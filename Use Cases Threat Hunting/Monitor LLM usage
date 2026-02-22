@@ -1,1 +1,302 @@
+Here are some sample queries we can use. By adjusting the AppDisplayName filter, we can search across different applications. In this example, You can filtered for Copilot, ChatGPT, and Gemini.
+// AI/Copilot usage baseline over 30 days
+SigninLogs
+| where TimeGenerated > ago(30d)
+| where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+| summarize 
+    SignInCount = count(),
+    UniqueUsers = dcount(UserPrincipalName),
+    UniqueIPs = dcount(IPAddress),
+    FailedAttempts = countif(ResultType != "0"),
+    SuccessRate = round(100.0 * countif(ResultType == "0") / count(), 2),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    IPList = make_set(IPAddress, 20),
+    TopUsers = make_set(UserPrincipalName, 10)
+by AppDisplayName
+| extend FailureRate = round(100.0 * FailedAttempts / SignInCount, 2)
+| order by SignInCount desc
+
+ 
+
+// High failure rate for AI/Copilot apps per user
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+| where ResultType != "0"  // Failed sign-ins only
+| summarize 
+    FailedAttempts = count(),
+    UniqueIPs = dcount(IPAddress),
+    UniqueApps = dcount(AppDisplayName),
+    ErrorCodes = make_set(ResultType),
+    ErrorMessages = make_set(ResultDescription, 5),
+    IPList = make_set(IPAddress, 10),
+    AppList = make_set(AppDisplayName)
+by UserPrincipalName
+| where FailedAttempts >= 10
+| extend ThreatLevel = case(
+    FailedAttempts >= 50 and UniqueIPs >= 5, "Critical",
+    FailedAttempts >= 30 and UniqueIPs >= 3, "High",
+    FailedAttempts >= 10, "Medium",
+    "Low"
+)
+| order by FailedAttempts desc
+
+ 
+
+// AI/Copilot sign-ins from high-risk locations
+let KnownLocations = SigninLogs
+    | where TimeGenerated > ago(30d)
+    | where UserType == "Member"
+    | summarize by Location;
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+| where ResultType == "0"  // Successful only
+| where Location !in (KnownLocations) or Location == ""
+| project TimeGenerated, UserPrincipalName, AppDisplayName, IPAddress, Location, 
+          UserAgent, AuthenticationRequirement, ConditionalAccessStatus, ResultDescription
+| extend ThreatIndicator = case(
+    Location == "", "Unknown Location",
+    "New Geographic Location"
+)
+| order by TimeGenerated desc
+
+// AI/Copilot access to privileged resources
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+| extend ConditionalAccessPoliciesArray = parse_json(ConditionalAccessPolicies)
+| mv-expand ConditionalAccessPoliciesArray
+| extend 
+    PolicyName = tostring(ConditionalAccessPoliciesArray.displayName),
+    PolicyResult = tostring(ConditionalAccessPoliciesArray.result)
+| where PolicyName has "Admin" or PolicyName has "Privileged" or PolicyName has "Elevated"
+     or PolicyResult == "failure" or PolicyResult == "notApplied"
+| project TimeGenerated, UserPrincipalName, AppDisplayName, PolicyName, PolicyResult, 
+          IPAddress, Location, ResultType, ResultDescription
+| order by TimeGenerated desc
+
+ 
+
+// Suspicious or rare user agents accessing AI/Copilot apps
+let BaselineUserAgents = SigninLogs
+    | where TimeGenerated > ago(30d)
+    | where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+    | summarize Count = count() by UserAgent
+    | where Count >= 10  // Common user agents
+    | project UserAgent;
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+| where UserAgent !in (BaselineUserAgents)
+| where UserAgent has_any ("python", "curl", "postman", "powershell", "automation", "bot", "script")
+     or UserAgent == "" or isempty(UserAgent)
+| summarize 
+    Count = count(),
+    UniqueUsers = dcount(UserPrincipalName),
+    Apps = make_set(AppDisplayName),
+    Users = make_set(UserPrincipalName, 10),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+by UserAgent
+| extend ThreatLevel = case(
+    UserAgent has_any ("python", "curl", "powershell", "script"), "High",
+    UserAgent == "", "Medium",
+    "Low"
+)
+| order by Count desc
+
+// Multiple locations or IPs using same AI/Copilot session
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+| where ResultType == "0"
+| summarize 
+    SignInCount = count(),
+    UniqueIPs = dcount(IPAddress),
+    UniqueLocations = dcount(Location),
+    IPList = make_set(IPAddress),
+    LocationList = make_set(Location),
+    TimeRange = strcat(format_datetime(min(TimeGenerated), "yyyy-MM-dd HH:mm"), " to ", format_datetime(max(TimeGenerated), "yyyy-MM-dd HH:mm"))
+by UserPrincipalName, AppDisplayName, SessionId
+| where UniqueIPs >= 2 or UniqueLocations >= 2
+| extend ThreatIndicator = case(
+    UniqueIPs >= 3, "Critical - Multiple IPs per Session",
+    UniqueLocations >= 2, "High - Multiple Locations per Session",
+    "Medium"
+)
+| order by UniqueIPs desc
+
+ 
+
+Notice the amount of detailed information returned by the query.
+
+// AI Agent Behavioral Baseline
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where AppDisplayName has_any ("Copilot", "AI", "Agent", "GPT", "Gemini")
+| where ResultType == "0"
+| summarize 
+    AvgDailySignIns = count() / 30,
+    AvgSessionDuration = avg(datetime_diff('minute', TimeGenerated, CreatedDateTime)),
+    UniqueLocations = dcount(Location),
+    PrimaryLocation = arg_max(Location, *)
+by UserPrincipalName
+// Store as baseline, alert on deviations >50%
+
+ 
+
+ 
+ 
+ 
+
+
+// AI Agent Activity Dashboard
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where TimeGenerated > ago(30d)| where AppDisplayName has_any ("Copilot", "AI", "Agent", "GPT", "Gemini")
+| summarize 
+    Total = count(),
+    Successful = countif(ResultType == "0"),
+    Failed = countif(ResultType != "0"),
+    UniqueUsers = dcount(UserPrincipalName),
+    UniqueIPs = dcount(IPAddress)
+by AppDisplayName, bin(TimeGenerated, 1h)
+| render timechart
+
+ 
+
+// Monitor all agent management activities
+SigninLogs
+| where TimeGenerated > ago(1d)
+| where AppDisplayName == "Security Copilot Agent Management"
+| project TimeGenerated, UserPrincipalName, IPAddress, Location, ResultType
+
+ 
+
+// AI Access from New Location
+let KnownLocations = SigninLogs
+    | where TimeGenerated > ago(30d)
+    | where UserPrincipalName != ""
+    | summarize by UserPrincipalName, Location;
+SigninLogs
+| where TimeGenerated > ago(15d)
+| where AppDisplayName has_any ("Copilot", "AI", "Agent")
+| where ResultType == "0"
+| join kind=leftanti KnownLocations on UserPrincipalName, Location
+
+Failure for specific users.
+
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where UserPrincipalName in ("u12225@int.zava-corp.com", "u3991@int.zava-corp.com", "u4114@int.zava-corp.com")
+| where AppDisplayName has "Copilot"
+| project TimeGenerated, UserPrincipalName, IPAddress, Location, ResultType, ResultDescription, UserAgent, AppDisplayName
+| order by TimeGenerated desc
+
+ 
+
+// High-volume AI/Copilot activity suggesting data exfiltration
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+| where ResultType == "0"
+| summarize 
+    SignInCount = count(),
+    SessionDuration = datetime_diff('minute', max(TimeGenerated), min(TimeGenerated)),
+    UniqueIPs = dcount(IPAddress),
+    Apps = make_set(AppDisplayName)
+by UserPrincipalName, bin(TimeGenerated, 1h)
+| where SignInCount >= 50  // Excessive activity per hour
+| extend ThreatIndicator = case(
+    SignInCount >= 100, "Critical - Possible Bulk Data Access",
+    SignInCount >= 50, "High - Excessive AI Activity",
+    "Medium"
+)
+| order by SignInCount desc
+
+// AI/Copilot access with failed or not applied Conditional Access
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+| where ResultType == "0"  // Successful sign-in
+| where ConditionalAccessStatus == "failure" or ConditionalAccessStatus == "notApplied"
+| extend ConditionalAccessPoliciesArray = parse_json(ConditionalAccessPolicies)
+| mv-expand ConditionalAccessPoliciesArray
+| extend 
+    PolicyName = tostring(ConditionalAccessPoliciesArray.displayName),
+    PolicyResult = tostring(ConditionalAccessPoliciesArray.result)
+| where PolicyResult != "success"
+| project TimeGenerated, UserPrincipalName, AppDisplayName, PolicyName, PolicyResult, 
+          IPAddress, Location, UserAgent, AuthenticationRequirement
+| order by TimeGenerated desc
+
+// Service principals accessing AI/Copilot resources
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResourceDisplayName has "Copilot" or ResourceDisplayName has "AI" 
+     or ServicePrincipalName has "copilot" or ServicePrincipalName has "AI"
+| summarize 
+    AccessCount = count(),
+    UniqueResources = dcount(ResourceDisplayName),
+    FailedAttempts = countif(ResultType != "0"),
+    Resources = make_set(ResourceDisplayName),
+    IPList = make_set(IPAddress, 10),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+by ServicePrincipalName, AppId
+| extend RiskScore = case(
+    FailedAttempts >= 10, "High",
+    AccessCount >= 100, "Medium",
+    "Low"
+)
+| order by AccessCount desc
+
+ 
+
+// AI/Copilot access flagged as risky by Identity Protection
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+| where IsRisky == true or RiskLevel != "" or RiskState != ""
+| project TimeGenerated, UserPrincipalName, AppDisplayName, IPAddress, Location,
+          IsRisky, RiskLevel, RiskState, RiskDetail, RiskEventTypes_V2,
+          ResultType, ResultDescription, UserAgent
+| extend RiskEvents = parse_json(RiskEventTypes_V2)
+| order by TimeGenerated desc
+
+ 
+
+// Cross-tenant AI/Copilot access
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+| where HomeTenantId != AADTenantId  // Different home and resource tenants
+| where ResultType == "0"
+| project TimeGenerated, UserPrincipalName, HomeTenantName, AADTenantId, 
+          AppDisplayName, ResourceDisplayName, IPAddress, Location, 
+          CrossTenantAccessType, UserType
+| order by TimeGenerated desc
+
+// Impossible travel detection for AI/Copilot users
+SigninLogs
+| where TimeGenerated > ago(30d)
+| where AppDisplayName has "Copilot" or AppDisplayName has "AI" or AppDisplayName has "Agent"
+| where ResultType == "0"
+| where Location != ""
+| project TimeGenerated, UserPrincipalName, Location, IPAddress, AppDisplayName
+| order by UserPrincipalName, TimeGenerated asc
+| serialize
+| extend 
+    PrevLocation = prev(Location, 1),
+    PrevTime = prev(TimeGenerated, 1),
+    PrevUser = prev(UserPrincipalName, 1)
+| where UserPrincipalName == PrevUser and Location != PrevLocation
+| extend TimeDiffMinutes = datetime_diff('minute', TimeGenerated, PrevTime)
+| where TimeDiffMinutes <= 60 and TimeDiffMinutes > 0  // Less than 1 hour between sign-ins
+| project TimeGenerated, UserPrincipalName, Location, PrevLocation, 
+          TimeDiffMinutes, IPAddress, AppDisplayName
+| extend ThreatIndicator = "Impossible Travel Detected"
+| order by TimeGenerated desc
 
