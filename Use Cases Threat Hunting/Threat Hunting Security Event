@@ -1,0 +1,878 @@
+# 🛡️ SecurityEvent Table - Active Directory & Domain Controller Threat Hunting Guide
+
+## 📋 Overview
+
+This guide provides comprehensive KQL detection rules, analytic rules, and threat hunting queries for the **SecurityEvent** table to monitor domain controllers and Active Directory for malicious activity.
+
+---
+
+## 📊 Executive Dashboard - Key Risk Indicators
+
+### 🔴 Top 10 High Risk IP Addresses
+
+```kql
+// Top 10 IPs with highest risk score based on security events
+let TimeWindow = 7d;
+let FailedLogons = SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID == 4625
+| summarize FailedLogonCount = count() by IpAddress
+| where isnotempty(IpAddress) and IpAddress != "-";
+let BruteForceIndicators = SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID == 4625
+| summarize 
+    AttemptsPerHour = count(),
+    UniqueAccounts = dcount(TargetUserName)
+    by IpAddress, bin(TimeGenerated, 1h)
+| summarize MaxAttemptsPerHour = max(AttemptsPerHour), AvgAccountsTargeted = avg(UniqueAccounts) by IpAddress
+| where MaxAttemptsPerHour > 10;
+let SuccessAfterFail = SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID in (4624, 4625)
+| summarize 
+    Failures = countif(EventID == 4625),
+    Successes = countif(EventID == 4624)
+    by IpAddress
+| where Failures > 5 and Successes > 0
+| extend SuccessAfterFailRatio = toreal(Successes) / toreal(Failures);
+let AdminActivity = SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID == 4672
+| summarize PrivilegedLogons = count() by IpAddress;
+let KerberosAnomalies = SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID in (4768, 4769)
+| extend TicketEncryptionType = extract(@"<Data Name='TicketEncryptionType'>([^<]+)</Data>", 1, EventData)
+| where TicketEncryptionType in ("0x17", "0x18")
+| summarize WeakEncryption = count() by IpAddress;
+FailedLogons
+| join kind=leftouter (BruteForceIndicators) on IpAddress
+| join kind=leftouter (SuccessAfterFail) on IpAddress
+| join kind=leftouter (AdminActivity) on IpAddress
+| join kind=leftouter (KerberosAnomalies) on IpAddress
+| extend RiskScore = 
+    (coalesce(FailedLogonCount, 0) * 1) +
+    (coalesce(MaxAttemptsPerHour, 0) * 3) +
+    (case(coalesce(SuccessAfterFailRatio, 0) > 0.1, 30, 0)) +
+    (coalesce(PrivilegedLogons, 0) * 5) +
+    (coalesce(WeakEncryption, 0) * 10)
+| extend RiskLevel = case(
+    RiskScore >= 150, "🔴 Critical - Active Threat",
+    RiskScore >= 75, "🟠 High - Investigation Required",
+    RiskScore >= 30, "🟡 Medium - Suspicious",
+    "🟢 Low"
+)
+| extend ThreatIndicators = strcat(
+    iff(coalesce(MaxAttemptsPerHour, 0) > 20, "BruteForce, ", ""),
+    iff(coalesce(SuccessAfterFailRatio, 0) > 0.1, "SuccessAfterFail, ", ""),
+    iff(coalesce(PrivilegedLogons, 0) > 10, "PrivilegedAccess, ", ""),
+    iff(coalesce(WeakEncryption, 0) > 5, "WeakKerberos, ", "")
+)
+| project IpAddress, RiskLevel, RiskScore, ThreatIndicators, FailedLogonCount, MaxAttemptsPerHour, PrivilegedLogons, WeakEncryption
+| order by RiskScore desc
+| take 10
+```
+
+### 🖥️ Top Servers at Risk
+
+```kql
+// Top 10 servers with highest security risk
+let TimeWindow = 7d;
+let AuthenticationRisk = SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| summarize 
+    FailedLogons = countif(EventID == 4625),
+    AccountLockouts = countif(EventID == 4740),
+    PrivilegedLogons = countif(EventID == 4672)
+    by Computer;
+let GroupChanges = SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID in (4728, 4732, 4756) // Group membership changes
+| summarize SensitiveGroupChanges = count() by Computer;
+let AccountChanges = SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID in (4720, 4722, 4724, 4726, 4738) // Account lifecycle events
+| summarize AccountModifications = count() by Computer;
+let DirectoryChanges = SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID in (5136, 5137, 5141) // AD object changes
+| summarize ADObjectChanges = count() by Computer;
+let SuspiciousProcesses = SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID == 4688
+| where CommandLine has_any ("mimikatz", "secretsdump", "ntdsutil", "vssadmin", "procdump", "lsass", "dcsync", "SAM", "SYSTEM")
+| summarize SuspiciousProcessCount = count() by Computer;
+let NewServices = SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID == 4697
+| summarize NewServiceInstalls = count() by Computer;
+AuthenticationRisk
+| join kind=leftouter (GroupChanges) on Computer
+| join kind=leftouter (AccountChanges) on Computer
+| join kind=leftouter (DirectoryChanges) on Computer
+| join kind=leftouter (SuspiciousProcesses) on Computer
+| join kind=leftouter (NewServices) on Computer
+| extend ServerRiskScore = 
+    (coalesce(FailedLogons, 0) * 0.5) +
+    (coalesce(AccountLockouts, 0) * 2) +
+    (coalesce(SensitiveGroupChanges, 0) * 20) +
+    (coalesce(AccountModifications, 0) * 5) +
+    (coalesce(ADObjectChanges, 0) * 8) +
+    (coalesce(SuspiciousProcessCount, 0) * 100) +
+    (coalesce(NewServiceInstalls, 0) * 15)
+| extend ServerType = case(
+    Computer has "DC" or ADObjectChanges > 0, "Domain Controller",
+    Computer has "CA" or Computer has "CERT", "Certificate Authority",
+    Computer has "ADFS", "Federation Server",
+    Computer has "SQL", "Database Server",
+    "Server"
+)
+| extend RiskLevel = case(
+    SuspiciousProcessCount > 0, "🔴 CRITICAL - Active Compromise Indicators",
+    ServerRiskScore >= 200, "🔴 High - Immediate Review Required",
+    ServerRiskScore >= 100, "🟠 Medium - Investigation Recommended",
+    "🟡 Low - Monitor"
+)
+| project Computer, ServerType, RiskLevel, ServerRiskScore, FailedLogons, AccountLockouts, SensitiveGroupChanges, AccountModifications, ADObjectChanges, SuspiciousProcessCount, NewServiceInstalls
+| order by ServerRiskScore desc
+| take 10
+```
+
+### 📈 Security KPIs Summary
+
+```kql
+// Key security metrics for the environment
+let TimeWindow = 7d;
+print 
+    MetricType = "Security KPIs",
+    TimePeriod = strcat("Last ", tostring(TimeWindow))
+| join kind=cross (
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | summarize 
+        TotalSecurityEvents = count(),
+        FailedLogonAttempts = countif(EventID == 4625),
+        SuccessfulLogons = countif(EventID == 4624),
+        AccountLockouts = countif(EventID == 4740),
+        PrivilegedLogons = countif(EventID == 4672),
+        NewAccountsCreated = countif(EventID == 4720),
+        GroupMembershipChanges = countif(EventID in (4728, 4732, 4756)),
+        PasswordResets = countif(EventID == 4724),
+        PolicyChanges = countif(EventID in (4670, 4719, 4739)),
+        KerberosEvents = countif(EventID in (4768, 4769, 4771))
+) on 1 == 1
+| extend FailureRate = round(toreal(FailedLogonAttempts) / toreal(SuccessfulLogons + FailedLogonAttempts) * 100, 2)
+| extend OverallStatus = case(
+    FailedLogonAttempts > 10000 or AccountLockouts > 100, "🔴 ELEVATED RISK",
+    FailedLogonAttempts > 5000 or GroupMembershipChanges > 50, "🟠 MODERATE RISK",
+    "🟢 NORMAL"
+)
+| project 
+    OverallStatus,
+    TotalSecurityEvents,
+    FailedLogonAttempts,
+    FailureRate,
+    AccountLockouts,
+    PrivilegedLogons,
+    NewAccountsCreated,
+    GroupMembershipChanges,
+    PasswordResets,
+    PolicyChanges
+```
+
+---
+
+## 📊 Key Event IDs for Active Directory Security Monitoring
+
+### Authentication Events
+| Event ID | Description | Threat Relevance |
+|----------|-------------|------------------|
+| **4624** | Successful Logon | Baseline, lateral movement detection |
+| **4625** | Failed Logon | Brute force, password spray |
+| **4648** | Logon with Explicit Credentials | Credential theft, lateral movement |
+| **4768** | Kerberos TGT Request | Kerberoasting, Golden Ticket |
+| **4769** | Kerberos Service Ticket | Kerberoasting, Silver Ticket |
+| **4771** | Kerberos Pre-Auth Failed | Password spray |
+| **4776** | NTLM Authentication | Pass-the-Hash, legacy auth abuse |
+
+### Privilege Escalation & Persistence
+| Event ID | Description | Threat Relevance |
+|----------|-------------|------------------|
+| **4672** | Special Privileges Assigned | Admin logon tracking |
+| **4728** | Member Added to Global Security Group | Privilege escalation |
+| **4732** | Member Added to Local Security Group | Local privilege escalation |
+| **4756** | Member Added to Universal Security Group | Enterprise-wide escalation |
+| **4740** | Account Lockout | Brute force indicator |
+| **4767** | Account Unlocked | Potential compromise cleanup |
+
+### Account & Policy Changes
+| Event ID | Description | Threat Relevance |
+|----------|-------------|------------------|
+| **4720** | User Account Created | Persistence, backdoor accounts |
+| **4722** | User Account Enabled | Dormant account abuse |
+| **4723** | Password Change Attempt | Credential theft |
+| **4724** | Password Reset Attempt | Account takeover |
+| **4738** | User Account Changed | Privilege modification |
+| **4739** | Domain Policy Changed | Security policy weakening |
+| **4781** | Account Name Changed | Evasion technique |
+
+### Domain Controller Operations
+| Event ID | Description | Threat Relevance |
+|----------|-------------|------------------|
+| **4662** | Operation on AD Object | DCSync, AD replication abuse |
+| **4742** | Computer Account Changed | Machine account manipulation |
+| **5136** | Directory Service Object Modified | AD object tampering |
+| **5137** | Directory Service Object Created | New GPO, OU creation |
+| **5141** | Directory Service Object Deleted | Evidence destruction |
+
+---
+
+## 🔴 Critical Detection Rules
+
+### 1. Password Spray Detection
+
+```kql
+// Password Spray Detection - Multiple users, same password, single source
+SecurityEvent
+| where TimeGenerated > ago(1h)
+| where EventID == 4625
+| where LogonType in (2, 3, 8, 10)
+| extend FailureReason = case(
+    Status == "0xc000006d", "Bad Username or Password",
+    Status == "0xc000006a", "Incorrect Password",
+    Status == "0xc0000064", "Username Does Not Exist",
+    Status == "0xc000006f", "Logon Outside Allowed Hours",
+    Status == "0xc0000070", "Logon from Unauthorized Workstation",
+    Status == "0xc0000071", "Password Expired",
+    Status == "0xc0000072", "Account Disabled",
+    Status == "0xc0000234", "Account Locked Out",
+    "Other"
+)
+| summarize 
+    FailedAttempts = count(),
+    TargetAccounts = dcount(TargetUserName),
+    AccountList = make_set(TargetUserName, 20),
+    FirstAttempt = min(TimeGenerated),
+    LastAttempt = max(TimeGenerated)
+    by IpAddress, Computer, FailureReason
+| where TargetAccounts >= 5 and FailedAttempts >= 10
+| extend AttackWindow = datetime_diff('minute', LastAttempt, FirstAttempt)
+| where AttackWindow <= 60
+| extend ThreatLevel = case(
+    TargetAccounts >= 50, "🔴 Critical - Mass Password Spray",
+    TargetAccounts >= 20, "🔴 High - Coordinated Attack",
+    TargetAccounts >= 10, "🟠 Medium - Password Spray",
+    "🟡 Low - Suspicious Activity"
+)
+| project ThreatLevel, IpAddress, Computer, FailedAttempts, TargetAccounts, AttackWindow, AccountList, FirstAttempt, LastAttempt
+| order by TargetAccounts desc
+```
+
+### 2. Brute Force Attack Detection
+
+```kql
+// Brute Force Detection - Single user, multiple failed attempts
+SecurityEvent
+| where TimeGenerated > ago(1h)
+| where EventID == 4625
+| where LogonType in (2, 3, 8, 10)
+| summarize 
+    FailedAttempts = count(),
+    UniqueIPs = dcount(IpAddress),
+    IPList = make_set(IpAddress, 10),
+    Computers = make_set(Computer, 5),
+    FirstAttempt = min(TimeGenerated),
+    LastAttempt = max(TimeGenerated)
+    by TargetUserName, TargetDomainName
+| where FailedAttempts >= 10
+| extend AttackWindow = datetime_diff('minute', LastAttempt, FirstAttempt)
+| extend AttemptsPerMinute = round(todouble(FailedAttempts) / max_of(todouble(AttackWindow), 1.0), 2)
+| extend ThreatLevel = case(
+    FailedAttempts >= 100, "🔴 Critical - Aggressive Brute Force",
+    AttemptsPerMinute >= 5.0, "🔴 High - Rapid Brute Force",
+    FailedAttempts >= 50, "🟠 Medium - Brute Force",
+    "🟡 Low - Failed Logons"
+)
+| project ThreatLevel, TargetUserName, TargetDomainName, FailedAttempts, AttemptsPerMinute, UniqueIPs, IPList, Computers, FirstAttempt, LastAttempt
+| order by FailedAttempts desc
+```
+
+### 3. Successful Logon After Failed Attempts (Compromised Account)
+
+```kql
+// Successful logon following multiple failures - potential account compromise
+let FailedLogons = SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4625
+| where LogonType in (2, 3, 8, 10)
+| summarize FailedCount = count(), FailedFrom = make_set(IpAddress, 5) by TargetUserName, TargetDomainName
+| where FailedCount >= 5;
+let SuccessfulLogons = SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4624
+| where LogonType in (2, 3, 8, 10)
+| project SuccessTime = TimeGenerated, TargetUserName, TargetDomainName, SuccessIP = IpAddress, Computer, LogonType;
+FailedLogons
+| join kind=inner (SuccessfulLogons) on TargetUserName, TargetDomainName
+| extend SuspiciousIP = iff(SuccessIP in (FailedFrom), "⚠️ Same IP as failures", "🔴 Different IP - Potential Compromise")
+| project TargetUserName, TargetDomainName, FailedCount, SuccessTime, SuccessIP, SuspiciousIP, Computer, FailedFrom
+| order by FailedCount desc
+```
+
+---
+
+## 🟠 Privilege Escalation Detection
+
+### 4. Privileged Group Membership Changes
+
+```kql
+// Monitor additions to high-privilege AD groups
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID in (4728, 4732, 4756, 4751, 4761)
+| where TargetUserName has_any ("Domain Admins", "Enterprise Admins", "Schema Admins", 
+    "Administrators", "Account Operators", "Backup Operators", "Server Operators",
+    "Print Operators", "Domain Controllers", "DnsAdmins", "Group Policy Creator Owners")
+| extend Actor = SubjectUserName
+| extend AddedMember = MemberName
+| extend GroupModified = TargetUserName
+| extend ActionType = case(
+    EventID == 4728, "Member Added to Global Group",
+    EventID == 4732, "Member Added to Local Group",
+    EventID == 4756, "Member Added to Universal Group",
+    EventID == 4751, "Member Added to Distribution Group",
+    EventID == 4761, "Member Added to Restricted Group",
+    "Unknown"
+)
+| project TimeGenerated, ActionType, GroupModified, AddedMember, Actor, Computer
+| order by TimeGenerated desc
+```
+
+### 5. Special Privileges Assigned (Admin Logons)
+
+```kql
+// Track all admin logons with special privileges
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4672
+| where PrivilegeList has_any ("SeDebugPrivilege", "SeTakeOwnershipPrivilege", "SeBackupPrivilege",
+    "SeRestorePrivilege", "SeSecurityPrivilege", "SeTcbPrivilege", "SeLoadDriverPrivilege")
+| summarize 
+    LogonCount = count(),
+    Computers = make_set(Computer, 10),
+    Privileges = make_set(PrivilegeList, 5),
+    FirstLogon = min(TimeGenerated),
+    LastLogon = max(TimeGenerated)
+    by SubjectUserName, SubjectDomainName
+| extend RiskLevel = case(
+    LogonCount > 100, "🔴 High Volume - Investigate",
+    strcat_array(Computers, ",") has_any ("DC", "Server"), "🟠 DC/Server Admin Access",
+    "🟡 Standard Admin Activity"
+)
+| project SubjectUserName, SubjectDomainName, RiskLevel, LogonCount, Computers, Privileges, FirstLogon, LastLogon
+| order by LogonCount desc
+```
+
+### 6. New Admin Account Creation
+
+```kql
+// Detect new user accounts added to admin groups immediately after creation
+let NewAccounts = SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4720
+| project AccountCreated = TimeGenerated, NewAccount = TargetUserName, Creator = SubjectUserName, Computer;
+let GroupAdditions = SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID in (4728, 4732, 4756)
+| where TargetUserName has_any ("Admin", "Domain Admins", "Enterprise Admins", "Administrators")
+| project AddedTime = TimeGenerated, MemberAdded = MemberName, GroupName = TargetUserName, AddedBy = SubjectUserName;
+NewAccounts
+| join kind=inner (GroupAdditions) on $left.NewAccount == $right.MemberAdded
+| where AddedTime between (AccountCreated .. AccountCreated + 1h)
+| extend TimeBetween = datetime_diff('minute', AddedTime, AccountCreated)
+| extend ThreatLevel = case(
+    TimeBetween <= 5, "🔴 Critical - Immediate Privilege Escalation",
+    TimeBetween <= 30, "🔴 High - Rapid Escalation",
+    "🟠 Medium - Suspicious Timing"
+)
+| project ThreatLevel, NewAccount, Creator, AccountCreated, GroupName, AddedBy, AddedTime, TimeBetween
+| order by TimeBetween asc
+```
+
+---
+
+## 🟣 Kerberos Attack Detection
+
+### 7. Kerberoasting Detection
+
+```kql
+// Kerberoasting - Service Ticket requests for SPNs with weak encryption
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4769
+| extend TicketEncryptionType = extract(@"<Data Name='TicketEncryptionType'>([^<]+)</Data>", 1, EventData)
+| extend ServiceName = extract(@"<Data Name='ServiceName'>([^<]+)</Data>", 1, EventData)
+| where ServiceName !endswith "$"
+| where ServiceName !in ("krbtgt", "kadmin")
+| where TicketEncryptionType in ("0x17", "0x18") // RC4 encryption
+| extend ServiceType = case(
+    ServiceName has "MSSQL", "SQL Service",
+    ServiceName has "HTTP", "Web Service",
+    ServiceName has "CIFS", "File Share",
+    ServiceName has "LDAP", "Directory Service",
+    ServiceName has "WSMAN", "Remote Management",
+    "Other Service"
+)
+| summarize 
+    RequestCount = count(),
+    UniqueServices = dcount(ServiceName),
+    ServiceList = make_set(ServiceName, 20),
+    FirstRequest = min(TimeGenerated),
+    LastRequest = max(TimeGenerated)
+    by TargetUserName, TargetDomainName, IpAddress
+| where UniqueServices >= 3 or RequestCount >= 10
+| extend ThreatLevel = case(
+    UniqueServices >= 20, "🔴 Critical - Mass Kerberoasting",
+    UniqueServices >= 10, "🔴 High - Active Kerberoasting",
+    RequestCount >= 50, "🟠 Medium - SPN Enumeration",
+    "🟡 Low - Suspicious Activity"
+)
+| project ThreatLevel, TargetUserName, IpAddress, RequestCount, UniqueServices, ServiceList, FirstRequest, LastRequest
+| order by UniqueServices desc
+```
+
+### 8. AS-REP Roasting Detection
+
+```kql
+// AS-REP Roasting - Pre-auth not required, hash extraction
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4768
+| extend TicketEncryptionType = extract(@"<Data Name='TicketEncryptionType'>([^<]+)</Data>", 1, EventData)
+| extend PreAuthType = extract(@"<Data Name='PreAuthType'>([^<]+)</Data>", 1, EventData)
+| where TicketEncryptionType in ("0x17", "0x18") // RC4 encryption
+| where PreAuthType == "0" // No pre-authentication
+| summarize 
+    RequestCount = count(),
+    UniqueAccounts = dcount(TargetUserName),
+    AccountList = make_set(TargetUserName, 20),
+    FirstRequest = min(TimeGenerated),
+    LastRequest = max(TimeGenerated)
+    by IpAddress, TargetDomainName
+| where UniqueAccounts >= 2 or RequestCount >= 10
+| extend ThreatLevel = case(
+    UniqueAccounts >= 10, "🔴 Critical - AS-REP Roasting Campaign",
+    UniqueAccounts >= 5, "🔴 High - Active AS-REP Roasting",
+    "🟠 Medium - Suspicious Kerberos Activity"
+)
+| project ThreatLevel, IpAddress, TargetDomainName, RequestCount, UniqueAccounts, AccountList, FirstRequest, LastRequest
+| order by UniqueAccounts desc
+```
+
+### 9. Golden Ticket Detection
+
+```kql
+// Golden Ticket - Anomalous TGT with impossible ticket lifetimes
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4769
+| extend ServiceName = extract(@"<Data Name='ServiceName'>([^<]+)</Data>", 1, EventData)
+| extend TicketOptions = extract(@"<Data Name='TicketOptions'>([^<]+)</Data>", 1, EventData)
+| where ServiceName == "krbtgt"
+| where TicketOptions has "0x50800000" // Forwardable, Renewable, Invalid - typical Golden Ticket flags
+| summarize 
+    SuspiciousTickets = count(),
+    UniqueUsers = dcount(TargetUserName),
+    UserList = make_set(TargetUserName, 10),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by IpAddress, Computer
+| extend ThreatLevel = "🔴 Critical - Potential Golden Ticket"
+| project ThreatLevel, IpAddress, Computer, SuspiciousTickets, UniqueUsers, UserList, FirstSeen, LastSeen
+```
+
+---
+
+## 🔵 Lateral Movement Detection
+
+### 10. Pass-the-Hash Detection
+
+```kql
+// Pass-the-Hash - NTLM logons with admin accounts
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4624
+| where LogonType == 3 // Network logon
+| where AuthenticationPackageName == "NTLM"
+| where LmPackageName == "NTLM V2"
+| where TargetUserName !endswith "$" // Exclude machine accounts
+| join kind=leftouter (
+    SecurityEvent
+    | where EventID == 4672
+    | summarize HasPrivileges = count() by TargetUserName, TargetLogonId
+) on TargetUserName, TargetLogonId
+| where HasPrivileges > 0
+| summarize 
+    LogonCount = count(),
+    UniqueComputers = dcount(Computer),
+    ComputerList = make_set(Computer, 20),
+    UniqueSourceIPs = dcount(IpAddress),
+    SourceIPs = make_set(IpAddress, 10),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by TargetUserName, TargetDomainName
+| where UniqueComputers >= 3 or UniqueSourceIPs >= 3
+| extend ThreatLevel = case(
+    UniqueComputers >= 10, "🔴 Critical - Widespread Lateral Movement",
+    UniqueComputers >= 5, "🔴 High - Active Lateral Movement",
+    "🟠 Medium - Suspicious NTLM Activity"
+)
+| project ThreatLevel, TargetUserName, LogonCount, UniqueComputers, ComputerList, UniqueSourceIPs, SourceIPs, FirstSeen, LastSeen
+| order by UniqueComputers desc
+```
+
+### 11. Remote Desktop Lateral Movement
+
+```kql
+// RDP Lateral Movement - Track interactive remote sessions
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4624
+| where LogonType == 10 // Remote Interactive (RDP)
+| summarize 
+    RDPSessions = count(),
+    UniqueTargets = dcount(Computer),
+    TargetComputers = make_set(Computer, 20),
+    UniqueSourceIPs = dcount(IpAddress),
+    SourceIPs = make_set(IpAddress, 10),
+    FirstSession = min(TimeGenerated),
+    LastSession = max(TimeGenerated)
+    by TargetUserName, TargetDomainName
+| where UniqueTargets >= 3
+| extend ThreatLevel = case(
+    UniqueTargets >= 10, "🔴 High - Widespread RDP Access",
+    UniqueTargets >= 5, "🟠 Medium - Multiple RDP Targets",
+    "🟡 Low - RDP Activity"
+)
+| project ThreatLevel, TargetUserName, RDPSessions, UniqueTargets, TargetComputers, UniqueSourceIPs, SourceIPs, FirstSession, LastSession
+| order by UniqueTargets desc
+```
+
+### 12. Explicit Credential Use (RunAs)
+
+```kql
+// Explicit credentials - potential credential theft/misuse
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4648
+| where TargetServerName !in ("localhost", "127.0.0.1")
+| summarize 
+    UsageCount = count(),
+    UniqueTargets = dcount(TargetServerName),
+    TargetServers = make_set(TargetServerName, 20),
+    UniqueTargetUsers = dcount(TargetUserName),
+    TargetUsers = make_set(TargetUserName, 10),
+    FirstUse = min(TimeGenerated),
+    LastUse = max(TimeGenerated)
+    by SubjectUserName, SubjectDomainName, ProcessName
+| where UniqueTargets >= 2 or UniqueTargetUsers >= 2
+| extend RiskLevel = case(
+    UniqueTargetUsers >= 5, "🔴 High - Multiple Account Impersonation",
+    UniqueTargets >= 5, "🟠 Medium - Widespread Access",
+    "🟡 Low - Credential Usage"
+)
+| project RiskLevel, SubjectUserName, ProcessName, UsageCount, UniqueTargets, TargetServers, UniqueTargetUsers, TargetUsers, FirstUse, LastUse
+| order by UniqueTargetUsers desc
+```
+
+---
+
+## 🟢 Domain Controller Specific Monitoring
+
+### 13. DCSync Attack Detection
+
+```kql
+// DCSync Detection - Replication requests from non-DC sources
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4662
+| where Properties has_any ("Replicating Directory Changes", "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2", 
+    "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2", "89e95b76-444d-4c62-991a-0facbeda640c")
+| where SubjectUserName !endswith "$" // Not a machine account
+| extend IsDC = iff(Computer has "DC" or Computer has "PDC", true, false)
+| where IsDC == false
+| summarize 
+    ReplicationRequests = count(),
+    UniqueObjects = dcount(ObjectName),
+    Objects = make_set(ObjectName, 20),
+    FirstRequest = min(TimeGenerated),
+    LastRequest = max(TimeGenerated)
+    by SubjectUserName, SubjectDomainName, Computer, IpAddress
+| extend ThreatLevel = "🔴 Critical - Potential DCSync Attack"
+| project ThreatLevel, SubjectUserName, Computer, IpAddress, ReplicationRequests, UniqueObjects, Objects, FirstRequest, LastRequest
+```
+
+### 14. AD Object Modification Monitoring
+
+```kql
+// Active Directory Object Modifications
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID in (5136, 5137, 5139, 5141)
+| extend OperationType = case(
+    EventID == 5136, "Object Modified",
+    EventID == 5137, "Object Created",
+    EventID == 5139, "Object Undeleted",
+    EventID == 5141, "Object Deleted",
+    "Unknown"
+)
+| extend ObjectClass = tostring(split(ObjectClass, ",")[0])
+| where ObjectClass in ("user", "group", "computer", "organizationalUnit", "groupPolicyContainer")
+| summarize 
+    ChangeCount = count(),
+    Operations = make_set(OperationType, 5),
+    ModifiedObjects = dcount(ObjectDN),
+    ObjectList = make_set(ObjectDN, 10),
+    FirstChange = min(TimeGenerated),
+    LastChange = max(TimeGenerated)
+    by SubjectUserName, SubjectDomainName, ObjectClass
+| where ChangeCount >= 5
+| extend RiskLevel = case(
+    ObjectClass == "groupPolicyContainer", "🔴 High - GPO Modifications",
+    ObjectClass == "organizationalUnit", "🟠 Medium - OU Changes",
+    ChangeCount >= 50, "🔴 High - Mass Modifications",
+    "🟡 Low - AD Changes"
+)
+| project RiskLevel, SubjectUserName, ObjectClass, ChangeCount, Operations, ModifiedObjects, ObjectList, FirstChange, LastChange
+| order by ChangeCount desc
+```
+
+### 15. Computer Account Manipulation
+
+```kql
+// Computer Account Anomalies - potential machine account abuse
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID in (4741, 4742, 4743) // Computer account created, changed, deleted
+| extend OperationType = case(
+    EventID == 4741, "Computer Created",
+    EventID == 4742, "Computer Changed",
+    EventID == 4743, "Computer Deleted",
+    "Unknown"
+)
+| summarize 
+    OperationCount = count(),
+    Operations = make_set(OperationType, 3),
+    ComputerAccounts = dcount(TargetUserName),
+    AccountList = make_set(TargetUserName, 10),
+    FirstOp = min(TimeGenerated),
+    LastOp = max(TimeGenerated)
+    by SubjectUserName, SubjectDomainName, Computer
+| where OperationCount >= 3
+| extend RiskLevel = case(
+    Operations has "Computer Deleted" and Operations has "Computer Created", "🔴 High - Account Replacement",
+    OperationCount >= 10, "🔴 High - Mass Computer Changes",
+    "🟠 Medium - Computer Account Activity"
+)
+| project RiskLevel, SubjectUserName, Computer, OperationCount, Operations, ComputerAccounts, AccountList, FirstOp, LastOp
+```
+
+---
+
+## 🔗 Cross-Table Correlation Queries
+
+### 16. SecurityEvent + IdentityLogonEvents Correlation
+
+```kql
+// Correlate Windows Security Events with Defender for Identity
+let WindowsLogons = SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID in (4624, 4625)
+| extend WindowsResult = iff(EventID == 4624, "Success", "Failed")
+| project WindowsTime = TimeGenerated, Account = TargetUserName, WindowsResult, WindowsComputer = Computer, WindowsIP = IpAddress, LogonType;
+let IdentityLogons = IdentityLogonEvents
+| where Timestamp > ago(24h)
+| project IdentityTime = Timestamp, Account = AccountName, IdentityResult = ActionType, IdentityDevice = DeviceName, IdentityIP = IPAddress, Protocol;
+WindowsLogons
+| join kind=fullouter (IdentityLogons) on Account
+| where isnotempty(WindowsTime) and isnotempty(IdentityTime)
+| where datetime_diff('minute', WindowsTime, IdentityTime) between (-5 .. 5)
+| extend CorrelationMatch = iff(WindowsResult == "Success" and IdentityResult has "success", "✅ Consistent", "⚠️ Discrepancy")
+| project Account, WindowsTime, WindowsResult, WindowsComputer, IdentityTime, IdentityResult, Protocol, CorrelationMatch
+| order by WindowsTime desc
+```
+
+### 17. SecurityEvent + SigninLogs Cloud Correlation
+
+```kql
+// Correlate on-prem logons with cloud authentication
+let OnPremLogons = SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4624
+| where LogonType in (2, 3, 10)
+| project OnPremTime = TimeGenerated, User = tolower(TargetUserName), OnPremComputer = Computer, OnPremIP = IpAddress;
+let CloudLogons = SigninLogs
+| where TimeGenerated > ago(24h)
+| extend User = tolower(tostring(split(UserPrincipalName, "@")[0]))
+| project CloudTime = TimeGenerated, User, CloudApp = AppDisplayName, CloudIP = IPAddress, CloudLocation = tostring(LocationDetails.countryOrRegion);
+OnPremLogons
+| join kind=inner (CloudLogons) on User
+| where datetime_diff('minute', CloudTime, OnPremTime) between (-30 .. 30)
+| extend SameIP = iff(OnPremIP == CloudIP, "Same IP", "Different IP")
+| extend SuspiciousPattern = iff(SameIP == "Different IP" and datetime_diff('minute', CloudTime, OnPremTime) < 5, "🔴 Impossible - Different IPs in < 5 min", "")
+| project User, OnPremTime, OnPremComputer, OnPremIP, CloudTime, CloudApp, CloudIP, CloudLocation, SameIP, SuspiciousPattern
+| where isnotempty(SuspiciousPattern)
+```
+
+### 18. SecurityEvent + AuditLogs for Hybrid Attacks
+
+```kql
+// Detect hybrid attacks spanning on-prem and Azure AD
+let OnPremPrivilegeChanges = SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID in (4728, 4732, 4756)
+| extend Actor = SubjectUserName, Target = MemberName, Group = TargetUserName
+| project OnPremTime = TimeGenerated, Actor, Target, Group, OnPremAction = "Added to AD Group", Computer;
+let AzureADChanges = AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName has_any ("Add member to group", "Add member to role")
+| extend Actor = tostring(InitiatedBy.user.userPrincipalName)
+| extend Target = tostring(TargetResources[0].userPrincipalName)
+| extend Role = tostring(TargetResources[0].displayName)
+| project AzureTime = TimeGenerated, Actor, Target, Role, AzureAction = OperationName;
+OnPremPrivilegeChanges
+| join kind=fullouter (AzureADChanges) on Target
+| where isnotempty(OnPremTime) and isnotempty(AzureTime)
+| where datetime_diff('hour', AzureTime, OnPremTime) between (-24 .. 24)
+| extend Pattern = case(
+    datetime_diff('hour', AzureTime, OnPremTime) < 1, "🔴 Rapid Hybrid Escalation",
+    Actor == Actor1, "🟠 Same Actor Both Realms",
+    "🟡 Investigate"
+)
+| project Target, OnPremTime, OnPremAction, Group, AzureTime, AzureAction, Role, Pattern
+```
+
+---
+
+## 📈 Sentinel Analytic Rule Templates
+
+### Rule 1: Password Spray Analytic Rule
+
+```yaml
+name: Password Spray Attack Detection
+description: Detects password spray attacks targeting multiple accounts from a single IP
+severity: High
+tactics:
+  - CredentialAccess
+  - InitialAccess
+techniques:
+  - T1110.003
+query: |
+  SecurityEvent
+  | where EventID == 4625
+  | where LogonType in (2, 3, 8, 10)
+  | summarize FailedAttempts = count(), TargetAccounts = dcount(TargetUserName) by IpAddress, bin(TimeGenerated, 1h)
+  | where TargetAccounts >= 5 and FailedAttempts >= 10
+  | extend AlertTitle = strcat("Password Spray from ", IpAddress, " targeting ", TargetAccounts, " accounts")
+triggerOperator: gt
+triggerThreshold: 0
+frequency: PT1H
+period: PT1H
+```
+
+### Rule 2: Privileged Group Change Analytic Rule
+
+```yaml
+name: High Privilege Group Modification
+description: Detects additions to privileged Active Directory groups
+severity: High
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+techniques:
+  - T1078.002
+query: |
+  SecurityEvent
+  | where EventID in (4728, 4732, 4756)
+  | where TargetUserName has_any ("Domain Admins", "Enterprise Admins", "Schema Admins", "Administrators")
+  | project TimeGenerated, Actor = SubjectUserName, AddedMember = MemberName, Group = TargetUserName, Computer
+  | extend AlertTitle = strcat(Actor, " added ", AddedMember, " to ", Group)
+triggerOperator: gt
+triggerThreshold: 0
+frequency: PT15M
+period: PT15M
+```
+
+### Rule 3: DCSync Attack Analytic Rule
+
+```yaml
+name: Potential DCSync Attack
+description: Detects directory replication requests from non-DC machines
+severity: Critical
+tactics:
+  - CredentialAccess
+techniques:
+  - T1003.006
+query: |
+  SecurityEvent
+  | where EventID == 4662
+  | where Properties has "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2"
+  | where SubjectUserName !endswith "$"
+  | project TimeGenerated, Actor = SubjectUserName, SourceComputer = Computer, SourceIP = IpAddress
+  | extend AlertTitle = strcat("DCSync attempt by ", Actor, " from ", SourceComputer)
+triggerOperator: gt
+triggerThreshold: 0
+frequency: PT5M
+period: PT5M
+```
+
+---
+
+## 📊 Executive Dashboard Queries
+
+### Security Overview - Failed Logons Trend
+
+```kql
+// Failed logon trend over time
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4625
+| summarize FailedLogons = count() by bin(TimeGenerated, 1h)
+| render timechart with (title="Failed Logon Attempts Over Time")
+```
+
+### Top Attacked Accounts
+
+```kql
+// Most targeted user accounts
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4625
+| summarize 
+    FailedAttempts = count(),
+    UniqueSourceIPs = dcount(IpAddress),
+    SourceIPs = make_set(IpAddress, 5)
+    by TargetUserName, TargetDomainName
+| top 20 by FailedAttempts desc
+| project Account = strcat(TargetDomainName, "\\", TargetUserName), FailedAttempts, UniqueSourceIPs, SourceIPs
+```
+
+### Domain Controller Health
+
+```kql
+// DC security event volume and health
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where Computer has_any ("DC", "PDC", "domaincontroller")
+| summarize 
+    TotalEvents = count(),
+    FailedLogons = countif(EventID == 4625),
+    SuccessLogons = countif(EventID == 4624),
+    PrivilegeUse = countif(EventID == 4672),
+    PolicyChanges = countif(EventID in (4713, 4739)),
+    GroupChanges = countif(EventID in (4728, 4732, 4756))
+    by Computer
+| extend HealthScore = iff(FailedLogons > 1000 or PolicyChanges > 10, "🔴 Alert", 
+    iff(FailedLogons > 100, "🟠 Warning", "🟢 Healthy"))
+| project Computer, HealthScore, TotalEvents, FailedLogons, SuccessLogons, PrivilegeUse, PolicyChanges, GroupChanges
