@@ -1,0 +1,601 @@
+name: Password Spray Attack Detection
+description: |
+  Detects password spray attacks where multiple user accounts are targeted from a single IP address with failed authentication attempts.
+  Indicates an attacker trying common passwords against many accounts to avoid account lockout thresholds.
+  let timeframe = 1h;
+  let failureThreshold = 5;
+  let userThreshold = 10;
+  SigninLogs
+  | where TimeGenerated > ago(timeframe)
+  | where ResultType != "0"
+  | summarize 
+      FailedAttempts = count(),
+      UniqueUsers = dcount(UserPrincipalName),
+      TargetedUsers = make_set(UserPrincipalName, 50),
+      StartTime = min(TimeGenerated),
+      EndTime = max(TimeGenerated),
+      Apps = make_set(AppDisplayName, 5),
+      Locations = make_set(Location, 3)
+  by IPAddress
+  | where UniqueUsers >= userThreshold and FailedAttempts >= failureThreshold
+  | extend Severity = case(
+      UniqueUsers >= 50, "High",
+      UniqueUsers >= 25, "Medium",
+      "Low"
+  )
+  | project 
+      TimeGenerated = StartTime,
+      IPAddress, 
+      UniqueUsers, 
+      FailedAttempts, 
+      TargetedUsers, 
+      StartTime, 
+      EndTime, 
+      Apps, 
+      Locations, 
+      Severity
+
+
+name: Brute Force Attack Detection
+description: |
+  Detects brute force attacks where a single user account experiences multiple failed authentication attempts from one or more IP addresses.
+  Classifies attacks as single-source, multi-source, or distributed brute force based on the number of attacking IPs.
+severity: High
+  let timeframe = 1h;
+  let failureThreshold = 10;
+  SigninLogs
+  | where TimeGenerated > ago(timeframe)
+  | where ResultType != "0"
+  | summarize 
+      FailedAttempts = count(),
+      UniqueIPs = dcount(IPAddress),
+      SourceIPs = make_set(IPAddress, 20),
+      StartTime = min(TimeGenerated),
+      EndTime = max(TimeGenerated),
+      Locations = make_set(Location, 5),
+      FailureReasons = make_set(ResultDescription, 5),
+      Apps = make_set(AppDisplayName, 5)
+  by UserPrincipalName
+  | where FailedAttempts >= failureThreshold
+  | extend AttackType = case(
+      UniqueIPs >= 5, "Distributed Brute Force",
+      UniqueIPs >= 2, "Multi-Source Brute Force", 
+      "Single-Source Brute Force"
+  )
+  | extend Severity = case(
+      FailedAttempts >= 50, "High",
+      FailedAttempts >= 25, "Medium",
+      "Low"
+  )
+  | project 
+      TimeGenerated = StartTime,
+      UserPrincipalName, 
+      AttackType, 
+      FailedAttempts, 
+      UniqueIPs, 
+      SourceIPs, 
+      StartTime, 
+      EndTime, 
+      Locations, 
+      FailureReasons, 
+      Apps, 
+      Severity
+
+
+name: Distributed Coordinated Attack Detection
+description: |
+  Detects highly distributed attacks where a single user is targeted from 10 or more unique IP addresses within a 4-hour window.
+  This pattern indicates botnet activity or coordinated attack infrastructure targeting high-value accounts.
+severity: Critical
+
+
+let timeframe = 30d;
+  let ipThreshold = 10;
+  SigninLogs
+  | where TimeGenerated > ago(timeframe)
+  | where ResultType != "0"
+  | summarize 
+      UniqueIPs = dcount(IPAddress),
+      FailedAttempts = count(),
+      SourceIPs = make_set(IPAddress, 100),
+      StartTime = min(TimeGenerated),
+      EndTime = max(TimeGenerated),
+      Locations = make_set(Location, 20)
+  by UserPrincipalName
+  | where UniqueIPs >= ipThreshold
+  | extend Severity = "Critical"
+  | project 
+      TimeGenerated = StartTime,
+      UserPrincipalName,
+      UniqueIPs,
+      FailedAttempts,
+      SourceIPs,
+      StartTime,
+      EndTime,
+      Locations,
+      Severity
+
+
+
+name: Impossible Travel and Geographic Anomaly Detection
+description: |
+  Detects when a user authenticates from 3 or more different geographic locations within a 1-hour window.
+  This pattern indicates potential account compromise, credential sharing, or VPN/proxy abuse.
+severity: High
+
+let timeframe = 30d;
+  SigninLogs
+  | where TimeGenerated > ago(timeframe)
+  | where isnotempty(Location) and isnotempty(IPAddress)
+  | summarize 
+      UniqueLocations = dcount(Location),
+      Locations = make_set(Location),
+      IPs = make_set(IPAddress),
+      FailedCount = countif(ResultType != "0"),
+      SuccessCount = countif(ResultType == "0"),
+      StartTime = min(TimeGenerated),
+      EndTime = max(TimeGenerated)
+  by UserPrincipalName
+  | where UniqueLocations >= 3
+  | extend Severity = case(
+      FailedCount >= 10, "High",
+      UniqueLocations >= 5, "High",
+      "Medium"
+  )
+  | project 
+      TimeGenerated = StartTime,
+      UserPrincipalName,
+      UniqueLocations,
+      Locations,
+      IPs,
+      FailedCount,
+      SuccessCount,
+      StartTime,
+      EndTime,
+      Severity
+
+
+
+name: Credential Stuffing Attack Detection
+description: |
+  Detects credential stuffing attacks where an attacker uses lists of known username/password combinations from previous data breaches.
+  Identified by high velocity of invalid credential attempts (ResultType 50126) from a single IP address.
+severity: High
+
+
+let timeframe = 20d;
+  let velocityThreshold = 50;
+  SigninLogs
+  | where TimeGenerated > ago(timeframe)
+  | where ResultType == "50126" // Invalid username or password
+  | summarize 
+      InvalidCredentialAttempts = count(),
+      UniqueUsers = dcount(UserPrincipalName),
+      Users = make_set(UserPrincipalName, 100),
+      StartTime = min(TimeGenerated),
+      EndTime = max(TimeGenerated),
+      Locations = make_set(Location, 5)
+  by IPAddress
+  | where InvalidCredentialAttempts >= velocityThreshold
+  | extend Severity = case(
+      InvalidCredentialAttempts >= 200, "Critical",
+      InvalidCredentialAttempts >= 100, "High",
+      "Medium"
+  )
+  | project 
+      TimeGenerated = StartTime,
+      IPAddress,
+      InvalidCredentialAttempts,
+      UniqueUsers,
+      Users,
+      StartTime,
+      EndTime,
+      Locations,
+      Severity
+
+
+
+
+name: Successful Login After Multiple Failed Attempts - Potential Breach
+description: |
+  CRITICAL: Detects successful authentication immediately following multiple failed attempts from the same IP.
+  This is a strong indicator of a successful breach after brute force or password spray attack.
+  Requires immediate investigation and potential incident response.
+severity: Critical
+
+
+let timeframe = 1h;
+let failureThreshold = 5;
+let successWindow = 30m;
+let FailedLogins = SigninLogs
+| where TimeGenerated > ago(timeframe)
+| where ResultType != "0"
+| summarize 
+    FailureCount = count(),
+    LastFailure = max(TimeGenerated),
+    FailureReasons = make_set(ResultDescription, 5)
+by UserPrincipalName, IPAddress
+| where FailureCount >= failureThreshold;
+let SuccessfulLogins = SigninLogs
+| where TimeGenerated > ago(timeframe)
+| where ResultType == "0"
+| project 
+    UserPrincipalName, 
+    IPAddress,
+    SuccessTime = TimeGenerated,
+    Location, 
+    AppDisplayName, 
+    DeviceDetail,
+    UserAgent,
+    RiskLevelDuringSignIn,
+    IsRisky;
+FailedLogins
+| join kind=inner SuccessfulLogins on UserPrincipalName, IPAddress
+| where SuccessTime > LastFailure
+| where SuccessTime - LastFailure <= successWindow
+| extend 
+    TimeSinceLastFailure = datetime_diff('minute', SuccessTime, LastFailure),
+    Severity = "Critical"
+| project 
+    TimeGenerated = SuccessTime,
+    UserPrincipalName,
+    IPAddress,
+    Location,
+    AppDisplayName,
+    FailureCount,
+    TimeSinceLastFailure,
+    FailureReasons,
+    DeviceDetail,
+    UserAgent,
+    RiskLevelDuringSignIn,
+    IsRisky,
+    Severity
+| extend BreachLikelihood = case(
+    TimeSinceLastFailure <= 5, "Very High - Immediate Success",
+    TimeSinceLastFailure <= 15, "High - Quick Success",
+    "Medium - Delayed Success"
+)
+
+
+
+name: Legacy Authentication Brute Force Attack
+description: |
+  Detects brute force attempts using legacy authentication protocols (IMAP, POP, SMTP, Basic Auth).
+  Legacy protocols bypass MFA and are commonly abused by attackers. Organizations should block legacy auth.
+severity: High
+  let timeframe = 1h;
+  let failureThreshold = 10;
+  let legacyProtocols = dynamic(["IMAP", "POP", "SMTP", "Authenticated SMTP", "Exchange ActiveSync", "Other clients"]);
+  SigninLogs
+  | where TimeGenerated > ago(timeframe)
+  | where ClientAppUsed in (legacyProtocols)
+  | where ResultType != "0"
+  | summarize 
+      FailedAttempts = count(),
+      UniqueUsers = dcount(UserPrincipalName),
+      TargetedUsers = make_set(UserPrincipalName, 50),
+      Protocols = make_set(ClientAppUsed),
+      StartTime = min(TimeGenerated),
+      EndTime = max(TimeGenerated),
+      Locations = make_set(Location, 5)
+  by IPAddress
+  | where FailedAttempts >= failureThreshold
+  | extend Severity = case(
+      UniqueUsers >= 20, "High",
+      FailedAttempts >= 50, "High",
+      "Medium"
+  )
+  | project 
+      TimeGenerated = StartTime,
+      IPAddress,
+      FailedAttempts,
+      UniqueUsers,
+      TargetedUsers,
+      Protocols,
+      Locations,
+      StartTime,
+      EndTime,
+      Severity
+
+
+name: Privileged Account Under Attack
+description: |
+  Detects authentication attacks targeting privileged accounts (admin, global admin, security roles).
+  Failed attempts against privileged accounts warrant immediate investigation due to high-value target status.
+severity: Critical
+
+ let timeframe = 1h;
+  let failureThreshold = 3; // Lower threshold for privileged accounts
+  let privilegedKeywords = dynamic([
+      "admin", "administrator", "root", "global", "security", 
+      "privileged", "service", "svc", "elevated", "tier0", 
+      "da-", "ea-", "ga-", "pa-"
+  ]);
+  SigninLogs
+  | where TimeGenerated > ago(timeframe)
+  | where ResultType != "0"
+  | where UserPrincipalName has_any (privilegedKeywords) or 
+          UserPrincipalName contains "_adm" or 
+          UserPrincipalName startswith "adm"
+  | summarize 
+      FailedAttempts = count(),
+      UniqueIPs = dcount(IPAddress),
+      SourceIPs = make_set(IPAddress, 20),
+      StartTime = min(TimeGenerated),
+      EndTime = max(TimeGenerated),
+      Locations = make_set(Location, 5),
+      Apps = make_set(AppDisplayName, 10),
+      FailureReasons = make_set(ResultDescription, 5)
+  by UserPrincipalName
+  | where FailedAttempts >= failureThreshold
+  | extend 
+      Severity = "Critical",
+      AttackType = case(
+          UniqueIPs >= 5, "Distributed Attack on Privileged Account",
+          UniqueIPs >= 2, "Multi-Source Attack on Privileged Account",
+          "Focused Attack on Privileged Account"
+      )
+  | project 
+      TimeGenerated = StartTime,
+      UserPrincipalName,
+      AttackType,
+      FailedAttempts,
+      UniqueIPs,
+      SourceIPs,
+      Locations,
+      Apps,
+      FailureReasons,
+      StartTime,
+      EndTime,
+      Severity
+
+
+
+Detect multiple failed logins attempts in a short time (password spraying & brute force).
+🔹 Identify successful logins immediately after failed attempts.
+🔹 Correlate sign-ins with threat intelligence to flag malicious IPs.
+
+
+let threat_intel = ThreatIntelligenceIndicator
+| where ExpirationDateTime > now()
+| project MaliciousIP = NetworkSourceIP;
+//
+let failed_logins = SigninLogs
+| where ResultType == "50126" or ResultType == "50053"
+| summarize FailedCount = count(), 
+ FirstFailed = min(TimeGenerated), 
+ LastFailed = max(TimeGenerated), 
+ FailedAttemptsIn10Min = count() by UserPrincipalName, IPAddress, AppDisplayName, bin(TimeGenerated, 10m)
+| where FailedAttemptsIn10Min > 10;
+//
+let successful_logins = SigninLogs
+| where ResultType == "0" // Successful login
+| project UserPrincipalName, IPAddress, AppDisplayName, SuccessTime = TimeGenerated;
+//
+failed_logins
+| join kind=inner (successful_logins) on UserPrincipalName, IPAddress, AppDisplayName
+| where SuccessTime between (LastFailed .. LastFailed + 5m) and IPAddress in (threat_intel)
+| project UserPrincipalName, IPAddress, AppDisplayName, FailedAttemptsIn10Min, SuccessTime, Threat_Level = "Critical: Successful Login After Brute Force Attempt"
+
+Tráfico Entra ID
+
+let LowerPercentile = 5;
+let MiddlePercentile = 50;
+let HigherPercentile = 95;
+let UserAgentSample = 5;
+let GeoSample = 5;
+_ASim_Authentication()
+| sort by TimeGenerated asc
+| extend
+    EventDuration = datetime_diff('millisecond', EventStartTime, EventEndTime),
+    TimeDelta = datetime_diff('second', next(EventStartTime), EventEndTime),
+    Src = coalesce(Src, SrcIpAddr)
+| extend Region = coalesce(SrcGeoRegion, SrcGeoCountry)
+| summarize
+    FirstSeen = min(EventStartTime),
+    LastSeen = max(EventEndTime),
+    TargetUsers = dcount(TargetUserId),
+    TargetApps = dcount(TargetAppId),
+    UserAgents = dcount(HttpUserAgent),
+    UserAgentSet = make_set(HttpUserAgent, UserAgentSample),
+    Geos = dcount(Region),
+    GeoSet = make_set(Region, GeoSample),
+    DeltaStdev = stdev(TimeDelta),
+    DeltaPercentiles = percentiles_array(TimeDelta, LowerPercentile, MiddlePercentile, HigherPercentile),
+    DeltaVariance = variance(TimeDelta),
+    DeltaAvg = avg(TimeDelta),
+    DeltaMin = min(TimeDelta),
+    DeltaMax = max(TimeDelta)
+    by Src, EventResultDetails, EventSubType
+
+
+
+ Gráfico de tendencia, fijaros en el día de hoy como hay un incremento el día 25
+
+
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "50053" or ResultType == "50126"
+| summarize PasswordSpray_Per_HalfHour=count() by bin (TimeGenerated, 30m)
+
+
+
+
+Podemos buscar por ciertas localizaciones.
+ 
+//Summarize sign in activity from a particular country or countries to your tenant over the last week
+let failureCodes = dynamic([50053, 50126, 50055]);
+let successCodes = dynamic([0, 50055, 50057, 50155, 50105, 50133, 50005, 50076, 50079, 50173, 50158, 50072, 50074, 53003, 53000, 53001, 50129]);
+SigninLogs
+| where TimeGenerated > ago(90d)
+//Choose a country code, you could do multiples with | where Location in ("AU","US")
+| where Location in ("US","CN","RU","IN","JP","IR","UA","NG","IQ","PK","KP","KZ")
+| extend ['Full Location'] = strcat(LocationDetails.countryOrRegion, '|', LocationDetails.state, '|', LocationDetails.city)
+| where ResultType in(successCodes) or ResultType in(failureCodes)
+| summarize
+    ['Count of distinct successful sign ins'] = dcountif(UserPrincipalName, (ResultType in(successCodes))),
+    ['List of successful users']=make_set_if(UserPrincipalName, (ResultType in(successCodes))),
+    ['Successful result codes'] = make_set_if(ResultType, (ResultType in(successCodes))),
+    ['Count of distinct failed sign ins'] = dcountif(UserPrincipalName, (ResultType in(failureCodes))),
+    ['List of failed users'] = make_set_if(UserPrincipalName, (ResultType in(failureCodes))),
+    ['Failed result codes'] = make_set_if(ResultType, (ResultType in(failureCodes)))
+    by ['Full Location'], IPAddress
+
+
+
+ Entra ID y Smart Lockout bloquean muchos de estos ataques, podemos los usuarios bloqueados o intentos desde Ips maliciosas
+ 
+Ver usuarios Bloqueados, nos ayuda a entender desde que países nos están atacando y usuarios target, en muchos casos están en algún Botnet
+SigninLogs
+//| where IPAddress != "31.13.191.176" 
+| where ResultType has "50053"
+// 50053 Sign-in was blocked because it came from an IP address with malicious activity
+//Account is locked because user tried to sign in too many times with an incorrect user ID or password.
+|summarize count() by IPAddress,Location, ResultDescription, UserPrincipalName,ClientAppUsed
+
+
+
+//The MITRE ATT&CK technique for password spray attacks is T1110.0031
+ 
+Revisar si temenos alguna IP relacionada con algún Threat Actor Nation State. Afortunadamente no hay nada en estas 24 h, pero estas son prioritarias para investigar. Identity protection ya os daría alertas
+ 
+SigninLogs
+| where TimeGenerated > ago(90d)
+| extend V2Risk = tostring(RiskEventTypes_V2)
+| where V2Risk contains "estsNationStateIP"
+
+// Attacker in the Middle Precision Detection
+ 
+** A premium detection requiring Entra P2 license **
+ 
+// Beginning in July 2024, the ‘Attacker in the Middle’ detection is now generally available in Identity Protection. By combining this offline detection with ‘Anomalous Token’ detection, it provides high-precision detection when a malicious actor attempts to replay a token. AAD Identity Protection will raise a security alert under ‘Anomalous Token’ with the ‘attackerInTheMiddle’ risk event type, ensuring reliable detection.
+ 
+let AnomalousTokenRequestId=
+SecurityAlert
+| where AlertName == "Anomalous Token"
+| mv-expand todynamic(Entities)
+| project Entities
+| extend RequestId = tostring(Entities.RequestId)
+| distinct RequestId;
+AADUserRiskEvents
+| where RequestId has_any(AnomalousTokenRequestId)
+| where RiskEventType == "attackerinTheMiddle"
+
+Detect continuous logon failures for the same user
+
+let threshold = 10;
+let unit = 10m;
+SigninLogs
+| where ResultType !in ("0", "50125", "50140")
+| summarize loginfailure = count() by UserPrincipalName, bin(TimeGenerated,unit)
+| where loginfailure > threshold 
+
+
+// Single-block password-spray victim finder (30 days). 
+
+(
+  SigninLogs
+  | where TimeGenerated >= ago(30d) and ResultType != 0
+  | extend IPAddress = coalesce(column_ifexists("IPAddress",""), column_ifexists("ClientIP",""), column_ifexists("RemoteIP",""), column_ifexists("ClientIp","")),
+           UPN = coalesce(column_ifexists("UserPrincipalName",""), column_ifexists("TargetUserName",""), column_ifexists("UserId",""), column_ifexists("Account",""))
+  | where isnotempty(IPAddress) and isnotempty(UPN)
+  | summarize DistinctFailedUsers = dcount(UPN) by IPAddress, bin(TimeGenerated, 24h)
+  | where DistinctFailedUsers >= 10
+  | distinct IPAddress
+)
+| join kind=inner (
+  SigninLogs
+  | where TimeGenerated >= ago(30d)
+  | extend IPAddress = coalesce(column_ifexists("IPAddress",""), column_ifexists("ClientIP",""), column_ifexists("RemoteIP",""), column_ifexists("ClientIp","")),
+           UPN = coalesce(column_ifexists("UserPrincipalName",""), column_ifexists("TargetUserName",""), column_ifexists("UserId",""), column_ifexists("Account","")),
+           Country = coalesce(column_ifexists("CountryOrRegion",""), column_ifexists("Country",""), column_ifexists("CountryName",""), column_ifexists("ClientCountryOrRegion","")),
+           City = coalesce(column_ifexists("City",""), column_ifexists("CityName","")),
+           App = coalesce(column_ifexists("AppDisplayName",""), column_ifexists("ResourceDisplayName",""), column_ifexists("Application",""), column_ifexists("ClientAppUsed","")),
+           IsFailed = iif(ResultType != 0, 1, 0),
+           IsSuccess = iif(ResultType == 0, 1, 0)
+  | where isnotempty(IPAddress) and isnotempty(UPN)
+  | project TimeGenerated, IPAddress, UPN, Country, City, App, IsFailed, IsSuccess
+) on IPAddress
+| summarize
+    FailedAttemptsFromSprayIPs = sum(IsFailed),
+    SuccessfulAttempts = sum(IsSuccess),
+    DistinctSprayIPs = dcount(IPAddress),
+    SprayIPList = make_set(IPAddress),
+    Countries = make_set(Country),
+    Cities = make_set(City),
+    Apps = make_set(App),
+    FirstSeen = min(TimeGenerated),
+    LastFailed = maxif(TimeGenerated, IsFailed == 1),
+    LastSeen = max(TimeGenerated)
+  by UPN
+| extend SuccessfulAfterFailures = iif(SuccessfulAttempts > 0 and FailedAttemptsFromSprayIPs > 0 and LastFailed < LastSeen, 1, 0)
+| extend Score = todouble(FailedAttemptsFromSprayIPs) + 20.0 * todouble(DistinctSprayIPs) + 50.0 * todouble(SuccessfulAfterFailures)
+| order by Score desc
+| project UPN, SprayIPList, FailedAttemptsFromSprayIPs, SuccessfulAttempts, DistinctSprayIPs, Countries, Cities, Apps, FirstSeen, LastFailed, LastSeen, SuccessfulAfterFailures, Score
+| take 100
+
+
+
+// Password-spray sign-in rows export (30 days) — no iplocation
+let lookback = 30d;
+let spray_window = 24h;
+let spray_threshold = 10;
+let sprayIPs =
+(
+  SigninLogs
+  | where TimeGenerated >= ago(lookback) and ResultType != 0
+  | extend IPAddress = coalesce(column_ifexists("IPAddress",""), column_ifexists("ClientIP",""), column_ifexists("RemoteIP",""), column_ifexists("ClientIp","")),
+           UPN = coalesce(column_ifexists("UserPrincipalName",""), column_ifexists("TargetUserName",""), column_ifexists("UserId",""), column_ifexists("Account",""))
+  | where isnotempty(IPAddress) and isnotempty(UPN)
+  | summarize DistinctFailedUsers = dcount(UPN) by IPAddress, bin(TimeGenerated, spray_window)
+  | where DistinctFailedUsers >= spray_threshold
+  | distinct IPAddress
+);
+// Exportable detail rows from those spray IPs
+SigninLogs
+| where TimeGenerated >= ago(lookback)
+| extend IPAddress = coalesce(column_ifexists("IPAddress",""), column_ifexists("ClientIP",""), column_ifexists("RemoteIP",""), column_ifexists("ClientIp","")),
+         UPN = coalesce(column_ifexists("UserPrincipalName",""), column_ifexists("TargetUserName",""), column_ifexists("UserId",""), column_ifexists("Account","")),
+         App = coalesce(column_ifexists("AppDisplayName",""), column_ifexists("ResourceDisplayName",""), column_ifexists("Application",""), column_ifexists("ClientAppUsed",""))
+| where isnotempty(IPAddress) and isnotempty(UPN) and IPAddress in (sprayIPs)
+| project TimeGenerated, UPN, IPAddress, App, ResultType
+| order by TimeGenerated desc
+
+
+
+// Simple Top-20 candidate users (30 days) — run this whole block at once
+SigninLogs
+| where TimeGenerated >= ago(30d)
+| extend
+    IPAddress = coalesce(column_ifexists("IPAddress",""), column_ifexists("ClientIP",""), column_ifexists("RemoteIP",""), column_ifexists("ClientIp","")),
+    UPN = coalesce(column_ifexists("UserPrincipalName",""), column_ifexists("TargetUserName",""), column_ifexists("UserId",""), column_ifexists("Account","")),
+    App = coalesce(column_ifexists("AppDisplayName",""), column_ifexists("ResourceDisplayName",""), column_ifexists("Application",""), column_ifexists("ClientAppUsed","")),
+    IsFailed = iif(column_ifexists("ResultType", 0) != 0, 1, 0),
+    IsSuccess = iif(column_ifexists("ResultType", 0) == 0, 1, 0)
+| where isnotempty(IPAddress) and isnotempty(UPN)
+| summarize
+    FailedAttempts = sum(IsFailed),
+    SuccessfulAttempts = sum(IsSuccess),
+    DistinctSourceIPs = dcount(IPAddress),
+    TopIPs = make_set(IPAddress, 10),
+    Apps = make_set(App, 10),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+  by UPN
+| extend
+    Score = todouble(FailedAttempts) + 10.0 * todouble(DistinctSourceIPs)
+| order by Score desc
+| take 20
+
+
+
+Travel
+
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == 0
+| summarize CountriesVisited = make_set(Location) by UserPrincipalName
+| extend CountryCount = array_length(CountriesVisited)
+| where CountryCount > 2 // You can value here based on your interest
+| project UserPrincipalName, CountryCount, CountriesVisited
+| order by CountryCount desc
