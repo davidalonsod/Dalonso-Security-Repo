@@ -1,0 +1,260 @@
+
+1. Service Principals suspicious IPS
+
+let SuspiciousIPs = AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| extend GeoInfo = geo_info_from_ip_address(IPAddress)
+| extend Country = tostring(GeoInfo.country)
+| where Country in ("US","CN","RU","IN","JP","IR","UA","NG","IQ","PK","KP","KZ","KP") or IPAddress startswith "10." or IPAddress startswith "172." or IPAddress startswith "192.168."
+| summarize 
+    AuthCount = count(),
+    Countries = make_set(Country),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    Resources = make_set(ResourceDisplayName, 10)
+    by ServicePrincipalName, ServicePrincipalId, IPAddress
+| order by AuthCount desc;
+SuspiciousIPs
+
+
+
+2. Managed Identity con Anomaly activity out of business hours
+
+AADManagedIdentitySignInLogs
+| where TimeGenerated > ago(7d)
+| extend Hour = hourofday(TimeGenerated)
+| extend IsWeekend = dayofweek(TimeGenerated) in (0d, 6d)
+| extend IsOutOfHours = Hour < 6 or Hour > 22
+| where IsOutOfHours or IsWeekend
+| summarize 
+    AuthCount = count(),
+    UniqueResources = dcount(ResourceDisplayName),
+    Resources = make_set(ResourceDisplayName, 10),
+    FirstActivity = min(TimeGenerated),
+    LastActivity = max(TimeGenerated)
+    by ServicePrincipalName, ServicePrincipalId
+| where AuthCount > 50 or UniqueResources > 10
+| order by AuthCount desc
+
+
+
+3.  Service Principal Brute Force
+
+
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType != "0"
+| summarize 
+    FailedAttempts = count(),
+    UniqueIPs = dcount(IPAddress),
+    IPList = make_set(IPAddress, 20),
+    ErrorCodes = make_set(ResultType),
+    Descriptions = make_set(ResultDescription, 5)
+    by ServicePrincipalName, ServicePrincipalId, AppId
+| where FailedAttempts > 20 or UniqueIPs > 5
+| order by FailedAttempts desc
+
+
+
+4. Service Principal Critical Access Resource
+
+
+let CriticalResources = dynamic(["Microsoft Graph", "Azure Key Vault", "Azure Active Directory", "Windows Azure Active Directory"]);
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| where ResourceDisplayName in (CriticalResources)
+| extend GeoInfo = geo_info_from_ip_address(IPAddress)
+| extend Country = tostring(GeoInfo.country), City = tostring(GeoInfo.city)
+| summarize 
+    AccessCount = count(),
+    UniqueIPs = dcount(IPAddress),
+    Countries = make_set(Country),
+    Cities = make_set(City),
+    FirstAccess = min(TimeGenerated),
+    LastAccess = max(TimeGenerated)
+    by ServicePrincipalName, ServicePrincipalId, ResourceDisplayName, ClientCredentialType
+| where UniqueIPs > 3 or AccessCount > 100
+| order by AccessCount desc
+
+
+
+5. Service Principal + CloudAppEvents Correlation
+
+
+let SuspiciousSPNs = AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| extend GeoInfo = geo_info_from_ip_address(IPAddress)
+| extend Country = tostring(GeoInfo.country)
+| where Country in ("RU", "CN", "KP", "IR") or IPAddress startswith "172."
+| summarize by ServicePrincipalId, ServicePrincipalName, AppId;
+CloudAppEvents
+| where TimeGenerated > ago(7d)
+| where AccountObjectId in ((SuspiciousSPNs | project ServicePrincipalId))
+| where ActionType in ("FileDownloaded", "FileSyncDownloadedFull", "FileDeleted", "SendAs", "MailItemsAccessed")
+| summarize 
+    SuspiciousActions = count(),
+    Actions = make_set(ActionType),
+    Objects = make_set(ObjectName, 10)
+    by AccountObjectId, AccountDisplayName, IPAddress
+| order by SuspiciousActions desc
+
+6. Managed Identity Lateral Movement
+
+AADManagedIdentitySignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| where ResourceDisplayName has_any ("Key Vault", "Storage", "SQL", "Cognitive")
+| summarize 
+    UniqueResources = dcount(ResourceDisplayName),
+    Resources = make_set(ResourceDisplayName),
+    AuthCount = count(),
+    SourceApps = make_set(SourceAppClientId)
+    by ServicePrincipalName, ServicePrincipalId
+| where UniqueResources > 5 or AuthCount > 200
+| order by UniqueResources desc
+
+
+
+7. Service Principal Token Abuse
+
+
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == "0"
+| where isnotempty(UniqueTokenIdentifier)
+| extend GeoInfo = geo_info_from_ip_address(IPAddress)
+| extend Country = tostring(GeoInfo.country)
+| summarize 
+    UniqueIPs = dcount(IPAddress),
+    UniqueCountries = dcount(Country),
+    IPList = make_set(IPAddress),
+    Countries = make_set(Country),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by UniqueTokenIdentifier, ServicePrincipalName, ServicePrincipalId
+| where UniqueIPs > 3 or UniqueCountries > 2
+| extend TimeDiff = datetime_diff('minute', LastSeen, FirstSeen)
+| where TimeDiff < 60
+| order by UniqueCountries desc
+
+8. Conditional Access Bypass Detection
+
+
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| extend CAPolicies = parse_json(ConditionalAccessPolicies)
+| where ConditionalAccessStatus in ("notApplied", "failure")
+| summarize 
+    BypassCount = count(),
+    UniqueIPs = dcount(IPAddress),
+    PolicyStatus = make_set(ConditionalAccessStatus),
+    Resources = make_set(ResourceDisplayName, 10)
+    by ServicePrincipalName, ServicePrincipalId
+| where BypassCount > 100
+| order by BypassCount desc
+
+
+
+
+9. First-Time Resource Access
+
+
+let HistoricalAccess = AADServicePrincipalSignInLogs
+| where TimeGenerated between (ago(30d) .. ago(7d))
+| where ResultType == "0"
+| summarize by ServicePrincipalId, ResourceDisplayName;
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| join kind=leftanti (HistoricalAccess) on ServicePrincipalId, ResourceDisplayName
+| summarize 
+    NewResourceAccess = count(),
+    NewResources = make_set(ResourceDisplayName),
+    UniqueIPs = dcount(IPAddress)
+    by ServicePrincipalName, ServicePrincipalId
+| where NewResourceAccess > 5
+| order by NewResourceAccess desc
+
+
+
+
+10. Microsoft Apps Activity Monitoring
+
+let MicrosoftApps = dynamic(["Microsoft Graph", "Office 365 Exchange Online", "Office 365 SharePoint Online", "Azure Key Vault", "Azure Resource Manager"]);
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| where ResourceDisplayName in (MicrosoftApps)
+| extend GeoInfo = geo_info_from_ip_address(IPAddress)
+| extend Country = tostring(GeoInfo.country)
+| summarize 
+    AccessCount = count(),
+    UniqueApps = dcount(ResourceDisplayName),
+    Apps = make_set(ResourceDisplayName),
+    Countries = make_set(Country),
+    UniqueIPs = dcount(IPAddress)
+    by ServicePrincipalName, ServicePrincipalId, ClientCredentialType
+| where UniqueApps > 3 or AccessCount > 1000
+| order by UniqueApps desc, AccessCount desc
+
+
+
+
+11. Cross-Tenant Service Principal Activity
+
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| where AppOwnerTenantId != ResourceOwnerTenantId
+| extend GeoInfo = geo_info_from_ip_address(IPAddress)
+| extend Country = tostring(GeoInfo.country)
+| summarize 
+    CrossTenantAccess = count(),
+    ResourceTenants = make_set(ResourceOwnerTenantId),
+    Resources = make_set(ResourceDisplayName, 10),
+    Countries = make_set(Country)
+    by ServicePrincipalName, ServicePrincipalId, AppOwnerTenantId
+| order by CrossTenantAccess desc
+
+
+
+
+12. Combined Workload Identity Risk Score
+
+let TimeRange = 7d;
+let SuspiciousAuth = AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(TimeRange)
+| extend GeoInfo = geo_info_from_ip_address(IPAddress)
+| extend Country = tostring(GeoInfo.country)
+| where Country in ("RU", "CN", "KP", "IR") or IPAddress startswith "172."
+| summarize SuspiciousAuthCount = count() by ServicePrincipalId
+| extend RiskScore = SuspiciousAuthCount * 5;
+let CABypass = AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(TimeRange)
+| where ConditionalAccessStatus == "notApplied"
+| summarize CABypassCount = count() by ServicePrincipalId
+| extend RiskScore = CABypassCount / 100;
+let CriticalAccess = AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(TimeRange)
+| where ResourceDisplayName in ("Microsoft Graph", "Azure Key Vault")
+| summarize CriticalAccessCount = count() by ServicePrincipalId
+| extend RiskScore = CriticalAccessCount / 50;
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(TimeRange)
+| summarize arg_max(TimeGenerated, *) by ServicePrincipalId
+| join kind=leftouter (SuspiciousAuth) on ServicePrincipalId
+| join kind=leftouter (CABypass) on ServicePrincipalId
+| join kind=leftouter (CriticalAccess) on ServicePrincipalId
+| extend TotalRiskScore = coalesce(RiskScore, 0) + coalesce(RiskScore1, 0) + coalesce(RiskScore2, 0)
+| where TotalRiskScore > 10
+| project ServicePrincipalName, ServicePrincipalId, TotalRiskScore, SuspiciousAuthCount, CABypassCount, CriticalAccessCount
+| order by TotalRiskScore desc
+
+
+
+
+
