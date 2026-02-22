@@ -1,0 +1,85 @@
+: Ready-to-use hunting queries for BEC investigations leveraging MDO, XDR, and Sentinel telemetry.
+
+// BEC Environment-Wide Hunting Queries // Detect malicious email activity across the entire environment without targeting specific users.
+// 1. High Volume Internal Email Sending (Potential Compromised Accounts) // Detect accounts sending unusually high volumes of internal emails.
+ EmailEvents | where Timestamp > ago(7d) | where EmailDirection == "Intra-org" | summarize EmailCount = count() by SenderFromAddress, bin(Timestamp, 1h) | where EmailCount > 50 // Adjust threshold based on your environment | project Timestamp, SenderFromAddress, EmailCount | order by EmailCount desc
+
+// 2. Emails with Suspicious Subjects (Invoice, Payment, Urgent) // Detect emails with common BEC subject patterns. 
+EmailEvents | where Timestamp > ago(7d) | where Subject has_any ("invoice", "payment", "urgent", "wire transfer", "bank details", "account verification", "suspended", "verify your account") | where DeliveryAction == "Blocked" or ThreatTypes != "" | project Timestamp, SenderFromAddress, RecipientEmailAddress, Subject, DeliveryAction, ThreatTypes | take 100
+
+// 3. External Emails Spoofing Internal Domains (Display Name Spoofing) // Detect external senders impersonating internal users.
+EmailEvents | where Timestamp > ago(7d) | where EmailDirection == "Inbound" | extend InternalDomain = "zava-corp.com" | where SenderFromDomain != InternalDomain and SenderDisplayName has InternalDomain | project Timestamp, SenderFromAddress, SenderDisplayName, RecipientEmailAddress, Subject, DeliveryAction | take 100
+
+// 4. Authentication Failures (DMARC/SPF/DKIM) // Identify emails failing authentication checks.
+ EmailEvents | where Timestamp > ago(7d) | where AuthenticationDetails has_any ("fail", "softfail", "none") | where DeliveryAction in ("Delivered", "Blocked", "Quarantined") | project Timestamp, SenderFromAddress, SenderFromDomain, RecipientEmailAddress, AuthenticationDetails, DeliveryAction, Subject | take 100
+
+// 5. Reply-To Address Mismatch (BEC Indicator) // Detect emails where Reply-To differs from the sender address.
+ EmailEvents | where Timestamp > ago(7d) | extend ReplyTo = tostring(parse_json(AdditionalFields).ReplyTo) | where isnotempty(ReplyTo) and ReplyTo != SenderFromAddress | project Timestamp, SenderFromAddress, ReplyTo, RecipientEmailAddress, Subject, DeliveryAction | take 100
+
+// 6. Mass Blocked Email Campaigns // Identify large-scale phishing or spam campaigns blocked by the system.
+ EmailEvents | where Timestamp > ago(7d) | where DeliveryAction == "Blocked" | summarize RecipientCount = dcount(RecipientEmailAddress), Subjects = make_set(Subject) by SenderFromAddress, SenderFromDomain | where RecipientCount > 10 | order by RecipientCount desc | take 50
+
+// 7. Suspicious Attachments (Executable, Scripts, Archives) // Detect high-risk file types in email attachments.
+ EmailAttachmentInfo | where Timestamp > ago(7d) | where FileType in ("exe", "bat", "cmd", "ps1", "vbs", "js", "jar", "zip", "rar", "7z", "iso") | join kind=inner (EmailEvents) on NetworkMessageId | project Timestamp, SenderFromAddress, RecipientEmailAddress, FileName, FileType, SHA256, DeliveryAction, Subject | take 100
+
+// 8. URLs Leading to Phishing or Malware // Identify malicious URLs in emails. EmailUrlInfo | where Timestamp > ago(7d) | join kind=inner (EmailEvents | where DeliveryAction == "Blocked" or ThreatTypes != "") on NetworkMessageId | project Timestamp, Url, UrlDomain, SenderFromAddress, RecipientEmailAddress, ThreatTypes, DeliveryAction | take 100
+
+// 9. Newly Registered Domains (< 30 days) in Emails // Detect emails from newly registered domains (common in phishing).
+EmailEvents | where Timestamp > ago(7d) | where EmailDirection == "Inbound" | extend SenderDomainAge = datetime_diff('day', now(), todatetime(parse_json(AdditionalFields).DomainCreationDate)) | where SenderDomainAge < 30 | project Timestamp, SenderFromAddress, SenderFromDomain, SenderDomainAge, RecipientEmailAddress, Subject, DeliveryAction | take 100
+
+// 10. Post-Delivery Remediation (ZAP Events) // Track emails removed after delivery via Zero-Hour Auto Purge.
+ EmailPostDeliveryEvents | where Timestamp > ago(7d) | where Action in ("ZAP", "Manual remediation", "Quarantine") | project Timestamp, NetworkMessageId, RecipientEmailAddress, Action, ActionResult, ActionTrigger, SenderFromAddress | take 100
+
+// 11. Recipients Clicking on Malicious Links // Identify users who clicked on flagged URLs. UrlClickEvents | where Timestamp > ago(7d) | where ThreatTypes != "" or ActionType == "ClickBlocked" | project Timestamp, AccountUpn, Url, IsClickedThrough, ThreatTypes, ActionType, NetworkMessageId | take 100
+
+// 12. Email Forwarding to External Domains // Detect potential data exfiltration via email forwarding.
+ OfficeActivity | where Timestamp > ago(7d) | where Operation == "Set-Mailbox" | where Parameters has "ForwardingSmtpAddress" or Parameters has "ForwardingAddress" | extend ForwardingAddress = extract(@"ForwardingSmtpAddress[""\s:]+([^"",]+)", 1, Parameters) | where isnotempty(ForwardingAddress) and ForwardingAddress !has "zava-corp.com" | project Timestamp, UserId, Operation, ForwardingAddress, ClientIP | order by Timestamp desc
+
+// 13. Anomalous Sender Locations (Impossible Travel) // Detect senders accessing from unusual or suspicious geolocations.
+ EmailEvents | where Timestamp > ago(7d) | where EmailDirection == "Outbound" or EmailDirection == "Intra-org" | extend SenderIP = tostring(parse_json(AdditionalFields).SenderIPv4) | summarize Locations = make_set(tostring(parse_json(AdditionalFields).IPLocation)) by SenderFromAddress | where array_length(Locations) > 3 | project SenderFromAddress, Locations
+
+// 14. Bulk Email Sending from Single Account // Detect accounts sending to many unique recipients (potential spam/phishing).
+EmailEvents | where Timestamp > ago(24h) | summarize RecipientCount = dcount(RecipientEmailAddress), Recipients = make_set(RecipientEmailAddress) by SenderFromAddress, bin(Timestamp, 1h) | where RecipientCount > 100 // Adjust threshold | order by RecipientCount desc | take 50
+
+// 15. Emails with Credential Harvesting Keywords // Detect phishing emails with password reset or credential theft language.
+EmailEvents | where Timestamp > ago(7d) | where Subject has_any ("password reset", "verify your identity", "unusual activity", "confirm your account", "click here to verify", "account suspended") | where DeliveryAction in ("Delivered", "Quarantined", "Blocked") | project Timestamp, SenderFromAddress, RecipientEmailAddress, Subject, DeliveryAction, ThreatTypes | take 100
+
+// 16. High Confidence Phishing Emails Delivered // Detect high-confidence phishing that bypassed filters.
+EmailEvents | where Timestamp > ago(7d) | where ConfidenceLevel in ("High", "9") and ThreatTypes has "Phish" | where DeliveryAction == "Delivered" | project Timestamp, SenderFromAddress, RecipientEmailAddress, Subject, ConfidenceLevel, ThreatTypes, DeliveryLocation | take 100
+
+// 17. Emails from Compromised External Accounts // Detect external senders with authentication failures sending to multiple internal users. 
+EmailEvents | where Timestamp > ago(7d) | where EmailDirection == "Inbound" | where AuthenticationDetails has "fail" | summarize RecipientCount = dcount(RecipientEmailAddress) by SenderFromAddress | where RecipientCount > 5 | order by RecipientCount desc | take 50
+Now hunting to specific users.
+
+// 1. Investigate Inbox Rules (Persistence) // Look for rules created by compromised users to hide emails or forward data.
+let targetUsers = dynamic(["u687@contoso.com", "u4179@contoso.com", "u2098@contoso.com"]); OfficeActivity | where Timestamp > ago(7d) | where UserId in (targetUsers) | where Operation in ("New-InboxRule", "Set-InboxRule", "Set-Mailbox", "Add-MailboxPermission") | project Timestamp, UserId, Operation, Parameters, ClientIP, UserAgent | order by Timestamp desc
+
+// 2. Investigate Suspicious Email Sending (Phishing/Spam) // Check if the compromised accounts are sending malicious emails (Internal or External).
+let targetUsers = dynamic(["u687@contoso.com", "u4179@contoso.com", "u2098@contoso.com"]); EmailEvents | where Timestamp > ago(7d) | where SenderFromAddress in (targetUsers) or RecipientEmailAddress in (targetUsers) | where ThreatTypes has_any ("Phish", "Spam", "Malware") or DeliveryAction == "Blocked" | project Timestamp, SenderFromAddress, RecipientEmailAddress, Subject, ThreatTypes, DeliveryAction, NetworkMessageId | take 100
+
+// 3. Extract URLs from Phishing Emails (EmailUrlInfo) // Identify malicious URLs embedded in emails sent by compromised accounts.
+let compromisedSender = "u687@contoso.com"; EmailEvents | where Timestamp > ago(7d) | where SenderFromAddress == compromisedSender | join kind=inner ( EmailUrlInfo | where Timestamp > ago(7d) | project NetworkMessageId, Url, UrlDomain ) on NetworkMessageId | project Timestamp, Subject, RecipientEmailAddress, Url, UrlDomain, NetworkMessageId, DeliveryAction | take 50
+
+// 4. Check for Malicious Attachments (EmailAttachmentInfo) // Investigate files attached to emails from compromised accounts.
+let compromisedSender = "u687@contoso.com"; EmailEvents | where Timestamp > ago(7d) | where SenderFromAddress == compromisedSender | join kind=inner ( EmailAttachmentInfo | where Timestamp > ago(7d) | project NetworkMessageId, FileName, FileType, SHA256 ) on NetworkMessageId | project Timestamp, Subject, RecipientEmailAddress, FileName, FileType, SHA256, NetworkMessageId, DeliveryAction | take 50
+
+// 5. Check for URL Clicks by Recipients (UrlClickEvents) // Determine if recipients clicked on malicious links.
+let targetRecipient = "u4193@contoso.com"; UrlClickEvents | where Timestamp > ago(7d) | where AccountUpn == targetRecipient | project Timestamp, AccountUpn, Url, IsClickedThrough, ThreatTypes, ActionType, NetworkMessageId | take 50
+
+// 6. Campaign Clustering (EmailClusterId) // Group similar phishing emails to identify coordinated campaigns.
+let compromisedSender = "u687@contoso.com"; EmailEvents | where Timestamp > ago(7d) | where SenderFromAddress == compromisedSender | summarize Count = count(), Subjects = make_set(Subject), Recipients = make_set(RecipientEmailAddress) by EmailClusterId | where Count > 1 | take 20
+
+// 7. Post-Delivery Actions (EmailPostDeliveryEvents) // Check for Zero-Hour Auto Purge (ZAP) or manual remediation actions.
+let compromisedSender = "u687@contoso.com"; EmailPostDeliveryEvents | where Timestamp > ago(7d) | where SenderFromAddress == compromisedSender | project Timestamp, NetworkMessageId, RecipientEmailAddress, Action, ActionResult, ActionTrigger | take 50
+
+// 8. Malware Detection in Attachments (EmailAttachmentInfo with Threats) // Identify attachments flagged as malware or threats.
+let compromisedSender = "u687@contoso.com"; EmailAttachmentInfo | where Timestamp > ago(7d) | join kind=inner (EmailEvents | where SenderFromAddress == compromisedSender) on NetworkMessageId | where isnotempty(ThreatTypes) or isnotempty(ThreatNames) | project Timestamp, FileName, SHA256, ThreatTypes, ThreatNames, RecipientEmailAddress, Subject | take 50
+
+// 9. Correlate Sign-ins with Email Activity // Identify the IP addresses and locations used to access the accounts during the attack window.
+let targetUsers = dynamic(["u687@contoso.com", "u4179@contoso.com", "u2098@contoso.com"]); SigninLogs | where Timestamp > ago(7d) | where UserPrincipalName in (targetUsers) | where ResultType == 0 // Successful sign-ins | project Timestamp, UserPrincipalName, IPAddress, Location, AppDisplayName, ClientAppUsed | order by Timestamp desc | take 100
+
+// 10. Check for OAuth App Consent (Persistence) // Verify if the attacker granted access to malicious applications.
+let targetUsers = dynamic(["u687@contoso.com", "u4179@contoso.com", "u2098@contoso.com"]); AuditLogs | where Timestamp > ago(7d) | where OperationName == "Consent to application" | extend InitiatedBy = tostring(parse_json(tostring(InitiatedBy.user)).userPrincipalName) | where InitiatedBy in (targetUsers) | project Timestamp, InitiatedBy, TargetResources, AdditionalDetails
+
+// 11. Data Exfiltration Check (MailItemsAccessed) // High volume of mail access can indicate data theft.
+let targetUsers = dynamic(["u687@contoso.com", "u4179@contoso.com", "u2098@contoso.com"]); OfficeActivity | where Timestamp > ago(7d) | where UserId in (targetUsers) | where Operation == "MailItemsAccessed" | summarize Count=count(), Files=make_set(SourceFileName) by UserId, Operation, ClientIP
