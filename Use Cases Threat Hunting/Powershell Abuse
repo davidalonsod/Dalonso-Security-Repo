@@ -1,0 +1,478 @@
+Query 1.1: Overall PowerShell Activity Timeline
+// Get hourly breakdown of PowerShell execution across the environment
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| summarize 
+    ExecutionCount = count(), 
+    UniqueUsers = dcount(AccountName), 
+    UniqueDevices = dcount(DeviceName),
+    UniqueCommandLines = dcount(ProcessCommandLine)
+    by bin(TimeGenerated, 1h)
+| order by TimeGenerated desc
+| render timechart
+Purpose: Establish baseline activity patterns to identify anomalies
+What to look for: Unusual spikes in executions, especially outside business hours
+
+Query 1.2: Top PowerShell Users
+// Identify users with highest PowerShell usage
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| summarize 
+    ExecutionCount = count(),
+    UniqueDevices = dcount(DeviceName),
+    UniqueCommands = dcount(ProcessCommandLine),
+    SampleCommands = make_set(ProcessCommandLine, 5)
+    by AccountName, AccountDomain
+| order by ExecutionCount desc
+| take 20
+Purpose: Identify accounts with elevated PowerShell usage
+What to look for: Service accounts with unusual activity, user accounts with excessive usage
+
+2. Encoded/Obfuscated PowerShell Commands
+Query 2.1: Base64 Encoded Commands
+// Hunt for Base64 encoded PowerShell commands
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "-enc", "-encodedcommand", "-e ", "-ec ",
+    "frombase64string", "convert::frombase64string"
+)
+// Exclude known legitimate sources
+| where InitiatingProcessFileName !in~ ("gc_worker.exe", "microsoft.management.services.cloudmanageddesktop.agent.exe")
+| extend CommandLength = strlen(ProcessCommandLine)
+| project 
+    TimeGenerated, 
+    DeviceName, 
+    AccountName,
+    AccountDomain,
+    ProcessCommandLine,
+    CommandLength,
+    InitiatingProcessFileName,
+    InitiatingProcessCommandLine
+| order by TimeGenerated desc
+Purpose: Detect encoded commands that may hide malicious intent
+Current Status: Legitimate Azure Guest Configuration activity found
+Action: Review any results from non-standard initiating processes
+
+Query 2.2: Multiple Encoding Techniques
+// Detect commands using multiple obfuscation layers
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "char", "[char]", "invoke-expression", "iex",
+    "invoke-command", "icm", "get-process", "gps",
+    "-join", "replace", "split"
+)
+| where ProcessCommandLine contains "+"
+| where strlen(ProcessCommandLine) > 200
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    ProcessCommandLine,
+    InitiatingProcessFileName
+| order by TimeGenerated desc
+Purpose: Find commands using string manipulation for obfuscation
+What to look for: Long commands with multiple encoding/decoding operations
+
+3. Suspicious Execution Flags & Behaviors
+Query 3.1: Bypass Execution Policy Commands
+// Find PowerShell with execution policy bypass
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "-nop", "-noprofile", 
+    "-w hidden", "-windowstyle hidden",
+    "bypass", "-executionpolicy bypass",
+    "unrestricted", "-executionpolicy unrestricted"
+)
+| summarize 
+    Count = count(),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    Devices = make_set(DeviceName),
+    InitiatingProcesses = make_set(InitiatingProcessFileName),
+    SampleCommands = make_set(ProcessCommandLine, 3)
+    by AccountName, AccountDomain
+| order by Count desc
+Purpose: Identify execution policy bypasses often used by attackers
+Current Status: High volume on system accounts - investigate servers with 80+ daily executions
+Action: Review alpine-srv1, rayt-pc, main-dc for legitimacy
+
+Query 3.2: PowerShell with Uncommon Parent Processes
+// Detect PowerShell launched from unusual parent processes
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where InitiatingProcessFileName !in~ (
+    "explorer.exe", "services.exe", "svchost.exe",
+    "taskeng.exe", "wmiprvse.exe", "msiexec.exe",
+    "cmd.exe", "conhost.exe", "gc_worker.exe"
+)
+| where isnotempty(InitiatingProcessFileName)
+| summarize 
+    Count = count(),
+    Devices = make_set(DeviceName),
+    Accounts = make_set(AccountName)
+    by InitiatingProcessFileName, InitiatingProcessCommandLine
+| order by Count asc
+| take 20
+Purpose: Find PowerShell spawned by suspicious processes
+What to look for: Office applications, browsers, or unusual binaries launching PowerShell
+
+4. File Download & Web Request Activities
+Query 4.1: PowerShell Download Cradles
+// Hunt for PowerShell downloading files from the internet
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "downloadstring", "downloadfile", "downloaddata",
+    "webclient", "net.webclient",
+    "invoke-webrequest", "invoke-restmethod",
+    "iwr", "irm", "curl", "wget",
+    "bitstransfer", "start-bitstransfer"
+)
+| extend 
+    HasHTTP = iff(ProcessCommandLine matches regex @"https?://", true, false),
+    HasIP = iff(ProcessCommandLine matches regex @"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", true, false)
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    ProcessCommandLine,
+    InitiatingProcessFileName,
+    HasHTTP,
+    HasIP
+| order by TimeGenerated desc
+Purpose: Detect PowerShell used for downloading malicious payloads
+Current Status: No suspicious downloads detected
+Action: Monitor for any hits - immediate investigation required
+
+Query 4.2: Network Connections from PowerShell
+// Find PowerShell making network connections
+DeviceNetworkEvents
+| where TimeGenerated > ago(7d)
+| where InitiatingProcessFileName =~ "powershell.exe" or InitiatingProcessFileName =~ "pwsh.exe"
+| where RemotePort in (80, 443, 8080, 8443)
+| summarize 
+    Connections = count(),
+    UniqueIPs = make_set(RemoteIP),
+    UniquePorts = make_set(RemotePort),
+    FirstConnection = min(TimeGenerated),
+    LastConnection = max(TimeGenerated)
+    by DeviceName, AccountName, InitiatingProcessCommandLine
+| where Connections > 5
+| order by Connections desc
+Purpose: Identify PowerShell establishing suspicious network connections
+What to look for: Connections to unknown IPs, unusual ports, or high connection counts
+
+5. PowerShell Remoting & Lateral Movement
+Query 5.1: PowerShell Remoting Activity
+// Detect PowerShell remoting commands (WinRM/PSRemoting)
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "enter-pssession", "new-pssession", "invoke-command",
+    "-computername", "-session",
+    "winrm", "winrs",
+    "test-wsman", "enable-psremoting"
+)
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    AccountDomain,
+    ProcessCommandLine,
+    InitiatingProcessFileName,
+    ProcessTokenElevation
+| order by TimeGenerated desc
+Purpose: Track PowerShell remoting which may indicate lateral movement
+Current Status: No suspicious remoting detected
+Action: Any hits should be investigated for unauthorized lateral movement
+
+Query 5.2: WinRM Service Activity
+// Monitor WinRM service usage
+DeviceEvents
+| where TimeGenerated > ago(7d)
+| where ActionType in ("ServiceInstalled", "ServiceStarted")
+| where FileName =~ "winrm"
+    or ProcessCommandLine has "winrm"
+    or RegistryKey has "winrm"
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    ActionType,
+    ProcessCommandLine,
+    RegistryKey
+Purpose: Detect WinRM service manipulation
+What to look for: Unexpected WinRM service starts or configuration changes
+
+6. Advanced Threat Hunting Queries
+Query 6.1: PowerShell Empire/Cobalt Strike Indicators
+// Hunt for known attack framework patterns
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "system.net.webclient", 
+    "iex(new-object",
+    "invoke-shellcode", "invoke-mimikatz",
+    "get-keystrokes", "get-gpppassword",
+    "invoke-tokenmanipu", "powerup",
+    "powersploit", "out-compresseddll",
+    "reflection.assembly"
+)
+| extend 
+    Severity = "High",
+    ThreatIndicator = case(
+        ProcessCommandLine has "invoke-mimikatz", "Mimikatz",
+        ProcessCommandLine has "invoke-shellcode", "Shellcode Injection",
+        ProcessCommandLine has "get-gpppassword", "GPP Password Extraction",
+        ProcessCommandLine has "invoke-tokenmanipu", "Token Manipulation",
+        "Generic Attack Framework"
+    )
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    ThreatIndicator,
+    Severity,
+    ProcessCommandLine,
+    InitiatingProcessFileName
+| order by TimeGenerated desc
+Purpose: Detect known offensive security tools and frameworks
+Severity: HIGH - Immediate investigation required
+
+Query 6.2: Suspicious PowerShell Script Execution
+// Find PowerShell executing scripts from suspicious locations
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "\\temp\\", "\\tmp\\",
+    "\\appdata\\local\\temp\\",
+    "\\users\\public\\",
+    "\\programdata\\",
+    "\\windows\\tasks\\",
+    "c:\\$"
+)
+| where ProcessCommandLine has_any (".ps1", ".psm1", ".psd1")
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    ProcessCommandLine,
+    InitiatingProcessFileName,
+    InitiatingProcessCommandLine
+| order by TimeGenerated desc
+Purpose: Detect scripts running from temporary or unusual locations
+What to look for: Scripts in temp folders, public directories, or hidden locations
+
+Query 6.3: PowerShell Process Injection Techniques
+// Hunt for process injection indicators
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "virtualallocex", "createremotethread",
+    "writeprocessmemory", "openprocess",
+    "reflection.assembly", "[reflection.assembly]::load",
+    "system.runtime.interopservices.marshal",
+    "invoke-dllinjection", "invoke-reflectivepeinjection"
+)
+| extend Severity = "Critical"
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    Severity,
+    ProcessCommandLine,
+    InitiatingProcessFileName,
+    ProcessTokenElevation
+| order by TimeGenerated desc
+Purpose: Detect process injection and memory manipulation techniques
+Severity: CRITICAL - Immediate containment required
+
+7. Credential Access & Privilege Escalation
+Query 7.1: Credential Dumping Attempts
+// Detect credential harvesting activities
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "sekurlsa", "lsadump", "sam",
+    "mimikatz", "invoke-mimikatz",
+    "get-credential", "convertfrom-securestring",
+    "lsass", "procdump",
+    "ntds.dit", "system.hive"
+)
+| extend Severity = "Critical"
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    AccountDomain,
+    Severity,
+    ProcessCommandLine,
+    ProcessTokenElevation
+| order by TimeGenerated desc
+Purpose: Identify credential theft attempts
+Severity: CRITICAL - Indicates active compromise
+
+Query 7.2: Privilege Escalation Attempts
+// Find PowerShell attempting privilege escalation
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "start-process", "-verb runas",
+    "invoke-expression", "iex",
+    "bypass", "add-localgroupmember",
+    "net localgroup administrators",
+    "enable-privilege", "sedebugueprivilege"
+)
+| where ProcessTokenElevation == "TokenElevationTypeFull"
+    or ProcessIntegrityLevel == "High"
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    ProcessCommandLine,
+    ProcessTokenElevation,
+    ProcessIntegrityLevel,
+    InitiatingProcessFileName
+| order by TimeGenerated desc
+Purpose: Track privilege escalation via PowerShell
+What to look for: Non-admin accounts gaining elevated privileges
+
+8. Persistence Mechanisms
+Query 8.1: Registry-Based Persistence
+// Detect PowerShell modifying Run keys for persistence
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "new-itemproperty", "set-itemproperty",
+    "reg add", "reg.exe",
+    "\\software\\microsoft\\windows\\currentversion\\run",
+    "\\currentversion\\runonce",
+    "schtasks", "new-scheduledtask"
+)
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    ProcessCommandLine,
+    InitiatingProcessFileName
+| order by TimeGenerated desc
+Purpose: Identify persistence mechanism creation
+What to look for: Registry Run key modifications, scheduled task creation
+
+Query 8.2: Startup Folder and Service Manipulation
+// Hunt for startup persistence mechanisms
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| where ProcessCommandLine has_any (
+    "\\startup\\", "\\start menu\\programs\\startup\\",
+    "new-service", "sc.exe create",
+    "wmi", "register-wmievent",
+    "eventsubscription"
+)
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    ProcessCommandLine,
+    ProcessTokenElevation
+| order by TimeGenerated desc
+Purpose: Detect service and startup folder persistence
+What to look for: New services, WMI event subscriptions, startup items
+
+9. Statistical Anomaly Detection
+Query 9.1: Rare PowerShell Commands
+// Identify rarely executed PowerShell commands (statistical outliers)
+let CommandFrequency = DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| extend CommandHash = hash_sha256(ProcessCommandLine)
+| summarize GlobalCount = count() by CommandHash, ProcessCommandLine;
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| extend CommandHash = hash_sha256(ProcessCommandLine)
+| join kind=inner (CommandFrequency) on CommandHash
+| where GlobalCount <= 5
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    ProcessCommandLine,
+    GlobalCount,
+    InitiatingProcessFileName
+| order by GlobalCount asc, TimeGenerated desc
+Purpose: Find unusual/unique PowerShell commands that may indicate malicious activity
+What to look for: One-off commands with complex or encoded content
+
+Query 9.2: Abnormal Execution Times
+// Find PowerShell executions during unusual hours
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| extend Hour = datetime_part("hour", TimeGenerated)
+| where Hour >= 22 or Hour <= 6  // Outside business hours (10 PM to 6 AM)
+| summarize 
+    Count = count(),
+    Devices = make_set(DeviceName),
+    SampleCommands = make_set(ProcessCommandLine, 3)
+    by AccountName, Hour
+| order by Count desc
+Purpose: Identify after-hours PowerShell activity
+What to look for: Non-service accounts active during off-hours
+
+10. Incident Response Queries
+Query 10.1: Full PowerShell Activity for Specific User
+// Complete PowerShell audit for a specific account (REPLACE <USERNAME>)
+let SuspiciousUser = "<USERNAME>";
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where AccountName =~ SuspiciousUser
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    AccountDomain,
+    ProcessCommandLine,
+    InitiatingProcessFileName,
+    InitiatingProcessCommandLine,
+    ProcessTokenElevation
+| order by TimeGenerated desc
+Purpose: Full forensic timeline for suspected compromised account
+Usage: Replace <USERNAME> with target account name
+
+Query 10.2: Full PowerShell Activity for Specific Device
+// Complete PowerShell audit for a specific device (REPLACE <DEVICENAME>)
+let SuspiciousDevice = "<DEVICENAME>";
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where DeviceName =~ SuspiciousDevice
+| where FileName =~ "powershell.exe" or FileName =~ "pwsh.exe"
+| project 
+    TimeGenerated,
+    DeviceName,
+    AccountName,
+    ProcessCommandLine,
+    InitiatingProcessFileName,
+    ProcessTokenElevation
+| order by TimeGenerated desc
+Purpose: Full forensic timeline for suspected compromised device
+Usage: Replace <DEVICENAME> with target device name
