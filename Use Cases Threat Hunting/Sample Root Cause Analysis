@@ -1,0 +1,50 @@
+```kql
+// Query 1: Identify all victims in phishing cascade
+EmailEvents
+| where Timestamp between (datetime(2025-11-18) .. datetime(2025-12-10))
+| where EmailDirection == "Intra-org"
+| where Subject has_any ("Compliance", "Training", "Password", "Immediate", "Action Required")
+| summarize Recipients = make_set(RecipientEmailAddress), 
+    EmailCount = count(), 
+    FirstEmail = min(Timestamp),
+    LastEmail = max(Timestamp)
+    by SenderFromAddress
+| order by FirstEmail asc
+
+// Query 2: Trace Azure Container Apps URL usage
+EmailUrlInfo
+| where Timestamp between (datetime(2025-12-01) .. datetime(2025-12-10))
+| where Url has "azurecontainerapps.io"
+| join kind=inner (EmailEvents) on NetworkMessageId
+| project Timestamp, SenderFromAddress, RecipientEmailAddress, Subject, 
+    Url, DeliveryAction, DeliveryLocation
+| order by Timestamp asc
+
+// Query 3: Find all URL clicks by compromised users
+UrlClickEvents
+| where Timestamp between (datetime(2025-11-18) .. datetime(2025-12-10))
+| where AccountUpn in ("user1@contoso.com", "user2@contoso.com", 
+    "compromiseuser@contoso.com", "compromiseuser2@contoso.com")
+| join kind=inner (EmailEvents) on NetworkMessageId
+| project Timestamp, AccountUpn, Url, SenderFromAddress, Subject, 
+    IPAddress, IsClickedThrough
+
+// Query 4: Detect Mimikatz DCSync activity
+DeviceEvents
+| where Timestamp between (datetime(2025-12-09) .. datetime(2025-12-10))
+| where DeviceName == "user@contoso.com"
+| where ProcessCommandLine has_any ("lsadump::dcsync", "lsadump::secrets")
+    or FileName in~ ("mimikatz.exe", "mimilib.dll")
+| project Timestamp, DeviceName, AccountName, FileName, 
+    ProcessCommandLine, InitiatingProcessAccountName
+
+// Query 5: Map complete attack chain
+let CompromisedAccounts = dynamic(["user2@contoso.com", "user3@contoso.com", 
+    "user4@contoso.com", "user5@contoso.com", "user6@contoso.com"]);
+EmailEvents
+| where Timestamp between (datetime(2025-11-18) .. datetime(2025-12-10))
+| where SenderFromAddress in (CompromisedAccounts) 
+    or RecipientEmailAddress in (CompromisedAccounts)
+| project Timestamp, SenderFromAddress, RecipientEmailAddress, Subject, 
+    DeliveryAction, UrlCount
+| order by Timestamp asc
