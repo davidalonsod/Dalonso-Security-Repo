@@ -4,7 +4,7 @@ More information about me https://www.linkedin.com/in/david-alonso-dominguez/
 
 # Dalonso Security Repo 🛡️
 
-Welcome to the Dalonso Security Repository! This space is dedicated to sharing knowledge, tools, and practical examples related to Microsoft Security technologies.
+Welcome to the David Alonso Security Repository! This space is dedicated to sharing knowledge, tools, and practical examples related to Microsoft Security technologies.
 
 ## 🔍 About This Repository
 
