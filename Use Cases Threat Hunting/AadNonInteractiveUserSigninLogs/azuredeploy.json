@@ -1,0 +1,992 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "ARM template to deploy AADNonInteractiveUserSignInLogs Analytic Rules to Microsoft Sentinel",
+    "author": "AAD Threat Hunting Rule Pack",
+    "source": "AADNonInteractiveUserSignInLogs-ThreatHunting.kql"
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace that Sentinel is deployed on"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region for deployment"
+      }
+    }
+  },
+  "variables": {},
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/f3a1c2e4-8b5d-4e7f-a9c1-2b3d4e5f6a7b')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Token Theft - Refresh Token Replay from New Location",
+        "description": "Detects when the same user refreshes an OAuth token from a completely different IP address AND country within a 30-minute window. Indicator of refresh token theft / pass-the-cookie attacks. MITRE: T1528, T1539",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "LateralMovement"],
+        "techniques": ["T1528", "T1539"],
+        "query": "AADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| where ResultType == 0\n| sort by UserPrincipalName asc, AppId asc, TimeGenerated asc\n| extend PrevIP      = prev(IPAddress, 1)\n| extend PrevCountry = prev(Location, 1)\n| extend PrevTime    = prev(TimeGenerated, 1)\n| extend PrevUser    = prev(UserPrincipalName, 1)\n| extend PrevApp     = prev(AppId, 1)\n| where UserPrincipalName == PrevUser\n   and  AppId             == PrevApp\n   and  IPAddress         != PrevIP\n   and  Location          != PrevCountry\n   and  (TimeGenerated - PrevTime) < 30m\n| project\n    TimeGenerated,\n    PrevTokenTime    = PrevTime,\n    UserPrincipalName,\n    AppDisplayName,\n    CurrentIP        = IPAddress,\n    CurrentCountry   = Location,\n    PreviousIP       = PrevIP,\n    PreviousCountry  = PrevCountry,\n    TimeBetweenTokens = (TimeGenerated - PrevTime),\n    CorrelationId,\n    UniqueTokenIdentifier\n| order by TimeGenerated desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CurrentIP" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Token Replay Detected - {{UserPrincipalName}} authenticated from {{CurrentCountry}} after prior token from {{PreviousCountry}}",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} refreshed a token from {{CurrentIP}} ({{CurrentCountry}}) within 30 min of a prior refresh from a different country. Possible refresh token theft."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/b7c3d5e6-f1a2-4b8c-9d0e-1f2a3b4c5d6e')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Non-Interactive Auth Followed by Privileged Audit Actions",
+        "description": "Detects when a user silently refreshes a token and then performs privileged Azure AD operations (role management, app/group/policy/device management) within 60 minutes. Indicative of session hijack or compromised account performing admin abuse. MITRE: T1078, T1098",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["PrivilegeEscalation", "Persistence", "DefenseEvasion"],
+        "techniques": ["T1078", "T1098", "T1134"],
+        "query": "let NonInteractiveUsers =\n    AADNonInteractiveUserSignInLogs\n    | where TimeGenerated > ago(2h)\n    | where ResultType == 0\n    | summarize LastNISignIn = max(TimeGenerated) by UserPrincipalName, IPAddress;\nAuditLogs\n| where TimeGenerated > ago(2h)\n| where Category in (\n    \"RoleManagement\", \"ApplicationManagement\", \"GroupManagement\",\n    \"Policy\", \"DeviceManagement\", \"UserManagement\"\n  )\n| extend UPN = tostring(InitiatedBy.user.userPrincipalName)\n| where isnotempty(UPN)\n| join kind=inner NonInteractiveUsers on $left.UPN == $right.UserPrincipalName\n| where (TimeGenerated - LastNISignIn) between (0m .. 60m)\n| project\n    AuditTime        = TimeGenerated,\n    UserPrincipalName = UPN,\n    OperationName,\n    AuditResult      = Result,\n    Category,\n    TargetResources,\n    LastNISignIn,\n    IPAddress,\n    TimeSinceNISignIn = (TimeGenerated - LastNISignIn)\n| order by AuditTime desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/c8d4e6f7-a2b3-5c9d-0e1f-2a3b4c5d6e7f')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Non-Interactive Sign-In from Threat Intelligence IP",
+        "description": "Detects non-interactive Azure AD sign-ins originating from IP addresses present in the ThreatIntelligenceIndicator table. Silent sign-ins from known-malicious IPs indicate an attacker has an active refresh token. MITRE: T1528, T1078",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "CommandAndControl", "InitialAccess"],
+        "techniques": ["T1528", "T1078", "T1539"],
+        "query": "let MaliciousIPs =\n    ThreatIntelligenceIndicator\n    | where TimeGenerated > ago(30d)\n    | where isnotempty(NetworkIP)\n       and  Active == true\n    | summarize ThreatTags = make_set(Tags), ThreatName = make_set(ThreatType) by NetworkIP;\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| where ResultType == 0\n| join kind=inner MaliciousIPs on $left.IPAddress == $right.NetworkIP\n| project\n    TimeGenerated,\n    UserPrincipalName,\n    AppDisplayName,\n    IPAddress,\n    Location,\n    ThreatTags,\n    ThreatName,\n    ConditionalAccessStatus,\n    AuthenticationRequirement,\n    CorrelationId,\n    UniqueTokenIdentifier\n| order by TimeGenerated desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/d9e5f7a8-b3c4-6d0e-1f2a-3b4c5d6e7f8a')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Interactive to Non-Interactive Token Theft Pivot",
+        "description": "Detects when a user had a successful interactive sign-in (without MFA or CA not applied) and then the same session was used for non-interactive refreshes from a different IP and country within 2 hours. Classic token theft pattern. MITRE: T1528, T1539",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT3H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "LateralMovement", "DefenseEvasion"],
+        "techniques": ["T1528", "T1539", "T1078"],
+        "query": "let InteractiveSessions =\n    SigninLogs\n    | where TimeGenerated > ago(3h)\n    | where ResultType == 0\n    | where AuthenticationRequirement == \"singleFactorAuthentication\"\n       or   ConditionalAccessStatus   == \"notApplied\"\n    | project\n        UserPrincipalName,\n        InteractiveTime    = TimeGenerated,\n        InteractiveIP      = IPAddress,\n        InteractiveCountry = Location,\n        AppDisplayName,\n        CorrelationId;\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(3h)\n| where ResultType == 0\n| join kind=inner InteractiveSessions on UserPrincipalName\n| where IPAddress != InteractiveIP\n   and  Location  != InteractiveCountry\n   and  (TimeGenerated - InteractiveTime) between (1m .. 2h)\n| project\n    NISignInTime       = TimeGenerated,\n    InteractiveTime,\n    UserPrincipalName,\n    AppDisplayName,\n    NIIPAddress        = IPAddress,\n    NICountry          = Location,\n    InteractiveIP,\n    InteractiveCountry,\n    CorrelationId,\n    UniqueTokenIdentifier,\n    TimeSinceInteractive = (TimeGenerated - InteractiveTime)\n| order by UserPrincipalName asc, InteractiveTime asc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "NIIPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/e0f6a8b9-c4d5-7e1f-2a3b-4c5d6e7f8a9b')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Device Code Flow Authentication Abuse",
+        "description": "Detects non-interactive sign-ins using device code flow. This protocol is abused in phishing attacks where a user is tricked into entering a code; the attacker redeems it for a long-lived refresh token. MITRE: T1528, T1566",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "InitialAccess"],
+        "techniques": ["T1528", "T1566"],
+        "query": "AADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| where AuthenticationProtocol == \"deviceCode\"\n   or   ClientAppUsed has_any (\"device code\", \"device_code\", \"Device Code\")\n| summarize\n    Count     = count(),\n    IPs       = make_set(IPAddress),\n    Countries = make_set(Location),\n    Apps      = make_set(AppDisplayName),\n    FirstSeen = min(TimeGenerated),\n    LastSeen  = max(TimeGenerated)\n  by UserPrincipalName\n| extend IPAddress = tostring(IPs[0])\n| order by Count desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/f1a7b9c0-d5e6-8f2a-3b4c-5d6e7f8a9b0c')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ROPC Authentication Detected - Credential Pass-Through Bypass",
+        "description": "Detects Resource Owner Password Credential (ROPC) grant flow. ROPC passes credentials directly to Azure AD bypassing MFA and Conditional Access completely. Should never appear in a healthy enterprise tenant. MITRE: T1110, T1078, T1550",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "DefenseEvasion", "InitialAccess"],
+        "techniques": ["T1110", "T1078", "T1550"],
+        "query": "AADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| where AuthenticationProtocol =~ \"ropc\"\n   or   ClientAppUsed has_any (\"Password\", \"ROPC\", \"ropc\")\n| summarize\n    Count     = count(),\n    IPs       = make_set(IPAddress),\n    Countries = make_set(Location),\n    Apps      = make_set(AppDisplayName),\n    Errors    = make_set(ResultType),\n    FirstSeen = min(TimeGenerated),\n    LastSeen  = max(TimeGenerated)\n  by UserPrincipalName\n| extend IPAddress = tostring(IPs[0])\n| order by Count desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/a2b8c0d1-e6f7-9a3b-4c5d-6e7f8a9b0c1d')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Non-Interactive Sign-In via TOR or Anonymous Proxy",
+        "description": "Detects non-interactive Azure AD sign-ins from IP addresses tagged as TOR exit nodes, anonymous proxies, or VPN anonymizers. Attackers use anonymization to hide their location when replaying stolen refresh tokens. MITRE: T1090, T1090.003",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["DefenseEvasion", "CredentialAccess", "CommandAndControl"],
+        "techniques": ["T1090", "T1528"],
+        "query": "let TorExitIPs =\n    ThreatIntelligenceIndicator\n    | where TimeGenerated > ago(30d)\n    | where Active == true\n    | where Tags has_any (\"tor\", \"proxy\", \"anonymizer\", \"vpn\", \"anonymity\")\n    | where isnotempty(NetworkIP)\n    | summarize AnonymizationType = make_set(Tags) by NetworkIP;\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| where ResultType == 0\n| join kind=inner TorExitIPs on $left.IPAddress == $right.NetworkIP\n| project\n    TimeGenerated,\n    UserPrincipalName,\n    AppDisplayName,\n    IPAddress,\n    Location,\n    AnonymizationType,\n    ConditionalAccessStatus,\n    AuthenticationRequirement,\n    CorrelationId,\n    UniqueTokenIdentifier\n| order by TimeGenerated desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/b3c9d1e2-f7a8-0b4c-5d6e-7f8a9b0c1d2e')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Brute Force Success - Credential Stuffing Succeeded",
+        "description": "Detects the brute force success pattern: account experiences multiple non-interactive failures with brute-force error codes followed by a successful sign-in — attacker eventually guessed or stuffed the correct credentials. MITRE: T1110, T1110.004",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT3H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "InitialAccess"],
+        "techniques": ["T1110"],
+        "query": "let BruteForceErrors = dynamic([\"50126\",\"50055\",\"50056\",\"50064\",\"50053\",\"50034\",\"50057\",\"50128\"]);\nlet Failures =\n    AADNonInteractiveUserSignInLogs\n    | where TimeGenerated > ago(3h)\n    | extend ErrorCode = tostring(ResultType)\n    | where ErrorCode in (BruteForceErrors)\n    | summarize\n        FailCount = count(),\n        LastFail  = max(TimeGenerated),\n        FailIPs   = make_set(IPAddress),\n        Countries = make_set(Location)\n      by UserPrincipalName;\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(3h)\n| where ResultType == 0\n| summarize\n    FirstSuccess = min(TimeGenerated),\n    SuccessIP    = tostring(make_set(IPAddress)[0])\n  by UserPrincipalName\n| join kind=inner Failures on UserPrincipalName\n| where FailCount > 5\n   and  FirstSuccess > LastFail\n| project\n    UserPrincipalName,\n    FailCount,\n    LastFail,\n    FirstSuccess,\n    TimeBetweenFailAndSuccess = (FirstSuccess - LastFail),\n    FailIPs,\n    SuccessIP,\n    Countries\n| order by FailCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "SuccessIP" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/c4d0e2f3-a8b9-1c5d-6e7f-8a9b0c1d2e3f')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "MFA Fatigue Attack - Push Bombing Followed by Silent Token Abuse",
+        "description": "Detects MFA fatigue (push bombing) attack pattern: user receives many failed MFA prompts, eventually approves, then attacker heavily uses non-interactive tokens. Used by LAPSUS$ and Scattered Spider. MITRE: T1621",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT4H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "DefenseEvasion"],
+        "techniques": ["T1621", "T1078", "T1528"],
+        "query": "let MFAFatigue =\n    SigninLogs\n    | where TimeGenerated > ago(4h)\n    | where ResultType in (50074, 500121, 50076)\n    | summarize\n        MFAAttempts  = count(),\n        FirstAttempt = min(TimeGenerated)\n      by UserPrincipalName;\nlet MFASuccess =\n    SigninLogs\n    | where TimeGenerated > ago(4h)\n    | where ResultType == 0\n    | where AuthenticationRequirement == \"multiFactorAuthentication\"\n    | summarize MFASuccessTime = min(TimeGenerated), SuccessIP = tostring(make_set(IPAddress)[0])\n      by UserPrincipalName;\nMFAFatigue\n| where MFAAttempts >= 3\n| join kind=inner MFASuccess on UserPrincipalName\n| where MFASuccessTime > FirstAttempt\n| join kind=inner (\n    AADNonInteractiveUserSignInLogs\n    | where TimeGenerated > ago(4h)\n    | where ResultType == 0\n    | summarize NI_Count = count(), NI_Countries = make_set(Location), NI_IPs = make_set(IPAddress)\n      by UserPrincipalName\n  ) on UserPrincipalName\n| where NI_Count > 10\n| project\n    UserPrincipalName,\n    MFAAttempts,\n    FirstMFAPrompt   = FirstAttempt,\n    MFASuccessTime,\n    SuccessIP,\n    NI_Count,\n    NI_Countries\n| order by MFAAttempts desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "SuccessIP" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/d5e1f3a4-b9c0-2d6e-7f8a-9b0c1d2e3f4a')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Stale Token Used After Password Change or Auth Method Update",
+        "description": "Detects non-interactive token refreshes continuing AFTER a user's password or authentication methods were changed/reset. An attacker with a pre-existing refresh token can maintain access even after credential reset. MITRE: T1528, T1078",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["Persistence", "CredentialAccess", "DefenseEvasion"],
+        "techniques": ["T1528", "T1078", "T1550"],
+        "query": "let PasswordChanges =\n    AuditLogs\n    | where TimeGenerated > ago(24h)\n    | where OperationName has_any (\n        \"Reset password\",\n        \"Change password\",\n        \"Update user\",\n        \"User changed password\",\n        \"Admin updated user authentication method\",\n        \"Update Authentication Method\",\n        \"Delete Authentication Method\"\n      )\n    | extend UPN = tostring(TargetResources[0].userPrincipalName)\n    | where isnotempty(UPN)\n    | summarize ChangeTime = max(TimeGenerated) by UPN;\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(24h)\n| where ResultType == 0\n| join kind=inner PasswordChanges on $left.UserPrincipalName == $right.UPN\n| where TimeGenerated > ChangeTime\n| summarize\n    TokensAfterChange = count(),\n    IPs               = make_set(IPAddress),\n    Countries         = make_set(Location),\n    Apps              = make_set(AppDisplayName),\n    LastSeen          = max(TimeGenerated),\n    FirstTokenAfter   = min(TimeGenerated)\n  by UserPrincipalName, ChangeTime\n| extend IPAddress = tostring(IPs[0])\n| order by TokensAfterChange desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/e6f2a4b5-c0d1-3e7f-8a9b-0c1d2e3f4a5b')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Account Takeover - Email Forwarding Rule After Silent Auth",
+        "description": "Detects Business Email Compromise (BEC) indicator: inbox forwarding/redirect rule created within 2 hours of a non-interactive sign-in. Attackers set up email forwarding immediately after obtaining access via token theft. MITRE: T1114, T1114.003",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT3H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["Collection", "Exfiltration", "Persistence"],
+        "techniques": ["T1114", "T1078"],
+        "query": "let SilentAuthUsers =\n    AADNonInteractiveUserSignInLogs\n    | where TimeGenerated > ago(3h)\n    | where ResultType == 0\n    | summarize LastNI = max(TimeGenerated), NI_IPs = make_set(IPAddress)\n      by UserPrincipalName;\nOfficeActivity\n| where TimeGenerated > ago(3h)\n| where Operation in (\n    \"New-InboxRule\", \"Set-InboxRule\", \"UpdateInboxRules\", \"Set-Mailbox\"\n  )\n| where Parameters has_any (\n    \"ForwardTo\", \"RedirectTo\", \"ForwardAsAttachmentTo\",\n    \"DeleteMessage\", \"MarkAsRead\"\n  )\n| extend UPN = tolower(UserId)\n| join kind=inner SilentAuthUsers on $left.UPN == $right.UserPrincipalName\n| where TimeGenerated > LastNI\n   and  (TimeGenerated - LastNI) < 2h\n| project\n    RuleCreationTime  = TimeGenerated,\n    UserPrincipalName = UPN,\n    Operation,\n    Parameters,\n    NI_IPs,\n    LastNISignIn      = LastNI,\n    TimeSinceNISignIn = (TimeGenerated - LastNI),\n    ClientIP\n| order by RuleCreationTime desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "ClientIP" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/f7a3b5c6-d1e2-4f8a-9b0c-1d2e3f4a5b6c')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "PIM Role Activation Followed by Non-Interactive Token Use",
+        "description": "Detects when a PIM role is activated and the user immediately uses a non-interactive token within 30 minutes. Indicates possible PIM abuse to temporarily elevate privileges and perform admin operations stealthily. MITRE: T1078, T1098, T1134",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["PrivilegeEscalation", "Persistence", "DefenseEvasion"],
+        "techniques": ["T1078", "T1098", "T1134"],
+        "query": "let PIMActivations =\n    AuditLogs\n    | where TimeGenerated > ago(2h)\n    | where OperationName has \"Add member to role completed (PIM activation)\"\n    | extend UPN = tostring(InitiatedBy.user.userPrincipalName)\n    | where isnotempty(UPN)\n    | project\n        ActivationTime = TimeGenerated,\n        UPN,\n        RoleName       = tostring(TargetResources[0].displayName);\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(2h)\n| where ResultType == 0\n| join kind=inner PIMActivations on $left.UserPrincipalName == $right.UPN\n| where TimeGenerated > ActivationTime\n   and  (TimeGenerated - ActivationTime) < 30m\n| project\n    NISignInTime       = TimeGenerated,\n    ActivationTime,\n    UserPrincipalName,\n    RoleName,\n    AppDisplayName,\n    IPAddress,\n    Location,\n    TimeSincePIMActivation = (TimeGenerated - ActivationTime)\n| order by NISignInTime desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/a8b4c6d7-e2f3-5a9b-0c1d-2e3f4a5b6c7d')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "OAuth App Consent Followed by Immediate Silent Authentication",
+        "description": "Detects illicit OAuth consent grant attack: user grants consent to an app in Audit Logs, same app immediately begins non-interactive sign-ins within 24 hours. Signature of phishing-induced app consent granting persistent mailbox/file access. MITRE: T1528, T1566",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "Persistence", "InitialAccess"],
+        "techniques": ["T1528", "T1566", "T1078"],
+        "query": "let RecentConsents =\n    AuditLogs\n    | where TimeGenerated > ago(24h)\n    | where OperationName has_any (\n        \"Consent to application\",\n        \"Add app role assignment\",\n        \"Add delegated permission grant\"\n      )\n    | extend ActorUPN    = tostring(InitiatedBy.user.userPrincipalName)\n    | extend AppId       = tostring(TargetResources[0].id)\n    | extend AppName     = tostring(TargetResources[0].displayName)\n    | where isnotempty(ActorUPN)\n    | project ConsentTime=TimeGenerated, ActorUPN, AppId, AppName, OperationName;\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(24h)\n| where ResultType == 0\n| join kind=inner RecentConsents\n    on $left.UserPrincipalName == $right.ActorUPN, $left.AppId == $right.AppId\n| where TimeGenerated > ConsentTime\n   and  (TimeGenerated - ConsentTime) < 24h\n| summarize\n    NI_Count     = count(),\n    IPs          = make_set(IPAddress),\n    Countries    = make_set(Location),\n    FirstUse     = min(TimeGenerated)\n  by UserPrincipalName, AppName, AppId, ConsentTime, OperationName\n| extend IPAddress = tostring(IPs[0])\n| order by ConsentTime desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/e2f8a0b1-c6d7-9e3f-4a5b-6c7d8e9f0a1b')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Impossible Travel - Non-Interactive Sign-Ins from Multiple Countries",
+        "description": "Detects users successfully authenticating via non-interactive sign-ins from 3 or more distinct countries within 1 hour. 3+ countries in 1 hour is physically impossible and strongly indicates refresh token theft replayed from multiple attacker locations. MITRE: T1078",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "DefenseEvasion"],
+        "techniques": ["T1078", "T1539"],
+        "query": "AADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| where ResultType == 0\n| summarize\n    Countries    = make_set(Location),\n    CountryCount = dcount(Location),\n    IPs          = make_set(IPAddress),\n    Apps         = make_set(AppDisplayName),\n    FirstSeen    = min(TimeGenerated),\n    LastSeen     = max(TimeGenerated)\n  by UserPrincipalName\n| where CountryCount >= 3\n| extend IPAddress = tostring(IPs[0])\n| order by CountryCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/f3a9b1c2-d7e8-0f4a-5b6c-7d8e9f0a1b2c')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Legacy Authentication Bypassing MFA and Conditional Access",
+        "description": "Detects successful non-interactive sign-ins using legacy authentication protocols (EAS, IMAP, POP3, SMTP, MAPI). These protocols cannot participate in MFA challenges or Conditional Access, completely bypassing security controls. MITRE: T1078, T1550",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["DefenseEvasion", "InitialAccess", "CredentialAccess"],
+        "techniques": ["T1078", "T1550"],
+        "query": "let LegacyProtocols = dynamic([\n    \"Exchange ActiveSync\", \"IMAP4\", \"MAPI Over HTTP\",\n    \"POP3\", \"SMTP\", \"Authenticated SMTP\", \"AutoDiscover\",\n    \"Exchange Online PowerShell\", \"Exchange Web Services\",\n    \"Other clients\", \"Other clients; IMAP\", \"Other clients; POP\"\n]);\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| where ClientAppUsed in (LegacyProtocols)\n| where ResultType == 0\n| summarize\n    SignInCount = count(),\n    IPs         = make_set(IPAddress),\n    Countries   = make_set(Location),\n    Protocols   = make_set(ClientAppUsed),\n    FirstSeen   = min(TimeGenerated),\n    LastSeen    = max(TimeGenerated)\n  by UserPrincipalName, AppDisplayName\n| where SignInCount > 3\n| extend IPAddress = tostring(IPs[0])\n| order by SignInCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/d1e7f9a0-b5c6-8d2e-3f4a-5b6c7d8e9f0a')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Password Spray Attack via Non-Interactive Sign-Ins",
+        "description": "Detects horizontal password spray attacks where a single IP attempts authentication against many user accounts. Attacker spreads attempts to stay below per-account lockout thresholds. Non-interactive spray skips MFA prompts making it stealthy. MITRE: T1110.003",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "InitialAccess"],
+        "techniques": ["T1110"],
+        "query": "let SprayErrors = dynamic([\"50126\", \"50034\", \"50053\"]);\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| extend ErrorCode = tostring(ResultType)\n| where ErrorCode in (SprayErrors)\n| summarize\n    TargetCount = dcount(UserPrincipalName),\n    Targets     = make_set(UserPrincipalName, 30),\n    FailCount   = count(),\n    ErrorCodes  = make_set(ErrorCode),\n    UserAgents  = make_set(UserAgent),\n    FirstSeen   = min(TimeGenerated),\n    LastSeen    = max(TimeGenerated)\n  by IPAddress, Location\n| where TargetCount > 10\n| order by TargetCount desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT2H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/b5c1d3e4-f9a0-2b6c-7d8e-9f0a1b2c3d4e')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "New or Rogue OAuth Application First Seen in Tenant",
+        "description": "Detects OAuth applications appearing for the first time in past 7 days with no prior activity in preceding 30 days. New apps suddenly generating non-interactive sign-ins can indicate illicit consent, rogue app registration, or supply chain compromise. MITRE: T1528, T1199",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "P1D",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["Persistence", "CredentialAccess", "InitialAccess"],
+        "techniques": ["T1528", "T1199", "T1078"],
+        "query": "let KnownApps =\n    AADNonInteractiveUserSignInLogs\n    | where TimeGenerated between (ago(14d) .. ago(7d))\n    | summarize by AppId;\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(7d)\n| where ResultType == 0\n| join kind=leftanti KnownApps on AppId\n| summarize\n    FirstSeen = min(TimeGenerated),\n    UserCount = dcount(UserPrincipalName),\n    Users     = make_set(UserPrincipalName, 10),\n    IPs       = make_set(IPAddress),\n    Countries = make_set(Location)\n  by AppDisplayName, AppId\n| extend IPAddress = tostring(IPs[0])\n| order by FirstSeen desc",
+        "entityMappings": [
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              { "identifier": "AppId", "columnName": "AppId" },
+              { "identifier": "Name", "columnName": "AppDisplayName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "P1D",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["CloudApplication"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/c6d2e4f5-a0b1-3c7d-8e9f-0a1b2c3d4e5f')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Service Principal Authenticating from Anomalous IP Spread",
+        "description": "Detects service principals (workload identities) authenticating from 4+ distinct IPs in 24 hours. Legitimate service principals have stable IP footprints. Wide IP spread indicates compromised service principal credentials being used from attacker infrastructure. MITRE: T1078.004",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT4H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "Persistence", "LateralMovement"],
+        "techniques": ["T1078", "T1528"],
+        "query": "AADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(24h)\n| where isnotempty(ServicePrincipalId)\n   and  ResultType == 0\n| summarize\n    SignInCount = count(),\n    UniqueIPs   = dcount(IPAddress),\n    IPs         = make_set(IPAddress),\n    Countries   = make_set(Location),\n    FirstSeen   = min(TimeGenerated)\n  by AppDisplayName, ServicePrincipalId\n| where UniqueIPs > 3\n| extend IPAddress = tostring(IPs[0])\n| order by UniqueIPs desc",
+        "entityMappings": [
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AppDisplayName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["CloudApplication"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/d7e3f5a6-b1c2-4d8e-9f0a-1b2c3d4e5f6a')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Non-Interactive Sign-In from High-Risk Country",
+        "description": "Detects successful non-interactive sign-ins from countries designated as high-risk (sanctioned nations, high APT origination). Silent authentication from these regions may indicate stolen token use from attacker infrastructure. Customize the country list as needed. MITRE: T1078",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["InitialAccess", "CredentialAccess"],
+        "techniques": ["T1078", "T1539"],
+        "query": "let HighRiskCountries = dynamic([\"KP\",\"IR\",\"RU\",\"CN\",\"BY\",\"CU\",\"SY\",\"VE\",\"MM\"]);\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| where ResultType == 0\n| where Location in (HighRiskCountries)\n| summarize\n    Count     = count(),\n    Apps      = make_set(AppDisplayName),\n    IPs       = make_set(IPAddress),\n    FirstSeen = min(TimeGenerated),\n    LastSeen  = max(TimeGenerated)\n  by UserPrincipalName, Location\n| extend IPAddress = tostring(IPs[0])\n| order by Count desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/e8f4a6b7-c2d3-5e9f-0a1b-2c3d4e5f6a7b')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Non-Interactive Brute Force - Single User Targeted by Multiple IPs",
+        "description": "Detects targeted brute force/credential stuffing against a single user account via non-interactive sign-ins using multiple source IPs. Attacker distributes attempts across IPs to avoid rate limiting and account lockout. MITRE: T1110, T1110.001, T1110.004",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "InitialAccess"],
+        "techniques": ["T1110"],
+        "query": "let BruteForceErrors = dynamic([\"50126\",\"50055\",\"50056\",\"50064\",\"50053\",\"50034\",\"50057\",\"50128\"]);\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| extend ErrorCode = tostring(ResultType)\n| where ErrorCode in (BruteForceErrors)\n| summarize\n    FailCount   = count(),\n    UniqueIPs   = dcount(IPAddress),\n    IPs         = make_set(IPAddress, 20),\n    Countries   = make_set(Location),\n    ErrorCodes  = make_set(ErrorCode),\n    FirstSeen   = min(TimeGenerated),\n    LastSeen    = max(TimeGenerated)\n  by UserPrincipalName\n| where FailCount > 20\n| extend IPAddress = tostring(IPs[0])\n| order by FailCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "deployedRulesCount": {
+      "type": "int",
+      "value": 23
+    }
+  }
+}
