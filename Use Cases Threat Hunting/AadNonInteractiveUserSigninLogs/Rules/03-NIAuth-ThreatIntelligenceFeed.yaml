@@ -1,0 +1,82 @@
+id: c8d4e6f7-a2b3-5c9d-0e1f-2a3b4c5d6e7f
+name: Non-Interactive Sign-In from Threat Intelligence IP
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects non-interactive (silent) Azure AD sign-ins originating from IP addresses
+  present in the ThreatIntelligenceIndicator table. Silent sign-ins from known-malicious
+  IPs indicate that an attacker has an active refresh token and is using it from
+  attacker-controlled infrastructure.
+  MITRE ATT&CK: T1528 (Steal Application Access Token), T1078 (Valid Accounts)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADNonInteractiveUserSignInLogs
+  - connectorId: ThreatIntelligence
+    dataTypes:
+      - ThreatIntelligenceIndicator
+queryFrequency: 15m
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - CommandAndControl
+  - InitialAccess
+relevantTechniques:
+  - T1528
+  - T1078
+  - T1539
+query: |
+  let MaliciousIPs =
+      ThreatIntelligenceIndicator
+      | where TimeGenerated > ago(30d)
+      | where isnotempty(NetworkIP)
+         and  Active == true
+      | summarize ThreatTags = make_set(Tags), ThreatName = make_set(ThreatType) by NetworkIP;
+  AADNonInteractiveUserSignInLogs
+  | where TimeGenerated > ago(1h)
+  | where ResultType == 0
+  | join kind=inner MaliciousIPs on $left.IPAddress == $right.NetworkIP
+  | project
+      TimeGenerated,
+      UserPrincipalName,
+      AppDisplayName,
+      IPAddress,
+      Location,
+      ThreatTags,
+      ThreatName,
+      ConditionalAccessStatus,
+      AuthenticationRequirement,
+      CorrelationId,
+      UniqueTokenIdentifier
+  | order by TimeGenerated desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  ThreatTags: ThreatTags
+  ThreatName: ThreatName
+  AppDisplayName: AppDisplayName
+alertDetailsOverride:
+  alertDisplayNameFormat: "TI Match - Non-Interactive Sign-In from Malicious IP for {{UserPrincipalName}}"
+  alertDescriptionFormat: "User {{UserPrincipalName}} performed a silent token refresh from IP {{IPAddress}} which is flagged in Threat Intelligence as: {{ThreatTags}}."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+      - IP
+    groupByAlertDetails: []
+    groupByCustomDetails: []

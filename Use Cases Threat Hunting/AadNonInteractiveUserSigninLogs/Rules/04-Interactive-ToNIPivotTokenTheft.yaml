@@ -1,0 +1,90 @@
+id: d9e5f7a8-b3c4-6d0e-1f2a-3b4c5d6e7f8a
+name: Interactive to Non-Interactive Token Theft Pivot
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects when a user had a successful interactive sign-in (especially without MFA or with
+  CA not applied) and then the same session was used for non-interactive token refreshes
+  from a DIFFERENT IP address and country within a 2-hour window. This is the classic
+  pattern of an attacker stealing a token immediately after initial authentication.
+  MITRE ATT&CK: T1528 (Steal Application Access Token), T1539 (Steal Web Session Cookie)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADNonInteractiveUserSignInLogs
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 3h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - LateralMovement
+  - DefenseEvasion
+relevantTechniques:
+  - T1528
+  - T1539
+  - T1078
+query: |
+  let InteractiveSessions =
+      SigninLogs
+      | where TimeGenerated > ago(3h)
+      | where ResultType == 0
+      | where AuthenticationRequirement == "singleFactorAuthentication"
+         or   ConditionalAccessStatus   == "notApplied"
+      | project
+          UserPrincipalName,
+          InteractiveTime    = TimeGenerated,
+          InteractiveIP      = IPAddress,
+          InteractiveCountry = Location,
+          AppDisplayName,
+          CorrelationId;
+  AADNonInteractiveUserSignInLogs
+  | where TimeGenerated > ago(3h)
+  | where ResultType == 0
+  | join kind=inner InteractiveSessions on UserPrincipalName
+  | where IPAddress != InteractiveIP
+     and  Location  != InteractiveCountry
+     and  (TimeGenerated - InteractiveTime) between (1m .. 2h)
+  | project
+      NISignInTime       = TimeGenerated,
+      InteractiveTime,
+      UserPrincipalName,
+      AppDisplayName,
+      NIIPAddress        = IPAddress,
+      NICountry          = Location,
+      InteractiveIP,
+      InteractiveCountry,
+      CorrelationId,
+      UniqueTokenIdentifier,
+      TimeSinceInteractive = (TimeGenerated - InteractiveTime)
+  | order by UserPrincipalName asc, InteractiveTime asc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: NIIPAddress
+customDetails:
+  InteractiveIP: InteractiveIP
+  InteractiveCountry: InteractiveCountry
+  NonInteractiveCountry: NICountry
+  AppDisplayName: AppDisplayName
+alertDetailsOverride:
+  alertDisplayNameFormat: "Token Pivot - {{UserPrincipalName}} interactive from {{InteractiveCountry}}, NI token reused from {{NICountry}}"
+  alertDescriptionFormat: "User {{UserPrincipalName}} used a non-interactive token from {{NIIPAddress}} within 2 hours of interactive auth from {{InteractiveIP}}. Possible token theft."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
