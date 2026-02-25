@@ -1,0 +1,1053 @@
+// =============================================================================
+// AADNonInteractiveUserSignInLogs — Threat Hunting & Deep Forensic Queries
+// Workspace: xxxxxxxxxxxxxxxxxx
+// Updated: 2026-02-24
+// =============================================================================
+// Non-interactive sign-ins cover: token refreshes, legacy auth, service-to-service,
+// ROPC, and device code flows. Attackers exploit these because they are silent —
+// no MFA prompt, no user awareness, no CA challenge after initial token issuance.
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 1. DATA OVERVIEW & COVERAGE
+//    Volume, token types, failure breakdown across all client app protocols
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(30d)
+| summarize 
+    Total     = count(),
+    UniqueUsers = dcount(UserPrincipalName),
+    UniqueApps  = dcount(AppDisplayName),
+    UniqueIPs   = dcount(IPAddress),
+    Failures    = countif(ResultType != 0),
+    Successes   = countif(ResultType == 0)
+  by ClientAppUsed
+| order by Total desc
+
+
+// -----------------------------------------------------------------------------
+// 2. TOKEN THEFT — REFRESH TOKEN REPLAY FROM NEW LOCATION
+//    Same user + same OAuth app, different IP/country within 30 min
+//    --> session hijack / pass-the-cookie indicator
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| sort by UserPrincipalName asc, AppId asc, TimeGenerated asc
+| extend PrevIP      = prev(IPAddress, 1),
+         PrevCountry = prev(Location, 1),
+         PrevTime    = prev(TimeGenerated, 1),
+         PrevUser    = prev(UserPrincipalName, 1),
+         PrevApp     = prev(AppId, 1)
+| where UserPrincipalName == PrevUser
+   and  AppId             == PrevApp
+   and  IPAddress         != PrevIP
+   and  Location          != PrevCountry
+   and  (TimeGenerated - PrevTime) < 30m
+| project TimeGenerated, PrevTime, UserPrincipalName, AppDisplayName,
+          IPAddress, Location, PrevIP, PrevCountry,
+          CorrelationId, UniqueTokenIdentifier
+
+
+// -----------------------------------------------------------------------------
+// 3. IMPOSSIBLE TRAVEL
+//    Users authenticating from 3+ countries — token may be used from multiple
+//    attacker-controlled locations
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == 0
+| summarize 
+    Countries    = make_set(Location),
+    CountryCount = dcount(Location),
+    IPs          = make_set(IPAddress),
+    Apps         = make_set(AppDisplayName),
+    FirstSeen    = min(TimeGenerated),
+    LastSeen     = max(TimeGenerated)
+  by UserPrincipalName
+| where CountryCount >= 3
+| order by CountryCount desc
+
+
+// -----------------------------------------------------------------------------
+// 4. LEGACY AUTHENTICATION — MFA / CONDITIONAL ACCESS BYPASS
+//    These protocols bypass CA policies and MFA enforcement entirely
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(30d)
+| where ClientAppUsed in (
+    "Exchange ActiveSync", "IMAP4", "MAPI Over HTTP",
+    "POP3", "SMTP", "Authenticated SMTP", "AutoDiscover",
+    "Exchange Online PowerShell", "Exchange Web Services",
+    "Other clients", "Other clients; IMAP", "Other clients; POP"
+  )
+| where ResultType == 0
+| summarize 
+    SignInCount = count(),
+    IPs         = make_set(IPAddress),
+    Countries   = make_set(Location),
+    FirstSeen   = min(TimeGenerated),
+    LastSeen    = max(TimeGenerated)
+  by UserPrincipalName, ClientAppUsed, AppDisplayName
+| where SignInCount > 5
+| order by SignInCount desc
+
+
+// -----------------------------------------------------------------------------
+// 5. HIGH-FREQUENCY TOKEN REFRESH (SESSION HIJACK)
+//    >50 refreshes per hour from same IP = likely automated token replay
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == 0
+| summarize 
+    RefreshCount = count(),
+    Apps         = make_set(AppDisplayName)
+  by UserPrincipalName, IPAddress, bin(TimeGenerated, 1h)
+| where RefreshCount > 50
+| order by RefreshCount desc
+
+
+// -----------------------------------------------------------------------------
+// 6. FIRST-TIME APP GRANT (NEW / ROGUE OAUTH APPLICATION)
+//    App appearing in last 7 days with no activity in prior 30 days
+// -----------------------------------------------------------------------------
+let KnownApps =
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated between (ago(60d) .. ago(30d))
+    | summarize by AppId;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == 0
+| join kind=leftanti KnownApps on AppId
+| summarize 
+    FirstSeen = min(TimeGenerated),
+    UserCount = dcount(UserPrincipalName),
+    Users     = make_set(UserPrincipalName),
+    IPs       = make_set(IPAddress)
+  by AppDisplayName, AppId
+| order by FirstSeen desc
+
+
+// -----------------------------------------------------------------------------
+// 7. CROSS-TENANT / GUEST ACCOUNT ABUSE
+//    External identities using non-interactive flows to access your tenant
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where CrossTenantAccessType != "none"
+   and  ResultType == 0
+| summarize 
+    SignInCount     = count(),
+    UniqueApps      = dcount(AppDisplayName),
+    Apps            = make_set(AppDisplayName),
+    IPs             = make_set(IPAddress),
+    HomeTenantIds   = make_set(HomeTenantId)
+  by UserPrincipalName, UserType, CrossTenantAccessType
+| where UserType == "Guest" or CrossTenantAccessType == "b2bCollaboration"
+| order by SignInCount desc
+
+
+// -----------------------------------------------------------------------------
+// 8. CORRELATION: NON-INTERACTIVE AUTH → PRIVILEGED AUDIT ACTIONS
+//    User silently refreshes token, then performs admin operations within 60 min
+// -----------------------------------------------------------------------------
+let NonInteractiveUsers =
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated > ago(7d)
+    | where ResultType == 0
+    | summarize LastNISignIn = max(TimeGenerated) by UserPrincipalName, IPAddress;
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where Category in ("RoleManagement", "ApplicationManagement", "GroupManagement",
+                      "Policy", "DeviceManagement", "UserManagement")
+| extend UPN = tostring(InitiatedBy.user.userPrincipalName)
+| where isnotempty(UPN)
+| join kind=inner NonInteractiveUsers on $left.UPN == $right.UserPrincipalName
+| where (TimeGenerated - LastNISignIn) between (0m .. 60m)
+| project TimeGenerated, UPN, OperationName, Result, Category,
+          TargetResources, LastNISignIn, IPAddress
+| order by TimeGenerated desc
+
+
+// -----------------------------------------------------------------------------
+// 9. CORRELATION: NON-INTERACTIVE AUTH → DATA EXFILTRATION (OFFICEACTIVITY)
+//    User authenticates silently, then bulk-downloads from SharePoint/OneDrive
+// -----------------------------------------------------------------------------
+let SilentAuthUsers =
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated > ago(7d)
+    | where ResultType == 0
+    | summarize SilentSignIns = count() by UserPrincipalName;
+OfficeActivity
+| where TimeGenerated > ago(7d)
+| where Operation in ("FileDownloaded", "FileSyncDownloadedFull",
+                       "SearchQueryPerformed", "FileAccessed")
+| summarize 
+    OpCount    = count(),
+    FileCount  = dcount(SourceFileName),
+    Operations = make_set(Operation)
+  by UserId
+| where OpCount > 100
+| join kind=inner SilentAuthUsers on $left.UserId == $right.UserPrincipalName
+| project UserId, OpCount, FileCount, Operations, SilentSignIns
+| order by OpCount desc
+
+
+// -----------------------------------------------------------------------------
+// 10. CORRELATION: NON-INTERACTIVE AUTH → UEBA BEHAVIORAL ANOMALIES
+//     Cross-reference with BehaviorAnalytics (UEBA) high-risk users
+// -----------------------------------------------------------------------------
+let RiskyUsers =
+    BehaviorAnalytics
+    | where TimeGenerated > ago(14d)
+    | where ActivityInsights has "AnomalousTokenRefresh"
+       or   InvestigationPriority > 5
+    | summarize MaxRisk = max(InvestigationPriority), Insights = make_set(ActivityInsights)
+      by UserPrincipalName;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == 0
+| summarize 
+    Countries = make_set(Location),
+    IPs       = make_set(IPAddress),
+    Apps      = make_set(AppDisplayName),
+    LastSeen  = max(TimeGenerated)
+  by UserPrincipalName
+| join kind=inner RiskyUsers on UserPrincipalName
+| order by MaxRisk desc
+
+
+// -----------------------------------------------------------------------------
+// 11. CORRELATION: NON-INTERACTIVE AUTH → RISKY USERS (AADRiskyUsers)
+//     Users flagged by Identity Protection who are silently authenticating
+// -----------------------------------------------------------------------------
+let HighRiskUsers =
+    AADRiskyUsers
+    | where RiskState in ("atRisk", "confirmedCompromised")
+    | where RiskLevel in ("high", "medium")
+    | project UserPrincipalName, RiskLevel, RiskState, RiskDetail;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == 0
+| summarize 
+    SilentCount  = count(),
+    Countries    = make_set(Location),
+    IPs          = make_set(IPAddress),
+    Apps         = make_set(AppDisplayName),
+    LastActivity = max(TimeGenerated)
+  by UserPrincipalName
+| join kind=inner HighRiskUsers on UserPrincipalName
+| project UserPrincipalName, RiskLevel, RiskState, RiskDetail,
+          SilentCount, Countries, IPs, Apps, LastActivity
+| order by SilentCount desc
+
+
+// -----------------------------------------------------------------------------
+// 12. CORRELATION: NON-INTERACTIVE AUTH → THREAT INTELLIGENCE (TI FEED)
+//     Sign-ins from IPs present in your ThreatIntelligenceIndicator table
+// -----------------------------------------------------------------------------
+let MaliciousIPs =
+    ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(30d)
+    | where isnotempty(NetworkIP)
+       and  Active == true
+    | summarize by NetworkIP;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| join kind=inner MaliciousIPs on $left.IPAddress == $right.NetworkIP
+| project TimeGenerated, UserPrincipalName, AppDisplayName,
+          IPAddress, Location, CorrelationId, UniqueTokenIdentifier,
+          ConditionalAccessStatus, AuthenticationRequirement
+| order by TimeGenerated desc
+
+
+// -----------------------------------------------------------------------------
+// 13. SERVICE PRINCIPAL / WORKLOAD IDENTITY ABUSE
+//     Service principals signing in from 4+ distinct IPs (anomalous spread)
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where isnotempty(ServicePrincipalId)
+   and  ResultType == 0
+| summarize 
+    SignInCount = count(),
+    UniqueIPs   = dcount(IPAddress),
+    IPs         = make_set(IPAddress),
+    Countries   = make_set(Location),
+    FirstSeen   = min(TimeGenerated)
+  by AppDisplayName, ServicePrincipalId
+| where UniqueIPs > 3
+| order by UniqueIPs desc
+
+
+// -----------------------------------------------------------------------------
+// 14. FULL-FIDELITY FORENSIC TIMELINE — SINGLE USER PIVOT
+//     Unified timeline across NI sign-ins, interactive sign-ins, audit logs,
+//     and security alerts for one account. Replace TargetUser below.
+// -----------------------------------------------------------------------------
+let TargetUser = "REPLACE_WITH_UPN@yourdomain.com";
+let Window     = ago(14d);
+// Non-interactive sign-ins
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > Window
+| where UserPrincipalName == TargetUser
+| project TimeGenerated, TableSource="NI_SignIn",
+          Details=strcat(AppDisplayName," | ",IPAddress," | ",Location," | RC:",tostring(ResultType)),
+          CorrelationId
+// Interactive sign-ins
+| union (
+    SigninLogs
+    | where TimeGenerated > Window
+    | where UserPrincipalName == TargetUser
+    | project TimeGenerated, TableSource="Interactive_SignIn",
+              Details=strcat(AppDisplayName," | ",IPAddress," | ",Location," | RC:",tostring(ResultType)),
+              CorrelationId
+  )
+// Audit actions
+| union (
+    AuditLogs
+    | where TimeGenerated > Window
+    | where InitiatedBy.user.userPrincipalName == TargetUser
+    | project TimeGenerated, TableSource="AuditLog",
+              Details=strcat(OperationName," | ",Result," | ",Category),
+              CorrelationId
+  )
+// Security alerts
+| union (
+    SecurityAlert
+    | where TimeGenerated > Window
+    | mv-expand todynamic(Entities)
+    | where Entities.UserPrincipalName == TargetUser
+    | project TimeGenerated, TableSource="SecurityAlert",
+              Details=strcat(AlertName," | ",AlertSeverity," | ",ProviderName),
+              CorrelationId=""
+  )
+| order by TimeGenerated asc
+
+
+// =============================================================================
+// SECTION 2 — SIGNINLOGS CORRELATION
+// Correlating AADNonInteractiveUserSignInLogs with interactive SigninLogs to
+// identify sessions where attackers obtained a token interactively and then
+// abused it silently.
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 15. INTERACTIVE → NON-INTERACTIVE PIVOT
+//     User had a successful interactive sign-in, then the same session was used
+//     non-interactively from a DIFFERENT IP within 2 hours (token theft window)
+// -----------------------------------------------------------------------------
+let InteractiveSessions =
+    SigninLogs
+    | where TimeGenerated > ago(14d)
+    | where ResultType == 0
+    | where AuthenticationRequirement == "singleFactorAuthentication"
+       or   ConditionalAccessStatus == "notApplied"
+    | project UserPrincipalName, InteractiveTime=TimeGenerated,
+              InteractiveIP=IPAddress, InteractiveCountry=Location,
+              AppDisplayName, CorrelationId;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| join kind=inner InteractiveSessions on UserPrincipalName
+| where IPAddress != InteractiveIP
+   and  Location  != InteractiveCountry
+   and  (TimeGenerated - InteractiveTime) between (1m .. 2h)
+| project TimeGenerated, InteractiveTime, UserPrincipalName, AppDisplayName,
+          IPAddress, Location,
+          InteractiveIP, InteractiveCountry,
+          CorrelationId, UniqueTokenIdentifier
+| order by UserPrincipalName asc, InteractiveTime asc
+
+
+// -----------------------------------------------------------------------------
+// 16. SINGLE-FACTOR INTERACTIVE + MULTI-COUNTRY NON-INTERACTIVE (MFA GAP)
+//     User authenticates with only 1 factor interactively (MFA not enforced),
+//     then refreshes tokens silently from a foreign country
+// -----------------------------------------------------------------------------
+let SingleFactorUsers =
+    SigninLogs
+    | where TimeGenerated > ago(14d)
+    | where ResultType == 0
+    | where AuthenticationRequirement == "singleFactorAuthentication"
+    | summarize SFACount = count(), Apps = make_set(AppDisplayName)
+      by UserPrincipalName;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| summarize NI_Countries = make_set(Location), NI_IPs = make_set(IPAddress),
+            NI_Count = count()
+  by UserPrincipalName
+| where array_length(NI_Countries) > 2
+| join kind=inner SingleFactorUsers on UserPrincipalName
+| project UserPrincipalName, SFACount, NI_Count, NI_Countries, NI_IPs, Apps
+| order by NI_Count desc
+
+
+// -----------------------------------------------------------------------------
+// 17. DEVICE CODE FLOW ABUSE (Phishing via device code)
+//     Device code flow is abused in phishing — user is tricked into entering a
+//     code; attacker redeems it and gets a long-lived refresh token silently
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where AuthenticationProtocol == "deviceCode"
+   or   ClientAppUsed has "device"
+| summarize 
+    Count     = count(),
+    IPs       = make_set(IPAddress),
+    Countries = make_set(Location),
+    Apps      = make_set(AppDisplayName),
+    FirstSeen = min(TimeGenerated),
+    LastSeen  = max(TimeGenerated)
+  by UserPrincipalName
+| order by Count desc
+
+
+// -----------------------------------------------------------------------------
+// 18. ROPC (Resource Owner Password Credential) DETECTION
+//     ROPC passes credentials directly — bypasses MFA and CA entirely.
+//     Should never appear in a healthy tenant.
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where AuthenticationProtocol == "ropc"
+   or   ClientAppUsed has "Password"
+| summarize 
+    Count     = count(),
+    IPs       = make_set(IPAddress),
+    Countries = make_set(Location),
+    Apps      = make_set(AppDisplayName),
+    Errors    = make_set(ResultType)
+  by UserPrincipalName
+| order by Count desc
+
+
+// -----------------------------------------------------------------------------
+// 19. NI SIGN-IN ↔ INTERACTIVE SIGN-IN: COUNTRY MISMATCH SAME DAY
+//     Same user has interactive sign-in from country A and non-interactive
+//     from country B on the same calendar day — impossible without VPN/token theft
+// -----------------------------------------------------------------------------
+let InteractiveByDay =
+    SigninLogs
+    | where TimeGenerated > ago(14d)
+    | where ResultType == 0
+    | summarize InteractiveCountries = make_set(Location)
+      by UserPrincipalName, Day=bin(TimeGenerated, 1d);
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| summarize NI_Countries = make_set(Location)
+  by UserPrincipalName, Day=bin(TimeGenerated, 1d)
+| join kind=inner InteractiveByDay on UserPrincipalName, Day
+| extend Overlap = set_intersect(NI_Countries, InteractiveCountries)
+| extend NewCountries = set_difference(NI_Countries, InteractiveCountries)
+| where array_length(NewCountries) > 0
+| project Day, UserPrincipalName, InteractiveCountries, NI_Countries, NewCountries
+| order by Day desc
+
+
+// =============================================================================
+// SECTION 3 — GEOLOCATION & IP INTELLIGENCE
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 20. HIGH-RISK COUNTRY SIGN-INS (non-interactive)
+//     Customize the country list below to match your org's risk policy
+// -----------------------------------------------------------------------------
+let HighRiskCountries = dynamic(["KP","IR","RU","CN","BY","CU","SY","VE","MM"]);
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| where Location in (HighRiskCountries)
+| summarize 
+    Count     = count(),
+    Apps      = make_set(AppDisplayName),
+    IPs       = make_set(IPAddress),
+    FirstSeen = min(TimeGenerated),
+    LastSeen  = max(TimeGenerated)
+  by UserPrincipalName, Location
+| order by Count desc
+
+
+// -----------------------------------------------------------------------------
+// 21. TOR / ANONYMOUS PROXY DETECTION (non-interactive via known anonymizer IP ranges)
+//     Uses NetworkAccessType or ISP field; also checks for known TOR exit patterns
+//     Correlate with ThreatIntelligenceIndicator for TOR/proxy tagging
+// -----------------------------------------------------------------------------
+let TorExitIPs =
+    ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(30d)
+    | where Active == true
+    | where Tags has_any ("tor","proxy","anonymizer","vpn")
+    | where isnotempty(NetworkIP)
+    | summarize by NetworkIP;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| join kind=inner TorExitIPs on $left.IPAddress == $right.NetworkIP
+| project TimeGenerated, UserPrincipalName, AppDisplayName,
+          IPAddress, Location, CorrelationId, UniqueTokenIdentifier,
+          ConditionalAccessStatus
+| order by TimeGenerated desc
+
+
+// -----------------------------------------------------------------------------
+// 22. ASN / DATACENTER IP SIGN-INS (non-corporate, non-residential)
+//     Cloud/datacenter ASNs indicate automated tools, scrapers, or attacker infra
+//     Filter to known cloud ASNs: AS8075 (Microsoft), AS16509 (AWS), AS15169 (Google), etc.
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| extend IsDatacenter = (AutonomousSystemNumber in (8075, 16509, 15169, 396982, 14618,
+                          20940, 16276, 12876, 13335, 14061, 36351, 46606))
+| where IsDatacenter == true
+| summarize 
+    Count     = count(),
+    Apps      = make_set(AppDisplayName),
+    Countries = make_set(Location),
+    IPs       = make_set(IPAddress)
+  by UserPrincipalName, AutonomousSystemNumber, AutonomousSystemOrganization
+| order by Count desc
+
+
+// -----------------------------------------------------------------------------
+// 23. GEOLOCATION VELOCITY — MORE THAN 500 KM IN LESS THAN 60 MIN
+//     Uses consecutive sign-in country pairs + avg speed heuristic
+//     Requires lat/long enrichment or country-to-region mapping
+// -----------------------------------------------------------------------------
+// Proxy using country-change in short time window (simpler, no lat/long required)
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| sort by UserPrincipalName asc, TimeGenerated asc
+| extend PrevCountry = prev(Location, 1),
+         PrevTime    = prev(TimeGenerated, 1),
+         PrevUser    = prev(UserPrincipalName, 1)
+| where UserPrincipalName == PrevUser
+   and  Location          != PrevCountry
+   and  (TimeGenerated - PrevTime) < 1h
+   and  isnotempty(Location)
+   and  isnotempty(PrevCountry)
+| summarize 
+    Transitions = count(),
+    CountryPairs = make_set(strcat(PrevCountry,"→",Location)),
+    IPs          = make_set(IPAddress)
+  by UserPrincipalName
+| order by Transitions desc
+
+
+// -----------------------------------------------------------------------------
+// 24. NEW COUNTRY FIRST APPEARANCE (never seen before for this user)
+//     Baseline countries over prior 30 days; alert on new country in last 7 days
+// -----------------------------------------------------------------------------
+let PriorCountries =
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated between (ago(44d) .. ago(14d))
+    | summarize KnownCountries = make_set(Location) by UserPrincipalName;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| summarize NewCountries = make_set(Location), Count = count()
+  by UserPrincipalName
+| join kind=leftouter PriorCountries on UserPrincipalName
+| extend TrulyNew = set_difference(NewCountries, coalesce(KnownCountries, dynamic([])))
+| where array_length(TrulyNew) > 0
+| project UserPrincipalName, TrulyNew, NewCountries, KnownCountries, Count
+| order by array_length(TrulyNew) desc
+
+
+// =============================================================================
+// SECTION 4 — BRUTE FORCE & PASSWORD SPRAY
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 25. NON-INTERACTIVE BRUTE FORCE — SINGLE USER, MANY FAILURES
+//     Classic credential stuffing: same user, many IPs, wrong-password errors
+// -----------------------------------------------------------------------------
+let BruteForceErrors = dynamic(["50126","50055","50056","50064","50053","50034","50057","50128"]);
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| extend ErrorCode = tostring(ResultType)
+| where ErrorCode in (BruteForceErrors)
+| summarize 
+    FailCount   = count(),
+    UniqueIPs   = dcount(IPAddress),
+    IPs         = make_set(IPAddress, 20),
+    Countries   = make_set(Location),
+    ErrorCodes  = make_set(ErrorCode),
+    FirstSeen   = min(TimeGenerated),
+    LastSeen    = max(TimeGenerated)
+  by UserPrincipalName
+| where FailCount > 20
+| extend SuccessAfter = false  // enrich with success lookup below if needed
+| order by FailCount desc
+
+
+// -----------------------------------------------------------------------------
+// 26. PASSWORD SPRAY — MANY USERS FROM SAME IP
+//     One IP hitting many accounts with same error code = horizontal spray
+// -----------------------------------------------------------------------------
+let SprayErrors = dynamic(["50126","50034","50053"]);
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| extend ErrorCode = tostring(ResultType)
+| where ErrorCode in (SprayErrors)
+| summarize 
+    TargetCount = dcount(UserPrincipalName),
+    Targets     = make_set(UserPrincipalName, 30),
+    FailCount   = count(),
+    ErrorCodes  = make_set(ErrorCode),
+    UserAgents  = make_set(UserAgent),
+    FirstSeen   = min(TimeGenerated),
+    LastSeen    = max(TimeGenerated)
+  by IPAddress, Location
+| where TargetCount > 10
+| order by TargetCount desc
+
+
+// -----------------------------------------------------------------------------
+// 27. LOW-AND-SLOW PASSWORD SPRAY (1-2 attempts per user per hour window)
+//     Evades lockout by spreading attempts across time and users
+// -----------------------------------------------------------------------------
+let SprayErrors = dynamic(["50126","50034","50053"]);
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| extend ErrorCode = tostring(ResultType)
+| where ErrorCode in (SprayErrors)
+| summarize FailsPerHour = count(), UniqueUsers = dcount(UserPrincipalName)
+  by IPAddress, bin(TimeGenerated, 1h)
+| where FailsPerHour between (2 .. 15)  // low rate per hour
+   and  UniqueUsers > 5                  // many different users = spray
+| summarize 
+    SprayHours    = count(),
+    TotalAttempts = sum(FailsPerHour),
+    TotalUsers    = sum(UniqueUsers)
+  by IPAddress
+| order by SprayHours desc
+
+
+// -----------------------------------------------------------------------------
+// 28. BRUTE FORCE → SUCCESS CHAIN
+//     Same user: >5 failures with brute-force error codes, then a success —
+//     the classic "attacker finally guessed the password" pattern
+// -----------------------------------------------------------------------------
+let BruteForceErrors = dynamic(["50126","50055","50056","50064","50053","50034","50057","50128"]);
+let Failures =
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated > ago(14d)
+    | extend ErrorCode = tostring(ResultType)
+    | where ErrorCode in (BruteForceErrors)
+    | summarize FailCount = count(), LastFail = max(TimeGenerated), IPs = make_set(IPAddress)
+      by UserPrincipalName;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| summarize FirstSuccess = min(TimeGenerated), SuccessIP = make_set(IPAddress)
+  by UserPrincipalName
+| join kind=inner Failures on UserPrincipalName
+| where FailCount > 5
+   and  FirstSuccess > LastFail
+| project UserPrincipalName, FailCount, LastFail, FirstSuccess,
+          TimeDiff=FirstSuccess-LastFail, IPs, SuccessIP
+| order by FailCount desc
+
+
+// -----------------------------------------------------------------------------
+// 29. ACCOUNT LOCKOUT ANALYSIS (Error 50053)
+//     Users repeatedly locked out — indicates targeted brute force or
+//     misconfigured sync tool hammering the account
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 50053
+| summarize 
+    LockoutCount = count(),
+    IPs          = make_set(IPAddress),
+    Countries    = make_set(Location),
+    Apps         = make_set(AppDisplayName),
+    FirstSeen    = min(TimeGenerated),
+    LastSeen     = max(TimeGenerated)
+  by UserPrincipalName
+| order by LockoutCount desc
+
+
+// =============================================================================
+// SECTION 5 — BOTNET & AUTOMATED ATTACK DETECTION
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 30. BOTNET SIGNATURE — SAME USER-AGENT ACROSS MANY ACCOUNTS
+//     Botnets often use one consistent or rotated user agent string across all nodes
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where isnotempty(UserAgent)
+| summarize 
+    UserCount   = dcount(UserPrincipalName),
+    IPCount     = dcount(IPAddress),
+    Users       = make_set(UserPrincipalName, 10),
+    IPs         = make_set(IPAddress, 10),
+    RequestCount= count()
+  by UserAgent
+| where UserCount > 50
+   and  IPCount  > 5
+| order by UserCount desc
+
+
+// -----------------------------------------------------------------------------
+// 31. BOTNET SIGNATURE — EXACT MILLISECOND/SECOND PRECISION ACROSS MANY USERS
+//     Bot nodes fire at identical cadences; humans don't request tokens on-the-second
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType != 0
+| summarize 
+    CountPerSecond = count(),
+    UniqueUsers    = dcount(UserPrincipalName),
+    UniqueIPs      = dcount(IPAddress),
+    Users          = make_set(UserPrincipalName, 10)
+  by bin(TimeGenerated, 1s)
+| where CountPerSecond > 20
+   and  UniqueUsers    > 10
+| order by CountPerSecond desc
+
+
+// -----------------------------------------------------------------------------
+// 32. C2 TOKEN REFRESH PATTERN — REGULAR INTERVAL HEARTBEAT
+//     Malware / implants refresh tokens at exact fixed intervals (e.g., every 3600s)
+//     Look for machine-like regularity: very low stddev between requests
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| sort by UserPrincipalName asc, AppId asc, TimeGenerated asc
+| extend PrevTime = prev(TimeGenerated, 1),
+         PrevUser = prev(UserPrincipalName, 1),
+         PrevApp  = prev(AppId, 1)
+| where UserPrincipalName == PrevUser and AppId == PrevApp
+| extend IntervalSecs = datetime_diff("second", TimeGenerated, PrevTime)
+| where IntervalSecs > 0 and IntervalSecs < 7200
+| summarize 
+    AvgInterval  = avg(IntervalSecs),
+    StdDev       = stdev(IntervalSecs),
+    Count        = count(),
+    IPs          = make_set(IPAddress)
+  by UserPrincipalName, AppDisplayName
+| where Count > 20
+   and  StdDev < 30   // very regular = automated heartbeat
+| order by StdDev asc
+
+
+// -----------------------------------------------------------------------------
+// 33. IP REUSE ACROSS MANY ACCOUNTS (SHARED BOTNET NODE)
+//     Single IP authenticating as many different users = shared bot node
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| summarize 
+    UserCount   = dcount(UserPrincipalName),
+    Users       = make_set(UserPrincipalName, 20),
+    Apps        = make_set(AppDisplayName, 10),
+    Countries   = make_set(Location),
+    SignInCount = count(),
+    FirstSeen   = min(TimeGenerated)
+  by IPAddress
+| where UserCount > 20
+| order by UserCount desc
+
+
+// -----------------------------------------------------------------------------
+// 34. DISTRIBUTED BOTNET ATTACK — MANY IPS, ONE USER, SHORT WINDOW
+//     Single user targeted by >20 different IPs within 1 hour = coordinated botnet
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType != 0
+| summarize UniqueIPs = dcount(IPAddress), IPs = make_set(IPAddress, 30),
+            FailCount = count(), Countries = make_set(Location)
+  by UserPrincipalName, bin(TimeGenerated, 1h)
+| where UniqueIPs > 20
+| order by UniqueIPs desc
+
+
+// -----------------------------------------------------------------------------
+// 35. KNOWN BOTNET/MALWARE C2 IP CORRELATION
+//     Cross-reference non-interactive sign-ins with TI indicators tagged as botnets
+// -----------------------------------------------------------------------------
+let BotnetIPs =
+    ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(30d)
+    | where Active == true
+    | where Tags has_any ("botnet","c2","malware","rat","trojan","backdoor")
+    | where isnotempty(NetworkIP)
+    | summarize ThreatTags = make_set(Tags), ThreatName = make_set(ThreatType) by NetworkIP;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| join kind=inner BotnetIPs on $left.IPAddress == $right.NetworkIP
+| summarize 
+    Count       = count(),
+    Users       = make_set(UserPrincipalName),
+    Apps        = make_set(AppDisplayName),
+    ResultCodes = make_set(ResultType)
+  by IPAddress, ThreatTags, ThreatName
+| order by Count desc
+
+
+// =============================================================================
+// SECTION 6 — ADVANCED CORRELATION & HUNTING
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 36. OAUTH APP CONSENT GRANT → IMMEDIATE NON-INTERACTIVE ABUSE
+//     Watch for: app consent in AuditLogs followed by non-interactive sign-ins
+//     from the same app within 24 hours (attacker granted their own app consent)
+// -----------------------------------------------------------------------------
+let RecentConsents =
+    AuditLogs
+    | where TimeGenerated > ago(14d)
+    | where OperationName has_any ("Consent to application","Add app role assignment",
+                                    "Add delegated permission grant")
+    | extend ActorUPN = tostring(InitiatedBy.user.userPrincipalName)
+    | extend GrantedAppId = tostring(TargetResources[0].id)
+    | project ConsentTime=TimeGenerated, ActorUPN, GrantedAppId, OperationName;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| join kind=inner RecentConsents on $left.UserPrincipalName == $right.ActorUPN
+         and $left.AppId == $right.GrantedAppId
+| where TimeGenerated > ConsentTime
+   and  (TimeGenerated - ConsentTime) < 24h
+| project TimeGenerated, ConsentTime, UserPrincipalName, AppDisplayName, AppId,
+          IPAddress, Location, OperationName
+| order by TimeGenerated desc
+
+
+// -----------------------------------------------------------------------------
+// 37. PRIVILEGED ROLE ACTIVATION → NON-INTERACTIVE ADMIN ACTION
+//     PIM role activated, then non-interactive token used for admin operations
+//     within 30 minutes (lateral movement via PIM abuse)
+// -----------------------------------------------------------------------------
+let PIMActivations =
+    AuditLogs
+    | where TimeGenerated > ago(14d)
+    | where OperationName has "Add member to role completed (PIM activation)"
+    | extend UPN = tostring(InitiatedBy.user.userPrincipalName)
+    | project ActivationTime=TimeGenerated, UPN,
+              RoleName=tostring(TargetResources[0].displayName);
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| join kind=inner PIMActivations on $left.UserPrincipalName == $right.UPN
+| where TimeGenerated > ActivationTime
+   and  (TimeGenerated - ActivationTime) < 30m
+| project TimeGenerated, ActivationTime, UserPrincipalName, RoleName,
+          AppDisplayName, IPAddress, Location
+| order by TimeGenerated desc
+
+
+// -----------------------------------------------------------------------------
+// 38. MFA FATIGUE ATTACK — MANY INTERACTIVE PROMPTS + SILENT SUCCESS
+//     User bombarded with MFA push notifications (many failed MFA sign-ins),
+//     eventually approves or attacker uses fallback → followed by silent token use
+// -----------------------------------------------------------------------------
+let MFAFatigue =
+    SigninLogs
+    | where TimeGenerated > ago(14d)
+    | where ResultType in (50074, 500121, 50076)  // MFA required, MFA denied, MFA interrupted
+    | summarize MFAAttempts = count(), FirstAttempt = min(TimeGenerated)
+      by UserPrincipalName, CorrelationId;
+let MFASuccess =
+    SigninLogs
+    | where TimeGenerated > ago(14d)
+    | where ResultType == 0
+    | where AuthenticationRequirement == "multiFactorAuthentication"
+    | summarize MFASuccessTime = min(TimeGenerated) by UserPrincipalName;
+MFAFatigue
+| join kind=inner MFASuccess on UserPrincipalName
+| where MFASuccessTime > FirstAttempt
+| join kind=inner (
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated > ago(14d)
+    | where ResultType == 0
+    | summarize NI_Count = count(), NI_Countries = make_set(Location)
+      by UserPrincipalName
+  ) on UserPrincipalName
+| where NI_Count > 100
+| project UserPrincipalName, MFAAttempts, FirstAttempt, MFASuccessTime, NI_Count, NI_Countries
+| order by MFAAttempts desc
+
+
+// -----------------------------------------------------------------------------
+// 39. STALE / ORPHAN TOKEN USE (token used after password change or MFA update)
+//     Password or auth info changed in AuditLogs, but non-interactive tokens
+//     continue being used — suggests attacker has pre-existing refresh token
+// -----------------------------------------------------------------------------
+let PasswordChanges =
+    AuditLogs
+    | where TimeGenerated > ago(14d)
+    | where OperationName has_any ("Reset password","Change password",
+                                    "Update user","User changed password",
+                                    "Admin updated user authentication method")
+    | extend UPN = tostring(TargetResources[0].userPrincipalName)
+    | where isnotempty(UPN)
+    | summarize ChangeTime = max(TimeGenerated) by UPN;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| join kind=inner PasswordChanges on $left.UserPrincipalName == $right.UPN
+| where TimeGenerated > ChangeTime
+| summarize 
+    TokensAfterChange = count(),
+    IPs               = make_set(IPAddress),
+    Countries         = make_set(Location),
+    Apps              = make_set(AppDisplayName),
+    LastSeen          = max(TimeGenerated)
+  by UserPrincipalName, ChangeTime
+| order by TokensAfterChange desc
+
+
+// -----------------------------------------------------------------------------
+// 40. ACCOUNT TAKEOVER — EMAIL FORWARDING RULE SET AFTER SILENT AUTH
+//     Attacker uses silent auth, then sets inbox forwarding in Exchange/M365
+//     Cross-reference with OfficeActivity InboxRule creation
+// -----------------------------------------------------------------------------
+let SilentAuthUsers =
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated > ago(14d)
+    | where ResultType == 0
+    | summarize LastNI = max(TimeGenerated), NI_IPs = make_set(IPAddress)
+      by UserPrincipalName;
+OfficeActivity
+| where TimeGenerated > ago(14d)
+| where Operation in ("New-InboxRule","Set-InboxRule",
+                       "UpdateInboxRules","Set-Mailbox")
+| where Parameters has_any ("ForwardTo","RedirectTo","ForwardAsAttachmentTo",
+                              "DeleteMessage","MarkAsRead")
+| extend UPN = tolower(UserId)
+| join kind=inner SilentAuthUsers on $left.UPN == $right.UserPrincipalName
+| where TimeGenerated > LastNI
+  and   (TimeGenerated - LastNI) < 2h
+| project TimeGenerated, UPN, Operation, Parameters, NI_IPs, LastNI
+| order by TimeGenerated desc
+
+
+// -----------------------------------------------------------------------------
+// 41. LATERAL MOVEMENT — ONE COMPROMISED ACCOUNT → IMPERSONATION OF OTHERS
+//     Attacker uses compromised account to get delegated token and impersonate
+//     other users (OAuth on-behalf-of flow abuse)
+// -----------------------------------------------------------------------------
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| where ConditionalAccessStatus == "notApplied"
+| summarize 
+    UniqueApps      = dcount(AppDisplayName),
+    HighPrivApps    = countif(AppDisplayName has_any ("Graph","Azure","SharePoint",
+                               "Exchange","Teams","KeyVault","Defender","Sentinel")),
+    Apps            = make_set(AppDisplayName),
+    IPs             = make_set(IPAddress),
+    Countries       = make_set(Location),
+    NI_Count        = count()
+  by UserPrincipalName
+| where HighPrivApps > 5
+   and  UniqueApps   > 10
+   and  NI_Count     > 500
+| order by HighPrivApps desc
+
+
+// -----------------------------------------------------------------------------
+// 42. RISKY SIGN-IN EVENTS CORRELATED WITH NI ACTIVITY (AADRiskySignIns)
+//     Entra risk engine flagged the interactive session, but non-interactive
+//     tokens from that session continue to be used
+// -----------------------------------------------------------------------------
+let RiskyEvents =
+    AADRiskySignIns
+    | where TimeGenerated > ago(14d)
+    | where RiskLevelDuringSignIn in ("high","medium")
+    | where RiskState != "dismissed"
+    | summarize MaxRisk = max(RiskLevelDuringSignIn),
+                RiskReasons = make_set(RiskEventTypes),
+                LastRisky = max(TimeGenerated)
+      by UserPrincipalName;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| summarize NI_Count = count(), NI_Countries = make_set(Location),
+            NI_IPs = make_set(IPAddress), LastNI = max(TimeGenerated)
+  by UserPrincipalName
+| join kind=inner RiskyEvents on UserPrincipalName
+| where LastNI > LastRisky
+| project UserPrincipalName, MaxRisk, RiskReasons, LastRisky,
+          NI_Count, NI_Countries, NI_IPs, LastNI
+| order by NI_Count desc
+
+
+// -----------------------------------------------------------------------------
+// 43. SIGN-IN SPIKE DETECTION (STATISTICAL ANOMALY — 3× DAILY AVERAGE)
+//     Detect days where a user's non-interactive sign-ins are 3x above their
+//     30-day rolling average — sudden token refresh explosion
+// -----------------------------------------------------------------------------
+let DailyAvg =
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated between (ago(44d) .. ago(14d))
+    | summarize AvgDaily = count() / 30.0
+      by UserPrincipalName;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(14d)
+| summarize DailyCount = count()
+  by UserPrincipalName, Day=bin(TimeGenerated, 1d)
+| join kind=inner DailyAvg on UserPrincipalName
+| where DailyCount > (AvgDaily * 3)
+   and  AvgDaily   > 10   // exclude users with very low baseline
+| project Day, UserPrincipalName, DailyCount, AvgDaily,
+          SpikeFactor=round(DailyCount / AvgDaily, 1)
+| order by SpikeFactor desc
+
+
+// -----------------------------------------------------------------------------
+// 44. HUNTING SUMMARY DASHBOARD — ALL SIGNALS IN ONE VIEW
+//     Quick triage table: score each user across multiple risk dimensions
+// -----------------------------------------------------------------------------
+let Window = ago(14d);
+let Countries = (
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated > Window | where ResultType == 0
+    | summarize CountryCount = dcount(Location) by UserPrincipalName);
+let HighFreq = (
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated > Window | where ResultType == 0
+    | summarize NI_Total = count() by UserPrincipalName);
+let BruteForce = (
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated > Window
+    | where tostring(ResultType) in ("50126","50053","50034")
+    | summarize BruteCount = count() by UserPrincipalName);
+let Risky = (
+    AADRiskyUsers
+    | where RiskLevel in ("high","medium")
+    | where RiskState in ("atRisk","confirmedCompromised")
+    | project UserPrincipalName, RiskLevel, RiskState);
+Countries
+| join kind=leftouter HighFreq     on UserPrincipalName
+| join kind=leftouter BruteForce   on UserPrincipalName
+| join kind=leftouter Risky        on UserPrincipalName
+| extend RiskScore =
+    iff(CountryCount >= 4, 3, iff(CountryCount >= 2, 1, 0)) +
+    iff(NI_Total    > 5000, 3, iff(NI_Total >= 1000, 1, 0)) +
+    iff(BruteCount  > 50,   3, iff(BruteCount >= 10, 1, 0)) +
+    iff(isnotempty(RiskState), 5, 0)
+| where RiskScore > 0
+| project UserPrincipalName, RiskScore, RiskState, RiskLevel,
+          CountryCount, NI_Total, BruteCount
+| order by RiskScore desc
