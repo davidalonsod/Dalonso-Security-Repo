@@ -1,0 +1,84 @@
+id: b8c9d0e1-f2a3-4b4c-5d6e-7f8a9b0c1d2e
+name: ADFS Sign-In from TOR or Anonymous Proxy (TI-Tagged)
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects successful ADFS-federated sign-ins originating from IP addresses tagged as TOR exit
+  nodes, anonymous proxies, VPNs, or anonymizers in the ThreatIntelligenceIndicator table.
+  Attackers commonly route stolen ADFS-issued tokens or replayed credentials through anonymizing
+  infrastructure to hide their true geolocation. Success from these IPs indicates active use of
+  compromised ADFS credentials through anonymized infrastructure.
+  MITRE ATT&CK: T1090 (Proxy), T1078 (Valid Accounts), T1550 (Use Alternate Authentication Material)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+  - connectorId: ThreatIntelligence
+    dataTypes:
+      - ThreatIntelligenceIndicator
+queryFrequency: 15m
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+  - InitialAccess
+  - DefenseEvasion
+relevantTechniques:
+  - T1090
+  - T1078
+  - T1550
+query: |
+  let TorExitIPs =
+      ThreatIntelligenceIndicator
+      | where TimeGenerated > ago(30d)
+      | where Active == true
+      | where Tags has_any ("tor", "proxy", "anonymizer", "vpn", "anonymity")
+      | where isnotempty(NetworkIP)
+      | summarize AnonymizationType = make_set(Tags) by NetworkIP;
+  ADFSSignInLogs
+  | where TimeGenerated > ago(1h)
+  | where ResultType == 0
+  | join kind=inner TorExitIPs on $left.IPAddress == $right.NetworkIP
+  | project
+      TimeGenerated,
+      UserPrincipalName,
+      AppDisplayName,
+      IPAddress,
+      Location,
+      AnonymizationType,
+      AuthenticationRequirement,
+      TokenIssuerName,
+      CorrelationId,
+      UniqueTokenIdentifier
+  | order by TimeGenerated desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  AppDisplayName: AppDisplayName
+  TokenIssuerName: TokenIssuerName
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS Sign-In from Anonymizer - {{UserPrincipalName}} via {{IPAddress}}"
+  alertDescriptionFormat: "User {{UserPrincipalName}} successfully authenticated via ADFS from TOR/proxy IP {{IPAddress}}. This IP is tagged in threat intelligence as an anonymizing service."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+      - IP
+    groupByAlertDetails: []
+    groupByCustomDetails: []

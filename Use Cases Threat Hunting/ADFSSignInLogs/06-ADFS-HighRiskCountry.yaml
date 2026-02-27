@@ -1,0 +1,69 @@
+id: f6a7b8c9-d0e1-4f2a-3b4c-5d6e7f8a9b0c
+name: ADFS Sign-In from High-Risk Country
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects successful ADFS-federated authentication originating from countries with elevated
+  APT activity or under international sanctions: North Korea, Iran, Russia, China, Belarus,
+  Cuba, Syria, Venezuela, Myanmar. ADFS authentication from these regions may indicate
+  compromised credentials used by state-sponsored threat actors or credential theft campaigns
+  associated with these geographies.
+  MITRE ATT&CK: T1078 (Valid Accounts), T1566 (Phishing)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+queryFrequency: 4h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078
+  - T1566
+query: |
+  let HighRiskCountries = dynamic(["KP", "IR", "RU", "CN", "BY", "CU",
+                                     "SY", "VE", "MM"]);
+  ADFSSignInLogs
+  | where TimeGenerated > ago(1d)
+  | where ResultType == 0
+  | where Location in (HighRiskCountries)
+  | summarize
+      Count     = count(),
+      Apps      = make_set(AppDisplayName),
+      IPs       = make_set(IPAddress),
+      FirstSeen = min(TimeGenerated),
+      LastSeen  = max(TimeGenerated)
+    by UserPrincipalName, Location
+  | order by Count desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPs
+customDetails:
+  Location: Location
+  SignInCount: Count
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS High-Risk Country Sign-In - {{UserPrincipalName}} from {{Location}}"
+  alertDescriptionFormat: "User {{UserPrincipalName}} successfully authenticated via ADFS from high-risk country {{Location}} ({{Count}} sign-ins). Review for possible credential compromise."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

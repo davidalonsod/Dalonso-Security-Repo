@@ -1,0 +1,70 @@
+id: d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f8a
+name: ADFS Brute Force - Single Account Targeted by Multiple IPs
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects coordinated botnet brute force: many distinct IP addresses directing credential
+  errors at a single ADFS user account. More than 20 failures against one account indicates
+  a targeted attack, potentially using a distributed botnet to evade per-IP rate limiting.
+  Error codes covered: invalid credentials (50126), wrong password (50055/50056/50064),
+  locked account (50053), user not found (50034), sign-in blocked (50057),
+  and ADFS extranet lockout (396083).
+  MITRE ATT&CK: T1110 (Brute Force), T1078 (Valid Accounts)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+queryFrequency: 4h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - InitialAccess
+relevantTechniques:
+  - T1110
+  - T1078
+query: |
+  let BruteForceErrors = dynamic(["50126", "50055", "50056", "50064",
+                                    "50053", "50034", "50057", "396083"]);
+  ADFSSignInLogs
+  | where TimeGenerated > ago(1d)
+  | extend ErrorCode = tostring(ResultType)
+  | where ErrorCode in (BruteForceErrors)
+  | summarize
+      FailCount  = count(),
+      UniqueIPs  = dcount(IPAddress),
+      IPs        = make_set(IPAddress, 20),
+      Countries  = make_set(Location),
+      ErrorCodes = make_set(ErrorCode),
+      FirstSeen  = min(TimeGenerated),
+      LastSeen   = max(TimeGenerated)
+    by UserPrincipalName
+  | where FailCount > 20
+  | order by FailCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  FailCount: FailCount
+  UniqueIPs: UniqueIPs
+  Countries: Countries
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS Brute Force against {{UserPrincipalName}} - {{FailCount}} failures from {{UniqueIPs}} IPs"
+  alertDescriptionFormat: "Account {{UserPrincipalName}} received {{FailCount}} ADFS credential failures from {{UniqueIPs}} unique IPs. Possible coordinated botnet brute force."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

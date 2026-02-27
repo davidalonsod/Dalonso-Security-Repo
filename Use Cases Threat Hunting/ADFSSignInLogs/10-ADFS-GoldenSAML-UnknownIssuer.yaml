@@ -1,0 +1,72 @@
+id: d0e1f2a3-b4c5-4d6e-7f8a-9b0c1d2e3f4a
+name: ADFS Golden SAML - Unexpected Token Issuer Detected
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects ADFS sign-ins where the TokenIssuerName is not a recognized federation service
+  endpoint for your organization. In Golden SAML attacks, adversaries extract the ADFS token
+  signing certificate and forge SAML assertions using an unrecognized issuer name. Any
+  TokenIssuerType of "ADFederationServices" combined with an unknown TokenIssuerName should
+  be treated as a critical security event.
+  IMPORTANT: Configure the KnownADFSIssuers list to match your environment before deploying.
+  MITRE ATT&CK: T1606 (Forge Web Credentials - SAML Tokens), T1550 (Use Alternate Authentication Material)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+queryFrequency: 15m
+queryPeriod: 4h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - DefenseEvasion
+relevantTechniques:
+  - T1606
+  - T1550
+query: |
+  // IMPORTANT: Replace placeholder values with your actual ADFS federation service names
+  let KnownADFSIssuers = dynamic([
+      "YOUR_ADFS_FEDERATION_SERVICE_NAME",   // e.g. "adfs.contoso.com"
+      "urn:federation:MicrosoftOnline"
+  ]);
+  ADFSSignInLogs
+  | where TimeGenerated > ago(4h)
+  | where ResultType == 0
+  | where TokenIssuerType == "ADFederationServices"
+  | where TokenIssuerName !in (KnownADFSIssuers)
+     and  isnotempty(TokenIssuerName)
+  | summarize
+      Count     = count(),
+      Users     = make_set(UserPrincipalName),
+      Apps      = make_set(AppDisplayName),
+      IPs       = make_set(IPAddress),
+      FirstSeen = min(TimeGenerated),
+      LastSeen  = max(TimeGenerated)
+    by TokenIssuerName
+  | order by Count desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Users
+customDetails:
+  TokenIssuerName: TokenIssuerName
+  SignInCount: Count
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS Golden SAML Alert - Unknown Issuer: {{TokenIssuerName}}"
+  alertDescriptionFormat: "ADFS tokens were issued by an unrecognized TokenIssuerName: {{TokenIssuerName}} ({{Count}} tokens). This may indicate a Golden SAML forged token attack."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities: []
+    groupByAlertDetails: []
+    groupByCustomDetails:
+      - TokenIssuerName

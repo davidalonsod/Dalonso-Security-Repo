@@ -1,0 +1,64 @@
+id: a7b8c9d0-e1f2-4a3b-4c5d-6e7f8a9b0c1d
+name: ADFS Impossible Travel - 3+ Countries in 1 Hour
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects a single user successfully authenticating via ADFS from 3 or more distinct countries
+  within the same 1-hour window. Legitimate users cannot physically travel between countries
+  within one hour; this pattern indicates either ADFS-issued token replay from multiple attacker
+  locations simultaneously, or a compromised account being used by multiple threat actors.
+  This is a strong indicator of Golden SAML token forging or stolen credential reuse.
+  MITRE ATT&CK: T1550 (Use Alternate Authentication Material), T1078 (Valid Accounts)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+queryFrequency: 1h
+queryPeriod: 2h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - LateralMovement
+  - InitialAccess
+relevantTechniques:
+  - T1550
+  - T1078
+query: |
+  ADFSSignInLogs
+  | where TimeGenerated > ago(2h)
+  | where ResultType == 0
+  | summarize
+      Countries    = make_set(Location),
+      CountryCount = dcount(Location),
+      IPs          = make_set(IPAddress),
+      Apps         = make_set(AppDisplayName),
+      FirstSeen    = min(TimeGenerated),
+      LastSeen     = max(TimeGenerated)
+    by UserPrincipalName, bin(TimeGenerated, 1h)
+  | where CountryCount >= 3
+  | order by CountryCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  CountryCount: CountryCount
+  Countries: Countries
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS Impossible Travel - {{UserPrincipalName}} in {{CountryCount}} countries within 1 hour"
+  alertDescriptionFormat: "User {{UserPrincipalName}} authenticated via ADFS from {{CountryCount}} distinct countries in a single hour. Possible token replay or simultaneous credential abuse."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

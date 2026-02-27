@@ -1,0 +1,79 @@
+id: f8a9b0c1-d2e3-4f4a-5b6c-7d8e9f0a1b2c
+name: ADFS Auth by Entra ID Risky User
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects users flagged as high- or medium-risk by Entra ID Identity Protection who are
+  actively authenticating through the ADFS federation path. This is particularly dangerous
+  because ADFS authentication may bypass the cloud-based Conditional Access policies and
+  risk-based sign-in controls that would normally block or challenge risky users in the
+  cloud authentication path. An actively risky user authenticating via ADFS represents
+  a gap in the risk-based access enforcement model.
+  MITRE ATT&CK: T1078 (Valid Accounts)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+      - AADRiskyUsers
+queryFrequency: 1h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078
+query: |
+  let HighRiskUsers =
+      AADRiskyUsers
+      | where RiskState in ("atRisk", "confirmedCompromised")
+      | where RiskLevel in ("high", "medium")
+      | project UserPrincipalName, RiskLevel, RiskState, RiskDetail;
+  ADFSSignInLogs
+  | where TimeGenerated > ago(1d)
+  | where ResultType == 0
+  | summarize
+      ADFSCount      = count(),
+      Countries      = make_set(Location),
+      IPs            = make_set(IPAddress),
+      Apps           = make_set(AppDisplayName),
+      LastActivity   = max(TimeGenerated)
+    by UserPrincipalName
+  | join kind=inner HighRiskUsers on UserPrincipalName
+  | project
+      UserPrincipalName,
+      RiskLevel,
+      RiskState,
+      RiskDetail,
+      ADFSCount,
+      Countries,
+      IPs,
+      Apps,
+      LastActivity
+  | order by ADFSCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  RiskLevel: RiskLevel
+  RiskState: RiskState
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS Risky User Active - {{UserPrincipalName}} ({{RiskLevel}} risk) has {{ADFSCount}} ADFS sign-ins"
+  alertDescriptionFormat: "User {{UserPrincipalName}} is flagged {{RiskLevel}} risk by Identity Protection but completed {{ADFSCount}} ADFS authentications, bypassing cloud risk enforcement."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

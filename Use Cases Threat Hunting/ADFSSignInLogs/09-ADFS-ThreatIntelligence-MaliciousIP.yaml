@@ -1,0 +1,83 @@
+id: c9d0e1f2-a3b4-4c5d-6e7f-8a9b0c1d2e3f
+name: ADFS Sign-In from Threat Intelligence Malicious IP
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects successful ADFS-federated authentication from IP addresses present in the
+  ThreatIntelligenceIndicator table with any active threat tag. Any successful ADFS
+  authentication from a known-malicious IP is a high-confidence indicator that an attacker
+  holds valid ADFS credentials (stolen, phished, or brute-forced) and is actively using them.
+  The ADFS federation path may bypass cloud-based Conditional Access policies depending on
+  the federation configuration.
+  MITRE ATT&CK: T1078 (Valid Accounts), T1528 (Steal Application Access Token)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+  - connectorId: ThreatIntelligence
+    dataTypes:
+      - ThreatIntelligenceIndicator
+queryFrequency: 15m
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078
+  - T1528
+query: |
+  let MaliciousIPs =
+      ThreatIntelligenceIndicator
+      | where TimeGenerated > ago(30d)
+      | where isnotempty(NetworkIP)
+         and  Active == true
+      | summarize ThreatTags = make_set(Tags), ThreatType = make_set(ThreatType)
+        by NetworkIP;
+  ADFSSignInLogs
+  | where TimeGenerated > ago(1h)
+  | where ResultType == 0
+  | join kind=inner MaliciousIPs on $left.IPAddress == $right.NetworkIP
+  | project
+      TimeGenerated,
+      UserPrincipalName,
+      AppDisplayName,
+      IPAddress,
+      Location,
+      ThreatTags,
+      ThreatType,
+      AuthenticationRequirement,
+      TokenIssuerName,
+      ConditionalAccessStatus
+  | order by TimeGenerated desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  ThreatTags: ThreatTags
+  AppDisplayName: AppDisplayName
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS Sign-In from Malicious IP - {{UserPrincipalName}} via {{IPAddress}}"
+  alertDescriptionFormat: "User {{UserPrincipalName}} authenticated via ADFS from threat-intelligence-tagged IP {{IPAddress}}. ThreatTags: {{ThreatTags}}."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+      - IP
+    groupByAlertDetails: []
+    groupByCustomDetails: []

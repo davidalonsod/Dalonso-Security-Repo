@@ -1,0 +1,86 @@
+id: b0c1d2e3-f4a5-4b6c-7d8e-9f0a1b2c3d4e
+name: PIM Role Activation Followed by ADFS Sign-In
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects when a user activates a privileged role via Azure AD Privileged Identity Management
+  (PIM) and then authenticates through the ADFS federation path within 30 minutes. This
+  sequence indicates that an attacker has used a stolen credential or compromised account to
+  activate elevated privileges via PIM, then immediately uses the ADFS federation trust to
+  access on-premises or federated resources with those elevated privileges. This pattern
+  combines cloud privilege escalation with on-premises lateral movement via the federation path.
+  MITRE ATT&CK: T1078 (Valid Accounts), T1134 (Access Token Manipulation), T1098 (Account Manipulation)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+      - AuditLogs
+queryFrequency: 30m
+queryPeriod: 2h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - PrivilegeEscalation
+  - LateralMovement
+  - Persistence
+relevantTechniques:
+  - T1078
+  - T1134
+  - T1098
+query: |
+  let PIMActivations =
+      AuditLogs
+      | where TimeGenerated > ago(2h)
+      | where OperationName has "Add member to role completed (PIM activation)"
+      | extend UPN = tostring(InitiatedBy.user.userPrincipalName)
+      | where isnotempty(UPN)
+      | project
+          ActivationTime = TimeGenerated,
+          UPN,
+          RoleName = tostring(TargetResources[0].displayName);
+  ADFSSignInLogs
+  | where TimeGenerated > ago(2h)
+  | where ResultType == 0
+  | join kind=inner PIMActivations on $left.UserPrincipalName == $right.UPN
+  | where TimeGenerated > ActivationTime
+     and  (TimeGenerated - ActivationTime) < 30m
+  | project
+      ADFSSignInTime     = TimeGenerated,
+      ActivationTime,
+      UserPrincipalName,
+      RoleName,
+      AppDisplayName,
+      IPAddress,
+      Location,
+      AuthenticationRequirement,
+      TimeSincePIM       = (TimeGenerated - ActivationTime)
+  | order by ADFSSignInTime desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  RoleName: RoleName
+  TimeSincePIM: TimeSincePIM
+alertDetailsOverride:
+  alertDisplayNameFormat: "PIM→ADFS Abuse - {{UserPrincipalName}} activated {{RoleName}} then used ADFS"
+  alertDescriptionFormat: "User {{UserPrincipalName}} activated PIM role '{{RoleName}}' and then authenticated via ADFS within 30 minutes. Possible privilege abuse via federation after PIM escalation."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

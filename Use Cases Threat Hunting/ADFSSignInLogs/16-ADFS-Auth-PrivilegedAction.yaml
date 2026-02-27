@@ -1,0 +1,81 @@
+id: d6e7f8a9-b0c1-4d2e-3f4a-5b6c7d8e9f0a
+name: ADFS Auth Followed by Privileged Azure AD Action
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects when a user authenticates via ADFS and then performs a privileged Azure AD audit
+  operation (role management, application management, group management, policy changes, device
+  management, or user management) within 60 minutes. This correlation indicates that a stolen
+  ADFS-issued token is being used to perform administrative actions in the cloud, a technique
+  used in sophisticated federated identity attacks and post-compromise privilege escalation.
+  MITRE ATT&CK: T1078 (Valid Accounts), T1098 (Account Manipulation), T1550 (Use Alternate Authentication Material)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 2h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+  - DefenseEvasion
+relevantTechniques:
+  - T1078
+  - T1098
+  - T1550
+query: |
+  let ADFSUsers =
+      ADFSSignInLogs
+      | where TimeGenerated > ago(2h)
+      | where ResultType == 0
+      | summarize LastADFSSignIn = max(TimeGenerated), ADFSIPs = make_set(IPAddress)
+        by UserPrincipalName;
+  AuditLogs
+  | where TimeGenerated > ago(2h)
+  | where Category in (
+      "RoleManagement", "ApplicationManagement", "GroupManagement",
+      "Policy", "DeviceManagement", "UserManagement"
+    )
+  | extend UPN = tostring(InitiatedBy.user.userPrincipalName)
+  | where isnotempty(UPN)
+  | join kind=inner ADFSUsers on $left.UPN == $right.UserPrincipalName
+  | where (TimeGenerated - LastADFSSignIn) between (0m .. 60m)
+  | project
+      AuditTime         = TimeGenerated,
+      UserPrincipalName = UPN,
+      OperationName,
+      AuditResult       = Result,
+      Category,
+      TargetResources,
+      LastADFSSignIn,
+      ADFSIPs,
+      TimeSinceADFSAuth = (TimeGenerated - LastADFSSignIn)
+  | order by AuditTime desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  OperationName: OperationName
+  Category: Category
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS Token→Privileged Action - {{UserPrincipalName}} performed {{OperationName}}"
+  alertDescriptionFormat: "User {{UserPrincipalName}} authenticated via ADFS and then performed privileged action '{{OperationName}}' ({{Category}}) within 60 minutes. Possible stolen token abuse."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
