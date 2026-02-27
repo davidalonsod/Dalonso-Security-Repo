@@ -1,0 +1,983 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "ARM template to deploy ADFSSignInLogs Analytic Rules to Microsoft Sentinel",
+    "author": "ADFS Threat Hunting Rule Pack",
+    "source": "ADFSSignInLogs-ThreatHunting.kql"
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace that Sentinel is deployed on"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region for deployment"
+      }
+    }
+  },
+  "variables": {},
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Extranet Lockout - Sustained Brute Force (Error 396083)",
+        "description": "Detects users triggering multiple ADFS extranet lockout events (error 396083) within 24 hours. Multiple lockouts for the same user indicate an attacker bypassing perimeter controls. MITRE: T1110, T1078",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT4H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "InitialAccess"],
+        "techniques": ["T1110", "T1078"],
+        "query": "ADFSSignInLogs\n| where TimeGenerated > ago(1d)\n| where ResultType == 396083\n| summarize\n    LockoutCount = count(),\n    UniqueIPs    = dcount(IPAddress),\n    IPs          = make_set(IPAddress, 20),\n    Countries    = make_set(Location),\n    Apps         = make_set(AppDisplayName),\n    FirstSeen    = min(TimeGenerated),\n    LastSeen     = max(TimeGenerated)\n  by UserPrincipalName\n| where LockoutCount >= 3\n| order by LockoutCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Extranet Lockout - {{UserPrincipalName}} triggered {{LockoutCount}} lockouts",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} has triggered ADFS extranet lockout (396083) {{LockoutCount}} times from {{UniqueIPs}} unique IPs. Possible brute force attack."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Password Spray - Single IP Targeting Multiple Accounts",
+        "description": "Detects a single IP generating credential errors against more than 10 distinct ADFS accounts within 24 hours. Classic password spray pattern that evades per-account lockout. MITRE: T1110",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT4H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "InitialAccess"],
+        "techniques": ["T1110"],
+        "query": "let SprayErrors = dynamic([\"50126\", \"50034\", \"50053\", \"396083\"]);\nADFSSignInLogs\n| where TimeGenerated > ago(1d)\n| extend ErrorCode = tostring(ResultType)\n| where ErrorCode in (SprayErrors)\n| summarize\n    TargetCount = dcount(UserPrincipalName),\n    Targets     = make_set(UserPrincipalName, 30),\n    FailCount   = count(),\n    ErrorCodes  = make_set(ErrorCode),\n    UserAgents  = make_set(UserAgent),\n    Countries   = make_set(Location),\n    FirstSeen   = min(TimeGenerated),\n    LastSeen    = max(TimeGenerated)\n  by IPAddress\n| where TargetCount > 10\n| order by TargetCount desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Password Spray from {{IPAddress}} - {{TargetCount}} accounts targeted",
+          "alertDescriptionFormat": "IP {{IPAddress}} has targeted {{TargetCount}} ADFS accounts with {{FailCount}} credential failures. Possible password spray attack."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/c3d4e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Low-and-Slow Password Spray - Rate-Evasion Pattern",
+        "description": "Detects IP addresses performing 2-15 credential failures per hour across more than 5 accounts, sustained across 3+ hours. Deliberately stays under lockout thresholds. MITRE: T1110",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT12H",
+        "tactics": ["CredentialAccess", "InitialAccess"],
+        "techniques": ["T1110"],
+        "query": "let SprayErrors = dynamic([\"50126\", \"50034\", \"50053\", \"396083\"]);\nADFSSignInLogs\n| where TimeGenerated > ago(1d)\n| extend ErrorCode = tostring(ResultType)\n| where ErrorCode in (SprayErrors)\n| summarize\n    FailsPerHour = count(),\n    UniqueUsers  = dcount(UserPrincipalName)\n  by IPAddress, bin(TimeGenerated, 1h)\n| where FailsPerHour between (2 .. 15)\n   and  UniqueUsers > 5\n| summarize\n    SprayHours    = count(),\n    TotalAttempts = sum(FailsPerHour),\n    TotalUsers    = sum(UniqueUsers)\n  by IPAddress\n| where SprayHours >= 3\n| order by SprayHours desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Low-and-Slow Spray from {{IPAddress}} - {{SprayHours}} hours of activity",
+          "alertDescriptionFormat": "IP {{IPAddress}} performed {{TotalAttempts}} credential failures across multiple ADFS accounts over {{SprayHours}} hours at a rate designed to evade lockout."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f8a')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Brute Force - Single Account Targeted by Multiple IPs",
+        "description": "Detects coordinated botnet brute force: many distinct IP addresses targeting one ADFS account with more than 20 credential errors. Indicates distributed botnet attack. MITRE: T1110, T1078",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT4H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "InitialAccess"],
+        "techniques": ["T1110", "T1078"],
+        "query": "let BruteForceErrors = dynamic([\"50126\", \"50055\", \"50056\", \"50064\",\n                                  \"50053\", \"50034\", \"50057\", \"396083\"]);\nADFSSignInLogs\n| where TimeGenerated > ago(1d)\n| extend ErrorCode = tostring(ResultType)\n| where ErrorCode in (BruteForceErrors)\n| summarize\n    FailCount  = count(),\n    UniqueIPs  = dcount(IPAddress),\n    IPs        = make_set(IPAddress, 20),\n    Countries  = make_set(Location),\n    ErrorCodes = make_set(ErrorCode),\n    FirstSeen  = min(TimeGenerated),\n    LastSeen   = max(TimeGenerated)\n  by UserPrincipalName\n| where FailCount > 20\n| order by FailCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Brute Force against {{UserPrincipalName}} - {{FailCount}} failures from {{UniqueIPs}} IPs",
+          "alertDescriptionFormat": "Account {{UserPrincipalName}} received {{FailCount}} ADFS credential failures from {{UniqueIPs}} unique IPs. Possible coordinated botnet brute force."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8a9b')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Brute Force to Successful Sign-In Chain",
+        "description": "Detects the credential compromise pattern: same user accumulates 5+ brute-force failures in ADFS followed by a successful sign-in after the last failure. Strong indicator of successful credential brute force. MITRE: T1110, T1078",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "InitialAccess"],
+        "techniques": ["T1110", "T1078"],
+        "query": "let BruteForceErrors = dynamic([\"50126\", \"50055\", \"50056\", \"50064\",\n                                  \"50053\", \"50034\", \"50057\", \"396083\"]);\nlet Failures =\n    ADFSSignInLogs\n    | where TimeGenerated > ago(1d)\n    | extend ErrorCode = tostring(ResultType)\n    | where ErrorCode in (BruteForceErrors)\n    | summarize\n        FailCount = count(),\n        LastFail  = max(TimeGenerated),\n        FailIPs   = make_set(IPAddress)\n      by UserPrincipalName;\nADFSSignInLogs\n| where TimeGenerated > ago(1d)\n| where ResultType == 0\n| summarize\n    FirstSuccess = min(TimeGenerated),\n    SuccessIP    = tostring(make_set(IPAddress)[0])\n  by UserPrincipalName\n| join kind=inner Failures on UserPrincipalName\n| where FailCount > 5\n   and  FirstSuccess > LastFail\n| project\n    UserPrincipalName,\n    FailCount,\n    LastFail,\n    FirstSuccess,\n    TimeDiff  = FirstSuccess - LastFail,\n    FailIPs,\n    SuccessIP\n| order by FailCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "SuccessIP" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Brute Force Success - {{UserPrincipalName}} compromised after {{FailCount}} failures",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} had {{FailCount}} ADFS failures followed by a successful login from {{SuccessIP}}. Account may be compromised."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/f6a7b8c9-d0e1-4f2a-3b4c-5d6e7f8a9b0c')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Sign-In from High-Risk Country",
+        "description": "Detects successful ADFS-federated authentication from countries with elevated APT activity or under international sanctions (KP, IR, RU, CN, BY, CU, SY, VE, MM). MITRE: T1078, T1566",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT4H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT12H",
+        "tactics": ["InitialAccess", "CredentialAccess"],
+        "techniques": ["T1078", "T1566"],
+        "query": "let HighRiskCountries = dynamic([\"KP\", \"IR\", \"RU\", \"CN\", \"BY\", \"CU\",\n                                   \"SY\", \"VE\", \"MM\"]);\nADFSSignInLogs\n| where TimeGenerated > ago(1d)\n| where ResultType == 0\n| where Location in (HighRiskCountries)\n| summarize\n    Count     = count(),\n    Apps      = make_set(AppDisplayName),\n    IPs       = make_set(IPAddress),\n    FirstSeen = min(TimeGenerated),\n    LastSeen  = max(TimeGenerated)\n  by UserPrincipalName, Location\n| order by Count desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS High-Risk Country Sign-In - {{UserPrincipalName}} from {{Location}}",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} successfully authenticated via ADFS from high-risk country {{Location}} ({{Count}} sign-ins). Review for possible credential compromise."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/a7b8c9d0-e1f2-4a3b-4c5d-6e7f8a9b0c1d')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Impossible Travel - 3+ Countries in 1 Hour",
+        "description": "Detects a single user authenticating via ADFS from 3 or more distinct countries within the same 1-hour window. Indicates token replay from multiple attacker locations or Golden SAML abuse. MITRE: T1550, T1078",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["LateralMovement", "InitialAccess"],
+        "techniques": ["T1550", "T1078"],
+        "query": "ADFSSignInLogs\n| where TimeGenerated > ago(2h)\n| where ResultType == 0\n| summarize\n    Countries    = make_set(Location),\n    CountryCount = dcount(Location),\n    IPs          = make_set(IPAddress),\n    Apps         = make_set(AppDisplayName),\n    FirstSeen    = min(TimeGenerated),\n    LastSeen     = max(TimeGenerated)\n  by UserPrincipalName, bin(TimeGenerated, 1h)\n| where CountryCount >= 3\n| order by CountryCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Impossible Travel - {{UserPrincipalName}} in {{CountryCount}} countries within 1 hour",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} authenticated via ADFS from {{CountryCount}} distinct countries in a single hour. Possible token replay or simultaneous credential abuse."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/b8c9d0e1-f2a3-4b4c-5d6e-7f8a9b0c1d2e')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Sign-In from TOR or Anonymous Proxy (TI-Tagged)",
+        "description": "Detects successful ADFS sign-ins from IPs tagged as TOR/proxy/anonymizer in ThreatIntelligenceIndicator. Attackers route stolen ADFS tokens through anonymizing services to hide origin. MITRE: T1090, T1078, T1550",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CommandAndControl", "InitialAccess", "DefenseEvasion"],
+        "techniques": ["T1090", "T1078", "T1550"],
+        "query": "let TorExitIPs =\n    ThreatIntelligenceIndicator\n    | where TimeGenerated > ago(30d)\n    | where Active == true\n    | where Tags has_any (\"tor\", \"proxy\", \"anonymizer\", \"vpn\", \"anonymity\")\n    | where isnotempty(NetworkIP)\n    | summarize AnonymizationType = make_set(Tags) by NetworkIP;\nADFSSignInLogs\n| where TimeGenerated > ago(1h)\n| where ResultType == 0\n| join kind=inner TorExitIPs on $left.IPAddress == $right.NetworkIP\n| project\n    TimeGenerated,\n    UserPrincipalName,\n    AppDisplayName,\n    IPAddress,\n    Location,\n    AnonymizationType,\n    AuthenticationRequirement,\n    TokenIssuerName,\n    CorrelationId,\n    UniqueTokenIdentifier\n| order by TimeGenerated desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Sign-In from Anonymizer - {{UserPrincipalName}} via {{IPAddress}}",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} successfully authenticated via ADFS from TOR/proxy IP {{IPAddress}}. This IP is tagged in threat intelligence as an anonymizing service."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/c9d0e1f2-a3b4-4c5d-6e7f-8a9b0c1d2e3f')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Sign-In from Threat Intelligence Malicious IP",
+        "description": "Detects successful ADFS-federated authentication from IP addresses in ThreatIntelligenceIndicator with any active threat tag. Strong indicator of compromised credentials being actively used. MITRE: T1078, T1528",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["InitialAccess", "CredentialAccess"],
+        "techniques": ["T1078", "T1528"],
+        "query": "let MaliciousIPs =\n    ThreatIntelligenceIndicator\n    | where TimeGenerated > ago(30d)\n    | where isnotempty(NetworkIP)\n       and  Active == true\n    | summarize ThreatTags = make_set(Tags), ThreatType = make_set(ThreatType)\n      by NetworkIP;\nADFSSignInLogs\n| where TimeGenerated > ago(1h)\n| where ResultType == 0\n| join kind=inner MaliciousIPs on $left.IPAddress == $right.NetworkIP\n| project\n    TimeGenerated,\n    UserPrincipalName,\n    AppDisplayName,\n    IPAddress,\n    Location,\n    ThreatTags,\n    ThreatType,\n    AuthenticationRequirement,\n    TokenIssuerName,\n    ConditionalAccessStatus\n| order by TimeGenerated desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Sign-In from Malicious IP - {{UserPrincipalName}} via {{IPAddress}}",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} authenticated via ADFS from threat-intelligence-tagged IP {{IPAddress}}. ThreatTags: {{ThreatTags}}."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/d0e1f2a3-b4c5-4d6e-7f8a-9b0c1d2e3f4a')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Golden SAML - Unexpected Token Issuer Detected",
+        "description": "Detects ADFS sign-ins where TokenIssuerName is not a recognized federation service for your organization. In Golden SAML attacks, forged tokens arrive from unrecognized issuers. Requires customization before deployment. MITRE: T1606, T1550",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT4H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "DefenseEvasion"],
+        "techniques": ["T1606", "T1550"],
+        "query": "// IMPORTANT: Replace placeholder values with your actual ADFS federation service names\nlet KnownADFSIssuers = dynamic([\n    \"YOUR_ADFS_FEDERATION_SERVICE_NAME\",\n    \"urn:federation:MicrosoftOnline\"\n]);\nADFSSignInLogs\n| where TimeGenerated > ago(4h)\n| where ResultType == 0\n| where TokenIssuerType == \"ADFederationServices\"\n| where TokenIssuerName !in (KnownADFSIssuers)\n   and  isnotempty(TokenIssuerName)\n| summarize\n    Count     = count(),\n    Users     = make_set(UserPrincipalName),\n    Apps      = make_set(AppDisplayName),\n    IPs       = make_set(IPAddress),\n    FirstSeen = min(TimeGenerated),\n    LastSeen  = max(TimeGenerated)\n  by TokenIssuerName\n| order by Count desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "Users" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Golden SAML Alert - Unknown Issuer: {{TokenIssuerName}}",
+          "alertDescriptionFormat": "ADFS tokens were issued by unrecognized TokenIssuerName: {{TokenIssuerName}} ({{Count}} tokens). May indicate a Golden SAML forged token attack."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Single-Factor Authentication - MFA Control Bypass",
+        "description": "Detects users successfully authenticating through ADFS with only single-factor authentication when MFA should be enforced. Indicates potential misconfigured claim rules or MFA bypass via legacy clients. MITRE: T1078, T1556",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT4H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT12H",
+        "tactics": ["CredentialAccess", "DefenseEvasion"],
+        "techniques": ["T1078", "T1556"],
+        "query": "ADFSSignInLogs\n| where TimeGenerated > ago(1d)\n| where ResultType == 0\n| where AuthenticationRequirement == \"singleFactorAuthentication\"\n   and  TokenIssuerType == \"ADFederationServices\"\n| summarize\n    Count     = count(),\n    Apps      = make_set(AppDisplayName),\n    IPs       = make_set(IPAddress),\n    Countries = make_set(Location),\n    FirstSeen = min(TimeGenerated),\n    LastSeen  = max(TimeGenerated)\n  by UserPrincipalName\n| order by Count desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS MFA Gap - {{UserPrincipalName}} authenticated with single factor",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} completed {{Count}} ADFS authentications using only single-factor authentication. MFA may not be enforced on the federation path."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/f2a3b4c5-d6e7-4f8a-9b0c-1d2e3f4a5b6c')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS High SAML Token Volume - Automated Token Farming",
+        "description": "Detects a user generating more than 50 ADFS SAML tokens in a single hour from the same IP. Legitimate users rarely generate hundreds of SAML assertions per hour; indicates automated token farming. MITRE: T1550, T1606",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "LateralMovement"],
+        "techniques": ["T1550", "T1606"],
+        "query": "ADFSSignInLogs\n| where TimeGenerated > ago(2h)\n| where ResultType == 0\n| where TokenIssuerType == \"ADFederationServices\"\n| summarize\n    TokenCount = count(),\n    UniqueApps = dcount(AppDisplayName),\n    Apps       = make_set(AppDisplayName)\n  by UserPrincipalName, IPAddress, bin(TimeGenerated, 1h)\n| where TokenCount > 50\n| order by TokenCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Token Volume Spike - {{UserPrincipalName}} generated {{TokenCount}} tokens in 1h",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} from IP {{IPAddress}} generated {{TokenCount}} ADFS SAML tokens in one hour. Possible automated token farming or credential stuffing."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/a3b4c5d6-e7f8-4a9b-0c1d-2e3f4a5b6c7d')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Stale Token Use After Password Change or Reset",
+        "description": "Detects ADFS tokens issued for a user after their password was recently changed or reset. Stale tokens after a reset indicate Golden SAML persistence via a cloned ADFS signing cert. Correlates AuditLogs with ADFSSignInLogs. MITRE: T1606, T1078, T1550",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["CredentialAccess", "Persistence", "DefenseEvasion"],
+        "techniques": ["T1606", "T1078", "T1550"],
+        "query": "let PasswordChanges =\n    AuditLogs\n    | where TimeGenerated > ago(1d)\n    | where OperationName has_any (\n        \"Reset password\", \"Change password\", \"Update user\",\n        \"User changed password\",\n        \"Admin updated user authentication method\",\n        \"Update Authentication Method\",\n        \"Delete Authentication Method\"\n      )\n    | extend UPN = tostring(TargetResources[0].userPrincipalName)\n    | where isnotempty(UPN)\n    | summarize ChangeTime = max(TimeGenerated) by UPN;\nADFSSignInLogs\n| where TimeGenerated > ago(1d)\n| where ResultType == 0\n| join kind=inner PasswordChanges on $left.UserPrincipalName == $right.UPN\n| where TimeGenerated > ChangeTime\n| summarize\n    TokensAfterChange = count(),\n    IPs               = make_set(IPAddress),\n    Countries         = make_set(Location),\n    Apps              = make_set(AppDisplayName),\n    Protocols         = make_set(AuthenticationRequirement),\n    LastSeen          = max(TimeGenerated),\n    FirstTokenAfter   = min(TimeGenerated)\n  by UserPrincipalName, ChangeTime\n| order by TokensAfterChange desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Stale Token Alert - {{UserPrincipalName}} active after password change",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} had a credential change at {{ChangeTime}} but ADFS issued {{TokensAfterChange}} tokens afterward. Possible Golden SAML persistence."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/b4c5d6e7-f8a9-4b0c-1d2e-3f4a5b6c7d8e')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Legacy Authentication Protocol - MFA Bypass via User Agent",
+        "description": "Detects successful ADFS authentications using legacy protocols (ActiveSync, IMAP, EWS, MAPI, etc.) that cannot participate in MFA challenges. Detected via UserAgent patterns. MITRE: T1078, T1550",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT4H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT12H",
+        "tactics": ["InitialAccess", "DefenseEvasion"],
+        "techniques": ["T1078", "T1550"],
+        "query": "let LegacyPatterns = dynamic([\n    \"ActiveSync\", \"IMAP4\", \"IMAP\", \"POP3\", \"SMTP\", \"ExchangeWebServices\",\n    \"AutoDiscover\", \"EWS\", \"OutlookAnywhere\", \"MAPI\",\n    \"Microsoft Office\", \"MSExchangeFBA\"\n]);\nADFSSignInLogs\n| where TimeGenerated > ago(1d)\n| where UserAgent has_any (LegacyPatterns)\n| where ResultType == 0\n| summarize\n    SignInCount = count(),\n    IPs         = make_set(IPAddress),\n    Countries   = make_set(Location),\n    UserAgents  = make_set(UserAgent, 5),\n    FirstSeen   = min(TimeGenerated),\n    LastSeen    = max(TimeGenerated)\n  by UserPrincipalName, AppDisplayName\n| where SignInCount > 3\n| order by SignInCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Legacy Auth Detected - {{UserPrincipalName}} via {{AppDisplayName}}",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} completed {{SignInCount}} ADFS sign-ins via legacy protocol app {{AppDisplayName}}. Legacy auth bypasses MFA and Conditional Access."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/c5d6e7f8-a9b0-4c1d-2e3f-4a5b6c7d8e9f')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS ROPC or Device Code Flow Authentication Detected",
+        "description": "Detects ADFS authentication flows using ROPC or Device Code. ROPC bypasses interactive auth; Device Code flow is abused in phishing campaigns. Both can bypass ADFS-layer MFA. MITRE: T1078, T1566",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT30M",
+        "queryPeriod": "PT4H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["InitialAccess", "CredentialAccess"],
+        "techniques": ["T1078", "T1566"],
+        "query": "ADFSSignInLogs\n| where TimeGenerated > ago(4h)\n| where AuthenticationProcessingDetails has_any (\"ROPC\", \"ropc\", \"DeviceCode\", \"device_code\", \"deviceCode\")\n   or   UserAgent has_any (\"ROPC\", \"device_code\", \"devicecode\", \"PublicClientApp\")\n| summarize\n    Count     = count(),\n    IPs       = make_set(IPAddress),\n    Countries = make_set(Location),\n    Apps      = make_set(AppDisplayName),\n    Errors    = make_set(ResultType),\n    Reqs      = make_set(AuthenticationRequirement),\n    FirstSeen = min(TimeGenerated),\n    LastSeen  = max(TimeGenerated)\n  by UserPrincipalName\n| order by Count desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS ROPC/DeviceCode Flow - {{UserPrincipalName}} - {{Count}} events",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} was detected using ROPC or Device Code auth flow via ADFS ({{Count}} events). These flows bypass MFA and are abused in phishing attacks."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/d6e7f8a9-b0c1-4d2e-3f4a-5b6c7d8e9f0a')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Auth Followed by Privileged Azure AD Action",
+        "description": "Detects ADFS authentication followed by a privileged Azure AD audit operation (role, app, group, policy, device, user management) within 60 minutes. Indicates stolen ADFS token used for admin escalation. MITRE: T1078, T1098, T1550",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["PrivilegeEscalation", "Persistence", "DefenseEvasion"],
+        "techniques": ["T1078", "T1098", "T1550"],
+        "query": "let ADFSUsers =\n    ADFSSignInLogs\n    | where TimeGenerated > ago(2h)\n    | where ResultType == 0\n    | summarize LastADFSSignIn = max(TimeGenerated), ADFSIPs = make_set(IPAddress)\n      by UserPrincipalName;\nAuditLogs\n| where TimeGenerated > ago(2h)\n| where Category in (\n    \"RoleManagement\", \"ApplicationManagement\", \"GroupManagement\",\n    \"Policy\", \"DeviceManagement\", \"UserManagement\"\n  )\n| extend UPN = tostring(InitiatedBy.user.userPrincipalName)\n| where isnotempty(UPN)\n| join kind=inner ADFSUsers on $left.UPN == $right.UserPrincipalName\n| where (TimeGenerated - LastADFSSignIn) between (0m .. 60m)\n| project\n    AuditTime         = TimeGenerated,\n    UserPrincipalName = UPN,\n    OperationName,\n    AuditResult       = Result,\n    Category,\n    TargetResources,\n    LastADFSSignIn,\n    ADFSIPs,\n    TimeSinceADFSAuth = (TimeGenerated - LastADFSSignIn)\n| order by AuditTime desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Token to Privileged Action - {{UserPrincipalName}} performed {{OperationName}}",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} authenticated via ADFS and performed privileged action '{{OperationName}}' ({{Category}}) within 60 minutes. Possible stolen token abuse."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/e7f8a9b0-c1d2-4e3f-4a5b-6c7d8e9f0a1b')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Auth Followed by Email Forwarding Rule - BEC Indicator",
+        "description": "Detects BEC pattern: user authenticates via ADFS then creates or modifies an inbox forwarding/redirect rule in Exchange Online within 2 hours. Classic pattern after ADFS credential theft. MITRE: T1114, T1078",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT3H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["Collection", "Exfiltration", "Persistence"],
+        "techniques": ["T1114", "T1078"],
+        "query": "let ADFSAuthUsers =\n    ADFSSignInLogs\n    | where TimeGenerated > ago(3h)\n    | where ResultType == 0\n    | summarize\n        LastADFS = max(TimeGenerated),\n        ADFS_IPs = make_set(IPAddress)\n      by UserPrincipalName;\nOfficeActivity\n| where TimeGenerated > ago(3h)\n| where Operation in (\n    \"New-InboxRule\", \"Set-InboxRule\", \"UpdateInboxRules\", \"Set-Mailbox\"\n  )\n| where Parameters has_any (\n    \"ForwardTo\", \"RedirectTo\", \"ForwardAsAttachmentTo\",\n    \"DeleteMessage\", \"MarkAsRead\"\n  )\n| extend UPN = tolower(UserId)\n| join kind=inner ADFSAuthUsers on $left.UPN == $right.UserPrincipalName\n| where TimeGenerated > LastADFS\n   and  (TimeGenerated - LastADFS) < 2h\n| project\n    RuleCreationTime  = TimeGenerated,\n    UserPrincipalName = UPN,\n    Operation,\n    Parameters,\n    ADFS_IPs,\n    LastADFSSignIn    = LastADFS,\n    TimeSinceADFS     = (TimeGenerated - LastADFS),\n    ClientIP\n| order by RuleCreationTime desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "ClientIP" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS BEC Alert - {{UserPrincipalName}} created forwarding rule after ADFS auth",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} authenticated via ADFS then performed inbox operation '{{Operation}}' within 2 hours. High-confidence Business Email Compromise indicator."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/f8a9b0c1-d2e3-4f4a-5b6c-7d8e9f0a1b2c')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "ADFS Auth by Entra ID Risky User",
+        "description": "Detects high/medium-risk users (per Entra ID Identity Protection) actively authenticating through ADFS federation, potentially bypassing cloud-based risk enforcement and Conditional Access. MITRE: T1078",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT12H",
+        "tactics": ["InitialAccess", "CredentialAccess"],
+        "techniques": ["T1078"],
+        "query": "let HighRiskUsers =\n    AADRiskyUsers\n    | where RiskState in (\"atRisk\", \"confirmedCompromised\")\n    | where RiskLevel in (\"high\", \"medium\")\n    | project UserPrincipalName, RiskLevel, RiskState, RiskDetail;\nADFSSignInLogs\n| where TimeGenerated > ago(1d)\n| where ResultType == 0\n| summarize\n    ADFSCount      = count(),\n    Countries      = make_set(Location),\n    IPs            = make_set(IPAddress),\n    Apps           = make_set(AppDisplayName),\n    LastActivity   = max(TimeGenerated)\n  by UserPrincipalName\n| join kind=inner HighRiskUsers on UserPrincipalName\n| project\n    UserPrincipalName,\n    RiskLevel,\n    RiskState,\n    RiskDetail,\n    ADFSCount,\n    Countries,\n    IPs,\n    Apps,\n    LastActivity\n| order by ADFSCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "ADFS Risky User Active - {{UserPrincipalName}} ({{RiskLevel}} risk) has {{ADFSCount}} ADFS sign-ins",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} is flagged {{RiskLevel}} risk by Identity Protection but completed {{ADFSCount}} ADFS authentications, bypassing cloud risk enforcement."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/a9b0c1d2-e3f4-4a5b-6c7d-8e9f0a1b2c3d')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "MFA Fatigue Attack Followed by ADFS Federation Pivot",
+        "description": "Detects the MFA fatigue chain: user receives 3+ MFA push prompts, eventually approves one, and the attacker then pivots to ADFS-federated resources. Correlates SigninLogs MFA events with ADFSSignInLogs. MITRE: T1621, T1550",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT12H",
+        "tactics": ["CredentialAccess", "InitialAccess", "DefenseEvasion"],
+        "techniques": ["T1621", "T1550"],
+        "query": "let MFAFatigue =\n    SigninLogs\n    | where TimeGenerated > ago(1d)\n    | where ResultType in (50074, 500121, 50076)\n    | summarize\n        MFAAttempts  = count(),\n        FirstAttempt = min(TimeGenerated)\n      by UserPrincipalName;\nlet MFASuccess =\n    SigninLogs\n    | where TimeGenerated > ago(1d)\n    | where ResultType == 0\n    | where AuthenticationRequirement == \"multiFactorAuthentication\"\n    | summarize MFASuccessTime = min(TimeGenerated)\n      by UserPrincipalName;\nMFAFatigue\n| where MFAAttempts >= 3\n| join kind=inner MFASuccess on UserPrincipalName\n| where MFASuccessTime > FirstAttempt\n| join kind=inner (\n    ADFSSignInLogs\n    | where TimeGenerated > ago(1d)\n    | where ResultType == 0\n    | summarize\n        ADFS_Count     = count(),\n        ADFS_Countries = make_set(Location),\n        ADFS_IPs       = make_set(IPAddress)\n      by UserPrincipalName\n  ) on UserPrincipalName\n| where ADFS_Count > 5\n| project\n    UserPrincipalName,\n    MFAAttempts,\n    FirstMFAPrompt = FirstAttempt,\n    MFASuccessTime,\n    ADFS_Count,\n    ADFS_Countries,\n    ADFS_IPs\n| order by MFAAttempts desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "MFA Fatigue to ADFS Pivot - {{UserPrincipalName}} with {{MFAAttempts}} MFA prompts",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} received {{MFAAttempts}} MFA challenges (fatigue indicator), then pivoted to ADFS with {{ADFS_Count}} federated sign-ins. Possible adversary-in-the-middle attack."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/b0c1d2e3-f4a5-4b6c-7d8e-9f0a1b2c3d4e')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "PIM Role Activation Followed by ADFS Sign-In",
+        "description": "Detects PIM role activation followed by ADFS federation authentication within 30 minutes. Combines cloud privilege escalation with on-premises lateral movement via the ADFS federation trust. MITRE: T1078, T1134, T1098",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT30M",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": ["PrivilegeEscalation", "LateralMovement", "Persistence"],
+        "techniques": ["T1078", "T1134", "T1098"],
+        "query": "let PIMActivations =\n    AuditLogs\n    | where TimeGenerated > ago(2h)\n    | where OperationName has \"Add member to role completed (PIM activation)\"\n    | extend UPN = tostring(InitiatedBy.user.userPrincipalName)\n    | where isnotempty(UPN)\n    | project\n        ActivationTime = TimeGenerated,\n        UPN,\n        RoleName = tostring(TargetResources[0].displayName);\nADFSSignInLogs\n| where TimeGenerated > ago(2h)\n| where ResultType == 0\n| join kind=inner PIMActivations on $left.UserPrincipalName == $right.UPN\n| where TimeGenerated > ActivationTime\n   and  (TimeGenerated - ActivationTime) < 30m\n| project\n    ADFSSignInTime     = TimeGenerated,\n    ActivationTime,\n    UserPrincipalName,\n    RoleName,\n    AppDisplayName,\n    IPAddress,\n    Location,\n    AuthenticationRequirement,\n    TimeSincePIM       = (TimeGenerated - ActivationTime)\n| order by ADFSSignInTime desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "UserPrincipalName" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "IPAddress" }
+            ]
+          }
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "PIM to ADFS Abuse - {{UserPrincipalName}} activated {{RoleName}} then used ADFS",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} activated PIM role '{{RoleName}}' and then authenticated via ADFS within 30 minutes. Possible privilege abuse via federation after PIM escalation."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    }
+  ]
+}
