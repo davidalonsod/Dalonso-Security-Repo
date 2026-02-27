@@ -1,0 +1,1067 @@
+// =============================================================================
+// ADFSSignInLogs — Threat Hunting & Deep Forensic Queries
+// Workspace: e34d562e-ef12-4c4e-9bc0-7c6ae357c015
+// Updated: 2026-02-25
+// =============================================================================
+// ADFSSignInLogs captures authentication events processed by on-premises
+// Active Directory Federation Services (ADFS). This includes WS-Federation,
+// SAML 2.0, OAuth 2.0, and OpenID Connect flows federated to Azure AD.
+// Key threat scenarios:
+//   - Golden SAML / SAMLjacking (forged SAML tokens)
+//   - Pass-the-token / token replay attacks
+//   - ADFS extranet lockout bypass
+//   - Legacy protocol MFA bypass
+//   - Federated identity pivot after ADFS compromise
+// =============================================================================
+
+
+// =============================================================================
+// SECTION 1 — DATA OVERVIEW & COVERAGE
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 1. VOLUME, PROTOCOL BREAKDOWN, AND FAILURE RATES
+//    Understand what authentication protocols and client apps are hitting ADFS
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(30d)
+| summarize
+    Total       = count(),
+    UniqueUsers = dcount(UserPrincipalName),
+    UniqueIPs   = dcount(IPAddress),
+    UniqueApps  = dcount(AppDisplayName),
+    Failures    = countif(ResultType != 0),
+    Successes   = countif(ResultType == 0),
+    FailureRate = round(100.0 * countif(ResultType != 0) / count(), 2)
+  by AuthenticationRequirement
+| order by Total desc
+
+
+// -----------------------------------------------------------------------------
+// 2. TOP ERROR CODES — ADFS-SPECIFIC + AZURE AD CODES
+//    ADFS-specific: 396083 = extranet lockout, 300030 = WsFedMessageInvalid
+//    Common: 50053 = account locked, 50126 = invalid credentials
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(30d)
+| where ResultType != 0
+| summarize
+    Count           = count(),
+    UniqueUsers     = dcount(UserPrincipalName),
+    UniqueIPs       = dcount(IPAddress),
+    SampleDetails   = any(ResultDescription)
+  by tostring(ResultType)
+| order by Count desc
+
+
+// -----------------------------------------------------------------------------
+// 3. ADFS SERVER COVERAGE — WHICH SERVERS ARE EMITTING EVENTS
+//    Helps identify rogue or unexpected token issuers in the federation farm
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(30d)
+| summarize
+    EventCount  = count(),
+    UniqueUsers = dcount(UserPrincipalName),
+    FirstSeen   = min(TimeGenerated),
+    LastSeen    = max(TimeGenerated)
+  by TokenIssuerName, TokenIssuerType
+| order by EventCount desc
+
+
+// -----------------------------------------------------------------------------
+// 4. AUTHENTICATION TIMELINE — DAILY TREND
+//    Volume trends; sudden spikes may indicate spray or automated attacks
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(30d)
+| summarize
+    Total    = count(),
+    Failures = countif(ResultType != 0),
+    Success  = countif(ResultType == 0)
+  by bin(TimeGenerated, 1d)
+| order by TimeGenerated asc
+
+
+// =============================================================================
+// SECTION 2 — BRUTE FORCE & PASSWORD SPRAY
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 5. ADFS EXTRANET LOCKOUT DETECTION (Error 396083)
+//    396083 = ADFS extranet lockout policy triggered
+//    Multiple lockouts = sustained brute force bypassing perimeter controls
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 396083
+| summarize
+    LockoutCount = count(),
+    UniqueIPs    = dcount(IPAddress),
+    IPs          = make_set(IPAddress, 20),
+    Countries    = make_set(Location),
+    Apps         = make_set(AppDisplayName),
+    FirstSeen    = min(TimeGenerated),
+    LastSeen     = max(TimeGenerated)
+  by UserPrincipalName
+| order by LockoutCount desc
+
+
+// -----------------------------------------------------------------------------
+// 6. PASSWORD SPRAY — SINGLE IP TARGETING MANY ADFS ACCOUNTS
+//    One IP hitting many accounts with credential error codes
+//    Non-interactive ADFS spray is stealthy: no per-user lockout until threshold
+// -----------------------------------------------------------------------------
+let SprayErrors = dynamic(["50126", "50034", "50053", "396083"]);
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| extend ErrorCode = tostring(ResultType)
+| where ErrorCode in (SprayErrors)
+| summarize
+    TargetCount = dcount(UserPrincipalName),
+    Targets     = make_set(UserPrincipalName, 30),
+    FailCount   = count(),
+    ErrorCodes  = make_set(ErrorCode),
+    UserAgents  = make_set(UserAgent),
+    Countries   = make_set(Location),
+    FirstSeen   = min(TimeGenerated),
+    LastSeen    = max(TimeGenerated)
+  by IPAddress
+| where TargetCount > 10
+| order by TargetCount desc
+
+
+// -----------------------------------------------------------------------------
+// 7. LOW-AND-SLOW PASSWORD SPRAY (2–15 attempts/hour, many users)
+//    Evades lockout policies by slowing below per-account threshold
+// -----------------------------------------------------------------------------
+let SprayErrors = dynamic(["50126", "50034", "50053", "396083"]);
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| extend ErrorCode = tostring(ResultType)
+| where ErrorCode in (SprayErrors)
+| summarize
+    FailsPerHour = count(),
+    UniqueUsers  = dcount(UserPrincipalName)
+  by IPAddress, bin(TimeGenerated, 1h)
+| where FailsPerHour between (2 .. 15)
+   and  UniqueUsers > 5
+| summarize
+    SprayHours    = count(),
+    TotalAttempts = sum(FailsPerHour),
+    TotalUsers    = sum(UniqueUsers)
+  by IPAddress
+| order by SprayHours desc
+
+
+// -----------------------------------------------------------------------------
+// 8. BRUTE FORCE — SINGLE USER TARGETED BY MANY IPS
+//    Coordinated botnet attack: many IPs, one account
+// -----------------------------------------------------------------------------
+let BruteForceErrors = dynamic(["50126", "50055", "50056", "50064",
+                                  "50053", "50034", "50057", "396083"]);
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| extend ErrorCode = tostring(ResultType)
+| where ErrorCode in (BruteForceErrors)
+| summarize
+    FailCount  = count(),
+    UniqueIPs  = dcount(IPAddress),
+    IPs        = make_set(IPAddress, 20),
+    Countries  = make_set(Location),
+    ErrorCodes = make_set(ErrorCode),
+    FirstSeen  = min(TimeGenerated),
+    LastSeen   = max(TimeGenerated)
+  by UserPrincipalName
+| where FailCount > 20
+| order by FailCount desc
+
+
+// -----------------------------------------------------------------------------
+// 9. BRUTE FORCE → SUCCESS CHAIN
+//    Same user: failures with brute-force errors, then a successful sign-in.
+//    Classic "attacker eventually guessed the right password" via ADFS
+// -----------------------------------------------------------------------------
+let BruteForceErrors = dynamic(["50126", "50055", "50056", "50064",
+                                  "50053", "50034", "50057", "396083"]);
+let Failures =
+    ADFSSignInLogs
+    | where TimeGenerated > ago(14d)
+    | extend ErrorCode = tostring(ResultType)
+    | where ErrorCode in (BruteForceErrors)
+    | summarize
+        FailCount = count(),
+        LastFail  = max(TimeGenerated),
+        FailIPs   = make_set(IPAddress)
+      by UserPrincipalName;
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| summarize
+    FirstSuccess = min(TimeGenerated),
+    SuccessIP    = tostring(make_set(IPAddress)[0])
+  by UserPrincipalName
+| join kind=inner Failures on UserPrincipalName
+| where FailCount > 5
+   and  FirstSuccess > LastFail
+| project
+    UserPrincipalName,
+    FailCount,
+    LastFail,
+    FirstSuccess,
+    TimeDiff  = FirstSuccess - LastFail,
+    FailIPs,
+    SuccessIP
+| order by FailCount desc
+
+
+// =============================================================================
+// SECTION 3 — GEOLOCATION & IP INTELLIGENCE
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 10. HIGH-RISK COUNTRY SIGN-INS VIA ADFS
+//     ADFS-federated auth from sanctioned / high APT-activity countries
+// -----------------------------------------------------------------------------
+let HighRiskCountries = dynamic(["KP", "IR", "RU", "CN", "BY", "CU",
+                                   "SY", "VE", "MM"]);
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| where Location in (HighRiskCountries)
+| summarize
+    Count     = count(),
+    Apps      = make_set(AppDisplayName),
+    IPs       = make_set(IPAddress),
+    FirstSeen = min(TimeGenerated),
+    LastSeen  = max(TimeGenerated)
+  by UserPrincipalName, Location
+| order by Count desc
+
+
+// -----------------------------------------------------------------------------
+// 11. IMPOSSIBLE TRAVEL — 3+ COUNTRIES IN 1 HOUR VIA ADFS
+//     Federated token replayed simultaneously from multiple attacker locations
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == 0
+| summarize
+    Countries    = make_set(Location),
+    CountryCount = dcount(Location),
+    IPs          = make_set(IPAddress),
+    Apps         = make_set(AppDisplayName),
+    FirstSeen    = min(TimeGenerated),
+    LastSeen     = max(TimeGenerated)
+  by UserPrincipalName, bin(TimeGenerated, 1h)
+| where CountryCount >= 3
+| order by CountryCount desc
+
+
+// -----------------------------------------------------------------------------
+// 12. NEW COUNTRY — FIRST-TIME ADFS ACCESS FROM UNSEEN LOCATION
+//     Baseline prior 30 days; alert on new country in last 7 days
+// -----------------------------------------------------------------------------
+let PriorCountries =
+    ADFSSignInLogs
+    | where TimeGenerated between (ago(44d) .. ago(14d))
+    | where ResultType == 0
+    | summarize KnownCountries = make_set(Location) by UserPrincipalName;
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| summarize NewCountries = make_set(Location), Count = count()
+  by UserPrincipalName
+| join kind=leftouter PriorCountries on UserPrincipalName
+| extend TrulyNew = set_difference(NewCountries, coalesce(KnownCountries, dynamic([])))
+| where array_length(TrulyNew) > 0
+| project UserPrincipalName, TrulyNew, NewCountries, KnownCountries, Count
+| order by array_length(TrulyNew) desc
+
+
+// -----------------------------------------------------------------------------
+// 13. TOR / ANONYMOUS PROXY DETECTION — ADFS (TI Feed Correlation)
+//     Stolen ADFS-issued tokens replayed from anonymized infrastructure
+// -----------------------------------------------------------------------------
+let TorExitIPs =
+    ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(30d)
+    | where Active == true
+    | where Tags has_any ("tor", "proxy", "anonymizer", "vpn", "anonymity")
+    | where isnotempty(NetworkIP)
+    | summarize AnonymizationType = make_set(Tags) by NetworkIP;
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| join kind=inner TorExitIPs on $left.IPAddress == $right.NetworkIP
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    AppDisplayName,
+    IPAddress,
+    Location,
+    AnonymizationType,
+    AuthenticationRequirement,
+    TokenIssuerName,
+    CorrelationId,
+    UniqueTokenIdentifier
+| order by TimeGenerated desc
+
+
+// -----------------------------------------------------------------------------
+// 14. THREAT INTELLIGENCE — ADFS SIGN-IN FROM KNOWN MALICIOUS IPS
+//     Any successful ADFS auth from TI-tagged IPs = likely stolen credential use
+// -----------------------------------------------------------------------------
+let MaliciousIPs =
+    ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(30d)
+    | where isnotempty(NetworkIP)
+       and  Active == true
+    | summarize ThreatTags = make_set(Tags), ThreatType = make_set(ThreatType)
+      by NetworkIP;
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| join kind=inner MaliciousIPs on $left.IPAddress == $right.NetworkIP
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    AppDisplayName,
+    IPAddress,
+    Location,
+    ThreatTags,
+    ThreatType,
+    AuthenticationRequirement,
+    TokenIssuerName,
+    ConditionalAccessStatus
+| order by TimeGenerated desc
+
+
+// =============================================================================
+// SECTION 4 — GOLDEN SAML & TOKEN ABUSE
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 15. UNEXPECTED TOKEN ISSUER — GOLDEN SAML INDICATOR
+//     In Golden SAML attacks, tokens are forged with a cloned signing cert.
+//     Watch for TokenIssuerName values you don't recognize in your federation farm.
+//     Replace with your known ADFS server names / federation service endpoints.
+// -----------------------------------------------------------------------------
+let KnownADFSIssuers = dynamic([
+    "YOUR_ADFS_FEDERATION_SERVICE_NAME",   // e.g. "adfs.contoso.com"
+    "urn:federation:MicrosoftOnline"
+]);
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| where TokenIssuerType == "ADFederationServices"
+| where TokenIssuerName !in (KnownADFSIssuers)
+   and  isnotempty(TokenIssuerName)
+| summarize
+    Count     = count(),
+    Users     = make_set(UserPrincipalName),
+    Apps      = make_set(AppDisplayName),
+    IPs       = make_set(IPAddress),
+    FirstSeen = min(TimeGenerated),
+    LastSeen  = max(TimeGenerated)
+  by TokenIssuerName
+| order by Count desc
+
+
+// -----------------------------------------------------------------------------
+// 16. SINGLE-FACTOR ADFS AUTH — MFA NOT ENFORCED (MFA GAP)
+//     Users authenticating through ADFS with only 1 factor when MFA should apply.
+//     "singleFactorAuthentication" + ADFS issuer = MFA bypass risk.
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| where AuthenticationRequirement == "singleFactorAuthentication"
+   and  TokenIssuerType == "ADFederationServices"
+| summarize
+    Count     = count(),
+    Apps      = make_set(AppDisplayName),
+    IPs       = make_set(IPAddress),
+    Countries = make_set(Location),
+    FirstSeen = min(TimeGenerated),
+    LastSeen  = max(TimeGenerated)
+  by UserPrincipalName
+| order by Count desc
+
+
+// -----------------------------------------------------------------------------
+// 17. HIGH SAML TOKEN VOLUME — AUTOMATED REPLAY INDICATOR
+//     Legitimate ADFS users don't generate hundreds of SAML tokens per hour.
+//     High-volume SAML issuance from one IP = automated credential stuffing
+//     or token farming for downstream replay.
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == 0
+| where TokenIssuerType == "ADFederationServices"
+| summarize
+    TokenCount = count(),
+    UniqueApps = dcount(AppDisplayName),
+    Apps       = make_set(AppDisplayName)
+  by UserPrincipalName, IPAddress, bin(TimeGenerated, 1h)
+| where TokenCount > 50
+| order by TokenCount desc
+
+
+// -----------------------------------------------------------------------------
+// 18. STALE ADFS TOKEN USE AFTER PASSWORD CHANGE
+//     Password changed/reset in AuditLogs, but ADFS tokens continue being issued.
+//     Attacker may hold a cloned signing cert or a persisted session cookie.
+// -----------------------------------------------------------------------------
+let PasswordChanges =
+    AuditLogs
+    | where TimeGenerated > ago(14d)
+    | where OperationName has_any (
+        "Reset password", "Change password", "Update user",
+        "User changed password",
+        "Admin updated user authentication method",
+        "Update Authentication Method",
+        "Delete Authentication Method"
+      )
+    | extend UPN = tostring(TargetResources[0].userPrincipalName)
+    | where isnotempty(UPN)
+    | summarize ChangeTime = max(TimeGenerated) by UPN;
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| join kind=inner PasswordChanges on $left.UserPrincipalName == $right.UPN
+| where TimeGenerated > ChangeTime
+| summarize
+    TokensAfterChange = count(),
+    IPs               = make_set(IPAddress),
+    Countries         = make_set(Location),
+    Apps              = make_set(AppDisplayName),
+    Protocols         = make_set(AuthenticationRequirement),
+    LastSeen          = max(TimeGenerated),
+    FirstTokenAfter   = min(TimeGenerated)
+  by UserPrincipalName, ChangeTime
+| order by TokensAfterChange desc
+
+
+// =============================================================================
+// SECTION 5 — LEGACY AUTHENTICATION & PROTOCOL ABUSE
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 19. LEGACY AUTHENTICATION PROTOCOLS VIA ADFS (MFA / CA BYPASS)
+//     EAS, IMAP, POP3, SMTP etc. cannot participate in MFA challenges.
+//     ADFS + legacy protocol = full security control bypass.
+//     Detected via UserAgent patterns (ADFSSignInLogs lacks ClientAppUsed).
+// -----------------------------------------------------------------------------
+let LegacyPatterns = dynamic([
+    "ActiveSync", "IMAP4", "IMAP", "POP3", "SMTP", "ExchangeWebServices",
+    "AutoDiscover", "EWS", "OutlookAnywhere", "MAPI",
+    "Microsoft Office", "MSExchangeFBA"
+]);
+ADFSSignInLogs
+| where TimeGenerated > ago(30d)
+| where UserAgent has_any (LegacyPatterns)
+| where ResultType == 0
+| summarize
+    SignInCount = count(),
+    IPs         = make_set(IPAddress),
+    Countries   = make_set(Location),
+    UserAgents  = make_set(UserAgent, 5),
+    FirstSeen   = min(TimeGenerated),
+    LastSeen    = max(TimeGenerated)
+  by UserPrincipalName, AppDisplayName
+| where SignInCount > 3
+| order by SignInCount desc
+
+
+// -----------------------------------------------------------------------------
+// 20. ADFS ROPC / DEVICE CODE FLOW DETECTION
+//     ROPC passes credentials directly; device code flow abused in phishing.
+//     Both bypass Conditional Access claims from ADFS federation.
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where AuthenticationProcessingDetails has_any ("ROPC", "ropc", "DeviceCode", "device_code", "deviceCode")
+   or   UserAgent has_any ("ROPC", "device_code", "devicecode", "PublicClientApp")
+| summarize
+    Count     = count(),
+    IPs       = make_set(IPAddress),
+    Countries = make_set(Location),
+    Apps      = make_set(AppDisplayName),
+    Errors    = make_set(ResultType),
+    Reqs      = make_set(AuthenticationRequirement),
+    FirstSeen = min(TimeGenerated),
+    LastSeen  = max(TimeGenerated)
+  by UserPrincipalName
+| order by Count desc
+
+
+// =============================================================================
+// SECTION 6 — ADVANCED CORRELATION WITH OTHER TABLES
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 21. ADFS AUTH → PRIVILEGED AUDIT ACTIONS (Session Hijack Indicator)
+//     User authenticates via ADFS, then performs privileged Azure AD operations
+//     (role management, app management, policy changes) within 60 minutes.
+//     Indicates stolen ADFS-issued token used to escalate privileges.
+// -----------------------------------------------------------------------------
+let ADFSUsers =
+    ADFSSignInLogs
+    | where TimeGenerated > ago(7d)
+    | where ResultType == 0
+    | summarize LastADFSSignIn = max(TimeGenerated), ADFSIPs = make_set(IPAddress)
+      by UserPrincipalName;
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where Category in (
+    "RoleManagement", "ApplicationManagement", "GroupManagement",
+    "Policy", "DeviceManagement", "UserManagement"
+  )
+| extend UPN = tostring(InitiatedBy.user.userPrincipalName)
+| where isnotempty(UPN)
+| join kind=inner ADFSUsers on $left.UPN == $right.UserPrincipalName
+| where (TimeGenerated - LastADFSSignIn) between (0m .. 60m)
+| project
+    AuditTime         = TimeGenerated,
+    UserPrincipalName = UPN,
+    OperationName,
+    AuditResult       = Result,
+    Category,
+    TargetResources,
+    LastADFSSignIn,
+    ADFSIPs,
+    TimeSinceADFSAuth = (TimeGenerated - LastADFSSignIn)
+| order by AuditTime desc
+
+
+// -----------------------------------------------------------------------------
+// 22. ADFS AUTH → EMAIL FORWARDING RULE (BEC INDICATOR)
+//     Attacker uses ADFS-issued token, then sets up inbox forwarding within 2h.
+//     Classic Business Email Compromise pattern after federated credential theft.
+// -----------------------------------------------------------------------------
+let ADFSAuthUsers =
+    ADFSSignInLogs
+    | where TimeGenerated > ago(7d)
+    | where ResultType == 0
+    | summarize
+        LastADFS = max(TimeGenerated),
+        ADFS_IPs = make_set(IPAddress)
+      by UserPrincipalName;
+OfficeActivity
+| where TimeGenerated > ago(7d)
+| where Operation in (
+    "New-InboxRule", "Set-InboxRule", "UpdateInboxRules", "Set-Mailbox"
+  )
+| where Parameters has_any (
+    "ForwardTo", "RedirectTo", "ForwardAsAttachmentTo",
+    "DeleteMessage", "MarkAsRead"
+  )
+| extend UPN = tolower(UserId)
+| join kind=inner ADFSAuthUsers on $left.UPN == $right.UserPrincipalName
+| where TimeGenerated > LastADFS
+   and  (TimeGenerated - LastADFS) < 2h
+| project
+    RuleCreationTime  = TimeGenerated,
+    UserPrincipalName = UPN,
+    Operation,
+    Parameters,
+    ADFS_IPs,
+    LastADFSSignIn    = LastADFS,
+    TimeSinceADFS     = (TimeGenerated - LastADFS),
+    ClientIP
+| order by RuleCreationTime desc
+
+
+// -----------------------------------------------------------------------------
+// 23. ADFS AUTH → BULK DATA DOWNLOAD (Exfiltration via ADFS Token)
+//     SharePoint/OneDrive bulk download correlated with ADFS-federated session.
+//     Common in cloud data exfiltration using on-prem stolen credentials.
+// -----------------------------------------------------------------------------
+let ADFSAuthUsers =
+    ADFSSignInLogs
+    | where TimeGenerated > ago(7d)
+    | where ResultType == 0
+    | summarize ADFSSignIns = count(), LastADFS = max(TimeGenerated)
+      by UserPrincipalName;
+OfficeActivity
+| where TimeGenerated > ago(7d)
+| where Operation in (
+    "FileDownloaded", "FileSyncDownloadedFull",
+    "SearchQueryPerformed", "FileAccessed"
+  )
+| summarize
+    OpCount   = count(),
+    FileCount = dcount(SourceFileName),
+    ClientIP  = tostring(make_set(ClientIP)[0])
+  by UserId
+| where OpCount > 100
+| join kind=inner ADFSAuthUsers on $left.UserId == $right.UserPrincipalName
+| project
+    UserPrincipalName = UserId,
+    OperationCount    = OpCount,
+    UniqueFiles       = FileCount,
+    ADFSSignIns,
+    LastADFS,
+    ClientIP
+| order by OperationCount desc
+
+
+// -----------------------------------------------------------------------------
+// 24. ADFS AUTH + RISKY USER CORRELATION (Identity Protection)
+//     Users flagged by Entra ID Identity Protection who are actively
+//     authenticating through the ADFS federation path (bypassing cloud controls).
+// -----------------------------------------------------------------------------
+let HighRiskUsers =
+    AADRiskyUsers
+    | where RiskState in ("atRisk", "confirmedCompromised")
+    | where RiskLevel in ("high", "medium")
+    | project UserPrincipalName, RiskLevel, RiskState, RiskDetail;
+ADFSSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == 0
+| summarize
+    ADFSCount      = count(),
+    Countries      = make_set(Location),
+    IPs            = make_set(IPAddress),
+    Apps           = make_set(AppDisplayName),
+    LastActivity   = max(TimeGenerated)
+  by UserPrincipalName
+| join kind=inner HighRiskUsers on UserPrincipalName
+| project
+    UserPrincipalName,
+    RiskLevel,
+    RiskState,
+    RiskDetail,
+    ADFSCount,
+    Countries,
+    IPs,
+    Apps,
+    LastActivity
+| order by ADFSCount desc
+
+
+// -----------------------------------------------------------------------------
+// 25. ADFS AUTH + RISKY SIGN-IN EVENTS (AADRiskySignIns)
+//     Entra risk engine flagged the session; investigate ADFS activity around it.
+// -----------------------------------------------------------------------------
+let RiskyEvents =
+    AADRiskySignIns
+    | where TimeGenerated > ago(14d)
+    | where RiskLevelDuringSignIn in ("high", "medium")
+    | where RiskState != "dismissed"
+    | summarize
+        MaxRisk      = max(RiskLevelDuringSignIn),
+        RiskReasons  = make_set(RiskEventTypes),
+        LastRisky    = max(TimeGenerated)
+      by UserPrincipalName;
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| summarize
+    ADFSCount  = count(),
+    Countries  = make_set(Location),
+    IPs        = make_set(IPAddress),
+    LastADFS   = max(TimeGenerated)
+  by UserPrincipalName
+| join kind=inner RiskyEvents on UserPrincipalName
+| project
+    UserPrincipalName,
+    MaxRisk,
+    RiskReasons,
+    LastRisky,
+    ADFSCount,
+    Countries,
+    IPs,
+    LastADFS
+| order by ADFSCount desc
+
+
+// -----------------------------------------------------------------------------
+// 26. MFA FATIGUE → ADFS FEDERATION PIVOT
+//     User bombarded with MFA push prompts (SigninLogs), eventually approves,
+//     attacker then pivots to ADFS-federated resources silently.
+// -----------------------------------------------------------------------------
+let MFAFatigue =
+    SigninLogs
+    | where TimeGenerated > ago(14d)
+    | where ResultType in (50074, 500121, 50076)
+    | summarize
+        MFAAttempts  = count(),
+        FirstAttempt = min(TimeGenerated)
+      by UserPrincipalName;
+let MFASuccess =
+    SigninLogs
+    | where TimeGenerated > ago(14d)
+    | where ResultType == 0
+    | where AuthenticationRequirement == "multiFactorAuthentication"
+    | summarize MFASuccessTime = min(TimeGenerated)
+      by UserPrincipalName;
+MFAFatigue
+| where MFAAttempts >= 3
+| join kind=inner MFASuccess on UserPrincipalName
+| where MFASuccessTime > FirstAttempt
+| join kind=inner (
+    ADFSSignInLogs
+    | where TimeGenerated > ago(14d)
+    | where ResultType == 0
+    | summarize
+        ADFS_Count     = count(),
+        ADFS_Countries = make_set(Location),
+        ADFS_IPs       = make_set(IPAddress)
+      by UserPrincipalName
+  ) on UserPrincipalName
+| where ADFS_Count > 5
+| project
+    UserPrincipalName,
+    MFAAttempts,
+    FirstMFAPrompt = FirstAttempt,
+    MFASuccessTime,
+    ADFS_Count,
+    ADFS_Countries,
+    ADFS_IPs
+| order by MFAAttempts desc
+
+
+// -----------------------------------------------------------------------------
+// 27. PIM ACTIVATION → ADFS SIGN-IN (Privilege Abuse via Federation)
+//     PIM elevated privileges in AuditLogs, then ADFS token used within 30 min.
+//     Suggests attacker activated privileged role via stolen ADFS credential.
+// -----------------------------------------------------------------------------
+let PIMActivations =
+    AuditLogs
+    | where TimeGenerated > ago(14d)
+    | where OperationName has "Add member to role completed (PIM activation)"
+    | extend UPN = tostring(InitiatedBy.user.userPrincipalName)
+    | where isnotempty(UPN)
+    | project
+        ActivationTime = TimeGenerated,
+        UPN,
+        RoleName = tostring(TargetResources[0].displayName);
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| join kind=inner PIMActivations on $left.UserPrincipalName == $right.UPN
+| where TimeGenerated > ActivationTime
+   and  (TimeGenerated - ActivationTime) < 30m
+| project
+    ADFSSignInTime     = TimeGenerated,
+    ActivationTime,
+    UserPrincipalName,
+    RoleName,
+    AppDisplayName,
+    IPAddress,
+    Location,
+    AuthenticationRequirement,
+    TimeSincePIM       = (TimeGenerated - ActivationTime)
+| order by ADFSSignInTime desc
+
+
+// -----------------------------------------------------------------------------
+// 28. INTERACTIVE SIGN-IN ↔ ADFS COUNTRY MISMATCH (SAME DAY)
+//     User has interactive (cloud) sign-in from country A, but ADFS-federated
+//     sign-in from country B on the same day — impossible without VPN or token theft.
+// -----------------------------------------------------------------------------
+let InteractiveByDay =
+    SigninLogs
+    | where TimeGenerated > ago(14d)
+    | where ResultType == 0
+    | summarize InteractiveCountries = make_set(Location)
+      by UserPrincipalName, Day = bin(TimeGenerated, 1d);
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| summarize ADFS_Countries = make_set(Location)
+  by UserPrincipalName, Day = bin(TimeGenerated, 1d)
+| join kind=inner InteractiveByDay on UserPrincipalName, Day
+| extend Overlap     = set_intersect(ADFS_Countries, InteractiveCountries)
+| extend NewCountries = set_difference(ADFS_Countries, InteractiveCountries)
+| where array_length(NewCountries) > 0
+| project Day, UserPrincipalName, InteractiveCountries, ADFS_Countries, NewCountries
+| order by Day desc
+
+
+// -----------------------------------------------------------------------------
+// 29. OAUTH CONSENT GRANT → ADFS FEDERATION ABUSE
+//     OAuth app consent in AuditLogs, then the same app immediately generates
+//     ADFS-federated sign-ins within 24 hours. Illicit OAuth consent via ADFS.
+// -----------------------------------------------------------------------------
+let RecentConsents =
+    AuditLogs
+    | where TimeGenerated > ago(14d)
+    | where OperationName has_any (
+        "Consent to application",
+        "Add app role assignment",
+        "Add delegated permission grant"
+      )
+    | extend ActorUPN   = tostring(InitiatedBy.user.userPrincipalName)
+    | extend AppId      = tostring(TargetResources[0].id)
+    | extend AppName    = tostring(TargetResources[0].displayName)
+    | where isnotempty(ActorUPN)
+    | project ConsentTime = TimeGenerated, ActorUPN, AppId, AppName, OperationName;
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| join kind=inner RecentConsents
+    on $left.UserPrincipalName == $right.ActorUPN,
+       $left.AppId             == $right.AppId
+| where TimeGenerated > ConsentTime
+   and  (TimeGenerated - ConsentTime) < 24h
+| summarize
+    ADFS_Count   = count(),
+    IPs          = make_set(IPAddress),
+    Countries    = make_set(Location),
+    FirstUse     = min(TimeGenerated)
+  by UserPrincipalName, AppName, AppId, ConsentTime, OperationName
+| order by ConsentTime desc
+
+
+// =============================================================================
+// SECTION 7 — BOTNET & AUTOMATED ATTACK DETECTION
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 30. BOTNET SIGNATURE — SAME USER-AGENT ACROSS MANY ACCOUNTS
+//     Botnets reuse one user agent string across all nodes hitting ADFS endpoints.
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where isnotempty(UserAgent)
+| summarize
+    UserCount    = dcount(UserPrincipalName),
+    IPCount      = dcount(IPAddress),
+    Users        = make_set(UserPrincipalName, 10),
+    IPs          = make_set(IPAddress, 10),
+    RequestCount = count()
+  by UserAgent
+| where UserCount > 50
+   and  IPCount   > 5
+| order by UserCount desc
+
+
+// -----------------------------------------------------------------------------
+// 31. REGULAR-INTERVAL HEARTBEAT — C2 PATTERN
+//     Malware refreshes ADFS tokens at exact fixed cadences (low stddev).
+//     Machine-like regularity: legitimate users authenticate irregularly.
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| sort by UserPrincipalName asc, AppId asc, TimeGenerated asc
+| extend PrevTime = prev(TimeGenerated, 1),
+         PrevUser = prev(UserPrincipalName, 1),
+         PrevApp  = prev(AppId, 1)
+| where UserPrincipalName == PrevUser and AppId == PrevApp
+| extend IntervalSecs = datetime_diff("second", TimeGenerated, PrevTime)
+| where IntervalSecs > 0 and IntervalSecs < 7200
+| summarize
+    AvgInterval = avg(IntervalSecs),
+    StdDev      = stdev(IntervalSecs),
+    Count       = count(),
+    IPs         = make_set(IPAddress)
+  by UserPrincipalName, AppDisplayName
+| where Count  > 20
+   and  StdDev < 30
+| order by StdDev asc
+
+
+// -----------------------------------------------------------------------------
+// 32. IP REUSE ACROSS MANY ACCOUNTS (SHARED BOTNET NODE)
+//     One IP authenticating as many different users via ADFS = shared bot node.
+//     Attackers run credential stuffing from a single cloud VM/proxy.
+// -----------------------------------------------------------------------------
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| where ResultType == 0
+| summarize
+    UserCount   = dcount(UserPrincipalName),
+    Users       = make_set(UserPrincipalName, 20),
+    Apps        = make_set(AppDisplayName, 10),
+    Countries   = make_set(Location),
+    SignInCount = count(),
+    FirstSeen   = min(TimeGenerated)
+  by IPAddress
+| where UserCount > 20
+| order by UserCount desc
+
+
+// -----------------------------------------------------------------------------
+// 33. BOTNET TI CORRELATION — ADFS SIGN-INS FROM C2/MALWARE IPS
+// -----------------------------------------------------------------------------
+let BotnetIPs =
+    ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(30d)
+    | where Active == true
+    | where Tags has_any ("botnet", "c2", "malware", "rat", "trojan", "backdoor")
+    | where isnotempty(NetworkIP)
+    | summarize
+        ThreatTags = make_set(Tags),
+        ThreatName = make_set(ThreatType)
+      by NetworkIP;
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| join kind=inner BotnetIPs on $left.IPAddress == $right.NetworkIP
+| summarize
+    Count       = count(),
+    Users       = make_set(UserPrincipalName),
+    Apps        = make_set(AppDisplayName),
+    ResultCodes = make_set(ResultType)
+  by IPAddress, tostring(ThreatTags), tostring(ThreatName)
+| order by Count desc
+
+
+// =============================================================================
+// SECTION 8 — FULL-FIDELITY FORENSIC TIMELINE & HUNTING DASHBOARD
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// 34. FORENSIC TIMELINE — SINGLE USER PIVOT (ADFS + ALL TABLES)
+//     Replace TargetUser with a UPN to correlate all activity for one account.
+// -----------------------------------------------------------------------------
+let TargetUser = "REPLACE_WITH_UPN@yourdomain.com";
+let Window     = ago(14d);
+// ADFS sign-ins
+ADFSSignInLogs
+| where TimeGenerated > Window
+| where UserPrincipalName == TargetUser
+| project
+    TimeGenerated,
+    TableSource = "ADFS_SignIn",
+    Details     = strcat(AppDisplayName, " | ", IPAddress, " | ",
+                         Location, " | Req:", AuthenticationRequirement,
+                         " | RC:", tostring(ResultType)),
+    CorrelationId
+// Interactive sign-ins
+| union (
+    SigninLogs
+    | where TimeGenerated > Window
+    | where UserPrincipalName == TargetUser
+    | project
+        TimeGenerated,
+        TableSource = "Interactive_SignIn",
+        Details     = strcat(AppDisplayName, " | ", IPAddress, " | ",
+                             Location, " | RC:", tostring(ResultType)),
+        CorrelationId
+  )
+// Non-interactive sign-ins
+| union (
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated > Window
+    | where UserPrincipalName == TargetUser
+    | project
+        TimeGenerated,
+        TableSource = "NI_SignIn",
+        Details     = strcat(AppDisplayName, " | ", IPAddress, " | ",
+                             Location, " | RC:", tostring(ResultType)),
+        CorrelationId
+  )
+// Audit actions
+| union (
+    AuditLogs
+    | where TimeGenerated > Window
+    | where InitiatedBy.user.userPrincipalName == TargetUser
+    | project
+        TimeGenerated,
+        TableSource = "AuditLog",
+        Details     = strcat(OperationName, " | ", Result, " | ", Category),
+        CorrelationId
+  )
+// Security alerts
+| union (
+    SecurityAlert
+    | where TimeGenerated > Window
+    | mv-expand todynamic(Entities)
+    | where Entities.UserPrincipalName == TargetUser
+    | project
+        TimeGenerated,
+        TableSource = "SecurityAlert",
+        Details     = strcat(AlertName, " | ", AlertSeverity, " | ", ProviderName),
+        CorrelationId = ""
+  )
+| order by TimeGenerated asc
+
+
+// -----------------------------------------------------------------------------
+// 35. SIGN-IN SPIKE DETECTION — STATISTICAL ANOMALY (3× DAILY AVERAGE)
+//     Sudden explosion of ADFS auth events = automated attack or Golden SAML replay
+// -----------------------------------------------------------------------------
+let DailyAvg =
+    ADFSSignInLogs
+    | where TimeGenerated between (ago(44d) .. ago(14d))
+    | summarize AvgDaily = count() / 30.0
+      by UserPrincipalName;
+ADFSSignInLogs
+| where TimeGenerated > ago(14d)
+| summarize DailyCount = count()
+  by UserPrincipalName, Day = bin(TimeGenerated, 1d)
+| join kind=inner DailyAvg on UserPrincipalName
+| where DailyCount > (AvgDaily * 3)
+   and  AvgDaily   > 5
+| project
+    Day,
+    UserPrincipalName,
+    DailyCount,
+    AvgDaily,
+    SpikeFactor = round(DailyCount / AvgDaily, 1)
+| order by SpikeFactor desc
+
+
+// -----------------------------------------------------------------------------
+// 36. HUNTING SUMMARY DASHBOARD — MULTI-SIGNAL RISK SCORING
+//     Score each user across: impossible travel, spray victim, extranet lockout,
+//     high-risk country, risky identity, high ADFS volume.
+// -----------------------------------------------------------------------------
+let Window = ago(14d);
+let Countries = (
+    ADFSSignInLogs
+    | where TimeGenerated > Window | where ResultType == 0
+    | summarize CountryCount = dcount(Location) by UserPrincipalName);
+let HighFreq = (
+    ADFSSignInLogs
+    | where TimeGenerated > Window | where ResultType == 0
+    | summarize ADFS_Total = count() by UserPrincipalName);
+let BruteVictim = (
+    ADFSSignInLogs
+    | where TimeGenerated > Window
+    | where tostring(ResultType) in ("50126", "50053", "50034", "396083")
+    | summarize BruteCount = count() by UserPrincipalName);
+let Risky = (
+    AADRiskyUsers
+    | where RiskLevel in ("high", "medium")
+    | where RiskState in ("atRisk", "confirmedCompromised")
+    | project UserPrincipalName, RiskLevel, RiskState);
+let HighRiskCountry = (
+    ADFSSignInLogs
+    | where TimeGenerated > Window | where ResultType == 0
+    | where Location in (dynamic(["KP","IR","RU","CN","BY","CU","SY","VE","MM"]))
+    | summarize HRCCount = count() by UserPrincipalName);
+Countries
+| join kind=leftouter HighFreq      on UserPrincipalName
+| join kind=leftouter BruteVictim   on UserPrincipalName
+| join kind=leftouter Risky         on UserPrincipalName
+| join kind=leftouter HighRiskCountry on UserPrincipalName
+| extend RiskScore =
+    iff(CountryCount  >= 4,     3, iff(CountryCount >= 2,   1, 0)) +
+    iff(ADFS_Total    > 5000,   3, iff(ADFS_Total   >= 1000, 1, 0)) +
+    iff(BruteCount    > 50,     3, iff(BruteCount   >= 10,   1, 0)) +
+    iff(isnotempty(RiskState),  5, 0) +
+    iff(HRCCount      > 0,      3, 0)
+| where RiskScore > 0
+| project
+    UserPrincipalName,
+    RiskScore,
+    RiskState,
+    RiskLevel,
+    CountryCount,
+    ADFS_Total,
+    BruteCount,
+    HRCCount
+| order by RiskScore desc
