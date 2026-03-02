@@ -1,0 +1,60 @@
+id: a7b8c9d0-e1f2-4a3b-4c5d-6e7f8a9b0c1d
+name: "Fortinet IPS - High-Frequency Intrusion Prevention Alerts"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Surfaces Fortinet IPS and Application Control block events that occurred more than 10 times
+  in a 24-hour period. Repeated IPS hits against the same signature from the same source may
+  indicate an active exploitation attempt, automated attack tooling, or a compromised internal
+  host attempting to exploit adjacent systems.
+  MITRE ATT&CK: T1190 (Exploit Public-Facing Application), T1203 (Exploitation for Client Execution)
+severity: High
+requiredDataConnectors:
+  - connectorId: CommonSecurityEvents
+    dataTypes:
+      - CommonSecurityLog
+queryFrequency: 1h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - Execution
+relevantTechniques:
+  - T1190
+  - T1203
+query: |
+  CommonSecurityLog
+  | where TimeGenerated > ago(1d)
+  | where DeviceVendor == "Fortinet"
+  | where DeviceEventClassID has_any ("IPS", "anomaly", "signature")
+      or Activity has_any ("ips-packet", "app-ctrl", "anomaly")
+  | summarize
+      HitCount         = count(),
+      SourceIPs        = make_set(SourceIP, 20),
+      DestinationIPs   = make_set(DestinationIP, 20),
+      ProtocolsUsed    = make_set(Protocol, 5),
+      SeverityValues   = make_set(LogSeverity, 5),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+    by Activity, DeviceEventClassID
+  | where HitCount > 10
+  | order by HitCount desc
+entityMappings: []
+customDetails:
+  HitCount: HitCount
+  Activity: Activity
+alertDetailsOverride:
+  alertDisplayNameFormat: "Fortinet IPS Alert - {{Activity}} ({{HitCount}} hits)"
+  alertDescriptionFormat: "Fortinet IPS/App Control signature {{Activity}} triggered {{HitCount}} events. Review source IPs and affected destinations for active exploitation."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: AnyAlert
+    groupByEntities: []
+    groupByAlertDetails: []
+    groupByCustomDetails:
+      - Activity
