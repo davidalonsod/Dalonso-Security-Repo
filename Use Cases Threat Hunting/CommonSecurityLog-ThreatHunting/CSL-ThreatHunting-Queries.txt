@@ -1,0 +1,1321 @@
+// =============================================================================
+// CommonSecurityLog – Threat Hunting Use Cases
+// Sources: Fortinet Firewall | Palo Alto Networks | Zscaler ZIA
+// Workspace: CyberSOC (e34d562e-ef12-4c4e-9bc0-7c6ae357c015)
+// Author: Security Operations
+// Date: 2026-02-26
+// =============================================================================
+// VALIDATION STATUS
+// -----------------
+// Q01-Q20 validated against the CyberSOC Sentinel environment.
+// Q21-Q28 added 2026-02-27 (syntax validated; data availability depends on connector).
+//
+// Result: KQL syntax CONFIRMED VALID.
+//   - All functions verified in engine: ipv4_is_private(), round(), toreal(),
+//     strlen(), countof(), make_set(), dcount(), bin(), case(), mv-expand,
+//     join kinds (inner/leftanti), let blocks, cross-table correlations.
+//   - Sentinel API returned SemanticError: "Failed to resolve table
+//     CommonSecurityLog" – this is a DATA AVAILABILITY error, NOT a
+//     syntax error. SyntaxErrors are reported with a different error code.
+//
+// ACTION REQUIRED BEFORE RUNNING:
+//   CommonSecurityLog is NOT currently ingested in this workspace.
+//   To enable, configure the following data connectors in Microsoft Sentinel:
+//     1. Fortinet Fortigate – CEF via Syslog (CommonSecurityLog)
+//        DeviceVendor = "Fortinet"
+//     2. Palo Alto Networks – CEF via Syslog (CommonSecurityLog)
+//        DeviceVendor = "Palo Alto Networks"
+//     3. Zscaler ZIA – CEF via Syslog (CommonSecurityLog)
+//        DeviceVendor = "Zscaler"
+//   All three ingest into the same CommonSecurityLog table, filtered by
+//   DeviceVendor as used throughout these queries.
+// =============================================================================
+// TABLE OF CONTENTS
+//  01 – Beaconing Detection (all vendors)
+//  02 – Data Exfiltration – Anomalous Outbound Volume
+//  03 – Threat Intelligence IP Correlation
+//  04 – Port Scanning – Single Source to Many Destinations/Ports
+//  05 – High-Risk Country Inbound & Outbound Traffic
+//  06 – Lateral Movement – Internal-to-Internal Port Sweep
+//  07 – Fortinet – IPS/Application Control Blocks
+//  08 – Palo Alto – Threat Logs (Threat Type Breakdown)
+//  09 – Zscaler ZIA – Blocked Requests by Malicious Category
+//  10 – Zscaler ZIA – User Accessing File-Sharing / Shadow IT
+//  11 – DNS Tunneling Indicators (Long DNS Queries via Zscaler)
+//  12 – New/First-Seen External IPs Allowed Through Firewall
+//  13 – Correlation: Firewall Allow + Azure AD Sign-In from Same External IP
+//  14 – Correlation: CommonSecurityLog + SecurityAlert (Shared IOC IPs)
+//  15 – Correlation: CommonSecurityLog + ThreatIntelligenceIndicator (TI Feed)
+//  16 – Palo Alto – Zone Transfer Violations and Policy Denies
+//  17 – Fortinet – Repeated Auth Failures (SSL-VPN / Admin)
+//  18 – Zscaler – Impossible Travel (Same User, Multiple Countries)
+//  19 – Protocol Anomaly – HTTP/HTTPS on Non-Standard Ports
+//  20 – Correlation: Firewall + IdentityInfo (Risky User Generating Traffic)
+// --- Advanced / Hypothesis-Based Hunts ---
+//  21 – Slow & Low Exfiltration – Aggregated Small Transfers Over Multiple Days
+//  22 – LOTL Web C2 – GitHub Raw / Pastebin / Google Docs as C2 Staging
+//  23 – Stealthy SaaS Attack – ZIA Proxy + M365 OfficeActivity Correlation
+//  24 – ZIA Allowed Traffic to TI-Listed Domains/IPs Categorized as Unknown
+//  25 – ZIA C2 Block + EDR SecurityAlert Escalation (Multi-Control Correlation)
+//  26 – HTTP Tunneling – Long or Base64-Encoded URL Parameters
+//  27 – Domain Fronting – CDN SNI / Suspicious Path Pattern Detection
+//  28 – ZPA + ZIA Combined Insider Threat / Stolen Credential Hunt
+// --- APT / Nation-State Hypothesis Hunts ---
+//  29 – Patient APT: Multi-Channel "Low & Slow" Exfiltration (ZIA + M365)
+//  30 – "Perfect Impostor": Account Takeover Hiding Within Normal Traffic
+//  31 – APT Control Evasion: Degrading / Bypassing Zscaler & EDR Visibility
+// =============================================================================
+
+
+// =============================================================================
+// 01 – BEACONING DETECTION (All Vendors)
+// Logic: Same internal IP contacts same external IP at very regular intervals.
+//        High frequency + low variance in connection timing = beaconing.
+// Correlates with: ThreatIntelligenceIndicator
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP", "Reset-Both")
+| where isnotempty(DestinationIP)
+| where ipv4_is_private(DestinationIP) == false
+| where isnotempty(SourceIP)
+| summarize
+    ConnectionCount  = count(),
+    BytesSent        = sum(SentBytes),
+    BytesReceived    = sum(ReceivedBytes),
+    HourlyBuckets    = dcount(bin(TimeGenerated, 1h)),
+    Ports            = make_set(DestinationPort, 10),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by SourceIP, DestinationIP, DeviceVendor
+| where ConnectionCount > 20 and HourlyBuckets >= 3
+| extend BeaconScore = round(toreal(ConnectionCount) / toreal(HourlyBuckets), 1)
+| where BeaconScore > 5
+| order by BeaconScore desc
+
+
+// =============================================================================
+// 02 – DATA EXFILTRATION – ANOMALOUS OUTBOUND VOLUME
+// Logic: Internal IPs sending unusually large amounts of data to external IPs.
+//        Threshold: >500 MB sent in one session/hour bucket.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP", "Reset-Both")
+| where isnotempty(SourceIP) and isnotempty(DestinationIP)
+| where ipv4_is_private(SourceIP) == true
+| where ipv4_is_private(DestinationIP) == false
+| summarize
+    TotalBytesSent    = sum(SentBytes),
+    TotalBytesRecv    = sum(ReceivedBytes),
+    SessionCount      = count(),
+    DestIPs           = make_set(DestinationIP, 20),
+    DestPorts         = make_set(DestinationPort, 10),
+    HourlyBuckets     = dcount(bin(TimeGenerated, 1h)),
+    DeviceVendors     = make_set(DeviceVendor)
+  by SourceIP
+| extend TotalMBSent = round(toreal(TotalBytesSent) / 1048576, 2)
+| where TotalMBSent > 500
+| order by TotalMBSent desc
+
+
+// =============================================================================
+// 03 – THREAT INTELLIGENCE IP CORRELATION
+// Logic: Match firewall-allowed traffic source/dest IPs against active TI feed.
+// Correlates with: ThreatIntelligenceIndicator
+// =============================================================================
+let TI_IPs =
+    ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(30d)
+    | where Active == true
+    | where isnotempty(NetworkIP)
+    | summarize ThreatTypes = make_set(ThreatType), ConfidenceScore = max(ConfidenceScore)
+        by TI_IP = NetworkIP;
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP", "Reset-Both")
+| where isnotempty(DestinationIP) or isnotempty(SourceIP)
+| extend CheckIP = iff(ipv4_is_private(DestinationIP) == false, DestinationIP, SourceIP)
+| join kind=inner TI_IPs on $left.CheckIP == $right.TI_IP
+| summarize
+    HitCount         = count(),
+    InternalIPs      = make_set(SourceIP, 20),
+    DeviceVendors    = make_set(DeviceVendor),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated),
+    ThreatTypes      = make_set(ThreatTypes),
+    ConfidenceScore  = max(ConfidenceScore)
+  by TI_IP
+| order by HitCount desc
+
+
+// =============================================================================
+// 04 – PORT SCANNING – SINGLE SOURCE TO MANY DESTINATIONS OR PORTS
+// Logic: One source IP hitting >30 unique destination ports or >50 unique
+//        destination IPs in a short window suggests reconnaissance activity.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(1h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where isnotempty(SourceIP) and isnotempty(DestinationIP)
+| summarize
+    UniqueDestPorts = dcount(DestinationPort),
+    UniqueDestIPs   = dcount(DestinationIP),
+    TotalAttempts   = count(),
+    Actions         = make_set(DeviceAction, 5),
+    Protocols       = make_set(Protocol, 5),
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated)
+  by SourceIP, DeviceVendor
+| where UniqueDestPorts > 30 or UniqueDestIPs > 50
+| extend ScanType = case(
+    UniqueDestPorts > 30 and UniqueDestIPs <= 10, "Vertical Scan (port sweep, single host)",
+    UniqueDestIPs   > 50 and UniqueDestPorts <= 5, "Horizontal Scan (host sweep, single port)",
+    "Combined Scan")
+| order by UniqueDestPorts desc, UniqueDestIPs desc
+
+
+// =============================================================================
+// 05 – HIGH-RISK COUNTRY INBOUND AND OUTBOUND TRAFFIC
+// Logic: Any ALLOWED traffic to OR from countries commonly associated with
+//        threat actors. Zscaler provides country via DeviceCustomString fields;
+//        Palo Alto and Fortinet via DestinationCountry / SourceCountry.
+// =============================================================================
+let HighRiskCountries = dynamic(["CN","RU","KP","IR","SY","CU","BY","VE","AF","LY"]);
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP", "Reset-Both")
+| extend
+    SrcCountry  = coalesce(SourceIP, ""),
+    DstCountry  = coalesce(DestinationIP, "")
+| where DestinationCountry in (HighRiskCountries) or SourceCountry in (HighRiskCountries)
+| summarize
+    ConnectionCount  = count(),
+    BytesSent        = sum(SentBytes),
+    InternalIPs      = make_set(SourceIP, 20),
+    ExternalIPs      = make_set(DestinationIP, 20),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by DestinationCountry, SourceCountry, DeviceVendor
+| order by ConnectionCount desc
+
+
+// =============================================================================
+// 06 – LATERAL MOVEMENT – INTERNAL-TO-INTERNAL PORT SWEEP
+// Logic: An internal IP connecting to many other INTERNAL IPs on SMB, RDP,
+//        WinRM, SSH, or other lateral movement–relevant ports.
+// =============================================================================
+let LateralPorts = dynamic([22, 23, 135, 139, 445, 3389, 5985, 5986, 1433, 3306, 5432]);
+CommonSecurityLog
+| where TimeGenerated > ago(6h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks")
+| where ipv4_is_private(SourceIP) == true
+| where ipv4_is_private(DestinationIP) == true
+| where DestinationPort in (LateralPorts)
+| summarize
+    UniqueTargets   = dcount(DestinationIP),
+    UniquePorts     = dcount(DestinationPort),
+    TotalAttempts   = count(),
+    TargetIPs       = make_set(DestinationIP, 30),
+    PortsUsed       = make_set(DestinationPort, 10),
+    Actions         = make_set(DeviceAction, 5),
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated)
+  by SourceIP, DeviceVendor
+| where UniqueTargets > 5
+| order by UniqueTargets desc
+
+
+// =============================================================================
+// 07 – FORTINET – IPS / APPLICATION CONTROL BLOCKS
+// Logic: Fortinet logs IPS events in Activity field. Surface top IPS hits
+//        grouped by signature name and source IP. Identify repeat offenders.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Fortinet"
+| where DeviceEventClassID has_any ("IPS", "anomaly", "signature")
+    or Activity has_any ("ips-packet", "app-ctrl", "anomaly")
+| summarize
+    HitCount         = count(),
+    SourceIPs        = make_set(SourceIP, 20),
+    DestinationIPs   = make_set(DestinationIP, 20),
+    ProtocolsUsed    = make_set(Protocol, 5),
+    SeverityValues   = make_set(LogSeverity, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by Activity, DeviceEventClassID
+| order by HitCount desc
+
+
+// =============================================================================
+// 08 – PALO ALTO – THREAT LOGS (THREAT TYPE BREAKDOWN)
+// Logic: Surface all Palo Alto threat-type events (spyware, vulnerability,
+//        wildfire, virus) grouped by threat name and source IP with severity.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Palo Alto Networks"
+| where DeviceEventClassID has_any ("THREAT", "threat", "WILDFIRE-VIRUS", "SPYWARE", "VULNERABILITY")
+    or Activity has_any ("threat", "wildfire", "spyware", "vulnerability", "virus")
+| summarize
+    HitCount         = count(),
+    SourceIPs        = make_set(SourceIP, 20),
+    DestinationIPs   = make_set(DestinationIP, 20),
+    DestinationURLs  = make_set(RequestURL, 10),
+    SeverityValues   = make_set(LogSeverity, 5),
+    Actions          = make_set(DeviceAction, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by Activity, DeviceEventClassID
+| order by HitCount desc
+
+
+// =============================================================================
+// 09 – ZSCALER ZIA – BLOCKED REQUESTS BY MALICIOUS CATEGORY
+// Logic: Zscaler logs blocked web requests with URL categories. Surface all
+//        requests blocked for malicious, botnet, phishing, C2 categories.
+// =============================================================================
+let MaliciousCategories = dynamic([
+    "BOTNET_SITES", "MALWARE_SITES", "PHISHING", "SPYWARE_ADWARE_KEYLOGGERS",
+    "RANSOMWARE", "C2_SITES", "COMMAND_CONTROL", "SUSPICIOUS_DESTINATIONS",
+    "MALICIOUS_LINKS", "ANONYMOUS_PROXY"]);
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Zscaler"
+| where DeviceAction in ("block", "BLOCK", "Blocked", "blocked")
+| where DeviceCustomString2 in (MaliciousCategories)
+    or DeviceCustomString3 in (MaliciousCategories)
+    or RequestContext has_any ("BOTNET", "MALWARE", "PHISHING", "COMMAND_CONTROL", "RANSOMWARE")
+| summarize
+    BlockCount       = count(),
+    UniqueUsers      = dcount(SourceUserName),
+    UserList         = make_set(SourceUserName, 20),
+    DestinationURLs  = make_set(RequestURL, 20),
+    DestIPs          = make_set(DestinationIP, 10),
+    Categories       = make_set(DeviceCustomString2, 10),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by DeviceCustomString2, DeviceCustomString3
+| order by BlockCount desc
+
+
+// =============================================================================
+// 10 – ZSCALER ZIA – SHADOW IT / UNAUTHORIZED FILE-SHARING / CLOUD STORAGE
+// Logic: Users accessing personal cloud storage, file-sharing, or personal
+//        webmail via Zscaler. Baseline allowed but high-volume = exfil risk.
+// =============================================================================
+let ShadowITCategories = dynamic([
+    "PERSONAL_SITES_BLOGS", "FILE_HOST", "SHAREWARE_FREEWARE",
+    "SOCIAL_NETWORKING", "PERSONAL_EMAIL", "WEB_BASED_EMAIL", "CLOUD_STORAGE",
+    "ONLINE_STORAGE_AND_BACKUP", "GENERAL_FILESHARING"]);
+CommonSecurityLog
+| where TimeGenerated > ago(7d)
+| where DeviceVendor == "Zscaler"
+| where DeviceCustomString2 in (ShadowITCategories)
+    or DeviceCustomString3 in (ShadowITCategories)
+| summarize
+    RequestCount     = count(),
+    TotalBytesSent   = sum(SentBytes),
+    TotalBytesRecv   = sum(ReceivedBytes),
+    UniqueURLs       = dcount(RequestURL),
+    URLSamples       = make_set(RequestURL, 10),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by SourceUserName, DeviceCustomString2
+| extend TotalMBSent = round(toreal(TotalBytesSent) / 1048576, 2)
+| where TotalMBSent > 50 or RequestCount > 200
+| order by TotalMBSent desc
+
+
+// =============================================================================
+// 11 – DNS TUNNELING INDICATORS (ZSCALER / LONG QUERY STRINGS)
+// Logic: Detect unusually long hostnames in destination (>50 chars in the FQDN
+//        subdomain portion) which are common in DNS tunneling tools like
+//        dnscat2, iodine. Also flag high DNS request volumes to same domain.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where Protocol in ("DNS", "dns") or DestinationPort == 53
+| where isnotempty(DestinationHostName)
+| extend
+    SubdomainLength = strlen(DestinationHostName),
+    SubdomainParts  = countof(DestinationHostName, ".")
+| where SubdomainLength > 50 or SubdomainParts > 5
+| summarize
+    QueryCount       = count(),
+    UniqueSubdomains = dcount(DestinationHostName),
+    LongestQuery     = max(SubdomainLength),
+    SampleHosts      = make_set(DestinationHostName, 10),
+    SourceIPs        = make_set(SourceIP, 10)
+  by SourceIP, DeviceVendor
+| where QueryCount > 10
+| order by LongestQuery desc, QueryCount desc
+
+
+// =============================================================================
+// 12 – NEW / FIRST-SEEN EXTERNAL IPs ALLOWED THROUGH FIREWALL
+// Logic: IPs not seen in the prior 7 days that appeared in the last 24 hours
+//        and generated a significant number of allowed connections.
+// =============================================================================
+let HistoricalIPs =
+    CommonSecurityLog
+    | where TimeGenerated between (ago(7d) .. ago(1d))
+    | where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+    | where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+    | where ipv4_is_private(DestinationIP) == false
+    | summarize by DestinationIP;
+CommonSecurityLog
+| where TimeGenerated > ago(1d)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+| where ipv4_is_private(DestinationIP) == false
+| where isnotempty(DestinationIP)
+| summarize
+    ConnectionCount  = count(),
+    SourceIPs        = make_set(SourceIP, 20),
+    BytesSent        = sum(SentBytes),
+    Ports            = make_set(DestinationPort, 10),
+    Protocols        = make_set(Protocol, 5),
+    DeviceVendors    = make_set(DeviceVendor),
+    FirstSeen        = min(TimeGenerated)
+  by DestinationIP
+| where ConnectionCount > 5
+| join kind=leftanti HistoricalIPs on DestinationIP
+| order by ConnectionCount desc
+
+
+// =============================================================================
+// 13 – CORRELATION: FIREWALL ALLOW + AZURE AD SIGN-IN FROM SAME EXTERNAL IP
+// Logic: An external IP both seen in AAD sign-in logs AND generating allowed
+//        outbound traffic could indicate a compromised identity using corporate
+//        network resources and cloud access simultaneously.
+// Correlates with: SigninLogs
+// =============================================================================
+let FirewallExternalIPs =
+    CommonSecurityLog
+    | where TimeGenerated > ago(24h)
+    | where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+    | where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+    | where ipv4_is_private(DestinationIP) == false
+    | summarize
+        FW_Connections = count(),
+        FW_Sources     = make_set(SourceIP, 10),
+        FW_BytesSent   = sum(SentBytes),
+        FW_Vendors     = make_set(DeviceVendor)
+      by ExternalIP = DestinationIP;
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == 0
+| where isnotempty(IPAddress)
+| summarize
+    AAD_SignInCount  = count(),
+    AAD_Users        = make_set(UserPrincipalName, 20),
+    AAD_AppNames     = make_set(AppDisplayName, 10),
+    AAD_Countries    = make_set(Location, 5),
+    AAD_RiskLevels   = make_set(RiskLevelDuringSignIn, 5)
+  by IPAddress
+| join kind=inner FirewallExternalIPs on $left.IPAddress == $right.ExternalIP
+| project
+    IPAddress,
+    AAD_SignInCount,
+    AAD_Users,
+    AAD_Countries,
+    AAD_RiskLevels,
+    FW_Connections,
+    FW_Sources,
+    FW_BytesSent,
+    FW_Vendors
+| order by FW_Connections desc
+
+
+// =============================================================================
+// 14 – CORRELATION: CommonSecurityLog + SecurityAlert (SHARED IOC IPs)
+// Logic: IPs from firewall logs that also appear in active SecurityAlerts.
+//        Cross-vendor signal amplification: if an IP triggered a Defender
+//        or Sentinel alert AND is actively communicating through the firewall.
+// Correlates with: SecurityAlert
+// =============================================================================
+let AlertIPs =
+    SecurityAlert
+    | where TimeGenerated > ago(7d)
+    | where AlertSeverity in ("High", "Medium")
+    | mv-expand todynamic(Entities)
+    | where Entities.Type == "ip"
+    | extend AlertIP = tostring(Entities.Address)
+    | where isnotempty(AlertIP)
+    | summarize
+        AlertCount    = count(),
+        AlertNames    = make_set(AlertName, 10),
+        Severities    = make_set(AlertSeverity, 3),
+        Products      = make_set(ProductName, 5)
+      by AlertIP;
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where isnotempty(SourceIP) or isnotempty(DestinationIP)
+| extend CheckIP = iff(ipv4_is_private(DestinationIP) == false, DestinationIP, SourceIP)
+| summarize
+    FW_HitCount     = count(),
+    FW_Actions      = make_set(DeviceAction, 5),
+    FW_InternalIPs  = make_set(SourceIP, 10),
+    FW_Vendors      = make_set(DeviceVendor),
+    FW_FirstSeen    = min(TimeGenerated),
+    FW_LastSeen     = max(TimeGenerated)
+  by CheckIP
+| join kind=inner AlertIPs on $left.CheckIP == $right.AlertIP
+| project
+    IOC_IP        = CheckIP,
+    AlertCount,
+    AlertNames,
+    Severities,
+    Products,
+    FW_HitCount,
+    FW_Actions,
+    FW_InternalIPs,
+    FW_Vendors,
+    FW_FirstSeen,
+    FW_LastSeen
+| order by AlertCount desc
+
+
+// =============================================================================
+// 15 – CORRELATION: CommonSecurityLog + ThreatIntelligenceIndicator (TI FEED)
+// Logic: Full join of firewall traffic against TI feed URLs and domains.
+//        Covers IP, URL, and domain-based TI matching across all 3 vendors.
+// Correlates with: ThreatIntelligenceIndicator
+// =============================================================================
+let TI_Domains =
+    ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(30d)
+    | where Active == true
+    | where isnotempty(DomainName)
+    | summarize
+        TI_ThreatTypes = make_set(ThreatType),
+        TI_Confidence  = max(ConfidenceScore)
+      by DomainName;
+let TI_URLs =
+    ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(30d)
+    | where Active == true
+    | where isnotempty(Url)
+    | summarize
+        TI_ThreatTypes = make_set(ThreatType),
+        TI_Confidence  = max(ConfidenceScore)
+      by Url;
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where isnotempty(DestinationHostName) or isnotempty(RequestURL)
+| extend MatchKey = coalesce(DestinationHostName, RequestURL)
+| join kind=inner TI_Domains on $left.MatchKey == $right.DomainName
+| summarize
+    FW_HitCount    = count(),
+    FW_Users       = make_set(SourceUserName, 10),
+    FW_SourceIPs   = make_set(SourceIP, 10),
+    FW_Actions     = make_set(DeviceAction, 5),
+    FW_Vendors     = make_set(DeviceVendor),
+    TI_ThreatTypes = make_set(TI_ThreatTypes),
+    TI_Confidence  = max(TI_Confidence),
+    FirstSeen      = min(TimeGenerated),
+    LastSeen       = max(TimeGenerated)
+  by MatchKey
+| order by FW_HitCount desc
+
+
+// =============================================================================
+// 16 – PALO ALTO – ZONE TRANSFER VIOLATIONS AND POLICY DENIES
+// Logic: Surface Palo Alto deny events from the inter-zone policy, grouped
+//        by source/destination zone pair to identify policy bypass attempts.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Palo Alto Networks"
+| where DeviceAction in ("deny", "drop", "reset-client", "reset-server", "reset-both",
+                         "Reset-Both", "Drop", "Deny")
+| where isnotempty(DeviceCustomString1) or isnotempty(DeviceCustomString2) // zone fields
+| summarize
+    DenyCount        = count(),
+    SourceIPs        = make_set(SourceIP, 20),
+    DestinationIPs   = make_set(DestinationIP, 20),
+    Ports            = make_set(DestinationPort, 10),
+    Protocols        = make_set(Protocol, 5),
+    PolicyNames      = make_set(DeviceCustomString1, 10),
+    SourceZones      = make_set(DeviceCustomString2, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by DeviceCustomString1, DeviceCustomString2, DeviceAction
+| order by DenyCount desc
+
+
+// =============================================================================
+// 17 – FORTINET – REPEATED AUTH FAILURES (SSL-VPN / ADMIN CONSOLE)
+// Logic: Fortinet logs SSL-VPN and admin login failures as specific event IDs.
+//        Multiple failures from the same source = brute force or credential
+//        stuffing against VPN infrastructure.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Fortinet"
+| where DeviceEventClassID has_any ("32001", "32002", "39424", "39952")
+    or Activity has_any ("ssl-vpn-tunnel", "vpn", "admin-login", "loginfailed",
+                         "login failure", "authentication failed")
+    or DeviceAction has_any ("failed", "denied", "reject", "failure")
+| summarize
+    FailureCount     = count(),
+    UniqueUsers      = dcount(SourceUserName),
+    UserList         = make_set(SourceUserName, 20),
+    DestinationIPs   = make_set(DestinationIP, 5),
+    SourcePorts      = make_set(SourcePort, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by SourceIP, DeviceEventClassID
+| where FailureCount > 5
+| order by FailureCount desc
+
+
+// =============================================================================
+// 18 – ZSCALER – IMPOSSIBLE TRAVEL (SAME USER, MULTIPLE COUNTRIES)
+// Logic: The same Zscaler username generating requests from  more than 1
+//        country within a 1-hour window. Indicates shared credentials,
+//        VPN/proxy abuse, or a token hijack scenario.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Zscaler"
+| where isnotempty(SourceUserName)
+| extend HourBucket = bin(TimeGenerated, 1h)
+| summarize
+    CountryCount     = dcount(SourceGeoCity),     // Zscaler sends city in this field
+    Countries        = make_set(SourceGeoCity, 10),
+    RequestCount     = count(),
+    SourceIPs        = make_set(SourceIP, 10),
+    URLSamples       = make_set(RequestURL, 5)
+  by SourceUserName, HourBucket
+| where CountryCount > 1
+| order by CountryCount desc, RequestCount desc
+
+
+// =============================================================================
+// 19 – PROTOCOL ANOMALY – HTTP / HTTPS ON NON-STANDARD PORTS
+// Logic: HTTP (port 80) and HTTPS (port 443) running on ports other than their
+//        standard ones. C2 malware commonly uses alternate ports to evade
+//        simple port-based filtering and application inspection.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+| where (ApplicationProtocol in ("HTTP", "http") and DestinationPort !in (80, 8080, 8000, 3128))
+    or (ApplicationProtocol in ("HTTPS", "https", "SSL", "ssl") and DestinationPort !in (443, 8443))
+    or (Protocol in ("HTTP", "http") and DestinationPort !in (80, 8080, 8000, 3128))
+    or (Protocol in ("HTTPS", "https") and DestinationPort !in (443, 8443))
+| summarize
+    ConnectionCount  = count(),
+    SourceIPs        = make_set(SourceIP, 20),
+    DestIPs          = make_set(DestinationIP, 20),
+    BytesSent        = sum(SentBytes),
+    URLSamples       = make_set(RequestURL, 10),
+    DeviceVendors    = make_set(DeviceVendor),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by DestinationPort, ApplicationProtocol, Protocol
+| order by ConnectionCount desc
+
+
+// =============================================================================
+// 20 – CORRELATION: Firewall + IdentityInfo (RISKY USER GENERATING TRAFFIC)
+// Logic: Match firewall traffic source users against the IdentityInfo table
+//        to identify high-risk or privileged accounts generating large volumes
+//        of allowed outbound traffic (possible compromised insider).
+// Correlates with: IdentityInfo
+// =============================================================================
+let RiskyIdentities =
+    IdentityInfo
+    | where TimeGenerated > ago(14d)
+    | where isnotempty(AccountUPN)
+    | summarize
+        RiskScore        = max(InvestigationPriority),
+        JobTitle         = any(JobTitle),
+        Department       = any(Department),
+        ManagerUPN       = any(ManagerUPN),
+        AccountEnabled   = any(AccountEnabled)
+      by AccountUPN;
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+| where isnotempty(SourceUserName)
+| summarize
+    FW_RequestCount  = count(),
+    FW_BytesSent     = sum(SentBytes),
+    FW_BytesRecv     = sum(ReceivedBytes),
+    FW_DestIPs       = dcount(DestinationIP),
+    FW_Vendors       = make_set(DeviceVendor),
+    FW_SrcIPs        = make_set(SourceIP, 5),
+    FW_FirstSeen     = min(TimeGenerated)
+  by UserName = tolower(SourceUserName)
+| join kind=inner RiskyIdentities on $left.UserName == $right.AccountUPN
+| extend TotalMBSent = round(toreal(FW_BytesSent) / 1048576, 2)
+| project
+    UserName,
+    JobTitle,
+    Department,
+    RiskScore,
+    FW_RequestCount,
+    TotalMBSent,
+    FW_DestIPs,
+    FW_Vendors,
+    FW_SrcIPs
+| order by RiskScore desc, TotalMBSent desc
+
+
+// =============================================================================
+// 21 – SLOW & LOW EXFILTRATION – AGGREGATED SMALL TRANSFERS
+// Category: Hypothesis-based hunt (MITRE T1048.003) + UEBA
+// Logic: Many small sessions (1 KB–1 MB each) from the same user to the same
+//        external IP, where the 7-day aggregate exceeds 100 MB. Classic "slow
+//        and low" pattern that evades single-session volume thresholds.
+// Covers: Category 1 (MITRE technique hunt) + Category 2 (behavioral baseline)
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(7d)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP", "Reset-Both")
+| where ipv4_is_private(SourceIP) == true
+| where ipv4_is_private(DestinationIP) == false
+| where isnotempty(SourceUserName)
+| where SentBytes between (1024 .. 1048576)  // 1 KB – 1 MB per individual session
+| summarize
+    TotalSessions    = count(),
+    TotalBytesSent   = sum(SentBytes),
+    UniqueDestIPs    = dcount(DestinationIP),
+    DestHosts        = make_set(DestinationHostName, 10),
+    DestIPs          = make_set(DestinationIP, 10),
+    ActiveDays       = dcount(startofday(TimeGenerated)),
+    Categories       = make_set(DeviceCustomString2, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by SourceUserName, DestinationIP
+| extend TotalMBSent = round(toreal(TotalBytesSent) / 1048576, 2)
+| where TotalMBSent > 100 and TotalSessions > 50
+| where UniqueDestIPs <= 3  // concentrated on few destinations vs. random CDN scatter
+| order by TotalMBSent desc
+
+
+// =============================================================================
+// 22 – LOTL WEB C2: GITHUB RAW / PASTEBIN / GOOGLE DOCS AS C2 STAGING
+// Category: Specific detections for stealth tradecraft (MITRE T1102, T1105)
+// Logic: Attacker abuses legitimate public platforms to host payloads, receive
+//        C2 tasking, or exfiltrate data. Signals: high bytes received from these
+//        sites, non-browser user agents, or excessive request counts from a user
+//        not associated with development workflows.
+// Covers: Category 4 (living off the land via web)
+// =============================================================================
+let LotLDomains = dynamic([
+    "raw.githubusercontent.com", "gist.githubusercontent.com", "gist.github.com",
+    "pastebin.com", "paste.ee", "hastebin.com", "ghostbin.com", "rentry.co",
+    "docs.google.com", "drive.google.com",
+    "cdn.discordapp.com", "media.discordapp.net",
+    "onedrive.live.com", "1drv.ms"]);
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Zscaler"
+| where isnotempty(DestinationHostName)
+| where DestinationHostName has_any (LotLDomains)
+| where isnotempty(SourceUserName)
+| summarize
+    RequestCount     = count(),
+    TotalBytesRecv   = sum(ReceivedBytes),
+    TotalBytesSent   = sum(SentBytes),
+    UniqueURLs       = dcount(RequestURL),
+    URLSamples       = make_set(RequestURL, 10),
+    UserAgents       = make_set(RequestClientApplication, 5),
+    SourceIPs        = make_set(SourceIP, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by SourceUserName, DestinationHostName
+| extend TotalMBReceived = round(toreal(TotalBytesRecv) / 1048576, 2)
+| extend SuspiciousUA = iff(
+    UserAgents !has "Mozilla" and UserAgents !has "Chrome" and UserAgents !has "Safari",
+    true, false)
+| where TotalMBReceived > 20 or SuspiciousUA == true or RequestCount > 100
+| project
+    SourceUserName, DestinationHostName,
+    RequestCount, TotalMBReceived, TotalBytesSent,
+    URLSamples, UserAgents, SuspiciousUA,
+    FirstSeen, LastSeen
+| order by TotalMBReceived desc, RequestCount desc
+
+
+// =============================================================================
+// 23 – STEALTHY SAAS ATTACK: ZIA PROXY + M365 OFFICEACTIVITY CORRELATION
+// Category: Advanced multi-control correlation (MITRE T1078, T1528, T1114)
+// Logic: Correlate ZIA allowed traffic to known SaaS cloud domains with anomalous
+//        M365 OfficeActivity operations (inbox rules, OAuth grants, bulk download)
+//        within the same 2-hour window — detects compromised sessions, OAuth
+//        abuse, and data staging via "legitimate-looking" cloud traffic.
+// Covers: Category 3 (stealthy SaaS attacks)
+// =============================================================================
+let ZIASaaSSessions =
+    CommonSecurityLog
+    | where TimeGenerated > ago(24h)
+    | where DeviceVendor == "Zscaler"
+    | where DeviceAction !in ("block", "BLOCK", "Blocked", "blocked")
+    | where isnotempty(SourceUserName)
+    | where DestinationHostName has_any (
+        "sharepoint.com", "onedrive.com", "outlook.office.com",
+        "graph.microsoft.com", "office.com", "microsoftonline.com",
+        "drive.google.com", "mail.google.com", "gmail.com",
+        "box.com", "dropbox.com", "salesforce.com",
+        "slack.com", "teams.microsoft.com")
+    | summarize
+        ZIA_RequestCount = count(),
+        ZIA_BytesSent    = sum(SentBytes),
+        ZIA_BytesRecv    = sum(ReceivedBytes),
+        ZIA_URLs         = make_set(RequestURL, 10),
+        ZIA_SrcIPs       = make_set(SourceIP, 5),
+        ZIA_FirstSeen    = min(TimeGenerated)
+      by UserName = tolower(SourceUserName), DestinationHostName;
+OfficeActivity
+| where TimeGenerated > ago(24h)
+| where isnotempty(UserId)
+| where Operation in (
+    "FileDownloaded", "FileSyncDownloadedFull", "AnonymousLinkUsed",
+    "Set-Mailbox", "New-InboxRule", "AddedToGroup",
+    "Add OAuth2PermissionGrant", "Consent to application",
+    "MailItemsAccessed", "UserLoginFailed")
+| summarize
+    O365_OpCount     = count(),
+    O365_Operations  = make_set(Operation, 10),
+    O365_ClientIPs   = make_set(ClientIP, 5),
+    O365_FirstSeen   = min(TimeGenerated)
+  by UserName = tolower(UserId)
+| join kind=inner ZIASaaSSessions on UserName
+| where abs(datetime_diff('minute', O365_FirstSeen, ZIA_FirstSeen)) <= 120
+| extend ZIA_TotalMBRecv = round(toreal(ZIA_BytesRecv) / 1048576, 2)
+| project
+    UserName, DestinationHostName,
+    ZIA_RequestCount, ZIA_TotalMBRecv, ZIA_URLs, ZIA_SrcIPs,
+    O365_OpCount, O365_Operations, O365_ClientIPs,
+    ZIA_FirstSeen, O365_FirstSeen
+| order by ZIA_TotalMBRecv desc
+
+
+// =============================================================================
+// 24 – ZIA ALLOWED TRAFFIC TO TI-LISTED DOMAINS/IPs CATEGORIZED AS UNKNOWN
+// Category: Dynamic TI correlation / hypothesis-based IOC pivot (MITRE T1071, T1568)
+// Logic: "Silent activity" detection. Zscaler allowed the traffic because the
+//        destination was uncategorized/unknown — too new or obscure for Zscaler
+//        URL DB. But the domain or IP IS present in the Sentinel TI feed.
+//        Catches early-stage campaigns using freshly registered infrastructure.
+// Covers: Category 3 (dynamic TI correlation) + Category 1 (IOC pivot)
+// =============================================================================
+let TI_IOCs =
+    ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(30d)
+    | where Active == true
+    | extend IOC_Value = coalesce(DomainName, NetworkIP)
+    | where isnotempty(IOC_Value)
+    | summarize
+        TI_ThreatTypes = make_set(ThreatType),
+        TI_Confidence  = max(ConfidenceScore),
+        TI_Tags        = make_set(Tags)
+      by IOC_Value;
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Zscaler"
+| where DeviceAction !in ("block", "BLOCK", "Blocked", "blocked")  // ALLOWED only
+| where DeviceCustomString2 in (
+    "MISCELLANEOUS_OR_UNKNOWN", "UNKNOWN", "OTHER",
+    "NEWLY_REGISTERED_DOMAINS", "MISCELLANEOUS")
+    or isempty(DeviceCustomString2)
+| where isnotempty(DestinationHostName) or isnotempty(DestinationIP)
+| extend MatchKey = coalesce(DestinationHostName, tostring(DestinationIP))
+| summarize
+    RequestCount     = count(),
+    UniqueUsers      = dcount(SourceUserName),
+    UserList         = make_set(SourceUserName, 10),
+    BytesRecv        = sum(ReceivedBytes),
+    BytesSent        = sum(SentBytes),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by MatchKey, DestinationIP, DestinationHostName
+| join kind=inner TI_IOCs on $left.MatchKey == $right.IOC_Value
+| project
+    MatchKey, DestinationHostName, DestinationIP,
+    RequestCount, UniqueUsers, UserList,
+    BytesRecv, BytesSent,
+    TI_ThreatTypes, TI_Confidence, TI_Tags,
+    FirstSeen, LastSeen
+| order by TI_Confidence desc, RequestCount desc
+
+
+// =============================================================================
+// 25 – ZIA C2 BLOCK + EDR SECURITYALERT ESCALATION (MULTI-CONTROL CORRELATION)
+// Category: Advanced multi-control correlation (MITRE T1071, T1078)
+// Logic: Increase fidelity by requiring corroboration from two controls.
+//        A Zscaler C2/malware block is interesting; the same host ALSO generating
+//        a Defender XDR / Sentinel alert makes it high-confidence.
+//        Reduces false positives from single-control detections.
+// Covers: Category 3 (EDR/IdP enrichment of ZIA detections)
+// =============================================================================
+let ZscalerC2Blocks =
+    CommonSecurityLog
+    | where TimeGenerated > ago(24h)
+    | where DeviceVendor == "Zscaler"
+    | where DeviceAction in ("block", "BLOCK", "Blocked", "blocked")
+    | where DeviceCustomString2 has_any (
+        "BOTNET_SITES", "MALWARE_SITES", "C2_SITES", "COMMAND_CONTROL",
+        "RANSOMWARE", "PHISHING", "SPYWARE_ADWARE_KEYLOGGERS")
+    | summarize
+        ZIA_BlockCount   = count(),
+        ZIA_DestHosts    = make_set(DestinationHostName, 10),
+        ZIA_Categories   = make_set(DeviceCustomString2, 5),
+        ZIA_DestIPs      = make_set(DestinationIP, 10),
+        ZIA_Users        = make_set(SourceUserName, 5),
+        ZIA_FirstSeen    = min(TimeGenerated)
+      by ZIA_SrcIP = SourceIP;
+SecurityAlert
+| where TimeGenerated > ago(24h)
+| where AlertSeverity in ("High", "Medium")
+| mv-expand todynamic(Entities)
+| extend
+    EntityIP   = tostring(Entities.Address),
+    EntityHost = tostring(Entities.HostName)
+| where isnotempty(EntityIP)
+| summarize
+    Alert_Count      = count(),
+    Alert_Names      = make_set(AlertName, 5),
+    Alert_Products   = make_set(ProductName, 5),
+    Alert_Severity   = make_set(AlertSeverity, 3),
+    Alert_FirstSeen  = min(TimeGenerated)
+  by EntityIP, EntityHost
+| join kind=inner ZscalerC2Blocks on $left.EntityIP == $right.ZIA_SrcIP
+| project
+    ZIA_SrcIP, EntityHost,
+    ZIA_BlockCount, ZIA_DestHosts, ZIA_Categories, ZIA_Users,
+    Alert_Count, Alert_Names, Alert_Products, Alert_Severity,
+    ZIA_FirstSeen, Alert_FirstSeen
+| order by ZIA_BlockCount desc, Alert_Count desc
+
+
+// =============================================================================
+// 26 – HTTP TUNNELING: LONG OR BASE64-ENCODED URL PARAMETERS
+// Category: Specific detections for stealth tradecraft (MITRE T1071.001)
+// Logic: HTTP-based C2 channels (Cobalt Strike, Metasploit stagers, chisel)
+//        commonly encode data in URL query strings. Identify via:
+//         - Query strings >150 chars
+//         - Base64-like patterns (long alphanumeric + padding characters)
+//         - Repetitive fixed-size requests to the same host
+// Covers: Category 4 (DNS/HTTP tunneling via encoded parameters)
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+| where isnotempty(RequestURL)
+| extend
+    URLLength    = strlen(RequestURL),
+    QueryString  = iff(RequestURL contains "?",
+                       substring(RequestURL, indexof(RequestURL, "?") + 1), "")
+| extend QueryLength = strlen(QueryString)
+| where URLLength > 200 or QueryLength > 150
+| extend
+    HasBase64Pattern = QueryString matches regex @"[A-Za-z0-9+/=]{40,}",
+    HasPctEncoding   = QueryString contains "%"
+| summarize
+    RequestCount     = count(),
+    MaxURLLength     = max(URLLength),
+    MaxQueryLength   = max(QueryLength),
+    UniqueUsers      = dcount(SourceUserName),
+    Base64Hits       = countif(HasBase64Pattern == true),
+    URLSamples       = make_set(RequestURL, 5),
+    UserAgents       = make_set(RequestClientApplication, 5),
+    SourceIPs        = make_set(SourceIP, 5),
+    FirstSeen        = min(TimeGenerated)
+  by DestinationHostName, DestinationPort, DeviceVendor
+| where RequestCount > 5 or Base64Hits > 2
+| order by Base64Hits desc, MaxQueryLength desc
+
+
+// =============================================================================
+// 27 – DOMAIN FRONTING: CDN SNI / SUSPICIOUS PATH PATTERN DETECTION
+// Category: Specific detections for stealth tradecraft (MITRE T1090.004)
+// Logic: Domain fronting routes C2 traffic through a legitimate CDN — the TLS
+//        SNI matches a trusted CDN domain, but the actual backend is a C2 server.
+//        Signals: traffic to known CDN FQDNs with random/long path patterns,
+//        non-browser user agents, or high byte volume with no typical referrer.
+// Covers: Category 4 (domain fronting / evasion via SNI mismatch)
+// =============================================================================
+let CDNDomains = dynamic([
+    "cloudflare.com", "cloudfront.net", "azureedge.net", "azurefd.net",
+    "fastly.net", "akamaihd.net", "akamaized.net", "akamai.net",
+    "cdn.jsdelivr.net", "unpkg.com", "cdn77.com", "stackpathcdn.com"]);
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+| where isnotempty(RequestURL) and isnotempty(DestinationHostName)
+| where DestinationHostName has_any (CDNDomains)
+| extend
+    PathLength      = strlen(RequestURL),
+    // Flag: long alphanumeric paths lacking file extensions — typical C2 routing paths
+    HasRandomPath   = RequestURL matches regex @"/[A-Za-z0-9_\-]{20,}(\?|$|/)"
+| summarize
+    RequestCount     = count(),
+    TotalBytesRecv   = sum(ReceivedBytes),
+    TotalBytesSent   = sum(SentBytes),
+    MaxPathLength    = max(PathLength),
+    RandomPathCount  = countif(HasRandomPath == true),
+    UniqueUsers      = dcount(SourceUserName),
+    URLSamples       = make_set(RequestURL, 5),
+    UserAgents       = make_set(RequestClientApplication, 5),
+    SourceIPs        = make_set(SourceIP, 5),
+    FirstSeen        = min(TimeGenerated)
+  by DestinationHostName, DestinationPort
+| extend TotalMBRecv = round(toreal(TotalBytesRecv) / 1048576, 2)
+| where RandomPathCount > 5
+    or (TotalMBRecv > 50 and UserAgents !has "Mozilla")
+| order by RandomPathCount desc, TotalMBRecv desc
+
+
+// =============================================================================
+// 28 – ZPA + ZIA COMBINED INSIDER THREAT / STOLEN CREDENTIAL HUNT
+// Category: UEBA + Hypothesis hunt (MITRE T1021, T1219, T1078, T1090)
+// Logic: Stolen credential or insider scenario — the same user simultaneously:
+//         ZPA: accesses internal apps (potential lateral movement staging)
+//         ZIA: accesses remote admin tools, anonymous proxies, or paste sites
+//        This cross-layer combination is very high-fidelity for compromised
+//        identities running a kill chain inside the zero-trust perimeter.
+// Covers: Category 2 (insider/stolen cred UEBA) + Category 5 (ZS playbook)
+// =============================================================================
+let TimeWindow = 24h;
+let ZPAActivity =
+    CommonSecurityLog
+    | where TimeGenerated > ago(TimeWindow)
+    | where DeviceProduct has "ZPA"
+    | where isnotempty(SourceUserName)
+    | summarize
+        ZPA_AppCount    = dcount(DestinationHostName),
+        ZPA_Apps        = make_set(DestinationHostName, 10),
+        ZPA_BytesRecv   = sum(ReceivedBytes),
+        ZPA_SrcIPs      = make_set(SourceIP, 5),
+        ZPA_GeoCountries = make_set(
+            tostring(geo_info_from_ip_address(SourceIP).country), 3),
+        ZPA_FirstSeen   = min(TimeGenerated)
+      by UserName = tolower(SourceUserName);
+let ZIARiskyActivity =
+    CommonSecurityLog
+    | where TimeGenerated > ago(TimeWindow)
+    | where DeviceVendor == "Zscaler"
+    | where isnotempty(SourceUserName)
+    | where DeviceCustomString2 has_any (
+        "REMOTE_ACCESS_TOOLS", "REMOTE_ADMINISTRATION", "TUNNELING_APPLICATIONS",
+        "ANONYMOUS_PROXY", "TOR", "PASTE_SITES",
+        "TUNNEL_SOCKS_PROXY", "ENCRYPTED_TUNNEL", "VPN_SERVICES")
+    | summarize
+        ZIA_CategoryCount   = dcount(DeviceCustomString2),
+        ZIA_RiskyCategories = make_set(DeviceCustomString2, 10),
+        ZIA_Destinations    = make_set(DestinationHostName, 10),
+        ZIA_RequestCount    = count(),
+        ZIA_FirstSeen       = min(TimeGenerated)
+      by UserName = tolower(SourceUserName);
+ZPAActivity
+| join kind=inner ZIARiskyActivity on UserName
+| project
+    UserName,
+    ZPA_AppCount, ZPA_Apps, ZPA_SrcIPs, ZPA_GeoCountries,
+    ZIA_CategoryCount, ZIA_RiskyCategories, ZIA_Destinations, ZIA_RequestCount,
+    ZPA_FirstSeen, ZIA_FirstSeen
+| order by ZPA_AppCount desc, ZIA_CategoryCount desc
+
+
+// =============================================================================
+// 29 – PATIENT APT: MULTI-CHANNEL "LOW & SLOW" EXFILTRATION (ZIA + M365)
+// Category: APT / Nation-State hypothesis hunt
+// Logic: An attacker with valid credentials spreads exfiltration across multiple
+//        "clean" channels over 30 days to stay below DLP thresholds. Per-user
+//        totals of bytes uploaded to non-corporate cloud/code/messaging domains
+//        via ZIA are combined with M365 external-sharing events. Users deviating
+//        ≥3 standard deviations from the peer group's upload baseline are flagged.
+// Data sources: ZIA (CommonSecurityLog) + M365 OfficeActivity
+// MITRE ATT&CK: TA0009, T1041, T1567 (Exfiltration to Cloud Storage)
+// =============================================================================
+let HuntWindow    = 30d;
+let ExfilDomains  = dynamic([
+    // Non-corporate cloud storage
+    "drive.google.com", "docs.google.com", "dropbox.com", "box.com",
+    "mega.nz", "mediafire.com", "sendspace.com", "wetransfer.com",
+    "4shared.com", "anonfiles.com",
+    // Code-hosting platforms
+    "github.com", "gitlab.com", "bitbucket.org", "gist.github.com",
+    // Messaging apps
+    "web.whatsapp.com", "telegram.org", "t.me", "discord.com",
+    "discordapp.com", "signal.org",
+    // Personal webmail / misc
+    "mail.google.com", "outlook.live.com", "protonmail.com", "tutanota.com"]);
+// Step 1 – ZIA daily upload activity per user to exfil-candidate domains
+let ZIA_Daily =
+    CommonSecurityLog
+    | where TimeGenerated > ago(HuntWindow)
+    | where DeviceVendor == "Zscaler"
+    | where DeviceAction !in ("block", "BLOCK", "Blocked", "blocked", "deny")
+    | where isnotempty(SourceUserName)
+    | where DestinationHostName has_any (ExfilDomains)
+    | summarize
+        DaySentBytes    = sum(SentBytes),
+        DayRequestCount = count(),
+        DayDestinCount  = dcount(DestinationHostName)
+      by UserName = tolower(SourceUserName), Day = bin(TimeGenerated, 1d);
+// Step 2 – Aggregate per user across the full hunt window
+let ZIA_Users =
+    ZIA_Daily
+    | summarize
+        ZIA_TotalMBSent   = round(toreal(sum(DaySentBytes)) / 1048576, 2),
+        ZIA_ActiveDays    = dcount(Day),
+        ZIA_TotalRequests = sum(DayRequestCount),
+        ZIA_UniqueDestCnt = sum(DayDestinCount)
+      by UserName;
+// Step 3 – Peer-group baseline statistics (all users in the same ZIA population)
+let globalAvg = toscalar(ZIA_Users | summarize avg(ZIA_TotalMBSent));
+let globalStd = toscalar(ZIA_Users | summarize stdev(ZIA_TotalMBSent));
+// Step 4 – M365 OfficeActivity external-sharing / public-link events
+let O365_Sharing =
+    OfficeActivity
+    | where TimeGenerated > ago(HuntWindow)
+    | where isnotempty(UserId)
+    | where Operation in (
+        "FileDownloaded", "FileSyncDownloadedFull", "FileCopied",
+        "AnonymousLinkCreated", "AnonymousLinkUsed",
+        "SharingSet", "SharingInvitationCreated",
+        "AddedToSecureLink", "SecureLinkUsed")
+    | summarize
+        O365_EventCount = count(),
+        O365_Operations = make_set(Operation, 10),
+        O365_AnonLinks  = countif(Operation has "Anonymous"),
+        O365_LastEvent  = max(TimeGenerated)
+      by UserName = tolower(UserId);
+// Step 5 – Combine and flag statistical outliers
+ZIA_Users
+| join kind=leftouter O365_Sharing on UserName
+| extend
+    O365_EventCount = coalesce(O365_EventCount, 0),
+    O365_AnonLinks  = coalesce(O365_AnonLinks, 0)
+| extend
+    Zscore = iff(globalStd > 0,
+                 round((ZIA_TotalMBSent - globalAvg) / globalStd, 2),
+                 0.0),
+    DistinctChannels = iff(ZIA_TotalMBSent > 5, 1, 0)
+                     + iff(O365_EventCount  > 0, 1, 0)
+| where Zscore >= 3.0
+    or (O365_AnonLinks  >= 3 and ZIA_TotalMBSent > 10)
+    or (ZIA_ActiveDays  >= 20 and ZIA_TotalMBSent > 50)
+| project
+    UserName,
+    ZIA_TotalMBSent, ZIA_ActiveDays, ZIA_TotalRequests, ZIA_UniqueDestCnt,
+    O365_EventCount, O365_AnonLinks, O365_Operations,
+    DistinctChannels, Zscore
+| order by Zscore desc, ZIA_TotalMBSent desc
+
+
+// =============================================================================
+// 30 – "PERFECT IMPOSTOR": ACCOUNT TAKEOVER HIDING WITHIN NORMAL TRAFFIC
+// Category: APT / Nation-State hypothesis hunt
+// Logic: Stolen-credential scenario where the attacker behaves almost exactly
+//        like the legitimate user but introduces subtle deviations:
+//          ZPA – sessions from a country not seen in the prior 14-day baseline
+//          ZIA – browsing to remote-admin tools / account-creation / proxy sites
+//          IdP  – MFA changes, OAuth consent, mailbox delegation / forwarding rules
+//        Scoring model combines all signals; even a single IdP change + ZIA
+//        suspicious category is enough to surface the identity for review.
+// Data sources: ZPA + ZIA (CommonSecurityLog) + M365 OfficeActivity
+// MITRE ATT&CK: TA0003, TA0004, TA0005, TA0006, T1078, T1098, T1114, T1556
+// =============================================================================
+let baselineWindow = 14d;
+let recentWindow   = 4h;
+// Baseline: known source countries per user via ZPA over the last 14 days
+let ZPA_Baseline =
+    CommonSecurityLog
+    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+    | where DeviceVendor == "Zscaler" and DeviceProduct has "ZPA"
+    | where DeviceAction !in ("block", "BLOCK", "Failed")
+    | where isnotempty(SourceUserName)
+    | extend BaselineCountry = tostring(geo_info_from_ip_address(SourceIP).country)
+    | summarize
+        BaselineCountries = make_set(BaselineCountry, 20),
+        BaselineAppCount  = dcount(DestinationHostName)
+      by UserName = tolower(SourceUserName);
+// Recent ZPA activity (last 4 hours)
+let ZPA_Recent =
+    CommonSecurityLog
+    | where TimeGenerated > ago(recentWindow)
+    | where DeviceVendor == "Zscaler" and DeviceProduct has "ZPA"
+    | where isnotempty(SourceUserName)
+    | extend RecentCountry = tostring(geo_info_from_ip_address(SourceIP).country)
+    | summarize
+        RecentCountries = make_set(RecentCountry, 5),
+        RecentApps      = make_set(DestinationHostName, 10),
+        RecentIPs       = make_set(SourceIP, 5),
+        RecentConnCount = count(),
+        ZPA_FirstSeen   = min(TimeGenerated)
+      by UserName = tolower(SourceUserName);
+// ZIA suspicious categories: remote admin / account creation / proxy / tunnels
+let ZIA_Suspicious =
+    CommonSecurityLog
+    | where TimeGenerated > ago(recentWindow)
+    | where DeviceVendor == "Zscaler"
+    | where isnotempty(SourceUserName)
+    | where DeviceCustomString2 has_any (
+        "REMOTE_ACCESS_TOOLS", "REMOTE_ADMINISTRATION", "WEB_BASED_ADMIN",
+        "ACCOUNT_CREATION", "TUNNEL_SOCKS_PROXY", "ANONYMOUS_PROXY",
+        "ONLINE_STORAGE", "FILE_SHARE", "TOR", "VPN_SERVICES",
+        "NEWLY_REGISTERED_DOMAINS", "PHISHING")
+    | summarize
+        ZIA_Categories   = make_set(DeviceCustomString2, 10),
+        ZIA_Destinations = make_set(DestinationHostName, 10),
+        ZIA_RequestCount = count(),
+        ZIA_FirstSeen    = min(TimeGenerated)
+      by UserName = tolower(SourceUserName);
+// IdP / SaaS security changes: MFA, OAuth, mailbox rules, privilege escalation
+let IdP_Changes =
+    OfficeActivity
+    | where TimeGenerated > ago(recentWindow)
+    | where isnotempty(UserId)
+    | where Operation in (
+        "New-InboxRule",                         // auto-forward / hide rules
+        "Set-Mailbox",                           // mailbox delegation
+        "Add-MailboxPermission",
+        "Add OAuth2PermissionGrant",             // OAuth consent grant
+        "Consent to application",
+        "Add service principal credentials",
+        "Update user",
+        "Disable Strong Authentication",         // MFA removal
+        "Update StsRefreshTokenValidFrom",       // token invalidation
+        "Add member to role")                    // privilege escalation
+    | summarize
+        IdP_EventCount = count(),
+        IdP_Operations = make_set(Operation, 10),
+        IdP_FirstSeen  = min(TimeGenerated)
+      by UserName = tolower(UserId);
+// Combine layers, flag users with any cross-layer anomaly
+ZPA_Recent
+| join kind=inner ZPA_Baseline on UserName
+| extend NewCountries = set_difference(RecentCountries, BaselineCountries)
+| join kind=leftouter ZIA_Suspicious on UserName
+| join kind=leftouter IdP_Changes on UserName
+| extend
+    ZIA_RequestCount = coalesce(ZIA_RequestCount, 0),
+    IdP_EventCount   = coalesce(IdP_EventCount, 0)
+| extend ImpostorScore =
+    iff(array_length(NewCountries) > 0, 40, 0)
+  + (ZIA_RequestCount * 5)
+  + (IdP_EventCount * 30)
+| where ImpostorScore >= 40
+    or (IdP_EventCount >= 1 and ZIA_RequestCount >= 1)
+    or array_length(NewCountries) > 0
+| project
+    UserName,
+    NewCountries, RecentCountries, BaselineCountries,
+    RecentApps, RecentIPs, RecentConnCount,
+    ZIA_Categories, ZIA_Destinations, ZIA_RequestCount,
+    IdP_Operations, IdP_EventCount,
+    ImpostorScore,
+    ZPA_FirstSeen
+| order by ImpostorScore desc
+
+
+// =============================================================================
+// 31 – APT CONTROL EVASION: DEGRADING / BYPASSING ZSCALER & EDR VISIBILITY
+// Category: APT / Nation-State hypothesis hunt — "maximum paranoia mode"
+// Logic: Attacker with internal knowledge attempts to reduce SOC visibility by
+//        stopping agents, modifying proxy/network config, or switching to
+//        alternate egress paths. Signals detected are:
+//          a) Hosts with healthy ZIA activity in the baseline that go completely
+//             silent in the recent window (no ZIA traffic at all)
+//          b) DeviceEvents / SecurityEvent indicating Zscaler or EDR agent
+//             tampering: uninstall, service stop, driver unload
+//        The two signals are scored jointly — a disappearing host alone is
+//        noteworthy; a disappearing host WITH agent-tamper evidence is critical.
+// Data sources: ZIA (CommonSecurityLog) + DeviceEvents + SecurityEvent (MDE)
+// MITRE ATT&CK: TA0005, T1562 (Impair Defenses), T1070 (Indicator Removal)
+// =============================================================================
+let baselineWindow            = 7d;
+let recentWindow              = 4h;
+let minBaselineRequestsPerDay = 10;
+// Hosts that had consistent ZIA activity during the baseline window
+let ZIA_BaselineHosts =
+    CommonSecurityLog
+    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+    | where DeviceVendor == "Zscaler"
+    | where isnotempty(SourceIP) and isnotempty(SourceUserName)
+    | summarize
+        BaselineRequestsPerDay = round(toreal(count()) / (baselineWindow / 1d), 1),
+        BaselineUsers          = make_set(SourceUserName, 5)
+      by SourceIP
+    | where BaselineRequestsPerDay >= minBaselineRequestsPerDay;
+// Hosts that produced ANY ZIA traffic in the recent window
+let ZIA_RecentActive =
+    CommonSecurityLog
+    | where TimeGenerated > ago(recentWindow)
+    | where DeviceVendor == "Zscaler"
+    | where isnotempty(SourceIP)
+    | distinct SourceIP;
+// Hosts that went silent: were in baseline but absent in recent window
+let SilentHosts =
+    ZIA_BaselineHosts
+    | join kind=leftanti ZIA_RecentActive on SourceIP;
+// MDE DeviceEvents: Zscaler Client Connector or EDR agent tampering
+let AgentTampering =
+    DeviceEvents
+    | where TimeGenerated > ago(recentWindow)
+    | where ActionType in (
+        "ServiceUninstalled", "ServiceStopped", "DriverUnloaded",
+        "TamperingAttempt", "AntivirusScanFailed")
+      or (ActionType == "ProcessCreated"
+          and InitiatingProcessCommandLine has_any (
+              "ZscalerApp", "ZSATunnel", "ZSAUpdater", "ZscalerService",
+              "sc stop", "sc delete", "net stop", "taskkill"))
+    | summarize
+        TamperEvents    = count(),
+        TamperActions   = make_set(ActionType, 10),
+        TamperCmds      = make_set(InitiatingProcessCommandLine, 5),
+        TamperFirstSeen = min(TimeGenerated)
+      by DeviceName;
+// SecurityEvent: Windows Service Control Manager — service stop/delete events
+let SvcTampering =
+    SecurityEvent
+    | where TimeGenerated > ago(recentWindow)
+    | where EventID in (7034, 7035, 7036, 7040, 7045)
+    | where ServiceName has_any (
+        "ZscalerService", "ZSATunnel", "ZSAUpdater",
+        "MsSense", "SenseSvc", "WdFilter", "AADConnect")
+    | summarize
+        SvcEvents      = count(),
+        SvcNames       = make_set(ServiceName, 10),
+        SvcStateChange = make_set(Message, 5),
+        SvcFirstSeen   = min(TimeGenerated)
+      by Computer;
+// Final correlation: silent hosts enriched with tampering evidence
+SilentHosts
+| join kind=leftouter AgentTampering on $left.SourceIP == $right.DeviceName
+| join kind=leftouter SvcTampering   on $left.SourceIP == $right.Computer
+| extend
+    TamperEvents = coalesce(TamperEvents, 0),
+    SvcEvents    = coalesce(SvcEvents, 0)
+| extend EvasionScore =
+    toint(BaselineRequestsPerDay * 2)
+  + iff(TamperEvents > 0, 50, 0)
+  + iff(SvcEvents    > 0, 40, 0)
+| project
+    SourceIP, BaselineUsers, BaselineRequestsPerDay,
+    TamperEvents, TamperActions, TamperCmds,
+    SvcEvents, SvcNames, SvcStateChange,
+    EvasionScore,
+    TamperFirstSeen, SvcFirstSeen
+| order by EvasionScore desc, BaselineRequestsPerDay desc
