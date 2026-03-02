@@ -268,20 +268,6 @@ Then set `AUTH_METHOD = "default"` and run the Setup cell.
 
 ---
 
-## Known Issues & Bug Fixes
-
-| Section | Fix Applied |
-|---|---|
-| **Process IOC (§7.5)** | `SEM0100: MaxConfidence` — `ConfidenceScore` is dynamic in TI; added schema-anchor `datatable` + `column_ifexists()` |
-| **Spam/Phishing (§11.1)** | `SEM0100: PhishFilterVerdict` / `SpamFilterVerdict` — optional columns; wrapped with `column_ifexists()` |
-| **Email Malware (§11.2)** | `SEM0100: MalwareFamily`, `DetectionMethods`, `FileType` — optional columns; wrapped with `column_ifexists()` |
-| **Threat Actor (§7.8)** | `SEM0100: IndicatorType` dynamic + `DeviceName` missing from UEBA; used `tostring(column_ifexists())`, removed `dcount(DeviceName)`, fixed `array_length(ActivityInsights) > 0` |
-| **MITRE ATT&CK (§15)** | Missing `import plotly.graph_objects as go`; rebuilt via cell delete + insert |
-| **OAuth / SP (§10.2)** | `SEM0100: IsHighRisk` out-of-scope after `project` — moved `order by` before `project` |
-| **IOC Matching (§7.1–7.6)** | Expanded from 6 to 11+ tables per entity type; all use `union isfuzzy=true` to handle unavailable tables gracefully |
-
----
-
 ## Data Tables Reference
 
 | Table | Description | Key Fields |
