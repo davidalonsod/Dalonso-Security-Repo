@@ -31,7 +31,7 @@
       "location": "[parameters('location')]",
       "properties": {
         "displayName": "Token Theft - Refresh Token Replay from New Location",
-        "description": "Detects when the same user refreshes an OAuth token from a completely different IP address AND country within a 30-minute window. Indicator of refresh token theft / pass-the-cookie attacks. MITRE: T1528, T1539",
+        "description": "Detects when the same user refreshes an unbound OAuth token from a completely different IP address AND country within a 30-minute window. Filters on TokenProtectionStatus (signInSessionStatusCodes 1002, 1003, 1005, 1006, 1008) to flag only unbound/non-compliant tokens and excludes Microsoft first-party application IDs whose backend services legitimately refresh tokens from geographically diverse datacenter IPs. MITRE: T1528, T1539",
         "severity": "High",
         "enabled": true,
         "queryFrequency": "PT1H",
@@ -42,24 +42,25 @@
         "suppressionDuration": "PT5H",
         "tactics": ["CredentialAccess", "LateralMovement"],
         "techniques": ["T1528", "T1539"],
-        "query": "AADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| where ResultType == 0\n| sort by UserPrincipalName asc, AppId asc, TimeGenerated asc\n| extend PrevIP      = prev(IPAddress, 1)\n| extend PrevCountry = prev(Location, 1)\n| extend PrevTime    = prev(TimeGenerated, 1)\n| extend PrevUser    = prev(UserPrincipalName, 1)\n| extend PrevApp     = prev(AppId, 1)\n| where UserPrincipalName == PrevUser\n   and  AppId             == PrevApp\n   and  IPAddress         != PrevIP\n   and  Location          != PrevCountry\n   and  (TimeGenerated - PrevTime) < 30m\n| project\n    TimeGenerated,\n    PrevTokenTime    = PrevTime,\n    UserPrincipalName,\n    AppDisplayName,\n    CurrentIP        = IPAddress,\n    CurrentCountry   = Location,\n    PreviousIP       = PrevIP,\n    PreviousCountry  = PrevCountry,\n    TimeBetweenTokens = (TimeGenerated - PrevTime),\n    CorrelationId,\n    UniqueTokenIdentifier\n| order by TimeGenerated desc",
+        "query": "// Known Microsoft first-party AppIds that legitimately refresh tokens from\n// multiple datacenter locations — exclude to reduce false positives.\nlet ExcludedAppIds = dynamic([\n    \"00000003-0000-0000-c000-000000000000\",\n    \"00000002-0000-0ff1-ce00-000000000000\",\n    \"00000003-0000-0ff1-ce00-000000000000\",\n    \"00000006-0000-0ff1-ce00-000000000000\",\n    \"d3590ed6-52b3-4102-aeff-aad2292ab01c\",\n    \"1fec8e78-bce4-4aaf-ab1b-5451cc387264\",\n    \"cc15fd57-2c6c-4117-a88c-83b1d56b4bbe\",\n    \"5e3ce6c0-2b1f-4285-8d4b-75ee78787346\",\n    \"27922004-5251-4030-b22d-91ecd9a37ea4\",\n    \"4765445b-32c6-49b0-83e6-1d93765276ca\",\n    \"ab9b8c07-8f02-4f72-87fa-80105867a763\",\n    \"57fb890c-0dab-4253-a5e0-7188c88b2bb4\",\n    \"08e18876-6177-487e-b8b5-cf950c1e598c\"\n]);\nlet UnboundTokenCodes = dynamic([\"1002\", \"1003\", \"1005\", \"1006\", \"1008\"]);\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(1h)\n| where ResultType == 0\n| where AppId !in (ExcludedAppIds)\n| extend TokenProtectionParsed = parse_json(TokenProtectionStatus)\n| extend SessionStatusCode = tostring(TokenProtectionParsed.signInSessionStatus.signInSessionStatusCode)\n| where SessionStatusCode in (UnboundTokenCodes)\n| summarize\n    EarliestTime      = min(TimeGenerated),\n    LatestTime        = max(TimeGenerated),\n    DistinctIPs       = make_set(IPAddress, 10),\n    DistinctCountries = make_set(Location, 10),\n    EventCount        = count(),\n    AppDisplayName    = any(AppDisplayName),\n    CorrelationIds    = make_set(CorrelationId, 5),\n    SessionStatusCodes = make_set(SessionStatusCode, 5)\n  by UserPrincipalName, AppId, bin(TimeGenerated, 30m)\n| where array_length(DistinctCountries) >= 2\n| where array_length(DistinctIPs) >= 2\n| project\n    EarliestTime,\n    LatestTime,\n    UserPrincipalName,\n    AppDisplayName,\n    AppId,\n    DistinctIPs,\n    DistinctCountries,\n    EventCount,\n    SessionStatusCodes,\n    CorrelationIds,\n    TimeBetweenFirstLast = (LatestTime - EarliestTime)\n| order by EarliestTime desc",
         "entityMappings": [
           {
             "entityType": "Account",
             "fieldMappings": [
               { "identifier": "FullName", "columnName": "UserPrincipalName" }
             ]
-          },
-          {
-            "entityType": "IP",
-            "fieldMappings": [
-              { "identifier": "Address", "columnName": "CurrentIP" }
-            ]
           }
         ],
+        "customDetails": {
+          "DistinctIPs": "DistinctIPs",
+          "DistinctCountries": "DistinctCountries",
+          "AppDisplayName": "AppDisplayName",
+          "SessionStatusCodes": "SessionStatusCodes",
+          "EventCount": "EventCount"
+        },
         "alertDetailsOverride": {
-          "alertDisplayNameFormat": "Token Replay Detected - {{UserPrincipalName}} authenticated from {{CurrentCountry}} after prior token from {{PreviousCountry}}",
-          "alertDescriptionFormat": "User {{UserPrincipalName}} refreshed a token from {{CurrentIP}} ({{CurrentCountry}}) within 30 min of a prior refresh from a different country. Possible refresh token theft."
+          "alertDisplayNameFormat": "Token Replay Detected - {{UserPrincipalName}} unbound token used from {{DistinctCountries}}",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} refreshed an unbound token (TokenProtectionStatus: {{SessionStatusCodes}}) from {{DistinctIPs}} spanning countries {{DistinctCountries}} within 30 min. App: {{AppDisplayName}}. Possible refresh token theft."
         },
         "incidentConfiguration": {
           "createIncident": true,
