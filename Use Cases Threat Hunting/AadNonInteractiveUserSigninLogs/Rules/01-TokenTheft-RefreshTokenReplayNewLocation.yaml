@@ -1,4 +1,4 @@
-id: f3a1c2e4-8b5d-4e7f-a9c1-2b3d4e5f6a7b
+id: ca2d7a76-26ce-4357-bf5e-09e06a01dac3
 name: Token Theft - Refresh Token Replay from New Location
 version: 1.1.0
 kind: Scheduled
@@ -60,11 +60,13 @@ query: |
   | where ResultType == 0
   // Exclude Microsoft first-party backend services
   | where AppId !in (ExcludedAppIds)
-  // Parse the TokenProtectionStatus field to extract the signInSessionStatusCode
-  | extend TokenProtectionParsed = parse_json(TokenProtectionStatus)
+  // Parse TokenProtectionStatus when available; column_ifexists returns '{}'
+  // when the column is absent so the query never fails on schema differences.
+  | extend TokenProtectionParsed = parse_json(column_ifexists('TokenProtectionStatus', '{}'))
   | extend SessionStatusCode = tostring(TokenProtectionParsed.signInSessionStatus.signInSessionStatusCode)
-  // Keep only events where the token is unbound / non-compliant
-  | where SessionStatusCode in (UnboundTokenCodes)
+  // When column is present: keep only unbound/non-compliant tokens (1002/1003/1005/1006/1008).
+  // When column is absent (empty): fall through to geographic detection as graceful fallback.
+  | where isempty(SessionStatusCode) or SessionStatusCode in (UnboundTokenCodes)
   // Build per-user, per-app windows and detect multi-country activity
   | summarize
       EarliestTime     = min(TimeGenerated),
