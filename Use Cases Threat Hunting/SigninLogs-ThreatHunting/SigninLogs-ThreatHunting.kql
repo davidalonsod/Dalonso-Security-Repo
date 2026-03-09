@@ -1,0 +1,1026 @@
+// =============================================================================
+// SigninLogs – Threat Hunting Use Cases
+// Table: SigninLogs (Azure Active Directory)
+// Workspace: CyberSOC
+// Author: Security Operations
+// Date: 2026-02-27
+// =============================================================================
+// TABLE OF CONTENTS
+// --- Brute Force & Password Spray ---
+//  01 – Password Spray — Single IP Targeting Many Accounts
+//  02 – Brute Force — Single Account Targeted from Many IPs
+//  03 – Credential Stuffing — High-Velocity Invalid Credentials (50126)
+//  04 – Legacy Authentication Brute Force (IMAP, POP, SMTP, EAS)
+//  05 – Privileged Account Under Attack — Low-Threshold Failures
+//  06 – Continuous Login Failures per User (Sliding Window)
+//  07 – Low-and-Slow Spray — Victim Scoring Dashboard (30 days)
+//  08 – Spray Sign-In Row Export (30 days – data for investigation)
+// --- Breach Indicators ---
+//  09 – Brute Force → Success Chain — Critical Breach Indicator
+//  10 – TI-Enriched Brute Force → Success (Threat Intelligence Correlation)
+//  11 – Blocked Users Analysis (50053 — Smart Lockout)
+//  12 – Nation State IP Sign-Ins (estsNationStateIP risk tag)
+// --- Geolocation & Travel ---
+//  13 – Impossible Travel — 3+ Countries in 1 Hour
+//  14 – Location-Based Sign-In Summary (Country + IP breakdown)
+//  15 – Impossible Travel — Simple Daily Country Count
+// --- Token & Session Abuse ---
+//  16 – Attacker in the Middle (AiTM) — AnomalousToken + attackerInTheMiddle
+//  17 – MFA Fatigue / Push Bombardment — Repeated MFA Interrupts
+//  18 – Token Replay — NI Sign-Ins Continuing After Password Reset
+// --- Legacy Auth & CA Policy ---
+//  19 – ASIM Authentication — Behavioral Baseline & Timing Analysis
+//  20 – Conditional Access Failure Spike — CA Policy Bypass Attempts
+// --- Cross-Table Correlations ---
+//  21 – Sign-In → Privileged Audit Action Correlation (AuditLogs)
+//  22 – Risky Sign-In → M365 Data Access (OfficeActivity)
+//  23 – New Device Registration + Immediate Privileged Access (AuditLogs)
+//  24 – Sign-In from TI-Flagged IP + Active Sentinel Alert (TI + SecurityAlert)
+// --- UEBA & Behavioral Analytics ---
+//  25 – User Sign-In Behavioral Baseline — Country/App Deviation (30 days)
+//  26 – Service Principal Sign-In from Anomalous Country
+//  27 – Multi-Signal Risk Scoring Dashboard (top 25 highest-risk users)
+//  28 – Distributed Coordinated Attack — Same User, 10+ IPs, 4h Window
+// =============================================================================
+
+
+// =============================================================================
+// 01 – PASSWORD SPRAY — SINGLE IP TARGETING MANY ACCOUNTS
+// Logic: One source IP generates authentication failures against ≥10 unique
+//        users in a 1-hour window. Classic spray pattern — low attempts per
+//        user to stay under lockout thresholds.
+// MITRE: T1110.003 (Password Spraying) → CredentialAccess
+// =============================================================================
+let timeframe = 1h;
+let userThreshold = 10;
+let failureThreshold = 5;
+SigninLogs
+| where TimeGenerated > ago(timeframe)
+| where ResultType != "0"
+| summarize
+    FailedAttempts   = count(),
+    UniqueUsers      = dcount(UserPrincipalName),
+    TargetedUsers    = make_set(UserPrincipalName, 50),
+    StartTime        = min(TimeGenerated),
+    EndTime          = max(TimeGenerated),
+    Apps             = make_set(AppDisplayName, 5),
+    Locations        = make_set(Location, 3)
+  by IPAddress
+| where UniqueUsers >= userThreshold and FailedAttempts >= failureThreshold
+| extend Severity = case(
+    UniqueUsers >= 50, "Critical",
+    UniqueUsers >= 25, "High",
+    "Medium")
+| order by UniqueUsers desc
+
+
+// =============================================================================
+// 02 – BRUTE FORCE — SINGLE ACCOUNT TARGETED FROM MANY IPs
+// Logic: One UPN accumulating ≥10 failures in 1h. Classify as single-source,
+//        multi-source, or distributed to prioritize response.
+// MITRE: T1110.001 (Password Guessing) → CredentialAccess
+// =============================================================================
+let timeframe = 1h;
+let failureThreshold = 10;
+SigninLogs
+| where TimeGenerated > ago(timeframe)
+| where ResultType != "0"
+| summarize
+    FailedAttempts   = count(),
+    UniqueIPs        = dcount(IPAddress),
+    SourceIPs        = make_set(IPAddress, 20),
+    StartTime        = min(TimeGenerated),
+    EndTime          = max(TimeGenerated),
+    Locations        = make_set(Location, 5),
+    FailureReasons   = make_set(ResultDescription, 5),
+    Apps             = make_set(AppDisplayName, 5)
+  by UserPrincipalName
+| where FailedAttempts >= failureThreshold
+| extend AttackType = case(
+    UniqueIPs >= 5, "Distributed Brute Force",
+    UniqueIPs >= 2, "Multi-Source Brute Force",
+    "Single-Source Brute Force")
+| extend Severity = case(
+    FailedAttempts >= 50, "High",
+    FailedAttempts >= 25, "Medium",
+    "Low")
+| order by FailedAttempts desc
+
+
+// =============================================================================
+// 03 – CREDENTIAL STUFFING — HIGH-VELOCITY INVALID CREDENTIALS
+// Logic: Single IP generating ≥50 ResultType 50126 errors (invalid credentials)
+//        against many users. Indicates credential lists from data breaches.
+// MITRE: T1110.004 (Credential Stuffing) → CredentialAccess
+// =============================================================================
+let timeframe = 20d;
+let velocityThreshold = 50;
+SigninLogs
+| where TimeGenerated > ago(timeframe)
+| where ResultType == "50126"
+| summarize
+    InvalidCredAttempts  = count(),
+    UniqueUsers          = dcount(UserPrincipalName),
+    Users                = make_set(UserPrincipalName, 100),
+    StartTime            = min(TimeGenerated),
+    EndTime              = max(TimeGenerated),
+    Locations            = make_set(Location, 5)
+  by IPAddress
+| where InvalidCredAttempts >= velocityThreshold
+| extend Severity = case(
+    InvalidCredAttempts >= 200, "Critical",
+    InvalidCredAttempts >= 100, "High",
+    "Medium")
+| order by InvalidCredAttempts desc
+
+
+// =============================================================================
+// 04 – LEGACY AUTHENTICATION BRUTE FORCE (IMAP, POP, SMTP, EAS)
+// Logic: Failures via legacy protocols. Legacy auth bypasses MFA and CA policies
+//        — any attack via these protocols warrants elevated alerting.
+// MITRE: T1110 (Brute Force), T1550 (Use Alternate Authentication Material)
+// =============================================================================
+let timeframe = 1h;
+let failureThreshold = 10;
+let legacyProtocols = dynamic([
+    "IMAP", "POP", "SMTP", "Authenticated SMTP",
+    "Exchange ActiveSync", "Other clients"]);
+SigninLogs
+| where TimeGenerated > ago(timeframe)
+| where ClientAppUsed in (legacyProtocols)
+| where ResultType != "0"
+| summarize
+    FailedAttempts   = count(),
+    UniqueUsers      = dcount(UserPrincipalName),
+    TargetedUsers    = make_set(UserPrincipalName, 50),
+    Protocols        = make_set(ClientAppUsed),
+    StartTime        = min(TimeGenerated),
+    EndTime          = max(TimeGenerated),
+    Locations        = make_set(Location, 5)
+  by IPAddress
+| where FailedAttempts >= failureThreshold
+| extend Severity = case(
+    UniqueUsers >= 20, "High",
+    FailedAttempts >= 50, "High",
+    "Medium")
+| order by FailedAttempts desc
+
+
+// =============================================================================
+// 05 – PRIVILEGED ACCOUNT UNDER ATTACK — LOW-THRESHOLD FAILURES
+// Logic: ≥3 failures against accounts with admin/privileged naming conventions.
+//        Lower threshold because any attack against privileged accounts is
+//        high-priority regardless of volume.
+// MITRE: T1110 (Brute Force), T1078 (Valid Accounts — Privileged)
+// =============================================================================
+let timeframe = 1h;
+let failureThreshold = 3;
+let privilegedKeywords = dynamic([
+    "admin", "administrator", "root", "global", "security",
+    "privileged", "service", "svc", "elevated", "tier0",
+    "da-", "ea-", "ga-", "pa-"]);
+SigninLogs
+| where TimeGenerated > ago(timeframe)
+| where ResultType != "0"
+| where UserPrincipalName has_any (privilegedKeywords)
+    or UserPrincipalName contains "_adm"
+    or UserPrincipalName startswith "adm"
+| summarize
+    FailedAttempts   = count(),
+    UniqueIPs        = dcount(IPAddress),
+    SourceIPs        = make_set(IPAddress, 20),
+    StartTime        = min(TimeGenerated),
+    EndTime          = max(TimeGenerated),
+    Locations        = make_set(Location, 5),
+    Apps             = make_set(AppDisplayName, 10),
+    FailureReasons   = make_set(ResultDescription, 5)
+  by UserPrincipalName
+| where FailedAttempts >= failureThreshold
+| extend
+    Severity   = "Critical",
+    AttackType = case(
+        UniqueIPs >= 5, "Distributed Attack on Privileged Account",
+        UniqueIPs >= 2, "Multi-Source Attack on Privileged Account",
+        "Focused Attack on Privileged Account")
+| order by FailedAttempts desc
+
+
+// =============================================================================
+// 06 – CONTINUOUS LOGIN FAILURES PER USER (SLIDING WINDOW)
+// Logic: More than 10 failures in any 10-minute bucket for the same user.
+//        Catches sustained automated attacks and credential guessing tools.
+// MITRE: T1110.001 (Password Guessing) → CredentialAccess
+// =============================================================================
+let threshold = 10;
+let unit = 10m;
+SigninLogs
+| where ResultType !in ("0", "50125", "50140")
+| summarize
+    LoginFailures    = count(),
+    UniqueIPs        = dcount(IPAddress),
+    SourceIPs        = make_set(IPAddress, 10),
+    Apps             = make_set(AppDisplayName, 5),
+    FailureReasons   = make_set(ResultDescription, 5)
+  by UserPrincipalName, bin(TimeGenerated, unit)
+| where LoginFailures > threshold
+| extend Severity = case(
+    LoginFailures >= 50, "High",
+    LoginFailures >= 25, "Medium",
+    "Low")
+| order by LoginFailures desc
+
+
+// =============================================================================
+// 07 – LOW-AND-SLOW SPRAY — VICTIM SCORING DASHBOARD (30 DAYS)
+// Logic: Identify users targeted by spray IPs (≥10 distinct victims/day).
+//        Score users by failure volume, spray IP count, and whether a success
+//        followed the spray. Prioritises the most likely breach victims.
+// MITRE: T1110.003 (Password Spraying) → CredentialAccess
+// =============================================================================
+let lookback         = 30d;
+let spray_window     = 24h;
+let spray_threshold  = 10;
+let sprayIPs =
+    SigninLogs
+    | where TimeGenerated >= ago(lookback) and ResultType != "0"
+    | extend IPAddress = coalesce(column_ifexists("IPAddress",""), column_ifexists("ClientIP",""))
+    | where isnotempty(IPAddress)
+    | summarize DistinctFailedUsers = dcount(UserPrincipalName)
+        by IPAddress, bin(TimeGenerated, spray_window)
+    | where DistinctFailedUsers >= spray_threshold
+    | distinct IPAddress;
+SigninLogs
+| where TimeGenerated >= ago(lookback)
+| extend
+    IPAddress = coalesce(column_ifexists("IPAddress",""), column_ifexists("ClientIP","")),
+    IsFailed  = iif(ResultType != "0", 1, 0),
+    IsSuccess = iif(ResultType == "0", 1, 0)
+| where isnotempty(IPAddress) and isnotempty(UserPrincipalName) and IPAddress in (sprayIPs)
+| summarize
+    FailedFromSprayIPs   = sum(IsFailed),
+    SuccessfulAttempts   = sum(IsSuccess),
+    DistinctSprayIPs     = dcount(IPAddress),
+    SprayIPList          = make_set(IPAddress, 20),
+    Countries            = make_set(Location, 10),
+    Apps                 = make_set(AppDisplayName, 10),
+    FirstSeen            = min(TimeGenerated),
+    LastFailed           = maxif(TimeGenerated, IsFailed == 1),
+    LastSeen             = max(TimeGenerated)
+  by UserPrincipalName
+| extend SuccessAfterFailures = iif(SuccessfulAttempts > 0
+    and FailedFromSprayIPs > 0
+    and LastFailed < LastSeen, 1, 0)
+| extend Score = todouble(FailedFromSprayIPs)
+    + 20.0 * todouble(DistinctSprayIPs)
+    + 50.0 * todouble(SuccessAfterFailures)
+| order by Score desc
+| take 100
+
+
+// =============================================================================
+// 08 – SPRAY SIGN-IN ROW EXPORT (30 days)
+// Logic: Exportable flat rows for all sign-ins from identified spray IPs.
+//        Use for investigation handoffs, SOAR playbook input, or SIEM export.
+// MITRE: T1110.003 → CredentialAccess
+// =============================================================================
+let lookback        = 30d;
+let spray_window    = 24h;
+let spray_threshold = 10;
+let sprayIPs =
+    SigninLogs
+    | where TimeGenerated >= ago(lookback) and ResultType != "0"
+    | where isnotempty(IPAddress)
+    | summarize DistinctFailedUsers = dcount(UserPrincipalName)
+        by IPAddress, bin(TimeGenerated, spray_window)
+    | where DistinctFailedUsers >= spray_threshold
+    | distinct IPAddress;
+SigninLogs
+| where TimeGenerated >= ago(lookback) and IPAddress in (sprayIPs)
+| where isnotempty(UserPrincipalName)
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    IPAddress,
+    Location,
+    AppDisplayName,
+    ResultType,
+    ResultDescription,
+    ClientAppUsed,
+    DeviceDetail,
+    RiskLevelDuringSignIn
+| order by TimeGenerated desc
+
+
+// =============================================================================
+// 09 – BRUTE FORCE → SUCCESS CHAIN — CRITICAL BREACH INDICATOR
+// Logic: User accumulates ≥5 failures from an IP, then succeeds from the same
+//        IP within 30 minutes. The success window and short gap strongly
+//        indicate the attacker found the correct password.
+// MITRE: T1110 (Brute Force), T1078 (Valid Accounts) → CredentialAccess, InitialAccess
+// =============================================================================
+let timeframe        = 1h;
+let failureThreshold = 5;
+let successWindow    = 30m;
+let FailedLogins =
+    SigninLogs
+    | where TimeGenerated > ago(timeframe)
+    | where ResultType != "0"
+    | summarize
+        FailureCount    = count(),
+        LastFailure     = max(TimeGenerated),
+        FailureReasons  = make_set(ResultDescription, 5)
+      by UserPrincipalName, IPAddress
+    | where FailureCount >= failureThreshold;
+let SuccessfulLogins =
+    SigninLogs
+    | where TimeGenerated > ago(timeframe)
+    | where ResultType == "0"
+    | project
+        UserPrincipalName, IPAddress,
+        SuccessTime           = TimeGenerated,
+        Location,
+        AppDisplayName,
+        DeviceDetail,
+        UserAgent,
+        RiskLevelDuringSignIn,
+        IsRisky;
+FailedLogins
+| join kind=inner SuccessfulLogins on UserPrincipalName, IPAddress
+| where SuccessTime > LastFailure
+| where SuccessTime - LastFailure <= successWindow
+| extend
+    TimeSinceLastFailure = datetime_diff("minute", SuccessTime, LastFailure),
+    Severity             = "Critical",
+    BreachLikelihood     = case(
+        TimeSinceLastFailure <= 5,  "Very High — Immediate Success",
+        TimeSinceLastFailure <= 15, "High — Quick Success",
+        "Medium — Delayed Success")
+| project
+    TimeGenerated = SuccessTime,
+    UserPrincipalName, IPAddress, Location,
+    AppDisplayName, FailureCount, TimeSinceLastFailure,
+    BreachLikelihood, FailureReasons,
+    RiskLevelDuringSignIn, IsRisky, Severity
+| order by TimeSinceLastFailure asc
+
+
+// =============================================================================
+// 10 – TI-ENRICHED BRUTE FORCE → SUCCESS
+// Logic: Same breach indicator as Q09, but the IP must also appear in the
+//        Sentinel Threat Intelligence feed. Two-signal confirmation.
+// Correlates with: ThreatIntelligenceIndicator
+// MITRE: T1110, T1078 → CredentialAccess, InitialAccess
+// =============================================================================
+let TI_IPs =
+    ThreatIntelligenceIndicator
+    | where ExpirationDateTime > now()
+    | where isnotempty(NetworkSourceIP)
+    | distinct NetworkSourceIP;
+let FailedLogins =
+    SigninLogs
+    | where TimeGenerated > ago(1h)
+    | where ResultType in ("50126", "50053")
+    | summarize
+        FailedCount         = count(),
+        FirstFailed         = min(TimeGenerated),
+        LastFailed          = max(TimeGenerated),
+        FailedAttemptsIn10m = count()
+      by UserPrincipalName, IPAddress, AppDisplayName, bin(TimeGenerated, 10m)
+    | where FailedAttemptsIn10m > 10;
+let SuccessfulLogins =
+    SigninLogs
+    | where TimeGenerated > ago(1h)
+    | where ResultType == "0"
+    | project UserPrincipalName, IPAddress, AppDisplayName, SuccessTime = TimeGenerated;
+FailedLogins
+| join kind=inner SuccessfulLogins on UserPrincipalName, IPAddress, AppDisplayName
+| where SuccessTime between (LastFailed .. LastFailed + 5m)
+| where IPAddress in (TI_IPs)
+| project
+    UserPrincipalName, IPAddress, AppDisplayName,
+    FailedAttemptsIn10m, SuccessTime,
+    ThreatLevel = "Critical — TI-Confirmed Success After Brute Force"
+
+
+// =============================================================================
+// 11 – BLOCKED USERS ANALYSIS (50053 — SMART LOCKOUT / MALICIOUS IP)
+// Logic: ResultType 50053 = sign-in blocked because IP flagged as malicious OR
+//        account locked due to too many failed attempts. Surface attack origin
+//        countries and targeted users.
+// MITRE: T1110 → CredentialAccess
+// =============================================================================
+SigninLogs
+| where ResultType == "50053"
+| summarize
+    BlockCount       = count(),
+    UniqueIPs        = dcount(IPAddress),
+    IPList           = make_set(IPAddress, 20),
+    Locations        = make_set(Location, 10),
+    Apps             = make_set(AppDisplayName, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by UserPrincipalName, ResultDescription, ClientAppUsed
+| order by BlockCount desc
+
+
+// =============================================================================
+// 12 – NATION STATE IP SIGN-INS (estsNationStateIP RISK TAG)
+// Logic: Surface sign-ins where Azure AD Identity Protection tagged the IP as
+//        affiliated with a nation-state threat actor. Entra P2 provides risk
+//        events that appear in RiskEventTypes_V2.
+// MITRE: T1078 → InitialAccess
+// =============================================================================
+SigninLogs
+| where TimeGenerated > ago(90d)
+| extend V2Risk = tostring(RiskEventTypes_V2)
+| where V2Risk contains "estsNationStateIP"
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    IPAddress,
+    Location,
+    AppDisplayName,
+    ResultType,
+    ResultDescription,
+    RiskLevelDuringSignIn,
+    RiskEventTypes_V2,
+    DeviceDetail
+| order by TimeGenerated desc
+
+
+// =============================================================================
+// 13 – IMPOSSIBLE TRAVEL — 3+ COUNTRIES IN 1 HOUR
+// Logic: Genuine users can't be in 3+ countries in 60 minutes. Covers both
+//        successful and failed sign-ins to catch probing + successful abuse.
+// MITRE: T1078 → InitialAccess
+// =============================================================================
+let timeframe = 30d;
+SigninLogs
+| where TimeGenerated > ago(timeframe)
+| where isnotempty(Location) and isnotempty(IPAddress)
+| summarize
+    UniqueLocations  = dcount(Location),
+    Locations        = make_set(Location),
+    IPs              = make_set(IPAddress),
+    FailedCount      = countif(ResultType != "0"),
+    SuccessCount     = countif(ResultType == "0"),
+    StartTime        = min(TimeGenerated),
+    EndTime          = max(TimeGenerated)
+  by UserPrincipalName
+| where UniqueLocations >= 3
+| extend Severity = case(
+    FailedCount >= 10, "High",
+    UniqueLocations >= 5, "High",
+    "Medium")
+| order by UniqueLocations desc
+
+
+// =============================================================================
+// 14 – LOCATION-BASED SIGN-IN SUMMARY (COUNTRY + IP BREAKDOWN)
+// Logic: Full breakdown of sign-ins from high-risk countries over 90 days.
+//        Surfaces both successful and failed sign-ins with user lists.
+//        Adjust the Location filter to match your org's risk posture.
+// MITRE: T1078, T1133 → InitialAccess
+// =============================================================================
+let failureCodes = dynamic([50053, 50126, 50055]);
+let successCodes = dynamic([0, 50057, 50155, 50105, 50133, 50076, 50079, 50173]);
+let RiskCountries = dynamic(["CN","RU","KP","IR","SY","CU","BY","NG","IQ","UA"]);
+SigninLogs
+| where TimeGenerated > ago(90d)
+| where Location in (RiskCountries)
+| extend FullLocation = strcat(
+    tostring(LocationDetails.countryOrRegion), "|",
+    tostring(LocationDetails.state), "|",
+    tostring(LocationDetails.city))
+| where ResultType in (successCodes) or ResultType in (failureCodes)
+| summarize
+    DistinctSuccessUsers = dcountif(UserPrincipalName, ResultType in (successCodes)),
+    SuccessUsers         = make_set_if(UserPrincipalName, ResultType in (successCodes)),
+    SuccessResultCodes   = make_set_if(ResultType, ResultType in (successCodes)),
+    DistinctFailedUsers  = dcountif(UserPrincipalName, ResultType in (failureCodes)),
+    FailedUsers          = make_set_if(UserPrincipalName, ResultType in (failureCodes)),
+    FailedResultCodes    = make_set_if(ResultType, ResultType in (failureCodes))
+  by FullLocation, IPAddress
+| order by DistinctSuccessUsers desc
+
+
+// =============================================================================
+// 15 – IMPOSSIBLE TRAVEL — DAILY COUNTRY COUNT TRENDING
+// Logic: Quick chart-ready summary — distinct countries per user per day over
+//        7 days. Useful for dashboards and trend visualization.
+// MITRE: T1078 → InitialAccess
+// =============================================================================
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == "0"
+| summarize
+    CountriesVisited = make_set(Location),
+    IPs              = make_set(IPAddress)
+  by UserPrincipalName
+| extend CountryCount = array_length(CountriesVisited)
+| where CountryCount > 2
+| project UserPrincipalName, CountryCount, CountriesVisited, IPs
+| order by CountryCount desc
+
+
+// =============================================================================
+// 16 – ATTACKER IN THE MIDDLE (AiTM) DETECTION
+// Logic: Correlates SecurityAlert "Anomalous Token" events with
+//        AADUserRiskEvents where RiskEventType == "attackerinTheMiddle".
+//        AiTM proxies (Evilginx, Modlishka) steal session cookies post-MFA.
+//        Requires Entra ID P2 + Microsoft Defender for Identity.
+// Correlates with: SecurityAlert, AADUserRiskEvents
+// MITRE: T1557 (AiTM), T1539 (Steal Web Session Cookie) → CredentialAccess
+// =============================================================================
+let AnomalousTokenRequestIds =
+    SecurityAlert
+    | where AlertName == "Anomalous Token"
+    | mv-expand todynamic(Entities)
+    | project Entities
+    | extend RequestId = tostring(Entities.RequestId)
+    | distinct RequestId;
+AADUserRiskEvents
+| where RequestId has_any (AnomalousTokenRequestIds)
+| where RiskEventType == "attackerinTheMiddle"
+| join kind=leftouter (
+    SigninLogs
+    | where TimeGenerated > ago(7d)
+    | project
+        UserPrincipalName,
+        CorrelationId,
+        Location,
+        AppDisplayName,
+        IPAddress,
+        DeviceDetail,
+        RiskLevelDuringSignIn
+  ) on $left.CorrelationId == $right.CorrelationId
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    RiskEventType,
+    IPAddress,
+    Location,
+    AppDisplayName,
+    RiskLevelDuringSignIn,
+    DeviceDetail,
+    Severity = "Critical"
+| order by TimeGenerated desc
+
+
+// =============================================================================
+// 17 – MFA FATIGUE / PUSH BOMBARDMENT DETECTION
+// Logic: Detect repeated MFA interrupts (push notifications) in a short window.
+//        ResultType 50074 = MFA required; 50076 = MFA completed. A high ratio
+//        of 50074 without 50076 or repeated 50074 bursts = fatigue attempt.
+// Correlates with: AADUserRiskEvents (optional enrichment)
+// MITRE: T1621 (MFA Request Generation) → CredentialAccess
+// =============================================================================
+let window = 1h;
+let mfaBombardThreshold = 5;
+let MFAInterrupts =
+    SigninLogs
+    | where TimeGenerated > ago(window)
+    | where ResultType in ("50074", "50076", "50079", "50158")
+    | summarize
+        MFAInterruptCount = count(),
+        MFASuccessCount   = countif(ResultType == "0"),
+        FirstInterrupt    = min(TimeGenerated),
+        LastInterrupt     = max(TimeGenerated),
+        SourceIPs         = make_set(IPAddress, 10),
+        Locations         = make_set(Location, 5),
+        Apps              = make_set(AppDisplayName, 5)
+      by UserPrincipalName;
+MFAInterrupts
+| where MFAInterruptCount >= mfaBombardThreshold
+| extend
+    InterruptDurationMin = datetime_diff("minute", LastInterrupt, FirstInterrupt),
+    Severity = case(
+        MFAInterruptCount >= 20, "High",
+        MFAInterruptCount >= 10, "Medium",
+        "Low")
+| order by MFAInterruptCount desc
+
+
+// =============================================================================
+// 18 – TOKEN REPLAY — NI SIGN-INS CONTINUING AFTER PASSWORD RESET
+// Logic: Azure AD Non-Interactive sign-ins are token refreshes — they continue
+//        even after a password reset until the refresh token expires or is
+//        revoked. Detect users with successful NI sign-ins within 30 minutes
+//        of a confirmed password change event in AuditLogs.
+// Correlates with: AADNonInteractiveUserSignInLogs, AuditLogs
+// MITRE: T1528 (Steal Application Access Token), T1550 → CredentialAccess
+// =============================================================================
+let window = 30m;
+let PasswordResets =
+    AuditLogs
+    | where TimeGenerated > ago(7d)
+    | where OperationName in ("Reset user password", "Change user password",
+        "Admin updated - Password changed", "Update user")
+    | extend TargetUPN = tostring(TargetResources[0].userPrincipalName)
+    | where isnotempty(TargetUPN)
+    | project ResetTime = TimeGenerated, TargetUPN;
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| join kind=inner PasswordResets on $left.UserPrincipalName == $right.TargetUPN
+| where TimeGenerated between (ResetTime .. ResetTime + window)
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    IPAddress,
+    Location,
+    AppDisplayName,
+    ResourceDisplayName,
+    CorrelationId,
+    ResetTime,
+    MinutesSinceReset = datetime_diff("minute", TimeGenerated, ResetTime),
+    Severity = "High"
+| order by MinutesSinceReset asc
+
+
+// =============================================================================
+// 19 – ASIM AUTHENTICATION — BEHAVIORAL BASELINE & TIMING ANALYSIS
+// Logic: ASIM-normalized view across all authentication sources. Computes
+//        inter-event timing statistics (delta, variance, stdev) per source IP.
+//        Low-variance, low-interval patterns indicate automated or scripted
+//        activity (bots, C2 checkins, credential spray tools).
+// =============================================================================
+let LowerPercentile  = 5;
+let MiddlePercentile = 50;
+let HigherPercentile = 95;
+let UserAgentSample  = 5;
+let GeoSample        = 5;
+_ASim_Authentication()
+| sort by TimeGenerated asc
+| extend
+    EventDuration = datetime_diff("millisecond", EventStartTime, EventEndTime),
+    TimeDelta     = datetime_diff("second", next(EventStartTime), EventEndTime),
+    Src           = coalesce(Src, SrcIpAddr)
+| extend Region = coalesce(SrcGeoRegion, SrcGeoCountry)
+| summarize
+    FirstSeen         = min(EventStartTime),
+    LastSeen          = max(EventEndTime),
+    TargetUsers       = dcount(TargetUserId),
+    TargetApps        = dcount(TargetAppId),
+    UserAgents        = dcount(HttpUserAgent),
+    UserAgentSet      = make_set(HttpUserAgent, UserAgentSample),
+    Geos              = dcount(Region),
+    GeoSet            = make_set(Region, GeoSample),
+    DeltaStdev        = stdev(TimeDelta),
+    DeltaPercentiles  = percentiles_array(TimeDelta, LowerPercentile, MiddlePercentile, HigherPercentile),
+    DeltaVariance     = variance(TimeDelta),
+    DeltaAvg          = avg(TimeDelta),
+    DeltaMin          = min(TimeDelta),
+    DeltaMax          = max(TimeDelta)
+  by Src, EventResultDetails, EventSubType
+| where DeltaStdev < 5 and DeltaAvg < 30  // very regular timing = suspicious
+
+
+// =============================================================================
+// 20 – CONDITIONAL ACCESS FAILURE SPIKE — CA POLICY BYPASS ATTEMPTS
+// Logic: A surge of CA-related failure codes from the same IP or user suggests
+//        an attacker probing for gaps in CA policy (wrong device, wrong app,
+//        legacy auth, location not covered). Result codes covered: 53003 (CA
+//        block), 530034, 53000, 53001 (grant ctrl failures).
+// MITRE: T1078 → InitialAccess, DefenseEvasion
+// =============================================================================
+let caFailureCodes = dynamic(["53003", "530034", "53000", "53001", "53004",
+    "50158", "50105", "50173", "50072", "50074"]);
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType in (caFailureCodes)
+| summarize
+    CAFailureCount   = count(),
+    UniqueUsers      = dcount(UserPrincipalName),
+    UserList         = make_set(UserPrincipalName, 20),
+    FailureCodes     = make_set(ResultType, 10),
+    FailureReasons   = make_set(ResultDescription, 10),
+    Apps             = make_set(AppDisplayName, 10),
+    Locations        = make_set(Location, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by IPAddress, ClientAppUsed
+| where CAFailureCount > 10
+| order by CAFailureCount desc
+
+
+// =============================================================================
+// 21 – SIGN-IN → PRIVILEGED AUDIT ACTION CORRELATION
+// Logic: User sign-in (success) from an anomalous IP or country, followed by
+//        a privileged operation in AuditLogs within 60 minutes. Detects the
+//        "authenticate then act" pattern of initial access → privilege abuse.
+// Correlates with: AuditLogs
+// MITRE: T1078 → InitialAccess; T1098 → PrivilegeEscalation
+// =============================================================================
+let window   = 60m;
+let lookback = 24h;
+let PrivilegedOps = dynamic([
+    "Add member to role", "Remove member from role",
+    "Update user", "Reset user password",
+    "Delete user", "Add application",
+    "Add service principal credentials", "Update application",
+    "Add delegated permission grant", "Consent to application",
+    "Update role", "Add role assignment to role definition"]);
+let Signins =
+    SigninLogs
+    | where TimeGenerated > ago(lookback)
+    | where ResultType == "0"
+    | project
+        UPN           = UserPrincipalName,
+        SignInTime    = TimeGenerated,
+        SignInIP      = IPAddress,
+        SignInCountry = Location,
+        App           = AppDisplayName,
+        RiskLevel     = RiskLevelDuringSignIn;
+AuditLogs
+| where TimeGenerated > ago(lookback)
+| where OperationName in (PrivilegedOps)
+| extend
+    ActorUPN     = tostring(InitiatedBy.user.userPrincipalName),
+    ActorIP      = tostring(InitiatedBy.user.ipAddress),
+    TargetObject = tostring(TargetResources[0].displayName)
+| where isnotempty(ActorUPN)
+| join kind=inner Signins on $left.ActorUPN == $right.UPN
+| where TimeGenerated between (SignInTime .. SignInTime + window)
+| project
+    TimeGenerated,
+    ActorUPN, OperationName, TargetObject,
+    ActorIP, SignInIP, SignInCountry,
+    App, RiskLevel, SignInTime,
+    MinutesSinceSignIn = datetime_diff("minute", TimeGenerated, SignInTime),
+    Severity = iff(RiskLevel in ("high", "medium"), "High", "Medium")
+| order by MinutesSinceSignIn asc
+
+
+// =============================================================================
+// 22 – RISKY SIGN-IN → M365 DATA ACCESS (OFFICEACTIVITY)
+// Logic: A sign-in flagged as risky (RiskLevelDuringSignIn = high/medium) is
+//        followed within 2h by bulk file access or download in O365.
+//        Combines Identity Protection signals with data access activity.
+// Correlates with: OfficeActivity
+// MITRE: T1078 → InitialAccess; T1213 (Data from Information Repositories) → Collection
+// =============================================================================
+let window   = 2h;
+let lookback = 24h;
+let RiskySignins =
+    SigninLogs
+    | where TimeGenerated > ago(lookback)
+    | where ResultType == "0"
+    | where RiskLevelDuringSignIn in ("high", "medium")
+    | project
+        UPN        = tolower(UserPrincipalName),
+        SignInTime = TimeGenerated,
+        IPAddress,
+        Location,
+        RiskLevel  = RiskLevelDuringSignIn,
+        RiskEvents = tostring(RiskEventTypes_V2);
+OfficeActivity
+| where TimeGenerated > ago(lookback)
+| where Operation in (
+    "FileDownloaded", "FileSyncDownloadedFull",
+    "AnonymousLinkUsed", "FileAccessed", "FolderCopied",
+    "SearchQueryInitiatedSharePoint", "SearchQueryInitiatedExchange")
+| where isnotempty(UserId)
+| summarize
+    O365_OpCount  = count(),
+    O365_Ops      = make_set(Operation, 10),
+    O365_Items    = make_set(OfficeObjectId, 20),
+    O365_First    = min(TimeGenerated)
+  by UPN = tolower(UserId)
+| join kind=inner RiskySignins on UPN
+| where O365_First between (SignInTime .. SignInTime + window)
+| project
+    UPN, RiskLevel, RiskEvents,
+    IPAddress, Location,
+    O365_OpCount, O365_Ops,
+    SignInTime, O365_First,
+    MinutesBetween = datetime_diff("minute", O365_First, SignInTime)
+| order by RiskLevel asc, O365_OpCount desc
+
+
+// =============================================================================
+// 23 – NEW DEVICE REGISTRATION + IMMEDIATE PRIVILEGED ACCESS
+// Logic: A user registers a new device (AuditLogs) and within 30 minutes
+//        performs a privileged operation or accesses sensitive resources.
+//        Attackers register adversary devices to establish persistence post-MFA.
+// Correlates with: AuditLogs
+// MITRE: T1098 (Account Manipulation) → PrivilegeEscalation, Persistence
+// =============================================================================
+let window = 30m;
+let NewDevices =
+    AuditLogs
+    | where TimeGenerated > ago(7d)
+    | where OperationName in (
+        "Register device", "Create device",
+        "Add registered owner to device", "Add device")
+    | extend
+        ActorUPN  = tostring(InitiatedBy.user.userPrincipalName),
+        DeviceName = tostring(TargetResources[0].displayName)
+    | where isnotempty(ActorUPN)
+    | project RegisterTime = TimeGenerated, ActorUPN, DeviceName;
+let PrivilegedActions =
+    AuditLogs
+    | where TimeGenerated > ago(7d)
+    | where OperationName has_any (
+        "Add member to role", "Consent to application",
+        "Add application", "Reset user password",
+        "Add service principal credentials")
+    | extend
+        ActorUPN     = tostring(InitiatedBy.user.userPrincipalName),
+        TargetObject = tostring(TargetResources[0].displayName)
+    | project ActionTime = TimeGenerated, ActorUPN, OperationName, TargetObject;
+NewDevices
+| join kind=inner PrivilegedActions on ActorUPN
+| where ActionTime between (RegisterTime .. RegisterTime + window)
+| project
+    ActorUPN, DeviceName,
+    RegisterTime, ActionTime, OperationName, TargetObject,
+    MinutesAfterRegister = datetime_diff("minute", ActionTime, RegisterTime),
+    Severity = "High"
+| order by MinutesAfterRegister asc
+
+
+// =============================================================================
+// 24 – SIGN-IN FROM TI-FLAGGED IP + ACTIVE SENTINEL ALERT
+// Logic: Two-control confirmation: a user signs in (success or failure) from an
+//        IP that is BOTH in the TI feed AND linked to an active Sentinel alert.
+//        This maximises fidelity and cuts through noisy single-source alerts.
+// Correlates with: ThreatIntelligenceIndicator, SecurityAlert
+// MITRE: T1078 → InitialAccess
+// =============================================================================
+let TI_IPs =
+    ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(30d)
+    | where Active == true
+    | where isnotempty(NetworkIP)
+    | summarize ThreatTypes = make_set(ThreatType), Confidence = max(ConfidenceScore)
+        by TI_IP = NetworkIP;
+let AlertIPs =
+    SecurityAlert
+    | where TimeGenerated > ago(7d)
+    | where AlertSeverity in ("High", "Medium")
+    | mv-expand todynamic(Entities)
+    | where Entities.Type == "ip"
+    | extend AlertIP = tostring(Entities.Address)
+    | where isnotempty(AlertIP)
+    | summarize AlertNames = make_set(AlertName, 5), Products = make_set(ProductName, 3)
+        by AlertIP;
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where isnotempty(IPAddress)
+| join kind=inner TI_IPs on $left.IPAddress == $right.TI_IP
+| join kind=inner AlertIPs on $left.IPAddress == $right.AlertIP
+| project
+    TimeGenerated, UserPrincipalName, IPAddress,
+    Location, AppDisplayName, ResultType, ResultDescription,
+    RiskLevelDuringSignIn, ThreatTypes, Confidence,
+    AlertNames, Products,
+    Severity = "High"
+| order by Confidence desc, TimeGenerated desc
+
+
+// =============================================================================
+// 25 – USER SIGN-IN BEHAVIORAL BASELINE — COUNTRY/APP DEVIATION
+// Logic: Compare each user's last 24h sign-in countries and apps against their
+//        30-day baseline. Surface users accessing new countries or new apps
+//        not seen in their history. Pure behavioral hunting — no TI required.
+// MITRE: T1078 → InitialAccess
+// =============================================================================
+let recentWindow   = 24h;
+let baselineWindow = 30d;
+let Baseline =
+    SigninLogs
+    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+    | where ResultType == "0"
+    | summarize
+        BaselineCountries = make_set(Location, 50),
+        BaselineApps      = make_set(AppDisplayName, 50)
+      by UserPrincipalName;
+let Recent =
+    SigninLogs
+    | where TimeGenerated > ago(recentWindow)
+    | where ResultType == "0"
+    | summarize
+        RecentCountries = make_set(Location, 20),
+        RecentApps      = make_set(AppDisplayName, 20),
+        SignInCount     = count(),
+        SourceIPs       = make_set(IPAddress, 10)
+      by UserPrincipalName;
+Recent
+| join kind=leftouter Baseline on UserPrincipalName
+| extend
+    NewCountries = set_difference(RecentCountries, BaselineCountries),
+    NewApps      = set_difference(RecentApps, BaselineApps)
+| where array_length(NewCountries) > 0 or array_length(NewApps) > 0
+| project
+    UserPrincipalName,
+    NewCountries, NewApps,
+    RecentCountries, RecentApps,
+    SignInCount, SourceIPs
+| order by array_length(NewCountries) desc
+
+
+// =============================================================================
+// 26 – SERVICE PRINCIPAL SIGN-IN FROM ANOMALOUS COUNTRY
+// Logic: Service principals (apps) should have predictable, static sign-in
+//        locations (datacenter ranges, known geos). A service principal
+//        signing in from an unexpected country indicates compromised credentials
+//        or a rogue application using the SP's client secret.
+// MITRE: T1078.004 (Valid Accounts: Cloud Accounts) → InitialAccess
+// =============================================================================
+let baselineWindow = 14d;
+let recentWindow   = 1d;
+let SPBaseline =
+    AADServicePrincipalSignInLogs
+    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+    | where ResultType == "0"
+    | summarize BaselineCountries = make_set(Location, 30)
+        by ServicePrincipalName;
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(recentWindow)
+| where ResultType == "0"
+| summarize
+    RecentCountries = make_set(Location, 10),
+    SignInCount     = count(),
+    SourceIPs       = make_set(IPAddress, 10),
+    Resources       = make_set(ResourceDisplayName, 10)
+  by ServicePrincipalName
+| join kind=inner SPBaseline on ServicePrincipalName
+| extend NewCountries = set_difference(RecentCountries, BaselineCountries)
+| where array_length(NewCountries) > 0
+| project
+    ServicePrincipalName,
+    NewCountries, BaselineCountries,
+    SignInCount, SourceIPs, Resources
+| order by array_length(NewCountries) desc
+
+
+// =============================================================================
+// 27 – MULTI-SIGNAL RISK SCORING DASHBOARD (TOP 25 HIGHEST-RISK USERS)
+// Logic: Score each user across 6 signals: failures, spray IPs, risky sign-ins,
+//        impossible travel, locked accounts, and successful post-spray logins.
+//        Composite risk score surfaces the most likely compromised users.
+// =============================================================================
+let lookback = 30d;
+SigninLogs
+| where TimeGenerated > ago(lookback)
+| extend
+    IsFailed  = iif(ResultType != "0", 1, 0),
+    IsSuccess = iif(ResultType == "0", 1, 0),
+    IsRisk    = iif(RiskLevelDuringSignIn in ("high","medium"), 1, 0),
+    IsLocked  = iif(ResultType == "50053", 1, 0)
+| summarize
+    TotalFailed         = sum(IsFailed),
+    TotalSucceeded      = sum(IsSuccess),
+    DistinctSourceIPs   = dcount(IPAddress),
+    DistinctCountries   = dcount(Location),
+    RiskySignins        = sum(IsRisk),
+    LockedEvents        = sum(IsLocked),
+    Apps                = make_set(AppDisplayName, 10),
+    Countries           = make_set(Location, 10),
+    SourceIPs           = make_set(IPAddress, 10),
+    FirstSeen           = min(TimeGenerated),
+    LastSeen            = max(TimeGenerated)
+  by UserPrincipalName
+| extend Score =
+    todouble(TotalFailed)
+    + 10.0  * todouble(DistinctSourceIPs)
+    + 15.0  * todouble(DistinctCountries)
+    + 30.0  * todouble(RiskySignins)
+    + 20.0  * todouble(LockedEvents)
+    + 50.0  * iif(TotalSucceeded > 0 and TotalFailed > 5, 1.0, 0.0)
+| order by Score desc
+| take 25
+| project
+    UserPrincipalName, Score,
+    TotalFailed, TotalSucceeded, DistinctSourceIPs,
+    DistinctCountries, RiskySignins, LockedEvents,
+    Apps, Countries, SourceIPs, FirstSeen, LastSeen
+
+
+// =============================================================================
+// 28 – DISTRIBUTED COORDINATED ATTACK — SAME USER, 10+ IPs, 4h WINDOW
+// Logic: Highly distributed attacks using botnet or coordinated infrastructure.
+//        Same user targeted from 10+ unique IPs over 30 days. Indicates high-
+//        value account under sustained, professional attack campaign.
+// MITRE: T1110 (Brute Force) → CredentialAccess
+// =============================================================================
+let timeframe    = 30d;
+let ipThreshold  = 10;
+SigninLogs
+| where TimeGenerated > ago(timeframe)
+| where ResultType != "0"
+| summarize
+    UniqueIPs        = dcount(IPAddress),
+    FailedAttempts   = count(),
+    SourceIPs        = make_set(IPAddress, 100),
+    StartTime        = min(TimeGenerated),
+    EndTime          = max(TimeGenerated),
+    Locations        = make_set(Location, 20),
+    Apps             = make_set(AppDisplayName, 10)
+  by UserPrincipalName
+| where UniqueIPs >= ipThreshold
+| extend
+    Severity     = "Critical",
+    AttackSpanDays = datetime_diff("day", EndTime, StartTime)
+| order by UniqueIPs desc
