@@ -1,7 +1,9 @@
 # SigninLogs Threat Hunting Pack
 
-Microsoft Sentinel hunting queries and analytic rules for
-Azure Active Directory / Entra ID sign-in telemetry. Not Microsoft Official
+Production-ready Microsoft Sentinel hunting queries and analytic rules for
+Azure Active Directory / Entra ID sign-in telemetry.
+
+---
 
 ## Contents
 
@@ -23,7 +25,7 @@ Azure Active Directory / Entra ID sign-in telemetry. Not Microsoft Official
 | Azure Active Directory | AADUserRiskEvents | Q08, Q17, Q18 |
 | Azure Active Directory | AADRiskyUsers | Q27 |
 | Azure Active Directory | AuditLogs | Q21, Q23, Rule 14 |
-| Threat Intelligence | ThreatIntelligenceIndicator | Q10, Q12, Q24 |
+| Threat Intelligence | ThreatIntelIndicators | Q10, Q12, Q24 |
 | Office 365 | OfficeActivity | Q22 |
 | Microsoft Defender XDR / Sentinel | SecurityAlert | Q16, Q24 |
 | Azure Active Directory | AADServicePrincipalSignInLogs | Q26 |
@@ -89,7 +91,7 @@ Azure Active Directory / Entra ID sign-in telemetry. Not Microsoft Official
 | Q21 Sign-In → Privileged AuditLogs | AuditLogs | Risky sign-in followed by admin action |
 | Q22 Risky Sign-In → M365 Activity | OfficeActivity | Compromised access pivoting to M365 |
 | Q23 New Device + Privileged Action | AuditLogs | Rogue device registration + elevation |
-| Q24 TI-IP + Active Alert Dual Confirm | ThreatIntelligenceIndicator, SecurityAlert | High-confidence actor confirmation |
+| Q24 TI-IP + Active Alert Dual Confirm | ThreatIntelIndicators, SecurityAlert | High-confidence actor confirmation |
 
 ### UEBA & Behavioral (Q25–Q28)
 
