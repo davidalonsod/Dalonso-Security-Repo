@@ -368,14 +368,16 @@ FailedLogins
 // 10 – TI-ENRICHED BRUTE FORCE → SUCCESS
 // Logic: Same breach indicator as Q09, but the IP must also appear in the
 //        Sentinel Threat Intelligence feed. Two-signal confirmation.
-// Correlates with: ThreatIntelligenceIndicator
+// Correlates with: ThreatIntelIndicators
 // MITRE: T1110, T1078 → CredentialAccess, InitialAccess
 // =============================================================================
 let TI_IPs =
-    ThreatIntelligenceIndicator
-    | where ExpirationDateTime > now()
-    | where isnotempty(NetworkSourceIP)
-    | distinct NetworkSourceIP;
+    ThreatIntelIndicators
+    | where ExpirationTimeUtc > now()
+    | where IsActive == true
+    | where Type == "ipv4-addr"
+    | where isnotempty(Value)
+    | distinct Value;
 let FailedLogins =
     SigninLogs
     | where TimeGenerated > ago(1h)
@@ -845,16 +847,17 @@ NewDevices
 // Logic: Two-control confirmation: a user signs in (success or failure) from an
 //        IP that is BOTH in the TI feed AND linked to an active Sentinel alert.
 //        This maximises fidelity and cuts through noisy single-source alerts.
-// Correlates with: ThreatIntelligenceIndicator, SecurityAlert
+// Correlates with: ThreatIntelIndicators, SecurityAlert
 // MITRE: T1078 → InitialAccess
 // =============================================================================
 let TI_IPs =
-    ThreatIntelligenceIndicator
+    ThreatIntelIndicators
     | where TimeGenerated > ago(30d)
-    | where Active == true
-    | where isnotempty(NetworkIP)
-    | summarize ThreatTypes = make_set(ThreatType), Confidence = max(ConfidenceScore)
-        by TI_IP = NetworkIP;
+    | where IsActive == true
+    | where Type == "ipv4-addr"
+    | where isnotempty(Value)
+    | summarize ThreatTypes = make_set(ThreatIntelligenceTags), Confidence = max(Confidence)
+        by TI_IP = Value;
 let AlertIPs =
     SecurityAlert
     | where TimeGenerated > ago(7d)
