@@ -1,0 +1,36 @@
+﻿// Rule    : Azure - Service Principal CA Bypass Sign-in Followed by Management Operations
+// Severity: High
+// Tactics : InitialAccess, CredentialAccess
+// MITRE   : T1528, T1078
+// Freq    : PT1H   Period: PT2H
+//==========================================================================================
+
+let CABypassSignins = AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(2h)
+    | where ResultType == 0
+    | where ConditionalAccessStatus has_any ("failure", "notApplied")
+    | where isnotempty(IPAddress)
+    | where IPAddress !startswith "168.63." and IPAddress !startswith "169.254."
+    | project SigninTime = TimeGenerated, ServicePrincipalId, ServicePrincipalName, SigninIP = IPAddress, AppId, ConditionalAccessStatus;
+AzureActivity
+| where TimeGenerated > ago(2h)
+| where ActivityStatusValue =~ "Success"
+| where OperationNameValue has_any ("WRITE", "DELETE", "ACTION")
+| where not(OperationNameValue has_any ("READ", "LIST", "GET", "LISTKEYS"))
+| where isnotempty(CallerIpAddress)
+| join kind=inner CABypassSignins on $left.CallerIpAddress == $right.SigninIP
+| where TimeGenerated > SigninTime and TimeGenerated <= SigninTime + 1h
+| summarize
+    MGMTOpCount = count(),
+    Operations = make_set(OperationNameValue, 10),
+    AffectedResources = make_set(ResourceId, 10),
+    SubscriptionIds = make_set(SubscriptionId, 5),
+    CallerIP = any(CallerIpAddress),
+    CAStatus = any(ConditionalAccessStatus),
+    FirstMGMTOp = min(TimeGenerated),
+    LastMGMTOp = max(TimeGenerated)
+    by Caller, ServicePrincipalName, SigninTime
+| where MGMTOpCount >= 2
+| extend
+    AccountName = coalesce(tostring(split(Caller, "@")[0]), ServicePrincipalName),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])

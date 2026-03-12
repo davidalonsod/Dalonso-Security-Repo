@@ -1,0 +1,35 @@
+﻿// Rule    : Azure - Diagnostic Settings Permanently Deleted Without Recreation
+// Severity: High
+// Tactics : DefenseEvasion
+// MITRE   : T1562
+// Freq    : PT1H   Period: PT2H
+//==========================================================================================
+
+let ExcludedCallerPatterns = dynamic(["terraform", "bicep", "pipeline", "github", "pulumi", "arm-"]);
+let Deletions = AzureActivity
+    | where TimeGenerated > ago(2h)
+    | where OperationNameValue =~ "MICROSOFT.INSIGHTS/DIAGNOSTICSETTINGS/DELETE"
+    | where ActivityStatusValue =~ "Success"
+    | where not(tolower(Caller) has_any (ExcludedCallerPatterns))
+    | where isnotempty(CallerIpAddress)
+    | project DeletionTime = TimeGenerated, Caller, ResourceId, CallerIpAddress, SubscriptionId, ResourceGroup;
+let Recreations = AzureActivity
+    | where TimeGenerated > ago(2h)
+    | where OperationNameValue =~ "MICROSOFT.INSIGHTS/DIAGNOSTICSETTINGS/WRITE"
+    | where ActivityStatusValue =~ "Success"
+    | summarize EarliestRecreation = min(TimeGenerated) by ResourceId;
+Deletions
+| join kind=leftouter Recreations on ResourceId
+| where isnull(EarliestRecreation) or EarliestRecreation > DeletionTime + 30m
+| summarize
+    DeletionCount = count(),
+    DeletedSettings = make_set(ResourceId, 10),
+    SourceIPs = make_set(CallerIpAddress, 5),
+    CallerIP = any(CallerIpAddress),
+    FirstDeletion = min(DeletionTime),
+    LastDeletion = max(DeletionTime)
+    by Caller, SubscriptionId, ResourceGroup
+| where DeletionCount >= 1
+| extend
+    AccountName = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])

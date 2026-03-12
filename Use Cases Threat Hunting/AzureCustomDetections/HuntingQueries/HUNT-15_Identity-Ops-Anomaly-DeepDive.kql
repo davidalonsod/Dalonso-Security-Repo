@@ -1,0 +1,46 @@
+// Hunt     : Hunt - Identity Operation Volume Anomaly Deep-Dive (30 Days)
+// Tactics  : Discovery, Impact, DefenseEvasion
+// MITRE    : T1078, T1580
+// Purpose  : For every identity active in the environment, compute daily write/delete/action operation counts and flag days where the volume significantly exceeds that identity's personal baseline. Use to investigate Rule-17 alerts, identify pre-attack reconnaissance bursts, or find compromised accounts that have been quietly abusing access over weeks.
+//==========================================================================================
+
+let ExcludedPatterns = dynamic(["terraform", "bicep", "pipeline", "github", "pulumi",
+    "devops", "arm-deployment"]);
+let AzurePlatformIPs = dynamic(["168.63.", "169.254."]);
+// Daily operation counts per identity
+let DailyOps = AzureActivity
+    | where TimeGenerated > ago(30d)
+    | where ActivityStatusValue =~ "Success"
+    | where OperationNameValue has_any ("WRITE", "DELETE", "ACTION")
+    | where not(OperationNameValue has_any ("READ", "LIST", "GET", "LISTKEYS"))
+    | where isnotempty(Caller) and isnotempty(CallerIpAddress)
+    | where not(CallerIpAddress has_any (AzurePlatformIPs))
+    | where not(tolower(Caller) has_any (ExcludedPatterns))
+    | summarize DailyCount = count() by Caller, Day = bin(TimeGenerated, 1d);
+// Per-identity baseline stats (using the first 23 days as baseline)
+let Baseline = DailyOps
+    | where Day < ago(7d)
+    | summarize
+        AvgDailyOps = avg(DailyCount),
+        StdDevOps   = stdev(DailyCount),
+        SampleDays  = dcount(Day)
+        by Caller
+    | where SampleDays >= 3;
+// Recent 7-day window
+let RecentOps = DailyOps
+    | where Day >= ago(7d);
+RecentOps
+| join kind=inner Baseline on Caller
+| extend DeviationScore = iff(
+    StdDevOps > 0,
+    (DailyCount - AvgDailyOps) / StdDevOps,
+    toreal(DailyCount))
+| where DeviationScore >= 2.5 or (AvgDailyOps < 1 and DailyCount >= 10)
+| project
+    Day,
+    Caller,
+    DailyCount,
+    AvgDailyOps  = round(AvgDailyOps, 1),
+    StdDevOps    = round(StdDevOps, 1),
+    DeviationScore = round(DeviationScore, 1)
+| order by DeviationScore desc, DailyCount desc

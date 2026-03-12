@@ -1,0 +1,40 @@
+// Hunt     : Hunt - Sentinel Configuration Changes (Rules, Connectors, Workbooks) (30 Days)
+// Tactics  : DefenseEvasion
+// MITRE    : T1562
+// Purpose  : Full timeline of Sentinel configuration changes: alert rule deletions/modifications, data connector changes, automation rule changes, and workbook modifications. Use to investigate Rule-16 alerts and to audit who modified Sentinel configuration during an incident response window.
+//==========================================================================================
+
+let SentinelOps = dynamic([
+    "MICROSOFT.SECURITYINSIGHTS/ALERTRULES/DELETE",
+    "MICROSOFT.SECURITYINSIGHTS/ALERTRULES/WRITE",
+    "MICROSOFT.SECURITYINSIGHTS/DATACONNECTORS/WRITE",
+    "MICROSOFT.SECURITYINSIGHTS/DATACONNECTORS/DELETE",
+    "MICROSOFT.SECURITYINSIGHTS/AUTOMATIONRULES/WRITE",
+    "MICROSOFT.SECURITYINSIGHTS/AUTOMATIONRULES/DELETE",
+    "MICROSOFT.SECURITYINSIGHTS/SETTINGS/WRITE",
+    "MICROSOFT.SECURITYINSIGHTS/WORKSPACEMANAGERCONFIGURATIONS/WRITE",
+    "MICROSOFT.OPERATIONALINSIGHTS/WORKSPACES/SAVEDEARCHES/DELETE"
+]);
+AzureActivity
+| where TimeGenerated > ago(30d)
+| where OperationNameValue has_any (SentinelOps)
+| where ActivityStatusValue =~ "Success"
+| extend ChangeCategory = case(
+    OperationNameValue has "ALERTRULES"        , "Analytics Rule",
+    OperationNameValue has "DATACONNECTORS"    , "Data Connector",
+    OperationNameValue has "AUTOMATIONRULES"   , "Automation Rule",
+    OperationNameValue has "SETTINGS"          , "Sentinel Settings",
+    OperationNameValue has "SAVEDEARCHES"      , "Saved Search / Hunting Query",
+    "Other")
+| extend ActionType = iff(OperationNameValue has "DELETE", "Delete", "Create/Modify")
+| project
+    TimeGenerated,
+    Caller,
+    CallerIpAddress,
+    ChangeCategory,
+    ActionType,
+    OperationNameValue,
+    ResourceId,
+    ResourceGroup,
+    SubscriptionId
+| order by TimeGenerated desc

@@ -1,0 +1,34 @@
+﻿// Rule    : Azure - Storage Account SAS Token Bulk Generation
+// Severity: Medium
+// Tactics : CredentialAccess, Exfiltration
+// MITRE   : T1550
+// Freq    : PT1H   Period: PT2H
+//==========================================================================================
+
+let ExcludedPatterns = dynamic(["backup", "monitor", "storagesync", "azurebackup", "recov"]);
+AzureActivity
+| where TimeGenerated > ago(2h)
+| where OperationNameValue has_any ("LISTACCOUNTSAS/ACTION", "LISTSERVICESAS/ACTION")
+| where ActivityStatusValue =~ "Success"
+| where not(tolower(Caller) has_any (ExcludedPatterns))
+| where isnotempty(CallerIpAddress)
+| where CallerIpAddress !startswith "168.63."
+| summarize
+    SASGenerationCount = count(),
+    TargetAccounts = make_set(tostring(split(ResourceId, "/")[8]), 10),
+    OperationTypes = make_set(OperationNameValue, 3),
+    SourceIPs = make_set(CallerIpAddress, 5),
+    CallerIP = any(CallerIpAddress),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by Caller, SubscriptionId, bin(TimeGenerated, 30m)
+| where SASGenerationCount >= 3
+| join kind=leftouter (
+    StorageBlobLogs
+    | where TimeGenerated > ago(2h)
+    | where OperationName == "GetBlob" and StatusCode == "200"
+    | summarize BlobReadCount = count(), TotalBytesRead = sum(ResponseBodySize) by RequesterObjectId
+) on $left.Caller == $right.RequesterObjectId
+| extend
+    AccountName = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])

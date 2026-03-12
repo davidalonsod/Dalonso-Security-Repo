@@ -1,0 +1,109 @@
+﻿// Rule    : Azure - Mass Deletion of Critical Resources (NSGs/VMs/Storage/VNETs/Key Vaults)
+// Severity: High
+// Tactics : Impact, DefenseEvasion
+// MITRE   : T1485, T1562
+// Freq    : PT1H   Period: PT3H
+//==========================================================================================
+
+let LookupWindow = 1h;
+let DeleteThreshold = 10;
+let ResourceTypeThreshold = 2;
+let KnownIaCPatterns = dynamic(["terraform", "bicep", "pipeline", "github", "pulumi", "devops", "arm-deployment", "cleanup", "deprovisioner"]);
+let AzurePlatformIPs = dynamic(["168.63.", "169.254."]);
+// Identities with established high-volume deletion patterns (14-day baseline)
+let KnownBulkDeleters = AzureActivity
+    | where TimeGenerated between (ago(14d) .. ago(2h))
+    | where OperationNameValue has "DELETE"
+    | where ActivityStatusValue =~ "Success"
+    | summarize DailyDeletes = count() by Caller, Day = bin(TimeGenerated, 1d)
+    | summarize AvgDailyDeletes = avg(DailyDeletes), DaysActive = dcount(Day) by Caller
+    | where AvgDailyDeletes >= 10 and DaysActive >= 5
+    | distinct Caller;
+// Critical resource DELETE operations (last 2h to capture full 1h windows)
+let CriticalDeletes = AzureActivity
+    | where TimeGenerated > ago(2h)
+    | where ActivityStatusValue =~ "Success"
+    | where OperationNameValue has "DELETE"
+    | where OperationNameValue has_any (
+        "MICROSOFT.NETWORK/NETWORKSECURITYGROUPS",
+        "MICROSOFT.COMPUTE/VIRTUALMACHINES",
+        "MICROSOFT.STORAGE/STORAGEACCOUNTS",
+        "MICROSOFT.NETWORK/VIRTUALNETWORKS",
+        "MICROSOFT.NETWORK/SUBNETS",
+        "MICROSOFT.COMPUTE/DISKS",
+        "MICROSOFT.KEYVAULT/VAULTS",
+        "MICROSOFT.NETWORK/APPLICATIONGATEWAYS",
+        "MICROSOFT.NETWORK/LOADBALANCERS"
+    )
+    | where not(tolower(Caller) has_any (KnownIaCPatterns))
+    | where isnotempty(CallerIpAddress)
+    | where not(CallerIpAddress has_any (AzurePlatformIPs))
+    | where Caller !in (KnownBulkDeleters);
+// Aggregate per caller/IP in 1-hour tumbling windows
+let DeleteBursts = CriticalDeletes
+    | summarize
+        DeleteCount = count(),
+        DistinctResourceTypes = dcount(tostring(split(OperationNameValue, "/")[1])),
+        DeletedResources = make_set(ResourceId, 20),
+        Operations = make_set(OperationNameValue, 10),
+        ResourceGroups = make_set(ResourceGroup, 5),
+        SubscriptionIds = make_set(SubscriptionId, 5),
+        CallerIP = any(CallerIpAddress),
+        SourceIPs = make_set(CallerIpAddress, 5),
+        FirstDelete = min(TimeGenerated),
+        LastDelete = max(TimeGenerated)
+        by Caller, bin(TimeGenerated, LookupWindow)
+    | where DeleteCount >= DeleteThreshold
+    | where DistinctResourceTypes >= ResourceTypeThreshold;
+// Enrich: correlate with SigninLogs for suspicious human sign-ins
+let UserSigninContext = SigninLogs
+    | where TimeGenerated > ago(3h)
+    | where isnotempty(IPAddress)
+    | project
+        SigninTime = TimeGenerated,
+        UserPrincipalName,
+        SigninIP = IPAddress,
+        UserDisplayName,
+        RiskLevelAggregated,
+        RiskState,
+        ConditionalAccessStatus,
+        Location,
+        AppDisplayName
+    | extend IsRisky = RiskLevelAggregated in ("high", "medium") or RiskState =~ "atRisk";
+// Enrich: correlate with SP sign-ins
+let SPSigninContext = AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(3h)
+    | where isnotempty(IPAddress)
+    | project
+        SPSigninTime = TimeGenerated,
+        ServicePrincipalName,
+        ServicePrincipalId,
+        SPSigninIP = IPAddress,
+        SPConditionalAccessStatus = ConditionalAccessStatus,
+        SPResultType = ResultType;
+DeleteBursts
+| join kind=leftouter (
+    UserSigninContext
+    | summarize
+        UserSigninCount = count(),
+        SigninLocations = make_set(Location, 3),
+        SigninApps = make_set(AppDisplayName, 3),
+        MaxRisk = max(RiskLevelAggregated),
+        HasRiskySignin = max(toint(IsRisky)),
+        UserNames = make_set(UserPrincipalName, 3)
+        by SigninIP
+  ) on $left.CallerIP == $right.SigninIP
+| join kind=leftouter (
+    SPSigninContext
+    | summarize
+        SPSigninCount = count(),
+        SigninSPs = make_set(ServicePrincipalName, 3),
+        CABypassCount = countif(SPConditionalAccessStatus has_any ("failure", "notApplied"))
+        by SPSigninIP
+  ) on $left.CallerIP == $right.SPSigninIP
+| extend
+    HasSigninCorroboration = isnotempty(UserSigninCount) or isnotempty(SPSigninCount),
+    SigninRiskLevel = coalesce(MaxRisk, "unknown"),
+    AccountName = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])
+| project-away SigninIP, SPSigninIP

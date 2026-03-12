@@ -1,0 +1,30 @@
+﻿// Hunt     : Hunt - Privileged Azure Management Operations Outside Business Hours (UTC 07-19)
+// Tactics  : DefenseEvasion,Persistence
+// MITRE    : T1078.004
+// Purpose  : Identifies identities performing sensitive management operations outside UTC 07:00-19:00 weekdays. Attackers in different time zones or running automated scripts often operate outside normal business hours. Review against expected schedules.
+//==========================================================================================
+
+AzureActivity
+| where TimeGenerated > ago(30d)
+| where ActivityStatusValue =~ "Success"
+| where OperationNameValue has_any (
+    "ROLEASSIGNMENTS/WRITE",
+    "ROLEASSIGNMENTS/DELETE",
+    "VIRTUALMACHINES/WRITE",
+    "DIAGNOSTICSETTINGS/DELETE",
+    "KEYVAULTS/WRITE",
+    "AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/WRITE",
+    "LOCKS/DELETE",
+    "POLICYASSIGNMENTS/DELETE")
+| where isnotempty(Caller)
+| extend HourUTC = hourofday(TimeGenerated)
+| extend DayOfWeek = dayofweek(TimeGenerated)
+| extend IsOffHours = HourUTC < 7 or HourUTC > 19 or DayOfWeek == 0d or DayOfWeek == 6d
+| where IsOffHours == true
+| summarize
+    OffHoursOpCount = count(),
+    Operations = make_set(OperationNameValue, 10),
+    HoursActive = make_set(HourUTC, 24),
+    SourceIPs = make_set(CallerIpAddress, 5)
+    by Caller, SubscriptionId
+| order by OffHoursOpCount desc

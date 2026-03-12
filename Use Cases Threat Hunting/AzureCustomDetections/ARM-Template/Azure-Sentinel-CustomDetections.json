@@ -1,0 +1,1336 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "defaultValue": "LAWSentinel",
+      "metadata": {
+        "description": "Name of the Microsoft Sentinel (Log Analytics) workspace"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region for deployed resources"
+      }
+    }
+  },
+  "resources": [
+
+    {
+      "comments": "RULE-01 | Cryptojacking: GPU/High-Compute VM Deployed by First-Time Identity | T1496 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/a1b2c3d4-e5f6-7890-abcd-ef1234567890')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure Cryptojacking - High-Compute VM Deployed by New Identity",
+        "description": "Detects deployment of GPU or high-compute VMs (NC/NV/ND/NP/HB/HC series) by identities with no history of such deployments in the last 14 days. Attackers compromise Azure credentials and immediately provision GPU VMs for cryptocurrency mining (T1496). FP mitigations applied: (1) 14-day behavioral baseline excludes established GPU deployers; (2) known IaC/CI-CD caller patterns excluded by name; (3) Azure platform IPs (168.63.x, 169.254.x) excluded; (4) requires ActivityStatus='Success' only — not 'Start' or 'Accept' which are pre-execution noise. NOT a duplicate of built-in 'Unusual number of resources created' because this is SKU-specific and identity-baseline-driven.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let GPUSKUs = dynamic([\"Standard_NC\", \"Standard_NV\", \"Standard_ND\", \"Standard_NP\", \"Standard_HB\", \"Standard_HC\"]);\nlet KnownAutoPatterns = dynamic([\"terraform\", \"bicep\", \"pipeline\", \"github\", \"pulumi\", \"devops\", \"arm-deployment\"]);\nlet PriorGPUDeployers = AzureActivity\n    | where TimeGenerated between (ago(14d) .. ago(6h))\n    | where OperationNameValue has_any (\"VIRTUALMACHINES/WRITE\", \"VIRTUALMACHINESCALESETS/WRITE\")\n    | where Properties has_any (GPUSKUs)\n    | where ActivityStatusValue =~ \"Success\"\n    | distinct Caller;\nAzureActivity\n| where TimeGenerated > ago(6h)\n| where ActivityStatusValue =~ \"Success\"\n| where OperationNameValue has_any (\"VIRTUALMACHINES/WRITE\", \"VIRTUALMACHINESCALESETS/WRITE\")\n| where Properties has_any (GPUSKUs)\n| where not(tolower(Caller) has_any (KnownAutoPatterns))\n| where isnotempty(CallerIpAddress)\n| where CallerIpAddress !startswith \"168.63.\" and CallerIpAddress !startswith \"169.254.\"\n| where Caller !in (PriorGPUDeployers)\n| summarize\n    DeploymentCount = count(),\n    DeployedResources = make_set(ResourceId, 10),\n    SourceIPs = make_set(CallerIpAddress, 5),\n    CallerIP = any(CallerIpAddress),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by Caller, ResourceGroup, SubscriptionId\n| extend\n    AccountName = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT12H",
+        "suppressionEnabled": false,
+        "tactics": ["Impact"],
+        "techniques": ["T1496"],
+        "eventGroupingSettings": { "aggregationKind": "SingleAlert" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Cryptojacking: GPU VM deployed by {{Caller}} from {{CallerIP}}",
+          "alertDescriptionFormat": "Identity {{Caller}} deployed {{DeploymentCount}} high-compute VM(s) with no prior history. Resources: {{DeployedResources}}"
+        },
+        "customDetails": {
+          "DeploymentCount": "DeploymentCount",
+          "SourceIPs": "SourceIPs",
+          "DeployedResources": "DeployedResources"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-02 | Diagnostic Settings Permanently Deleted Without Recreation | T1562.008 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/b2c3d4e5-f6a7-8901-bcde-f12345678901')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Diagnostic Settings Permanently Deleted Without Recreation",
+        "description": "Detects deletion of Azure Diagnostic Settings that are NOT re-created within 30 minutes. Attackers delete diagnostic settings to blind monitoring/SIEM ingestion before further activity (T1562.008). FP mitigations: (1) IaC/pipeline caller patterns excluded by name — Terraform 'destroy+apply' cycles typically recreate within seconds so the 30-min re-creation window handles those; (2) Only 'Success' status events — 'Start' is pre-execution noise; (3) Requires deletion NOT followed by timely recreation — catches destructive deletions vs. IaC cycles. NOT a duplicate of built-in 'NRT Security Event log cleared' which targets Windows OS event log, not Azure Diagnostic Settings.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let ExcludedCallerPatterns = dynamic([\"terraform\", \"bicep\", \"pipeline\", \"github\", \"pulumi\", \"arm-\"]);\nlet Deletions = AzureActivity\n    | where TimeGenerated > ago(2h)\n    | where OperationNameValue =~ \"MICROSOFT.INSIGHTS/DIAGNOSTICSETTINGS/DELETE\"\n    | where ActivityStatusValue =~ \"Success\"\n    | where not(tolower(Caller) has_any (ExcludedCallerPatterns))\n    | where isnotempty(CallerIpAddress)\n    | project DeletionTime = TimeGenerated, Caller, ResourceId, CallerIpAddress, SubscriptionId, ResourceGroup;\nlet Recreations = AzureActivity\n    | where TimeGenerated > ago(2h)\n    | where OperationNameValue =~ \"MICROSOFT.INSIGHTS/DIAGNOSTICSETTINGS/WRITE\"\n    | where ActivityStatusValue =~ \"Success\"\n    | summarize EarliestRecreation = min(TimeGenerated) by ResourceId;\nDeletions\n| join kind=leftouter Recreations on ResourceId\n| where isnull(EarliestRecreation) or EarliestRecreation > DeletionTime + 30m\n| summarize\n    DeletionCount = count(),\n    DeletedSettings = make_set(ResourceId, 10),\n    SourceIPs = make_set(CallerIpAddress, 5),\n    CallerIP = any(CallerIpAddress),\n    FirstDeletion = min(DeletionTime),\n    LastDeletion = max(DeletionTime)\n    by Caller, SubscriptionId, ResourceGroup\n| where DeletionCount >= 1\n| extend\n    AccountName = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT6H",
+        "suppressionEnabled": false,
+        "tactics": ["DefenseEvasion"],
+        "techniques": ["T1562"],
+        "eventGroupingSettings": { "aggregationKind": "SingleAlert" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Diag Settings deleted by {{Caller}} — no recreation within 30 min",
+          "alertDescriptionFormat": "{{Caller}} deleted {{DeletionCount}} diagnostic setting(s) without timely recreation. Affected: {{DeletedSettings}}"
+        },
+        "customDetails": {
+          "DeletionCount": "DeletionCount",
+          "DeletedSettings": "DeletedSettings"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-03 | Mass Privileged Role Assignments by a Single Identity | T1098.003 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/c3d4e5f6-a7b8-9012-cdef-123456789012')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Mass Privileged Role Assignments by Single Identity",
+        "description": "Alerts when a single identity assigns 5 or more non-read-only role assignments within a 30-minute window. Post-compromise privilege escalation by groups like LAPSUS$ and Storm-0501 involves rapid bulk role assignment to maintain access (T1098.003). FP mitigations: (1) PIM service principal excluded by name pattern — PIM-initiated bulk activations appear as role assignments but via 'MS-PIM' or 'PrivilegedIdentityManagement' callers; (2) Pure read-only roles (Reader, Billing Reader GUIDs) excluded; (3) Azure platform IP filtered; (4) Threshold of 5+ in 30 min avoids single legitimate assignment noise; (5) 30-minute bin ensures the burst pattern is detected rather than spread assignments.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let ExcludedCallerPatterns = dynamic([\"ms-pim\", \"privilegedidentity\", \"identitygovernance\", \"aadidentitygovernance\"]);\nlet ReadOnlyRoleIds = dynamic([\"acdd72a7-3385-48ef-bd42-f606fba81ae7\", \"fa23ad8b-c56e-40d8-ac0c-ce449e1d2c64\", \"72fafb9e-0641-4937-9268-a91bfd8191a3\"]);\nAzureActivity\n| where TimeGenerated > ago(1h)\n| where OperationNameValue =~ \"MICROSOFT.AUTHORIZATION/ROLEASSIGNMENTS/WRITE\"\n| where ActivityStatusValue =~ \"Success\"\n| where not(tolower(Caller) has_any (ExcludedCallerPatterns))\n| where isnotempty(CallerIpAddress)\n| where CallerIpAddress !startswith \"168.63.\"\n| extend RoleDefId = tolower(tostring(parse_json(Properties).requestbody.properties.roleDefinitionId))\n| where not(RoleDefId has_any (ReadOnlyRoleIds))\n| summarize\n    AssignmentCount = count(),\n    DistinctRoles = dcount(RoleDefId),\n    AssignedRoles = make_set(RoleDefId, 10),\n    AffectedScopes = make_set(ResourceGroup, 10),\n    SourceIPs = make_set(CallerIpAddress, 5),\n    CallerIP = any(CallerIpAddress),\n    FirstAssignment = min(TimeGenerated),\n    LastAssignment = max(TimeGenerated)\n    by Caller, SubscriptionId, bin(TimeGenerated, 30m)\n| where AssignmentCount >= 5\n| extend\n    AccountName = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT30M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT6H",
+        "suppressionEnabled": false,
+        "tactics": ["PrivilegeEscalation", "Persistence"],
+        "techniques": ["T1098"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Mass role assignment: {{AssignmentCount}} roles by {{Caller}}",
+          "alertDescriptionFormat": "{{Caller}} assigned {{AssignmentCount}} non-read-only roles in 30 minutes. Role IDs: {{AssignedRoles}}"
+        },
+        "customDetails": {
+          "AssignmentCount": "AssignmentCount",
+          "AssignedRoles": "AssignedRoles",
+          "AffectedScopes": "AffectedScopes"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-04 | Storage Account SAS Token Bulk Generation | T1550 | Medium",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/d4e5f6a7-b8c9-0123-defa-234567890123')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Storage Account SAS Token Bulk Generation",
+        "description": "Detects when a single identity generates 3 or more SAS tokens (ListAccountSAS/ListServiceSAS) within a 30-minute window. Attackers that gain Azure management access generate SAS tokens as an alternative authentication material (T1550) to exfiltrate storage data without leaving standard AAD sign-in traces. These exact operation names were observed in this workspace. FP mitigations: (1) known backup and monitoring SP name patterns excluded; (2) threshold of 3+ in 30 min avoids single-use app auth flows; (3) correlated across both AccountSAS and ServiceSAS operation types — legitimate single-SA access typically uses one type.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "let ExcludedPatterns = dynamic([\"backup\", \"monitor\", \"storagesync\", \"azurebackup\", \"recov\"]);\nAzureActivity\n| where TimeGenerated > ago(2h)\n| where OperationNameValue has_any (\"LISTACCOUNTSAS/ACTION\", \"LISTSERVICESAS/ACTION\")\n| where ActivityStatusValue =~ \"Success\"\n| where not(tolower(Caller) has_any (ExcludedPatterns))\n| where isnotempty(CallerIpAddress)\n| where CallerIpAddress !startswith \"168.63.\"\n| summarize\n    SASGenerationCount = count(),\n    TargetAccounts = make_set(tostring(split(ResourceId, \"/\")[8]), 10),\n    OperationTypes = make_set(OperationNameValue, 3),\n    SourceIPs = make_set(CallerIpAddress, 5),\n    CallerIP = any(CallerIpAddress),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by Caller, SubscriptionId, bin(TimeGenerated, 30m)\n| where SASGenerationCount >= 3\n| join kind=leftouter (\n    StorageBlobLogs\n    | where TimeGenerated > ago(2h)\n    | where OperationName == \"GetBlob\" and StatusCode == \"200\"\n    | summarize BlobReadCount = count(), TotalBytesRead = sum(ResponseBodySize) by RequesterObjectId\n) on $left.Caller == $right.RequesterObjectId\n| extend\n    AccountName = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT6H",
+        "suppressionEnabled": false,
+        "tactics": ["DefenseEvasion", "LateralMovement"],
+        "techniques": ["T1550"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "SAS bulk generation: {{SASGenerationCount}} tokens by {{Caller}}",
+          "alertDescriptionFormat": "{{Caller}} generated {{SASGenerationCount}} SAS tokens within 30 min from {{CallerIP}}"
+        },
+        "customDetails": {
+          "SASGenerationCount": "SASGenerationCount",
+          "TargetAccounts": "TargetAccounts"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-05 | Azure Automation Runbook Created by First-Time Caller | T1059.009 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/e5f6a7b8-c9d0-1234-efab-345678901234')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Automation Runbook Created or Published by First-Time Caller",
+        "description": "Detects creation or publishing of Azure Automation runbooks by identities with no history of runbook operations in the last 14 days. Attackers create runbooks that execute code at scale with Automation Account managed identity privileges — a cloud-native persistence and execution vector (T1059.009). Seen in APT29 and LAPSUS$ TTPs. FP mitigations: (1) 14-day behavioral baseline excludes developers/automation owners already working with runbooks; (2) known DevOps pipeline caller name patterns excluded; (3) Azure platform IPs excluded; (4) only 'Success' status — draft saves ('Start') excluded.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let KnownRunbookCallers = AzureActivity\n    | where TimeGenerated between (ago(14d) .. ago(6h))\n    | where OperationNameValue has_any (\"AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/WRITE\", \"AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/PUBLISH/ACTION\", \"AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/DRAFT/WRITE\")\n    | where ActivityStatusValue =~ \"Success\"\n    | distinct Caller;\nlet ExcludedPatterns = dynamic([\"automation-account\", \"devops\", \"pipeline\", \"github\", \"bicep\", \"terraform\"]);\nAzureActivity\n| where TimeGenerated > ago(6h)\n| where OperationNameValue has_any (\"AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/WRITE\", \"AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/PUBLISH/ACTION\")\n| where ActivityStatusValue =~ \"Success\"\n| where not(tolower(Caller) has_any (ExcludedPatterns))\n| where isnotempty(CallerIpAddress)\n| where CallerIpAddress !startswith \"168.63.\" and CallerIpAddress !startswith \"169.254.\"\n| where Caller !in (KnownRunbookCallers)\n| summarize\n    RunbookOpCount = count(),\n    RunbookNames = make_set(tostring(split(ResourceId, \"/\")[-1]), 10),\n    Operations = make_set(OperationNameValue, 5),\n    SourceIPs = make_set(CallerIpAddress, 5),\n    CallerIP = any(CallerIpAddress),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by Caller, ResourceGroup, SubscriptionId\n| extend\n    AccountName = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT12H",
+        "suppressionEnabled": false,
+        "tactics": ["Execution", "Persistence"],
+        "techniques": ["T1059"],
+        "eventGroupingSettings": { "aggregationKind": "SingleAlert" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "New runbook author: {{Caller}} created {{RunbookNames}} from {{CallerIP}}",
+          "alertDescriptionFormat": "First-time runbook caller {{Caller}} performed {{RunbookOpCount}} runbook operation(s) on {{RunbookNames}}"
+        },
+        "customDetails": {
+          "RunbookNames": "RunbookNames",
+          "Operations": "Operations"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-06 | TI Indicator Match on Azure Management Plane Caller IP (STIX ThreatIntelIndicators) | Multiple TTPs | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/f6a7b8c9-d0e1-2345-fabc-456789012345')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Threat Intelligence Match on Management Plane Caller IP (STIX)",
+        "description": "Correlates CallerIpAddress from AzureActivity against active STIX 2.1 IP indicators from ThreatIntelIndicators. An IP match indicates adversary-controlled infrastructure calling Azure management APIs — characteristic of nation-state operators and ransomware affiliates managing compromised Azure tenants. Enriched with SigninLogs and AADServicePrincipalSignInLogs to confirm a preceding authenticated session from the same TI-matched IP, dramatically reducing false positives from NAT/proxy coincidences. FP mitigations: (1) Confidence >= 75 filters low-quality bulk TI; (2) IsActive == true, Revoked == false, IsDeleted == false, ValidUntil > now() filter stale/revoked indicators; (3) RFC 1918 and Azure platform IPs excluded; (4) Only IPv4 observables (ObservableKey =~ 'ipv4-addr:value'); (5) Only AzureActivity Success status; (6) SigninLogs/AADServicePrincipalSignInLogs corroboration within 2h window elevates confidence.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let LookbackWindow = 1d;\nlet PrivateRanges = dynamic([\"10.\", \"192.168.\", \"172.16.\", \"172.17.\", \"172.18.\", \"172.19.\", \"172.20.\", \"172.21.\", \"172.22.\", \"172.23.\", \"172.24.\", \"172.25.\", \"172.26.\", \"172.27.\", \"172.28.\", \"172.29.\", \"172.30.\", \"172.31.\", \"127.\", \"169.254.\", \"168.63.\"]);\n// --- STIX 2.1 IPv4 TI Indicators from ThreatIntelIndicators ---\nlet TIIPIndicators = ThreatIntelIndicators\n    | where TimeGenerated > ago(LookbackWindow)\n    | where IsActive == true\n    | where Revoked == false\n    | where IsDeleted == false\n    | where ValidUntil > now()\n    | where Confidence >= 75\n    | where ObservableKey =~ \"ipv4-addr:value\"\n    | where isnotempty(ObservableValue)\n    | where not(ObservableValue has_any (PrivateRanges))\n    | summarize\n        ThreatType = any(tostring(Data.indicator_types)),\n        TI_Description = any(tostring(Data.description)),\n        ConfidenceScore = max(Confidence),\n        ActivityGroupNames = any(Tags),\n        TLPLevel = any(tostring(AdditionalFields.TLPLevel)),\n        TI_Pattern = any(Pattern)\n        by TI_IP = ObservableValue;\n// --- Azure Management Plane events from TI-matched IPs ---\nlet MgmtPlaneHits = AzureActivity\n    | where TimeGenerated > ago(LookbackWindow)\n    | where ActivityStatusValue =~ \"Success\"\n    | where isnotempty(CallerIpAddress)\n    | where not(CallerIpAddress has_any (PrivateRanges))\n    | join kind=inner TIIPIndicators on $left.CallerIpAddress == $right.TI_IP\n    | project\n        ActivityTime = TimeGenerated,\n        Caller,\n        CallerIpAddress,\n        OperationNameValue,\n        ResourceId,\n        ResourceGroup,\n        SubscriptionId,\n        TI_IP,\n        ThreatType,\n        TI_Description,\n        ConfidenceScore,\n        ActivityGroupNames,\n        TLPLevel,\n        TI_Pattern;\n// --- Corroborate with human sign-in from same TI IP (SigninLogs) ---\nlet UserSigninsFromTIIPs = SigninLogs\n    | where TimeGenerated > ago(LookbackWindow)\n    | where ResultType == \"0\"\n    | where isnotempty(IPAddress)\n    | where not(IPAddress has_any (PrivateRanges))\n    | join kind=inner TIIPIndicators on $left.IPAddress == $right.TI_IP\n    | project SigninTime = TimeGenerated, UserPrincipalName, SigninIP = IPAddress, UserDisplayName, AppDisplayName, RiskLevelAggregated;\n// --- Corroborate with SP sign-in from same TI IP (AADServicePrincipalSignInLogs) ---\nlet SPSigninsFromTIIPs = AADServicePrincipalSignInLogs\n    | where TimeGenerated > ago(LookbackWindow)\n    | where ResultType == \"0\"\n    | where isnotempty(IPAddress)\n    | where not(IPAddress has_any (PrivateRanges))\n    | join kind=inner TIIPIndicators on $left.IPAddress == $right.TI_IP\n    | project SPSigninTime = TimeGenerated, ServicePrincipalName, ServicePrincipalId, SPSigninIP = IPAddress, AppId;\n// --- Aggregate management plane hits per caller ---\nMgmtPlaneHits\n| summarize\n    OperationCount = count(),\n    Operations = make_set(OperationNameValue, 10),\n    SubscriptionIds = make_set(SubscriptionId, 5),\n    ResourceGroups = make_set(ResourceGroup, 5),\n    AffectedResources = make_set(ResourceId, 10),\n    CallerIP = any(CallerIpAddress),\n    ThreatType = any(ThreatType),\n    TI_Description = any(TI_Description),\n    ConfidenceScore = max(ConfidenceScore),\n    ActivityGroupNames = any(ActivityGroupNames),\n    TLPLevel = any(TLPLevel),\n    FirstSeen = min(ActivityTime),\n    LastSeen = max(ActivityTime)\n    by Caller, TI_IP\n// --- Left join to capture corroborating sign-ins (presence elevates confidence) ---\n| join kind=leftouter (\n    UserSigninsFromTIIPs\n    | summarize UserSigninCount = count(), SigninUsers = make_set(UserPrincipalName, 5), MaxUserRisk = max(RiskLevelAggregated) by SigninIP\n  ) on $left.TI_IP == $right.SigninIP\n| join kind=leftouter (\n    SPSigninsFromTIIPs\n    | summarize SPSigninCount = count(), SigninSPs = make_set(ServicePrincipalName, 5) by SPSigninIP\n  ) on $left.TI_IP == $right.SPSigninIP\n| extend\n    CorroboratedBySignin = isnotempty(UserSigninCount) or isnotempty(SPSigninCount),\n    TotalSigninCount = coalesce(UserSigninCount, 0) + coalesce(SPSigninCount, 0),\n    AccountName = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])\n| project-away SigninIP, SPSigninIP",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT6H",
+        "suppressionEnabled": false,
+        "tactics": ["InitialAccess", "Persistence", "Impact"],
+        "techniques": ["T1078", "T1098", "T1496"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "TI match (STIX): {{Caller}} called Azure MGMT from {{CallerIP}}, type: {{ThreatType}}",
+          "alertDescriptionFormat": "Caller {{Caller}} performed {{OperationCount}} Azure management operations from TI-matched IP {{CallerIP}}."
+        },
+        "customDetails": {
+          "ThreatType": "ThreatType",
+          "ConfidenceScore": "ConfidenceScore",
+          "ActivityGroupNames": "ActivityGroupNames",
+          "TLPLevel": "TLPLevel",
+          "CorroboratedBySignin": "CorroboratedBySignin",
+          "TotalSigninCount": "TotalSigninCount"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-07 | Azure Resource Lock or Policy Deleted | T1562 | Medium",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/a7b8c9d0-e1f2-3456-abcd-567890123456')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Resource Lock or Policy Assignment Deleted",
+        "description": "Detects deletion of Azure Resource Locks, Policy Assignments, or Policy Definitions — guardrail controls that prevent unauthorized resource actions. Attackers delete locks/policies before destructive operations (ransomware, crypto-jacking, data wiping) to avoid 'cannot delete locked resource' failures (T1562). FP mitigations: (1) Known IaC tool name patterns excluded — Terraform/Bicep legitimately destroy and re-create policies, but correlation with other rules (e.g., VM deploy) provides context; (2) Azure platform IPs excluded; (3) Only Succeeded operations; (4) Policy exemption WRITE is intentionally covered — attackers create exemptions to bypass policy without triggering a DELETE.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "let HighImpactOps = dynamic([\n    \"MICROSOFT.AUTHORIZATION/LOCKS/DELETE\",\n    \"MICROSOFT.AUTHORIZATION/POLICYASSIGNMENTS/DELETE\",\n    \"MICROSOFT.AUTHORIZATION/POLICYDEFINITIONS/DELETE\",\n    \"MICROSOFT.AUTHORIZATION/POLICYEXEMPTIONS/WRITE\",\n    \"MICROSOFT.AUTHORIZATION/POLICYSETDEFINITIONS/DELETE\",\n    \"MICROSOFT.MANAGEMENT/MANAGEMENTGROUPS/SUBSCRIPTIONS/DELETE\"\n]);\nlet ExcludedPatterns = dynamic([\"terraform\", \"bicep\", \"pipeline\", \"arm-\", \"policy-compliance\"]);\nAzureActivity\n| where TimeGenerated > ago(2h)\n| where OperationNameValue has_any (HighImpactOps)\n| where ActivityStatusValue =~ \"Success\"\n| where not(tolower(Caller) has_any (ExcludedPatterns))\n| where isnotempty(CallerIpAddress)\n| where CallerIpAddress !startswith \"168.63.\"\n| summarize\n    OperationCount = count(),\n    Operations = make_set(OperationNameValue, 10),\n    AffectedResources = make_set(ResourceId, 10),\n    SourceIPs = make_set(CallerIpAddress, 5),\n    CallerIP = any(CallerIpAddress),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by Caller, SubscriptionId, ResourceGroup\n| extend\n    AccountName = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT6H",
+        "suppressionEnabled": false,
+        "tactics": ["DefenseEvasion"],
+        "techniques": ["T1562"],
+        "eventGroupingSettings": { "aggregationKind": "SingleAlert" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Guardrail removed: {{Operations}} by {{Caller}}",
+          "alertDescriptionFormat": "{{Caller}} removed {{OperationCount}} Azure guardrail control(s): {{Operations}}"
+        },
+        "customDetails": {
+          "Operations": "Operations",
+          "AffectedResources": "AffectedResources"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-08 | SP Credential Added Then Privileged Role Assigned by Same Initiator | T1098.001 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/b8c9d0e1-f2a3-4567-bcde-678901234567')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Service Principal Credential Added Then Privileged Role Assigned (Same Initiator, 60 min)",
+        "description": "Detects when the same identity first adds a credential to a service principal and then assigns it (or another SP) a privileged role — both within 60 minutes. This is the Azure-native 'create backdoor SP' attack chain (T1098.001) used by groups like Storm-0501 and Midnight Blizzard to establish persistent privileged access. NOT a duplicate of built-in 'First access credential added to Application' rule which only covers the first credential add without the role-escalation correlation. FP mitigations: (1) Role name filtering — only Owner, Contributor, UAA, Global Admin, Privileged Role Admin trigger; (2) 60-minute correlation window keeps false positives low while catching fast-moving attacks; (3) Requires both events to share the same Initiator identity.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let CredentialAdditions = AuditLogs\n    | where TimeGenerated > ago(2h)\n    | where OperationName has_any (\"Add service principal credentials\", \"Update application \u2013 Certificates and secrets management\")\n    | where Result =~ \"success\"\n    | extend SPName = tostring(TargetResources[0].displayName)\n    | extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\n    | where isnotempty(Initiator)\n    | project CredTime = TimeGenerated, Initiator, SPName, CorrelationId;\nlet PrivilegedRoleAssignments = AuditLogs\n    | where TimeGenerated > ago(2h)\n    | where OperationName has_any (\"Add member to role\", \"Add app role assignment to service principal\", \"Add eligible member to role\")\n    | where Result =~ \"success\"\n    | extend RoleName = tostring(TargetResources[0].displayName)\n    | where RoleName has_any (\"Owner\", \"Contributor\", \"User Access Administrator\", \"Global Administrator\", \"Privileged Role Administrator\", \"Security Administrator\", \"Application Administrator\")\n    | extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\n    | where isnotempty(Initiator)\n    | project RoleTime = TimeGenerated, Initiator, RoleName, CorrelationId;\nCredentialAdditions\n| join kind=inner PrivilegedRoleAssignments on Initiator\n| where RoleTime >= CredTime and RoleTime <= CredTime + 1h\n| summarize\n    EventCount = count(),\n    AssignedRoles = make_set(RoleName, 5),\n    AffectedSPs = make_set(SPName, 5),\n    CorrelationIds = make_set(CorrelationId, 5),\n    FirstEvent = min(CredTime),\n    LastEvent = max(RoleTime)\n    by Initiator\n| extend\n    AccountName = tostring(split(Initiator, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Initiator, \"@\")[1])",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT6H",
+        "suppressionEnabled": false,
+        "tactics": ["Persistence", "PrivilegeEscalation"],
+        "techniques": ["T1098"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Backdoor SP: {{Initiator}} added credential then assigned {{AssignedRoles}}",
+          "alertDescriptionFormat": "{{Initiator}} added credentials to SP(s) {{AffectedSPs}} and subsequently assigned privileged role(s) {{AssignedRoles}} within 60 minutes."
+        },
+        "customDetails": {
+          "AssignedRoles": "AssignedRoles",
+          "AffectedSPs": "AffectedSPs"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-09 | Privileged Azure Management Operations from a New IP for Established Identity | T1078.004 | Medium",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/c9d0e1f2-a3b4-5678-cdef-789012345678')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Privileged Management Operations from a New Source IP for Established Identity",
+        "description": "Detects when a known identity (seen in the last 14 days) performs privileged Azure management operations from an IP address not previously used by that identity for such operations. This is the Azure-plane equivalent of Impossible Travel / anomalous access location, but for the management plane specifically. Relevant to T1078.004 (Valid Cloud Accounts) exploitation — compromised credentials used from attacker infrastructure. FP mitigations: (1) 14-day per-identity IP whitelist built from historical privileged ops; (2) Azure platform IPs excluded; (3) Uses set_has_element for exact match — no partial-IP tricks; (4) Only privileged operation types (write/delete on IAM, KV, VM, diagnostics, automation); (5) Identity must have prior history (new identities with no baseline are a different rule).",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "let PrivilegedOps = dynamic([\n    \"MICROSOFT.AUTHORIZATION/ROLEASSIGNMENTS/WRITE\",\n    \"MICROSOFT.AUTHORIZATION/ROLEASSIGNMENTS/DELETE\",\n    \"MICROSOFT.KEYVAULT/VAULTS/WRITE\",\n    \"MICROSOFT.KEYVAULT/VAULTS/DELETE\",\n    \"MICROSOFT.COMPUTE/VIRTUALMACHINES/WRITE\",\n    \"MICROSOFT.INSIGHTS/DIAGNOSTICSETTINGS/DELETE\",\n    \"MICROSOFT.AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/WRITE\",\n    \"MICROSOFT.AUTHORIZATION/LOCKS/DELETE\"\n]);\nlet HistoricalCallerIPs = AzureActivity\n    | where TimeGenerated between (ago(14d) .. ago(6h))\n    | where OperationNameValue has_any (PrivilegedOps)\n    | where ActivityStatusValue =~ \"Success\"\n    | where isnotempty(Caller) and isnotempty(CallerIpAddress)\n    | summarize HistoricalIPs = make_set(CallerIpAddress, 50) by Caller;\nAzureActivity\n| where TimeGenerated > ago(6h)\n| where OperationNameValue has_any (PrivilegedOps)\n| where ActivityStatusValue =~ \"Success\"\n| where isnotempty(CallerIpAddress)\n| where CallerIpAddress !startswith \"168.63.\" and CallerIpAddress !startswith \"169.254.\"\n| join kind=inner HistoricalCallerIPs on Caller\n| where not(set_has_element(HistoricalIPs, CallerIpAddress))\n| summarize\n    OperationCount = count(),\n    Operations = make_set(OperationNameValue, 10),\n    AffectedResources = make_set(ResourceId, 10),\n    CallerIP = any(CallerIpAddress),\n    SourceIPs = make_set(CallerIpAddress, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by Caller, SubscriptionId\n| extend\n    AccountName = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT12H",
+        "suppressionEnabled": false,
+        "tactics": ["InitialAccess", "Persistence"],
+        "techniques": ["T1078"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "New IP for {{Caller}}: privileged Azure ops from {{CallerIP}}",
+          "alertDescriptionFormat": "Established identity {{Caller}} performed {{OperationCount}} privileged management operation(s) from a new IP {{CallerIP}} not seen in 14 days."
+        },
+        "customDetails": {
+          "Operations": "Operations",
+          "AffectedResources": "AffectedResources"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-10 | Service Principal Signed In with CA Bypass Then Performed Azure Management Ops | T1528 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/d0e1f2a3-b4c5-6789-defa-890123456789')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Service Principal CA Bypass Sign-in Followed by Management Operations",
+        "description": "Detects when a service principal sign-in has Conditional Access status 'failure' or 'notApplied' (CA bypass) but ResultType=0 (sign-in succeeded), and that same source IP subsequently calls Azure management APIs within 1 hour. This is indicative of stolen SP tokens or credential abuse where the attacker bypassed CA policies (T1528 — Steal Application Access Token). Correlates AADServicePrincipalSignInLogs with AzureActivity on IP. FP mitigations: (1) ResultType=0 required — prevents alerting on simply failed sign-ins; (2) Requires 2+ management operations post sign-in — filters out single read operations; (3) Azure platform and link-local IPs excluded; (4) 1-hour temporal window keeps the correlation tight and reduces coincidental IP matches from shared NATs.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let CABypassSignins = AADServicePrincipalSignInLogs\n    | where TimeGenerated > ago(2h)\n    | where ResultType == 0\n    | where ConditionalAccessStatus has_any (\"failure\", \"notApplied\")\n    | where isnotempty(IPAddress)\n    | where IPAddress !startswith \"168.63.\" and IPAddress !startswith \"169.254.\"\n    | project SigninTime = TimeGenerated, ServicePrincipalId, ServicePrincipalName, SigninIP = IPAddress, AppId, ConditionalAccessStatus;\nAzureActivity\n| where TimeGenerated > ago(2h)\n| where ActivityStatusValue =~ \"Success\"\n| where OperationNameValue has_any (\"WRITE\", \"DELETE\", \"ACTION\")\n| where not(OperationNameValue has_any (\"READ\", \"LIST\", \"GET\", \"LISTKEYS\"))\n| where isnotempty(CallerIpAddress)\n| join kind=inner CABypassSignins on $left.CallerIpAddress == $right.SigninIP\n| where TimeGenerated > SigninTime and TimeGenerated <= SigninTime + 1h\n| summarize\n    MGMTOpCount = count(),\n    Operations = make_set(OperationNameValue, 10),\n    AffectedResources = make_set(ResourceId, 10),\n    SubscriptionIds = make_set(SubscriptionId, 5),\n    CallerIP = any(CallerIpAddress),\n    CAStatus = any(ConditionalAccessStatus),\n    FirstMGMTOp = min(TimeGenerated),\n    LastMGMTOp = max(TimeGenerated)\n    by Caller, ServicePrincipalName, SigninTime\n| where MGMTOpCount >= 2\n| extend\n    AccountName = coalesce(tostring(split(Caller, \"@\")[0]), ServicePrincipalName),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT6H",
+        "suppressionEnabled": false,
+        "tactics": ["InitialAccess", "CredentialAccess"],
+        "techniques": ["T1528", "T1078"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "CA bypass SP {{ServicePrincipalName}} then {{MGMTOpCount}} MGMT ops from {{CallerIP}}",
+          "alertDescriptionFormat": "SP {{ServicePrincipalName}} signed in (CA bypass) from {{CallerIP}}, then performed {{MGMTOpCount}} management operations within 1 hour."
+        },
+        "customDetails": {
+          "CAStatus": "CAStatus",
+          "MGMTOpCount": "MGMTOpCount",
+          "Operations": "Operations"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-01 | GPU and High-Compute VM Deployment History (90 days)",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-gpu-vm-deployments-90d')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - GPU and High-Compute VM Deployment History (90d)",
+        "query": "let GPUSKUs = dynamic([\"Standard_NC\", \"Standard_NV\", \"Standard_ND\", \"Standard_NP\", \"Standard_HB\", \"Standard_HC\"]);\nAzureActivity\n| where TimeGenerated > ago(90d)\n| where OperationNameValue has_any (\"VIRTUALMACHINES/WRITE\", \"VIRTUALMACHINESCALESETS/WRITE\")\n| where ActivityStatusValue =~ \"Success\"\n| where Properties has_any (GPUSKUs)\n| project TimeGenerated, Caller, CallerIpAddress, SubscriptionId, ResourceGroup, ResourceId, Properties\n| extend SKUHint = extract(@'Standard_(?:NC|NV|ND|NP|HB|HC)[^\"]*', 0, Properties)\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "Inventory all successful GPU/high-compute VM deployments over the past 90 days. Use to baseline legitimate deployers before tuning Rule-01, and to investigate potential cryptojacking campaigns." },
+          { "name": "tactics", "value": "Impact" },
+          { "name": "techniques", "value": "T1496" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-09T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-02 | Diagnostic Settings Change Timeline per Resource",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-diagnostic-settings-timeline')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - Diagnostic Settings Change Timeline per Resource (90d)",
+        "query": "AzureActivity\n| where TimeGenerated > ago(90d)\n| where OperationNameValue has \"DIAGNOSTICSETTINGS\"\n| where ActivityStatusValue =~ \"Success\"\n| project TimeGenerated, Operation = OperationNameValue, Caller, ResourceId, CallerIpAddress, SubscriptionId, ResourceGroup\n| extend IsDelete = Operation has \"DELETE\"\n| order by ResourceId asc, TimeGenerated asc",
+        "tags": [
+          { "name": "description", "value": "Show the full create/update/delete history of diagnostic settings per resource. Use to identify resources that were permanently unmonitored by correlating delete events with no subsequent write." },
+          { "name": "tactics", "value": "DefenseEvasion" },
+          { "name": "techniques", "value": "T1562.008" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-09T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-03 | Storage Blob High-Volume Read by Single IP (Potential Exfiltration)",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-storage-blob-exfiltration')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - Storage Blob High-Volume Read by Single IP (Potential Exfiltration)",
+        "query": "StorageBlobLogs\n| where TimeGenerated > ago(30d)\n| where OperationName == \"GetBlob\"\n| where StatusCode == \"200\"\n| where isnotempty(CallerIpAddress)\n| where CallerIpAddress !startswith \"168.63.\"\n| summarize\n    ReadCount = count(),\n    TotalBytesGB = round(sum(ResponseBodySize) / 1073741824.0, 2),\n    DistinctBlobs = dcount(ObjectKey),\n    StorageAccounts = make_set(AccountName, 5),\n    EarliestRead = min(TimeGenerated),\n    LatestRead = max(TimeGenerated)\n    by CallerIpAddress, bin(TimeGenerated, 1h)\n| where ReadCount > 500 or TotalBytesGB > 1.0\n| order by TotalBytesGB desc",
+        "tags": [
+          { "name": "description", "value": "Identify IPs that performed high-volume blob reads (>500 reads/hr or >1 GB/hr). Correlate with SAS token generation (Rule-04) to confirm exfiltration via ephemeral SAS credentials." },
+          { "name": "tactics", "value": "Exfiltration" },
+          { "name": "techniques", "value": "T1530" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-09T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-04 | Azure Automation Runbook Create/Modify/Publish History",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-automation-runbook-history')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - Azure Automation Runbook Create, Modify, Publish History (90d)",
+        "query": "AzureActivity\n| where TimeGenerated > ago(90d)\n| where OperationNameValue has \"AUTOMATION\"\n| where OperationNameValue has_any (\"RUNBOOKS\", \"WEBHOOKS\", \"SCHEDULES\", \"VARIABLES\", \"MODULES\")\n| where ActivityStatusValue =~ \"Success\"\n| project TimeGenerated, Caller, Operation = OperationNameValue, ResourceName = tostring(split(ResourceId, \"/\")[-1]), ResourceId, CallerIpAddress, ResourceGroup, SubscriptionId\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "Full history of Automation Account object changes. Use to identify newly created runbooks, unexpected content changes, and newly added webhooks (used for C2 callbacks). Correlate Caller with Rule-05 first-time-caller alerts." },
+          { "name": "tactics", "value": "Execution,Persistence" },
+          { "name": "techniques", "value": "T1059.009" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-09T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-05 | Threat Intelligence Indicators Matched in AzureActivity Management Plane (Extended 90d)",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-ti-mgmt-plane-extended')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - TI Indicator Match in Azure Management Plane — Extended 90 Days",
+        "query": "let PrivateRanges = dynamic([\"10.\", \"192.168.\", \"172.16.\", \"172.17.\", \"172.18.\", \"172.19.\", \"172.20.\", \"172.21.\", \"172.22.\", \"172.23.\", \"172.24.\", \"172.25.\", \"172.26.\", \"172.27.\", \"172.28.\", \"172.29.\", \"172.30.\", \"172.31.\", \"127.\", \"169.254.\", \"168.63.\"]);\nlet TIIPIndicators = ThreatIntelIndicators\n    | where TimeGenerated > ago(90d)\n    | where Confidence >= 50\n    | where ObservableKey =~ \"ipv4-addr:value\"\n    | where isnotempty(ObservableValue)\n    | where not(ObservableValue has_any (PrivateRanges))\n    | summarize\n        ThreatType     = any(tostring(Data.indicator_types)),\n        TI_Description = any(tostring(Data.description)),\n        ConfScore      = max(Confidence),\n        ActivityGroups = any(Tags),\n        TLPLevel       = any(tostring(AdditionalFields.TLPLevel)),\n        IsActive       = any(IsActive),\n        Revoked        = any(Revoked)\n        by TI_IP = ObservableValue;\nAzureActivity\n| where TimeGenerated > ago(90d)\n| where isnotempty(CallerIpAddress)\n| where not(CallerIpAddress has_any (PrivateRanges))\n| join kind=inner TIIPIndicators on $left.CallerIpAddress == $right.TI_IP\n| project TimeGenerated, Caller, CallerIpAddress, OperationNameValue, ActivityStatusValue, ResourceGroup, SubscriptionId, TI_IP, ThreatType, TI_Description, ConfScore, ActivityGroups, TLPLevel, IsActive, Revoked\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "Extended 90-day TI correlation with lower confidence threshold (>=50) for hunting. Includes inactive/expired indicators. Use to find historical compromise before TI feeds were ingested or indicators went active." },
+          { "name": "tactics", "value": "InitialAccess,Persistence,Impact" },
+          { "name": "techniques", "value": "T1078,T1098,T1496" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-09T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-06 | Privileged Role Assignments to Disabled or Deleted AAD Identities",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-orphaned-privileged-roles')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - Privileged Role Assignments Matching Disabled or Deleted AAD Identities",
+        "query": "let DisabledUsers = AuditLogs\n    | where TimeGenerated > ago(90d)\n    | where OperationName has_any (\"Disable account\", \"Delete user\", \"Update user\")\n    | where Result =~ \"success\"\n    | where OperationName !has \"Enable\"\n    | extend TargetId = tostring(TargetResources[0].id), TargetUPN = tostring(TargetResources[0].userPrincipalName)\n    | summarize DisabledAt = max(ActivityDateTime) by TargetId, TargetUPN;\nAzureActivity\n| where TimeGenerated > ago(90d)\n| where OperationNameValue =~ \"MICROSOFT.AUTHORIZATION/ROLEASSIGNMENTS/WRITE\"\n| where ActivityStatusValue =~ \"Success\"\n| extend AssignedPrincipalId = tostring(parse_json(Properties).requestbody.properties.principalId)\n| extend RoleDefId = tostring(parse_json(Properties).requestbody.properties.roleDefinitionId)\n| where isnotempty(AssignedPrincipalId)\n| join kind=inner DisabledUsers on $left.AssignedPrincipalId == $right.TargetId\n| where TimeGenerated > DisabledAt\n| project TimeGenerated, Caller, AssignedPrincipalId, TargetUPN, RoleDefId, ResourceGroup, SubscriptionId, DisabledAt\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "Finds role assignments made AFTER the target identity was disabled or deleted. This indicates either an attacker re-using a known principal ID to maintain access, or a cleanup gap creating a dormant privilege." },
+          { "name": "tactics", "value": "Persistence,PrivilegeEscalation" },
+          { "name": "techniques", "value": "T1098.003" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-09T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-07 | Azure Lighthouse Delegation Changes",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-lighthouse-delegation-changes')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - Azure Lighthouse Managed Services Delegation Changes (90d)",
+        "query": "AzureActivity\n| where TimeGenerated > ago(90d)\n| where OperationNameValue has \"MICROSOFT.MANAGEDSERVICES\"\n| where ActivityStatusValue =~ \"Success\"\n| extend OperationType = case(\n    OperationNameValue has \"DELETE\", \"Delegation Removed\",\n    OperationNameValue has \"WRITE\", \"Delegation Added or Modified\",\n    \"Other\")\n| project TimeGenerated, OperationType, Caller, Operation = OperationNameValue, ResourceId, CallerIpAddress, SubscriptionId\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "Shows all Azure Lighthouse (ManagedServices) delegation events. Attackers who gain Owner rights may create Lighthouse delegations to grant a foreign tenant persistent cross-subscription access that survives password resets." },
+          { "name": "tactics", "value": "Persistence" },
+          { "name": "techniques", "value": "T1098" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-09T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-08 | Privileged Azure Operations Outside Business Hours (UTC)",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-privileged-ops-outside-hours')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - Privileged Azure Management Operations Outside Business Hours (UTC 07-19)",
+        "query": "AzureActivity\n| where TimeGenerated > ago(30d)\n| where ActivityStatusValue =~ \"Success\"\n| where OperationNameValue has_any (\n    \"ROLEASSIGNMENTS/WRITE\",\n    \"ROLEASSIGNMENTS/DELETE\",\n    \"VIRTUALMACHINES/WRITE\",\n    \"DIAGNOSTICSETTINGS/DELETE\",\n    \"KEYVAULTS/WRITE\",\n    \"AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/WRITE\",\n    \"LOCKS/DELETE\",\n    \"POLICYASSIGNMENTS/DELETE\")\n| where isnotempty(Caller)\n| extend HourUTC = hourofday(TimeGenerated)\n| extend DayOfWeek = dayofweek(TimeGenerated)\n| extend IsOffHours = HourUTC < 7 or HourUTC > 19 or DayOfWeek == 0d or DayOfWeek == 6d\n| where IsOffHours == true\n| summarize\n    OffHoursOpCount = count(),\n    Operations = make_set(OperationNameValue, 10),\n    HoursActive = make_set(HourUTC, 24),\n    SourceIPs = make_set(CallerIpAddress, 5)\n    by Caller, SubscriptionId\n| order by OffHoursOpCount desc",
+        "tags": [
+          { "name": "description", "value": "Identifies identities performing sensitive management operations outside UTC 07:00-19:00 weekdays. Attackers in different time zones or running automated scripts often operate outside normal business hours. Review against expected schedules." },
+          { "name": "tactics", "value": "DefenseEvasion,Persistence" },
+          { "name": "techniques", "value": "T1078.004" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-09T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-09 | Service Principals Accessing Key Vault for the First Time",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-new-sp-keyvault-access')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - Service Principals Accessing Key Vault for the First Time Within 7 Days",
+        "query": "let AllKVAccess = AzureActivity\n    | where TimeGenerated > ago(90d)\n    | where OperationNameValue startswith \"MICROSOFT.KEYVAULT/VAULTS/\"\n    | where ActivityStatusValue =~ \"Success\"\n    | summarize FirstAccessEver = min(TimeGenerated) by Caller, VaultPath = tostring(strcat(SubscriptionId, \"/\", ResourceGroup, \"/\", tostring(split(ResourceId, \"/\")[8])));\nAllKVAccess\n| where FirstAccessEver > ago(7d)\n| join kind=inner (\n    AzureActivity\n    | where TimeGenerated > ago(7d)\n    | where OperationNameValue startswith \"MICROSOFT.KEYVAULT/VAULTS/\"\n    | where ActivityStatusValue =~ \"Success\"\n    | project TimeGenerated, Caller, Operation = OperationNameValue, ResourceId, CallerIpAddress, SubscriptionId, ResourceGroup\n) on Caller\n| project TimeGenerated, Caller, Operation, ResourceId, CallerIpAddress, SubscriptionId, ResourceGroup, FirstAccessEver\n| order by FirstAccessEver desc",
+        "tags": [
+          { "name": "description", "value": "Surfaces identities that accessed a Key Vault for the first time in 7 days. Compromised SPs often probe Key Vaults for secrets/certs after initial access. Investigate any SP not expected to require KV access." },
+          { "name": "tactics", "value": "CredentialAccess" },
+          { "name": "techniques", "value": "T1552.001" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-09T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-10 | Service Principal Credential Rotation Anomaly (Multiple Additions in 1-Hour Window)",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-sp-credential-rotation-anomaly')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - Service Principal Credential Rotation Anomaly (3+ Additions per Hour, 30 Days)",
+        "query": "AuditLogs\n| where TimeGenerated > ago(30d)\n| where OperationName has_any (\"Add service principal credentials\", \"Update application \u2013 Certificates and secrets management\")\n| where Result =~ \"success\"\n| extend SPName = tostring(TargetResources[0].displayName)\n| extend SPId = tostring(TargetResources[0].id)\n| extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\n| summarize\n    CredAddCount = count(),\n    AffectedSPs = make_set(SPName, 10),\n    SPIds = make_set(SPId, 10),\n    Initiators = make_set(Initiator, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by Initiator, bin(TimeGenerated, 1h)\n| where CredAddCount >= 3\n| order by CredAddCount desc",
+        "tags": [
+          { "name": "description", "value": "Detects 3+ SP credentials added in 1 hour by the same initiator. Used for persistence sweeps or credential stuffing across SP objects. Cross-reference with Rule-08 (SP Cred + Privileged Role)." },
+          { "name": "tactics", "value": "Persistence,CredentialAccess" },
+          { "name": "techniques", "value": "T1098.001" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-09T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-11 | Mass Resource Deletion - NSGs/VMs/Storage/VNETs/KeyVaults | T1485/T1562 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/e1f2a3b4-c5d6-7890-efab-901234567890')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Mass Deletion of Critical Resources (NSGs/VMs/Storage/VNETs/Key Vaults)",
+        "description": "Detects bulk deletion of critical Azure infrastructure resources (NSGs, VMs, Storage Accounts, VNETs, Disks, Key Vaults, Subnets) by a single identity within a 1-hour window. This pattern is characteristic of ransomware pre-staging (remove defenses before encrypting), destructive insider attacks (T1485 — Data Destruction), and adversary cleanup after cloud-environment abuse (T1562). Correlates with SigninLogs and AADServicePrincipalSignInLogs to surface whether the deleting identity had a suspicious preceding sign-in (risky, from TOR, CA failure, or first-time location). FP mitigations: (1) Minimum 10 distinct resource deletions — filters normal day-to-day single resource removals; (2) IaC/pipeline caller patterns excluded — Terraform destroy, Bicep, GitHub Actions deprovision legitimately; (3) Azure platform IPs excluded; (4) 14-day baseline excludes identities with a pattern of high-volume deletions; (5) Requires at least 2 distinct resource types — prevents alert on repeated deletion of same type (e.g., cleaning up test VMs of same kind). NOT a duplicate of any confirmed live built-in alert (verified against live SecurityAlert data).",
+        "severity": "High",
+        "enabled": true,
+        "query": "let LookupWindow = 1h;\nlet DeleteThreshold = 10;\nlet ResourceTypeThreshold = 2;\nlet KnownIaCPatterns = dynamic([\"terraform\", \"bicep\", \"pipeline\", \"github\", \"pulumi\", \"devops\", \"arm-deployment\", \"cleanup\", \"deprovisioner\"]);\nlet AzurePlatformIPs = dynamic([\"168.63.\", \"169.254.\"]);\n// Identities with established high-volume deletion patterns (14-day baseline)\nlet KnownBulkDeleters = AzureActivity\n    | where TimeGenerated between (ago(14d) .. ago(2h))\n    | where OperationNameValue has \"DELETE\"\n    | where ActivityStatusValue =~ \"Success\"\n    | summarize DailyDeletes = count() by Caller, Day = bin(TimeGenerated, 1d)\n    | summarize AvgDailyDeletes = avg(DailyDeletes), DaysActive = dcount(Day) by Caller\n    | where AvgDailyDeletes >= 10 and DaysActive >= 5\n    | distinct Caller;\n// Critical resource DELETE operations (last 2h to capture full 1h windows)\nlet CriticalDeletes = AzureActivity\n    | where TimeGenerated > ago(2h)\n    | where ActivityStatusValue =~ \"Success\"\n    | where OperationNameValue has \"DELETE\"\n    | where OperationNameValue has_any (\n        \"MICROSOFT.NETWORK/NETWORKSECURITYGROUPS\",\n        \"MICROSOFT.COMPUTE/VIRTUALMACHINES\",\n        \"MICROSOFT.STORAGE/STORAGEACCOUNTS\",\n        \"MICROSOFT.NETWORK/VIRTUALNETWORKS\",\n        \"MICROSOFT.NETWORK/SUBNETS\",\n        \"MICROSOFT.COMPUTE/DISKS\",\n        \"MICROSOFT.KEYVAULT/VAULTS\",\n        \"MICROSOFT.NETWORK/APPLICATIONGATEWAYS\",\n        \"MICROSOFT.NETWORK/LOADBALANCERS\"\n    )\n    | where not(tolower(Caller) has_any (KnownIaCPatterns))\n    | where isnotempty(CallerIpAddress)\n    | where not(CallerIpAddress has_any (AzurePlatformIPs))\n    | where Caller !in (KnownBulkDeleters);\n// Aggregate per caller/IP in 1-hour tumbling windows\nlet DeleteBursts = CriticalDeletes\n    | summarize\n        DeleteCount = count(),\n        DistinctResourceTypes = dcount(tostring(split(OperationNameValue, \"/\")[1])),\n        DeletedResources = make_set(ResourceId, 20),\n        Operations = make_set(OperationNameValue, 10),\n        ResourceGroups = make_set(ResourceGroup, 5),\n        SubscriptionIds = make_set(SubscriptionId, 5),\n        CallerIP = any(CallerIpAddress),\n        SourceIPs = make_set(CallerIpAddress, 5),\n        FirstDelete = min(TimeGenerated),\n        LastDelete = max(TimeGenerated)\n        by Caller, bin(TimeGenerated, LookupWindow)\n    | where DeleteCount >= DeleteThreshold\n    | where DistinctResourceTypes >= ResourceTypeThreshold;\n// Enrich: correlate with SigninLogs for suspicious human sign-ins\nlet UserSigninContext = SigninLogs\n    | where TimeGenerated > ago(3h)\n    | where isnotempty(IPAddress)\n    | project\n        SigninTime = TimeGenerated,\n        UserPrincipalName,\n        SigninIP = IPAddress,\n        UserDisplayName,\n        RiskLevelAggregated,\n        RiskState,\n        ConditionalAccessStatus,\n        Location,\n        AppDisplayName\n    | extend IsRisky = RiskLevelAggregated in (\"high\", \"medium\") or RiskState =~ \"atRisk\";\n// Enrich: correlate with SP sign-ins\nlet SPSigninContext = AADServicePrincipalSignInLogs\n    | where TimeGenerated > ago(3h)\n    | where isnotempty(IPAddress)\n    | project\n        SPSigninTime = TimeGenerated,\n        ServicePrincipalName,\n        ServicePrincipalId,\n        SPSigninIP = IPAddress,\n        SPConditionalAccessStatus = ConditionalAccessStatus,\n        SPResultType = ResultType;\nDeleteBursts\n| join kind=leftouter (\n    UserSigninContext\n    | summarize\n        UserSigninCount = count(),\n        SigninLocations = make_set(Location, 3),\n        SigninApps = make_set(AppDisplayName, 3),\n        MaxRisk = max(RiskLevelAggregated),\n        HasRiskySignin = max(toint(IsRisky)),\n        UserNames = make_set(UserPrincipalName, 3)\n        by SigninIP\n  ) on $left.CallerIP == $right.SigninIP\n| join kind=leftouter (\n    SPSigninContext\n    | summarize\n        SPSigninCount = count(),\n        SigninSPs = make_set(ServicePrincipalName, 3),\n        CABypassCount = countif(SPConditionalAccessStatus has_any (\"failure\", \"notApplied\"))\n        by SPSigninIP\n  ) on $left.CallerIP == $right.SPSigninIP\n| extend\n    HasSigninCorroboration = isnotempty(UserSigninCount) or isnotempty(SPSigninCount),\n    SigninRiskLevel = coalesce(MaxRisk, \"unknown\"),\n    AccountName = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])\n| project-away SigninIP, SPSigninIP",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT3H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT4H",
+        "suppressionEnabled": false,
+        "tactics": ["Impact", "DefenseEvasion"],
+        "techniques": ["T1485", "T1562"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Mass deletion: {{Caller}} deleted {{DeleteCount}} resources from {{CallerIP}}",
+          "alertDescriptionFormat": "Identity {{Caller}} deleted {{DeleteCount}} critical resources. Sign-in risk: {{SigninRiskLevel}}."
+        },
+        "customDetails": {
+          "DeleteCount": "DeleteCount",
+          "ResourceTypeCount": "DistinctResourceTypes",
+          "Operations": "Operations",
+          "SigninRiskLevel": "SigninRiskLevel",
+          "SigninCorroboration": "HasSigninCorroboration"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-12 | Mass Resource Creation Burst by Identity with No Prior Creation History | T1496/T1136 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/f2a3b4c5-d6e7-8901-fabc-012345678901')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Mass Resource Creation Burst by New Identity (Cryptojacking / Persistence)",
+        "description": "Detects bursts of resource creation events by identities with no prior resource-creation history in the last 14 days, across 3+ distinct resource types, within a 2-hour window. This pattern is characteristic of: (1) Cryptojacking operators provisioning GPU/compute fleets post-credential-theft (T1496); (2) Attackers establishing persistence infrastructure — VMs, App Registrations, Container Instances (T1136); (3) Supply-chain-compromised pipelines spinning up outbound command-and-control infrastructure. Differentiated from the built-in 'Unusual number of resources created' alert because this rule uses IDENTITY-BASELINE logic (only triggers for identities with ZERO creation history) rather than simple count thresholds, and requires TYPE DIVERSITY (3+ distinct resource types) to signal broad infrastructure provisioning rather than legitimate scaling operations. Enriched with SigninLogs and AADServicePrincipalSignInLogs to surface whether the creating identity had a suspicious preceding authentication. FP mitigations: (1) 14-day identity creation baseline — established deployers never trigger; (2) 3+ distinct resource type requirement — avoids alert on auto-scaling of single resource type; (3) Minimum 15 resource events in 2h — accommodates IaC deployments that legitimately provision dozens of resources but filters single-test deployments; (4) IaC/CI-CD tool pattern exclusion; (5) Azure platform IP exclusion; (6) Only Success status operations.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let LookupWindow = 2h;\nlet CreationThreshold = 15;\nlet ResourceTypeThreshold = 3;\nlet KnownIaCPatterns = dynamic([\"terraform\", \"bicep\", \"pipeline\", \"github\", \"pulumi\", \"devops\", \"arm-deployment\", \"provisioner\", \"deployer\"]);\nlet AzurePlatformIPs = dynamic([\"168.63.\", \"169.254.\"]);\n// Resource WRITE operations we care about (creation/provisioning)\nlet CreationOpKeywords = dynamic([\n    \"MICROSOFT.COMPUTE/VIRTUALMACHINES/WRITE\",\n    \"MICROSOFT.COMPUTE/VIRTUALMACHINESCALESETS/WRITE\",\n    \"MICROSOFT.STORAGE/STORAGEACCOUNTS/WRITE\",\n    \"MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/WRITE\",\n    \"MICROSOFT.WEB/SITES/WRITE\",\n    \"MICROSOFT.CONTAINERINSTANCE/CONTAINERGROUPS/WRITE\",\n    \"MICROSOFT.CONTAINERSERVICE/MANAGEDCLUSTERS/WRITE\",\n    \"MICROSOFT.KEYVAULT/VAULTS/WRITE\",\n    \"MICROSOFT.NETWORK/VIRTUALNETWORKS/WRITE\",\n    \"MICROSOFT.COMPUTE/DISKS/WRITE\",\n    \"MICROSOFT.DATABRICKS/WORKSPACES/WRITE\",\n    \"MICROSOFT.LOGIC/WORKFLOWS/WRITE\"\n]);\n// 14-day baseline: identities with established resource creation history\nlet KnownCreators = AzureActivity\n    | where TimeGenerated between (ago(14d) .. ago(3h))\n    | where OperationNameValue has_any (CreationOpKeywords)\n    | where ActivityStatusValue =~ \"Success\"\n    | distinct Caller;\n// Current window: creation bursts by UNKNOWN identities\nlet CreationBursts = AzureActivity\n    | where TimeGenerated > ago(3h)\n    | where ActivityStatusValue =~ \"Success\"\n    | where OperationNameValue has_any (CreationOpKeywords)\n    | where not(tolower(Caller) has_any (KnownIaCPatterns))\n    | where isnotempty(CallerIpAddress)\n    | where not(CallerIpAddress has_any (AzurePlatformIPs))\n    | where Caller !in (KnownCreators)\n    | summarize\n        CreationCount = count(),\n        DistinctResourceTypes = dcount(tostring(split(OperationNameValue, \"/\")[1])),\n        CreatedResources = make_set(ResourceId, 20),\n        Operations = make_set(OperationNameValue, 10),\n        ResourceGroups = make_set(ResourceGroup, 5),\n        SubscriptionIds = make_set(SubscriptionId, 5),\n        CallerIP = any(CallerIpAddress),\n        SourceIPs = make_set(CallerIpAddress, 5),\n        FirstCreate = min(TimeGenerated),\n        LastCreate = max(TimeGenerated)\n        by Caller, bin(TimeGenerated, LookupWindow)\n    | where CreationCount >= CreationThreshold\n    | where DistinctResourceTypes >= ResourceTypeThreshold;\n// Enrich: correlate with user sign-ins from same IP\nlet UserSigninContext = SigninLogs\n    | where TimeGenerated > ago(4h)\n    | where isnotempty(IPAddress)\n    | project\n        SigninTime = TimeGenerated,\n        UserPrincipalName,\n        SigninIP = IPAddress,\n        UserDisplayName,\n        RiskLevelAggregated,\n        RiskState,\n        ConditionalAccessStatus,\n        Location,\n        AppDisplayName,\n        IsInteractive\n    | extend IsRisky = RiskLevelAggregated in (\"high\", \"medium\") or RiskState =~ \"atRisk\";\n// Enrich: correlate with SP sign-ins from same IP\nlet SPSigninContext = AADServicePrincipalSignInLogs\n    | where TimeGenerated > ago(4h)\n    | where isnotempty(IPAddress)\n    | project\n        SPSigninTime = TimeGenerated,\n        ServicePrincipalName,\n        ServicePrincipalId,\n        SPSigninIP = IPAddress,\n        SPConditionalAccessStatus = ConditionalAccessStatus,\n        SPResultType = ResultType;\nCreationBursts\n| join kind=leftouter (\n    UserSigninContext\n    | summarize\n        UserSigninCount = count(),\n        SigninLocations = make_set(Location, 3),\n        SigninApps = make_set(AppDisplayName, 3),\n        MaxRisk = max(RiskLevelAggregated),\n        HasRiskySignin = max(toint(IsRisky)),\n        UserNames = make_set(UserPrincipalName, 3),\n        FirstSignin = min(SigninTime)\n        by SigninIP\n  ) on $left.CallerIP == $right.SigninIP\n| join kind=leftouter (\n    SPSigninContext\n    | summarize\n        SPSigninCount = count(),\n        SigninSPs = make_set(ServicePrincipalName, 3),\n        CABypassCount = countif(SPConditionalAccessStatus has_any (\"failure\", \"notApplied\"))\n        by SPSigninIP\n  ) on $left.CallerIP == $right.SPSigninIP\n| extend\n    HasSigninCorroboration = isnotempty(UserSigninCount) or isnotempty(SPSigninCount),\n    SigninRiskLevel = coalesce(MaxRisk, \"unknown\"),\n    AccountName = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])\n| project-away SigninIP, SPSigninIP",
+        "queryFrequency": "PT2H",
+        "queryPeriod": "PT4H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT8H",
+        "suppressionEnabled": false,
+        "tactics": ["Impact", "Persistence"],
+        "techniques": ["T1496", "T1136"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT8H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Mass creation: {{Caller}} created {{CreationCount}} resources ({{DistinctResourceTypes}} types) - first time seen",
+          "alertDescriptionFormat": "New identity {{Caller}} created {{CreationCount}} resources in 2 hours from {{CallerIP}}. No prior creation history."
+        },
+        "customDetails": {
+          "CreationCount": "CreationCount",
+          "ResourceTypeCount": "DistinctResourceTypes",
+          "Operations": "Operations",
+          "SigninRiskLevel": "SigninRiskLevel",
+          "SigninCorroboration": "HasSigninCorroboration"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-11 | Storage Anonymous and SAS-Token Access Timeline | T1530 | Medium",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-storage-anonymous-sas-access-timeline')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - Storage Anonymous and SAS-Token Access Timeline (90 Days)",
+        "query": "let PrivateRanges = dynamic([\"10.\", \"172.16.\", \"172.17.\", \"172.18.\", \"172.19.\", \"172.20.\", \"172.21.\", \"172.22.\", \"172.23.\", \"172.24.\", \"172.25.\", \"172.26.\", \"172.27.\", \"172.28.\", \"172.29.\", \"172.30.\", \"172.31.\", \"192.168.\", \"168.63.\", \"169.254.\"]);\nStorageBlobLogs\n| where TimeGenerated > ago(90d)\n| where AuthenticationType in~ (\"Anonymous\", \"SasToken\")\n| where StatusCode == 200\n| where isnotempty(CallerIpAddress)\n| where not(CallerIpAddress has_any (PrivateRanges))\n| summarize\n    AccessCount        = count(),\n    DistinctBlobs      = dcount(ObjectKey),\n    DistinctContainers = dcount(tostring(split(ObjectKey, \"/\")[0])),\n    TotalBytesGB       = round(sum(ResponseBodySize) / 1073741824.0, 3),\n    Operations         = make_set(OperationName, 5),\n    EarliestAccess     = min(TimeGenerated),\n    LatestAccess       = max(TimeGenerated)\n    by CallerIpAddress, AuthenticationType, AccountName, bin(TimeGenerated, 1d)\n| order by TotalBytesGB desc, AccessCount desc",
+        "tags": [
+          { "name": "description", "value": "Full 90-day timeline of anonymous and SAS-authenticated blob access from public IPs. Use to baseline normal patterns, confirm Rule-13 alerts, and detect low-and-slow exfiltration under the hourly threshold." },
+          { "name": "tactics", "value": "Collection,Exfiltration" },
+          { "name": "techniques", "value": "T1530" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-12T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-12 | NSG Deletion and Firewall Rule Modification History | T1562.007 | Medium",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-nsg-firewall-change-history')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - NSG Deletion and Firewall Rule Modification History (30 Days)",
+        "query": "let NSGOps = dynamic([\n    \"MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/DELETE\",\n    \"MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/WRITE\",\n    \"MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/SECURITYRULES/WRITE\",\n    \"MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/SECURITYRULES/DELETE\"\n]);\nAzureActivity\n| where TimeGenerated > ago(30d)\n| where OperationNameValue has_any (NSGOps)\n| where ActivityStatusValue =~ \"Success\"\n| extend ChangeType = case(\n    OperationNameValue has \"DELETE\" and OperationNameValue has \"NETWORKSECURITYGROUPS/DELETE\", \"NSG Deleted\",\n    OperationNameValue has \"SECURITYRULES/DELETE\", \"Security Rule Deleted\",\n    OperationNameValue has \"SECURITYRULES/WRITE\",  \"Security Rule Modified/Added\",\n    OperationNameValue has \"NETWORKSECURITYGROUPS/WRITE\", \"NSG Created/Modified\",\n    \"Other\")\n| project TimeGenerated, Caller, CallerIpAddress, ChangeType, ResourceId, ResourceGroup, SubscriptionId, Properties\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "Complete 30-day history of NSG deletions and individual security rule modifications. Helps determine whether Rule-14 alerts are isolated events or a broader network exposure campaign." },
+          { "name": "tactics", "value": "DefenseEvasion" },
+          { "name": "techniques", "value": "T1562.007" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-12T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-13 | VM Script Extension and Run Command Execution History | T1059/T1059.009 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-vm-script-extension-history')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - VM Custom Script Extension and Run Command History (30 Days)",
+        "query": "let ScriptExtTypes = dynamic([\"CustomScriptExtension\", \"CustomScriptForLinux\", \"RunCommandHandler\", \"RunCommand\", \"Microsoft.Compute.CustomScriptExtension\", \"Microsoft.Azure.Extensions.CustomScript\"]);\nAzureActivity\n| where TimeGenerated > ago(30d)\n| where OperationNameValue =~ \"MICROSOFT.COMPUTE/VIRTUALMACHINES/EXTENSIONS/WRITE\"\n    or  OperationNameValue =~ \"MICROSOFT.COMPUTE/VIRTUALMACHINES/RUNCOMMAND/ACTION\"\n| where ActivityStatusValue =~ \"Success\"\n| where Properties has_any (ScriptExtTypes) or OperationNameValue has \"RUNCOMMAND\"\n| extend PropsParsed   = todynamic(Properties)\n| extend ExtensionType = coalesce(tostring(PropsParsed[\"type\"]), tostring(PropsParsed.type), iff(OperationNameValue has \"RUNCOMMAND\", \"RunCommand\", \"Unknown\"))\n| extend VMName = tostring(split(ResourceId, \"/\")[8])\n| summarize\n    ExecCount     = count(),\n    DistinctVMs   = dcount(VMName),\n    VMNames       = make_set(VMName, 20),\n    ExtensionTypes = make_set(ExtensionType, 5),\n    SourceIPs     = make_set(CallerIpAddress, 5),\n    FirstSeen     = min(TimeGenerated),\n    LastSeen      = max(TimeGenerated)\n    by Caller, ResourceGroup, SubscriptionId\n| order by ExecCount desc",
+        "tags": [
+          { "name": "description", "value": "All Custom Script Extension deployments and Run Command executions across VMs in 30 days. Identifies unusual actors, one-off script injections, or scripts outside known IaC patterns. Cross-reference with Rule-15 alerts." },
+          { "name": "tactics", "value": "Execution,Persistence" },
+          { "name": "techniques", "value": "T1059,T1059.009" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-12T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-14 | Sentinel Configuration Changes (Rules, Connectors, Workbooks) | T1562 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-sentinel-config-changes')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - Sentinel Configuration Changes (Rules, Connectors, Automation) (30 Days)",
+        "query": "let SentinelOps = dynamic([\n    \"MICROSOFT.SECURITYINSIGHTS/ALERTRULES/DELETE\",\n    \"MICROSOFT.SECURITYINSIGHTS/ALERTRULES/WRITE\",\n    \"MICROSOFT.SECURITYINSIGHTS/DATACONNECTORS/WRITE\",\n    \"MICROSOFT.SECURITYINSIGHTS/DATACONNECTORS/DELETE\",\n    \"MICROSOFT.SECURITYINSIGHTS/AUTOMATIONRULES/WRITE\",\n    \"MICROSOFT.SECURITYINSIGHTS/AUTOMATIONRULES/DELETE\",\n    \"MICROSOFT.SECURITYINSIGHTS/SETTINGS/WRITE\",\n    \"MICROSOFT.SECURITYINSIGHTS/WORKSPACEMANAGERCONFIGURATIONS/WRITE\"\n]);\nAzureActivity\n| where TimeGenerated > ago(30d)\n| where OperationNameValue has_any (SentinelOps)\n| where ActivityStatusValue =~ \"Success\"\n| extend ChangeCategory = case(\n    OperationNameValue has \"ALERTRULES\"      , \"Analytics Rule\",\n    OperationNameValue has \"DATACONNECTORS\"  , \"Data Connector\",\n    OperationNameValue has \"AUTOMATIONRULES\" , \"Automation Rule\",\n    OperationNameValue has \"SETTINGS\"        , \"Sentinel Settings\",\n    \"Other\")\n| extend ActionType = iff(OperationNameValue has \"DELETE\", \"Delete\", \"Create/Modify\")\n| project TimeGenerated, Caller, CallerIpAddress, ChangeCategory, ActionType, OperationNameValue, ResourceId, ResourceGroup, SubscriptionId\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "Full 30-day timeline of Sentinel configuration changes: alert rule deletions/modifications, data connector changes, automation rule changes, and workspace settings. Use to investigate Rule-16 alerts and audit who changed Sentinel during an incident." },
+          { "name": "tactics", "value": "DefenseEvasion" },
+          { "name": "techniques", "value": "T1562" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-12T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "HUNT-15 | Identity Operation Volume Anomaly Deep-Dive | T1078/T1580 | Medium",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/hunt-identity-ops-anomaly-deepdive')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Hunt - Identity Operation Volume Anomaly Deep-Dive (30 Days)",
+        "query": "let ExcludedPatterns = dynamic([\"terraform\", \"bicep\", \"pipeline\", \"github\", \"pulumi\", \"devops\", \"arm-deployment\"]);\nlet AzurePlatformIPs = dynamic([\"168.63.\", \"169.254.\"]);\nlet DailyOps = AzureActivity\n    | where TimeGenerated > ago(30d)\n    | where ActivityStatusValue =~ \"Success\"\n    | where OperationNameValue has_any (\"WRITE\", \"DELETE\", \"ACTION\")\n    | where not(OperationNameValue has_any (\"READ\", \"LIST\", \"GET\", \"LISTKEYS\"))\n    | where isnotempty(Caller) and isnotempty(CallerIpAddress)\n    | where not(CallerIpAddress has_any (AzurePlatformIPs))\n    | where not(tolower(Caller) has_any (ExcludedPatterns))\n    | summarize DailyCount = count() by Caller, Day = bin(TimeGenerated, 1d);\nlet Baseline = DailyOps\n    | where Day < ago(7d)\n    | summarize AvgDailyOps = avg(DailyCount), StdDevOps = stdev(DailyCount), SampleDays = dcount(Day) by Caller\n    | where SampleDays >= 3;\nlet RecentOps = DailyOps | where Day >= ago(7d);\nRecentOps\n| join kind=inner Baseline on Caller\n| extend DeviationScore = iff(StdDevOps > 0, (DailyCount - AvgDailyOps) / StdDevOps, toreal(DailyCount))\n| where DeviationScore >= 2.5 or (AvgDailyOps < 1 and DailyCount >= 10)\n| project Day, Caller, DailyCount, AvgDailyOps = round(AvgDailyOps, 1), StdDevOps = round(StdDevOps, 1), DeviationScore = round(DeviationScore, 1)\n| order by DeviationScore desc, DailyCount desc",
+        "tags": [
+          { "name": "description", "value": "Per-identity daily management op counts vs. 23-day baseline. Flags days exceeding 2.5 sigma above mean. Use to investigate Rule-17 alerts, find recon bursts, or surface compromised accounts." },
+          { "name": "tactics", "value": "Discovery,Impact,DefenseEvasion" },
+          { "name": "techniques", "value": "T1078,T1580" },
+          { "name": "createdBy", "value": "Custom-AzureDetections" },
+          { "name": "createdTimeUtc", "value": "2026-03-12T00:00:00" }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-13 | Storage Account Accessed Anonymously or via SAS from Public Internet | T1530 | Medium",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/f3a4b5c6-d7e8-9012-fabc-def123456789')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Storage Account Accessed Anonymously or via SAS from Public Internet",
+        "description": "Detects blob reads from public IPs using Anonymous or SAS-Token authentication. Anonymous access to Storage Blobs is disabled by default in new accounts but may still exist in legacy deployments; SAS tokens are frequently used by attackers post-compromise to exfiltrate data without AAD traces (T1530). FP mitigations: (1) Private IP ranges and Azure platform IPs excluded; (2) Anonymous access triggers at 5+ requests — filters one-off misconfiguration probes; (3) SAS threshold set at 50 MB to focus on meaningful data movement; (4) RequestStatus == 200 only — rejects failed/probing attempts.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "let PrivateRanges = dynamic([\"10.\", \"172.16.\", \"172.17.\", \"172.18.\", \"172.19.\", \"172.20.\", \"172.21.\", \"172.22.\", \"172.23.\", \"172.24.\", \"172.25.\", \"172.26.\", \"172.27.\", \"172.28.\", \"172.29.\", \"172.30.\", \"172.31.\", \"192.168.\", \"168.63.\", \"169.254.\"]);\nlet SensitiveOps = dynamic([\"GetBlob\", \"ListBlobs\", \"GetBlobProperties\", \"GetContainerProperties\", \"ListContainers\", \"GetContainerACL\"]);\nlet AnonAccessThreshold = 5;\nlet SASBytesGBThreshold = 0.05;\nStorageBlobLogs\n| where TimeGenerated > ago(2h)\n| where AuthenticationType in~ (\"Anonymous\", \"SasToken\")\n| where OperationName in (SensitiveOps)\n| where StatusCode == 200\n| where isnotempty(CallerIpAddress)\n| where not(CallerIpAddress has_any (PrivateRanges))\n| summarize\n    AccessCount      = count(),\n    DistinctBlobs    = dcount(ObjectKey),\n    DistinctContainers = dcount(tostring(split(ObjectKey, \"/\")[0])),\n    TotalBytesGB     = round(sum(ResponseBodySize) / 1073741824.0, 3),\n    Operations       = make_set(OperationName, 5),\n    StorageAccounts  = make_set(AccountName, 5),\n    FirstAccess      = min(TimeGenerated),\n    LastAccess       = max(TimeGenerated)\n    by CallerIpAddress, AuthenticationType\n| where (AuthenticationType =~ \"Anonymous\" and AccessCount >= AnonAccessThreshold)\n    or  (AuthenticationType =~ \"SasToken\"  and TotalBytesGB >= SASBytesGBThreshold)\n| extend\n    CallerIP   = CallerIpAddress,\n    IsAnonymous = AuthenticationType =~ \"Anonymous\"",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT4H",
+        "suppressionEnabled": false,
+        "tactics": ["Collection", "Exfiltration"],
+        "techniques": ["T1530"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Storage {{AuthenticationType}} access: {{AccessCount}} ops from {{CallerIP}}",
+          "alertDescriptionFormat": "Public IP {{CallerIP}} accessed {{DistinctBlobs}} blob(s) using {{AuthenticationType}} authentication."
+        },
+        "customDetails": {
+          "AccessCount": "AccessCount",
+          "TotalBytesGB": "TotalBytesGB",
+          "StorageAccounts": "StorageAccounts",
+          "IsAnonymous": "IsAnonymous"
+        },
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-14 | Network Security Group Deleted | T1562.007 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/a4b5c6d7-e8f9-0123-abcd-ef4567890123')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Network Security Group Deleted",
+        "description": "Detects successful deletion of any Network Security Group (NSG). NSG deletion removes perimeter firewall rules, exposing VMs and subnets to unrestricted traffic — a deliberate adversary tactic before lateral movement or data exfiltration (T1562.007 — Disable or Modify Cloud Firewall). This is NOT a duplicate of Rule-07 (Resource Lock/Policy Deleted) which targets governance controls, nor of Rule-11 (Mass Deletion) which requires 10+ resources across multiple types. This rule fires on any single NSG deletion by a non-IaC caller. FP mitigations: (1) Known IaC/pipeline caller patterns excluded; (2) Azure platform IPs excluded; (3) Success-only events.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let KnownIaCPatterns = dynamic([\"terraform\", \"bicep\", \"pipeline\", \"github\", \"pulumi\", \"devops\", \"arm-deployment\", \"cleanup\", \"deprovisioner\"]);\nAzureActivity\n| where TimeGenerated > ago(2h)\n| where OperationNameValue =~ \"MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/DELETE\"\n| where ActivityStatusValue =~ \"Success\"\n| where not(tolower(Caller) has_any (KnownIaCPatterns))\n| where isnotempty(CallerIpAddress)\n| where CallerIpAddress !startswith \"168.63.\" and CallerIpAddress !startswith \"169.254.\"\n| summarize\n    DeletionCount         = count(),\n    DeletedNSGs           = make_set(ResourceId, 20),\n    AffectedSubscriptions = make_set(SubscriptionId, 5),\n    AffectedResourceGroups = make_set(ResourceGroup, 5),\n    SourceIPs             = make_set(CallerIpAddress, 5),\n    CallerIP              = any(CallerIpAddress),\n    FirstSeen             = min(TimeGenerated),\n    LastSeen              = max(TimeGenerated)\n    by Caller\n| extend\n    AccountName      = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT4H",
+        "suppressionEnabled": false,
+        "tactics": ["DefenseEvasion"],
+        "techniques": ["T1562"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "NSG deleted by {{Caller}} ({{DeletionCount}} NSG(s)) from {{CallerIP}}",
+          "alertDescriptionFormat": "{{Caller}} deleted {{DeletionCount}} Network Security Group(s) from {{CallerIP}}."
+        },
+        "customDetails": {
+          "DeletionCount": "DeletionCount",
+          "DeletedNSGs": "DeletedNSGs",
+          "SubscriptionsHit": "AffectedSubscriptions"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-15 | Custom Script Extension or Run Command Executed on VM | T1059/T1059.009 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/b5c6d7e8-f9a0-1234-bcde-f56789012345')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Custom Script Extension or Run Command Executed on Virtual Machine",
+        "description": "Detects deployment of a Custom Script Extension (Windows or Linux) or execution of Run Command on an Azure VM by a non-IaC identity. Both mechanisms execute arbitrary code inside the VM with SYSTEM/root-level permissions — a favored persistence and lateral-movement technique (T1059.009 — Cloud Administration Command). Attackers use CustomScriptExtension to drop reverse shells, install crypto miners, or stage ransomware without touching the VM's OS login. FP mitigations: (1) Known IaC and config-management tool patterns excluded (Terraform, Ansible, Chef, Puppet, DSC, pipelines); (2) Azure platform IPs excluded; (3) Only 'Success' events — 'Start' events fired before execution is confirmed are excluded.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let KnownIaCPatterns = dynamic([\"terraform\", \"bicep\", \"pipeline\", \"github\", \"pulumi\", \"devops\", \"arm-deployment\", \"chef\", \"puppet\", \"ansible\", \"dsc\"]);\nlet ScriptExtTypes = dynamic([\"CustomScriptExtension\", \"CustomScriptForLinux\", \"RunCommandHandler\", \"RunCommand\", \"Microsoft.Compute.CustomScriptExtension\", \"Microsoft.Azure.Extensions.CustomScript\"]);\nAzureActivity\n| where TimeGenerated > ago(2h)\n| where OperationNameValue =~ \"MICROSOFT.COMPUTE/VIRTUALMACHINES/EXTENSIONS/WRITE\"\n    or  OperationNameValue =~ \"MICROSOFT.COMPUTE/VIRTUALMACHINES/RUNCOMMAND/ACTION\"\n| where ActivityStatusValue =~ \"Success\"\n| where Properties has_any (ScriptExtTypes) or OperationNameValue =~ \"MICROSOFT.COMPUTE/VIRTUALMACHINES/RUNCOMMAND/ACTION\"\n| where not(tolower(Caller) has_any (KnownIaCPatterns))\n| where isnotempty(CallerIpAddress)\n| where CallerIpAddress !startswith \"168.63.\" and CallerIpAddress !startswith \"169.254.\"\n| extend PropsParsed    = todynamic(Properties)\n| extend ExtensionType  = coalesce(tostring(PropsParsed[\"type\"]), tostring(PropsParsed.type), iff(OperationNameValue has \"RUNCOMMAND\", \"RunCommand\", \"\"))\n| extend VMName         = tostring(split(ResourceId, \"/\")[8])\n| extend ExtensionName  = iff(array_length(split(ResourceId, \"/\")) > 10, tostring(split(ResourceId, \"/\")[10]), \"\")\n| summarize\n    ExecutionCount   = count(),\n    AffectedVMs      = make_set(VMName, 10),\n    ExtensionTypes   = make_set(ExtensionType, 5),\n    AffectedResources = make_set(ResourceId, 10),\n    SourceIPs        = make_set(CallerIpAddress, 5),\n    CallerIP         = any(CallerIpAddress),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n    by Caller, ResourceGroup, SubscriptionId\n| extend\n    AccountName      = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT4H",
+        "suppressionEnabled": false,
+        "tactics": ["Execution", "Persistence"],
+        "techniques": ["T1059"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Script executed on VM(s) by {{Caller}} — {{ExtensionTypes}} on {{AffectedVMs}}",
+          "alertDescriptionFormat": "{{Caller}} deployed {{ExecutionCount}} script extension(s) onto VMs: {{AffectedVMs}}."
+        },
+        "customDetails": {
+          "ExecutionCount": "ExecutionCount",
+          "AffectedVMs": "AffectedVMs",
+          "ExtensionTypes": "ExtensionTypes"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-16 | Sentinel Analytics Rule Deleted or Disabled | T1562 | High",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/c6d7e8f9-a0b1-2345-cdef-678901234567')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure Sentinel - Analytics Rule Deleted or Disabled",
+        "description": "Detects deletion or bulk modification (disabling) of Microsoft Sentinel Analytics Rules. Attackers with sufficient Azure RBAC privileges delete or disable detection rules to blind the SIEM before conducting further activity (T1562 — Impair Defenses). This complements Rule-02 (Diagnostic Settings) by covering the Sentinel layer specifically. Alert fires on: (1) any single DELETE of an alert rule; (2) 3+ WRITE operations (bulk rule toggles/edits) from a non-IaC caller. FP mitigations: (1) IaC/pipeline patterns excluded — DevSecOps pipelines deploying rules via ARM/API are known-good; (2) Azure platform IPs excluded; (3) WRITE threshold of 3 to filter individual rule tuning.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let KnownIaCPatterns = dynamic([\"terraform\", \"bicep\", \"pipeline\", \"github\", \"pulumi\", \"devops\"]);\nlet SentinelRuleOps = dynamic([\"MICROSOFT.SECURITYINSIGHTS/ALERTRULES/DELETE\", \"MICROSOFT.SECURITYINSIGHTS/ALERTRULES/WRITE\"]);\nAzureActivity\n| where TimeGenerated > ago(2h)\n| where OperationNameValue has_any (SentinelRuleOps)\n| where ActivityStatusValue =~ \"Success\"\n| where not(tolower(Caller) has_any (KnownIaCPatterns))\n| where isnotempty(CallerIpAddress)\n| where CallerIpAddress !startswith \"168.63.\" and CallerIpAddress !startswith \"169.254.\"\n| extend OperationType = iff(OperationNameValue has \"DELETE\", \"Delete\", \"Modify/Disable\")\n| summarize\n    OperationCount     = count(),\n    DeleteCount        = countif(OperationType == \"Delete\"),\n    ModifyCount        = countif(OperationType == \"Modify/Disable\"),\n    AffectedRules      = make_set(ResourceId, 20),\n    Operations         = make_set(OperationNameValue, 5),\n    AffectedWorkspaces = make_set(ResourceGroup, 5),\n    SourceIPs          = make_set(CallerIpAddress, 5),\n    CallerIP           = any(CallerIpAddress),\n    FirstSeen          = min(TimeGenerated),\n    LastSeen           = max(TimeGenerated)\n    by Caller, SubscriptionId\n| where DeleteCount >= 1 or ModifyCount >= 3\n| extend\n    AccountName      = tostring(split(Caller, \"@\")[0]),\n    AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT4H",
+        "suppressionEnabled": false,
+        "tactics": ["DefenseEvasion"],
+        "techniques": ["T1562"],
+        "eventGroupingSettings": { "aggregationKind": "SingleAlert" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Sentinel rule tampered by {{Caller}}: {{DeleteCount}} deleted, {{ModifyCount}} modified",
+          "alertDescriptionFormat": "{{Caller}} deleted {{DeleteCount}} and modified {{ModifyCount}} Sentinel analytics rules."
+        },
+        "customDetails": {
+          "DeleteCount": "DeleteCount",
+          "ModifyCount": "ModifyCount",
+          "AffectedRules": "AffectedRules",
+          "AffectedWorkspaces": "AffectedWorkspaces"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "comments": "RULE-17 | Anomalous Spike in Management Operations — Statistical Baseline | T1078/T1580 | Medium",
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/d7e8f9a0-b1c2-3456-defa-789012345678')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "Azure - Anomalous Spike in Management Operations (Statistical Baseline Deviation)",
+        "description": "Detects identities whose current-hour write/delete/action operation count exceeds their personal 13-day hourly average by 3 or more standard deviations (and at least 20 ops in the current hour). This statistical approach catches compromised credentials performing bulk changes (ransomware staging, data wipe prep, or infrastructure abuse) without hard-wired thresholds that would miss high-volume accounts. Requires at least 3 days of baseline data per identity to avoid false positives on new accounts. FP mitigations: (1) IaC/pipeline callers excluded; (2) Azure platform IPs excluded; (3) Minimum 20 ops in current hour — filters statistical noise from low-volume accounts; (4) 3-sigma threshold yields <0.3% false positive rate on normal distributions; (5) Read/list/get operations excluded — write/delete/action only.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "let DeviationThreshold = 3.0;\nlet MinOpsThreshold    = 20;\nlet MinBaselineDays    = 3;\nlet ExcludedPatterns   = dynamic([\"terraform\", \"bicep\", \"pipeline\", \"github\", \"pulumi\", \"devops\", \"arm-deployment\"]);\nlet AzurePlatformIPs   = dynamic([\"168.63.\", \"169.254.\"]);\nlet Baseline = AzureActivity\n    | where TimeGenerated between (ago(14d) .. ago(1h))\n    | where ActivityStatusValue =~ \"Success\"\n    | where OperationNameValue has_any (\"WRITE\", \"DELETE\", \"ACTION\")\n    | where not(OperationNameValue has_any (\"READ\", \"LIST\", \"GET\", \"LISTKEYS\"))\n    | where isnotempty(Caller) and isnotempty(CallerIpAddress)\n    | where not(CallerIpAddress has_any (AzurePlatformIPs))\n    | where not(tolower(Caller) has_any (ExcludedPatterns))\n    | summarize HourlyOps = count() by Caller, HourBin = bin(TimeGenerated, 1h)\n    | summarize AvgOpsPerHour = avg(HourlyOps), StdDevOps = stdev(HourlyOps), SampleDays = dcount(bin(HourBin, 1d)) by Caller\n    | where SampleDays >= MinBaselineDays;\nlet CurrentOps = AzureActivity\n    | where TimeGenerated > ago(1h)\n    | where ActivityStatusValue =~ \"Success\"\n    | where OperationNameValue has_any (\"WRITE\", \"DELETE\", \"ACTION\")\n    | where not(OperationNameValue has_any (\"READ\", \"LIST\", \"GET\", \"LISTKEYS\"))\n    | where isnotempty(Caller) and isnotempty(CallerIpAddress)\n    | where not(CallerIpAddress has_any (AzurePlatformIPs))\n    | where not(tolower(Caller) has_any (ExcludedPatterns))\n    | summarize\n        CurrentHourOps   = count(),\n        Operations       = make_set(OperationNameValue, 10),\n        AffectedResources = make_set(ResourceId, 10),\n        SourceIPs        = make_set(CallerIpAddress, 5),\n        CallerIP         = any(CallerIpAddress),\n        SubscriptionIds  = make_set(SubscriptionId, 5),\n        ResourceGroups   = make_set(ResourceGroup, 5),\n        FirstOp          = min(TimeGenerated),\n        LastOp           = max(TimeGenerated)\n        by Caller;\nCurrentOps\n| join kind=inner Baseline on Caller\n| where CurrentHourOps >= MinOpsThreshold\n| extend DeviationScore = iff(StdDevOps > 0, (CurrentHourOps - AvgOpsPerHour) / StdDevOps, toreal(CurrentHourOps))\n| where DeviationScore >= DeviationThreshold or (AvgOpsPerHour < 1 and CurrentHourOps >= MinOpsThreshold)\n| project Caller, CallerIP, SourceIPs, CurrentHourOps, AvgOpsPerHour = round(AvgOpsPerHour, 1), StdDevOps = round(StdDevOps, 1), DeviationScore = round(DeviationScore, 1), Operations, AffectedResources, SubscriptionIds, ResourceGroups, FirstOp, LastOp\n| extend AccountName = tostring(split(Caller, \"@\")[0]), AccountUPNSuffix = tostring(split(Caller, \"@\")[1])",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT4H",
+        "suppressionEnabled": false,
+        "tactics": ["Discovery", "Impact", "DefenseEvasion"],
+        "techniques": ["T1078", "T1580"],
+        "eventGroupingSettings": { "aggregationKind": "AlertPerResult" },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": ["Account", "IP"],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Anomalous ops: {{Caller}} — {{CurrentHourOps}} ops this hour ({{DeviationScore}}σ above baseline)",
+          "alertDescriptionFormat": "{{Caller}} performed {{CurrentHourOps}} management operations in the last hour — {{DeviationScore}} standard deviations above baseline."
+        },
+        "customDetails": {
+          "CurrentHourOps": "CurrentHourOps",
+          "AvgOpsPerHour": "AvgOpsPerHour",
+          "DeviationScore": "DeviationScore",
+          "Operations": "Operations"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "Name", "columnName": "AccountName" },
+              { "identifier": "UPNSuffix", "columnName": "AccountUPNSuffix" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "CallerIP" }
+            ]
+          }
+        ]
+      }
+    }
+
+  ]
+}

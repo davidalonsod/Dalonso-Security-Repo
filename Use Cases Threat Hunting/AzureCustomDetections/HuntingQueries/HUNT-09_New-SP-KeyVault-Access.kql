@@ -1,0 +1,22 @@
+﻿// Hunt     : Hunt - Service Principals Accessing Key Vault for the First Time Within 7 Days
+// Tactics  : CredentialAccess
+// MITRE    : T1552.001
+// Purpose  : Surfaces identities that accessed a Key Vault for the first time in the last 7 days. Compromised service principals and attacker-created SPs often probe Key Vaults for secrets/certs after initial access. Investigate any SP not expected to require KV access.
+//==========================================================================================
+
+let AllKVAccess = AzureActivity
+    | where TimeGenerated > ago(90d)
+    | where OperationNameValue startswith "MICROSOFT.KEYVAULT/VAULTS/"
+    | where ActivityStatusValue =~ "Success"
+    | summarize FirstAccessEver = min(TimeGenerated) by Caller, VaultPath = tostring(strcat(SubscriptionId, "/", ResourceGroup, "/", tostring(split(ResourceId, "/")[8])));
+AllKVAccess
+| where FirstAccessEver > ago(7d)
+| join kind=inner (
+    AzureActivity
+    | where TimeGenerated > ago(7d)
+    | where OperationNameValue startswith "MICROSOFT.KEYVAULT/VAULTS/"
+    | where ActivityStatusValue =~ "Success"
+    | project TimeGenerated, Caller, Operation = OperationNameValue, ResourceId, CallerIpAddress, SubscriptionId, ResourceGroup
+) on Caller
+| project TimeGenerated, Caller, Operation, ResourceId, CallerIpAddress, SubscriptionId, ResourceGroup, FirstAccessEver
+| order by FirstAccessEver desc

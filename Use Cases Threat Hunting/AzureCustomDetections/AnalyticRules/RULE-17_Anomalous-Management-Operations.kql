@@ -1,0 +1,76 @@
+// Rule    : Azure - Anomalous Spike in Management Operations (Statistical Baseline Deviation)
+// Severity: Medium
+// Tactics : Discovery, Impact, DefenseEvasion
+// MITRE   : T1078, T1580
+// Freq    : PT1H   Period: P14D
+//==========================================================================================
+
+let DeviationThreshold = 3.0;   // sigma — 3 standard deviations above personal mean
+let MinOpsThreshold    = 20;    // minimum ops in current hour to consider alerting
+let MinBaselineDays    = 3;     // require at least 3 days of history to build a baseline
+let ExcludedPatterns   = dynamic(["terraform", "bicep", "pipeline", "github", "pulumi",
+    "devops", "arm-deployment"]);
+let AzurePlatformIPs   = dynamic(["168.63.", "169.254."]);
+// ── Baseline: per-caller hourly operation counts for the last 13 days ──────────────────
+let Baseline = AzureActivity
+    | where TimeGenerated between (ago(14d) .. ago(1h))
+    | where ActivityStatusValue =~ "Success"
+    | where OperationNameValue has_any ("WRITE", "DELETE", "ACTION")
+    | where not(OperationNameValue has_any ("READ", "LIST", "GET", "LISTKEYS"))
+    | where isnotempty(Caller) and isnotempty(CallerIpAddress)
+    | where not(CallerIpAddress has_any (AzurePlatformIPs))
+    | where not(tolower(Caller) has_any (ExcludedPatterns))
+    | summarize HourlyOps = count() by Caller, HourBin = bin(TimeGenerated, 1h)
+    | summarize
+        AvgOpsPerHour = avg(HourlyOps),
+        StdDevOps     = stdev(HourlyOps),
+        SampleDays    = dcount(bin(HourBin, 1d))
+        by Caller
+    | where SampleDays >= MinBaselineDays;
+// ── Current 1-hour window ──────────────────────────────────────────────────────────────
+let CurrentOps = AzureActivity
+    | where TimeGenerated > ago(1h)
+    | where ActivityStatusValue =~ "Success"
+    | where OperationNameValue has_any ("WRITE", "DELETE", "ACTION")
+    | where not(OperationNameValue has_any ("READ", "LIST", "GET", "LISTKEYS"))
+    | where isnotempty(Caller) and isnotempty(CallerIpAddress)
+    | where not(CallerIpAddress has_any (AzurePlatformIPs))
+    | where not(tolower(Caller) has_any (ExcludedPatterns))
+    | summarize
+        CurrentHourOps   = count(),
+        Operations       = make_set(OperationNameValue, 10),
+        AffectedResources = make_set(ResourceId, 10),
+        SourceIPs        = make_set(CallerIpAddress, 5),
+        CallerIP         = any(CallerIpAddress),
+        SubscriptionIds  = make_set(SubscriptionId, 5),
+        ResourceGroups   = make_set(ResourceGroup, 5),
+        FirstOp          = min(TimeGenerated),
+        LastOp           = max(TimeGenerated)
+        by Caller;
+// ── Join & score ──────────────────────────────────────────────────────────────────────
+CurrentOps
+| join kind=inner Baseline on Caller
+| where CurrentHourOps >= MinOpsThreshold
+| extend DeviationScore = iff(
+    StdDevOps > 0,
+    (CurrentHourOps - AvgOpsPerHour) / StdDevOps,
+    toreal(CurrentHourOps))
+| where DeviationScore >= DeviationThreshold
+    or (AvgOpsPerHour < 1 and CurrentHourOps >= MinOpsThreshold)
+| project
+    Caller,
+    CallerIP,
+    SourceIPs,
+    CurrentHourOps,
+    AvgOpsPerHour    = round(AvgOpsPerHour, 1),
+    StdDevOps        = round(StdDevOps, 1),
+    DeviationScore   = round(DeviationScore, 1),
+    Operations,
+    AffectedResources,
+    SubscriptionIds,
+    ResourceGroups,
+    FirstOp,
+    LastOp
+| extend
+    AccountName      = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])

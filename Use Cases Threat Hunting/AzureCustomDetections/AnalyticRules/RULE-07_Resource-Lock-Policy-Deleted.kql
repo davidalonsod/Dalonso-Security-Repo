@@ -1,0 +1,35 @@
+﻿// Rule    : Azure - Resource Lock or Policy Assignment Deleted
+// Severity: Medium
+// Tactics : DefenseEvasion
+// MITRE   : T1562
+// Freq    : PT1H   Period: PT2H
+//==========================================================================================
+
+let HighImpactOps = dynamic([
+    "MICROSOFT.AUTHORIZATION/LOCKS/DELETE",
+    "MICROSOFT.AUTHORIZATION/POLICYASSIGNMENTS/DELETE",
+    "MICROSOFT.AUTHORIZATION/POLICYDEFINITIONS/DELETE",
+    "MICROSOFT.AUTHORIZATION/POLICYEXEMPTIONS/WRITE",
+    "MICROSOFT.AUTHORIZATION/POLICYSETDEFINITIONS/DELETE",
+    "MICROSOFT.MANAGEMENT/MANAGEMENTGROUPS/SUBSCRIPTIONS/DELETE"
+]);
+let ExcludedPatterns = dynamic(["terraform", "bicep", "pipeline", "arm-", "policy-compliance"]);
+AzureActivity
+| where TimeGenerated > ago(2h)
+| where OperationNameValue has_any (HighImpactOps)
+| where ActivityStatusValue =~ "Success"
+| where not(tolower(Caller) has_any (ExcludedPatterns))
+| where isnotempty(CallerIpAddress)
+| where CallerIpAddress !startswith "168.63."
+| summarize
+    OperationCount = count(),
+    Operations = make_set(OperationNameValue, 10),
+    AffectedResources = make_set(ResourceId, 10),
+    SourceIPs = make_set(CallerIpAddress, 5),
+    CallerIP = any(CallerIpAddress),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by Caller, SubscriptionId, ResourceGroup
+| extend
+    AccountName = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])
