@@ -1,0 +1,85 @@
+// Rule    : Workload Identity - Multiple SPs Created by Single Principal in Short Window
+// Severity: Medium
+// Tactics : Persistence, PrivilegeEscalation
+// MITRE   : T1136.003 (Create Account: Cloud Account), T1078.004 (Valid Accounts: Cloud Accounts)
+// Freq    : PT30M  Period: PT30M
+// Tables  : AuditLogs
+// Built-in differentiation: No Sentinel built-in detects bulk SP creation velocity patterns.
+// Microsoft Entra ID Protection monitors risky sign-ins but does not detect rapid SP creation
+// bursts from a single principal. This is distinct from RULE-09 (SP created never used) which
+// is a stale credential hygiene rule — this rule fires on the creation event burst itself,
+// well before any dormancy window is reached.
+//==========================================================================================
+// Attackers who achieve Application Administrator or Cloud App Admin privilege will create
+// multiple SPs rapidly to establish persistence (each SP can have independent credentials).
+// Automated tools like AzureHound or custom attack payloads generate this burst pattern.
+// Legitimate bulk SP creation (e.g., CI/CD pipelines) is typically automated from a known
+// service account — alert should be reviewed for unexpected human principals.
+
+let BurstWindow    = 10m;       // sliding window for burst detection
+let BurstThreshold = 3;         // >3 SPs created by same principal within window
+let LookbackPeriod = 30m;
+
+// --- All SP creation events in lookback ---
+let SPCreations = AuditLogs
+    | where TimeGenerated > ago(LookbackPeriod)
+    | where OperationName =~ "Add service principal"
+    | where Result =~ "success"
+    | extend InitiatorType    = case(
+        isnotempty(tostring(InitiatedBy.app.servicePrincipalId)), "ServicePrincipal",
+        isnotempty(tostring(InitiatedBy.user.id)),                "User",
+        "Unknown")
+    | extend InitiatorId      = coalesce(
+        tostring(InitiatedBy.app.servicePrincipalId),
+        tostring(InitiatedBy.user.id))
+    | extend InitiatorName    = coalesce(
+        tostring(InitiatedBy.app.displayName),
+        tostring(InitiatedBy.user.userPrincipalName))
+    | extend NewSPId          = tostring(TargetResources[0].id)
+    | extend NewSPName        = tostring(TargetResources[0].displayName)
+    | project TimeGenerated, InitiatorId, InitiatorName, InitiatorType,
+        NewSPId, NewSPName;
+
+// --- Post-creation arming events (joined per-SP before summarize to avoid dynamic-key join) ---
+let PostCreationData = AuditLogs
+    | where TimeGenerated > ago(LookbackPeriod + 10m)
+    | where OperationName in (
+        "Add service principal credentials",
+        "Add app role assignment to service principal",
+        "Add delegated permission grant"
+    )
+    | where Result =~ "success"
+    | extend TargetSPId = tostring(TargetResources[0].id)
+    | project TargetSPId, OperationName;
+// --- Detect burst: ≥BurstThreshold creations within BurstWindow ---
+// Join post-creation ops at per-SP (scalar) level before summarize to avoid dynamic-key join (SEM0713)
+SPCreations
+| join kind=inner (SPCreations | project InitiatorId, WindowEnd = TimeGenerated) on InitiatorId
+| where TimeGenerated between (WindowEnd - BurstWindow .. WindowEnd)
+| join kind=leftouter PostCreationData on $left.NewSPId == $right.TargetSPId
+| summarize
+    CreationsInWindow  = dcount(NewSPId),
+    SPsCreated         = make_set(NewSPName, 20),
+    SPIds              = make_set(NewSPId, 20),
+    PostCreationOps    = dcountif(NewSPId, isnotempty(TargetSPId)),
+    PostCreationOpList = make_set_if(OperationName, isnotempty(OperationName), 5),
+    WindowStart        = min(TimeGenerated),
+    WindowEnd          = max(TimeGenerated)
+    by InitiatorId, InitiatorName, InitiatorType
+| where CreationsInWindow > BurstThreshold
+| extend ImmediateArming   = PostCreationOps > 0
+| extend BurstDurationMins = datetime_diff("minute", WindowEnd, WindowStart)
+// --- Check if initiator is itself an SP (app creating apps = suspicious) ---
+| extend InitiatorIsApp    = InitiatorType == "ServicePrincipal"
+| extend SeverityLevel = case(
+    InitiatorIsApp and ImmediateArming,  "Critical — SP created SPs and immediately armed them",
+    InitiatorIsApp,                      "High — Service principal bulk-created other SPs",
+    ImmediateArming,                     "High — Bulk SP creation with immediate credential/role arming",
+    CreationsInWindow > 5,               "High — Very high SP creation burst (>5)",
+    "Medium — Suspicious SP creation burst")
+| project
+    InitiatorName, InitiatorId, InitiatorType, InitiatorIsApp,
+    CreationsInWindow, BurstDurationMins,
+    SPsCreated, SPIds,
+    ImmediateArming, PostCreationOps, PostCreationOpList,
+    SeverityLevel, WindowStart, WindowEnd

@@ -1,0 +1,100 @@
+// Rule    : Workload Identity - SP Graph API Service Principal Enumeration
+// Severity: Medium
+// Tactics : Discovery
+// MITRE   : T1087.004 (Account Discovery: Cloud Account), T1069.003 (Permission Groups: Cloud Groups)
+// Freq    : PT1H   Period: PT1H
+// Tables  : AuditLogs (Microsoft Graph audit entries)
+// Built-in differentiation: No Sentinel built-in detects Graph API SP bulk listing
+// by a service principal caller. Microsoft Sentinel "Rare subscription-level operations"
+// targets AzureActivity, not Graph API audit events. AzureAD Identity Protection does
+// not surface enumeration patterns from non-interactive SP callers.
+// Note: Requires Microsoft Entra ID / Azure AD audit log connector. Graph API calls
+// to /servicePrincipals appear in AuditLogs with OperationName "List servicePrincipals".
+// Tools like AzureHound, ROADtools, and AADInternals generate this pattern at high volume.
+//==========================================================================================
+// Attackers who compromise an SP use it to enumerate all other SPs in the tenant to
+// discover over-privileged apps, legacy credentials, and pivot targets. Listing ≥10 SPs
+// via Graph in a single hour from a non-interactive caller is a strong reconnaissance signal.
+
+let LookbackWindow = 1h;
+let SPListingThreshold = 10;    // ≥10 SP list operations = enumeration
+let ToolSignatureFilters = dynamic([
+    "python-requests", "azurehound", "roadrecon", "aadtools", "pscore",
+    "postman", "insomnia", "curl"    // common recon tool UA patterns
+]);
+
+// --- Capture Graph API calls to list/read service principals ---
+let SPListOps = AuditLogs
+    | where TimeGenerated > ago(LookbackWindow)
+    | where OperationName in~ (
+        "List servicePrincipals",
+        "Get servicePrincipal",
+        "List servicePrincipal appRoleAssignments",
+        "List servicePrincipal memberOf",
+        "List servicePrincipal owners",
+        "Get servicePrincipal oAuth2PermissionGrants",
+        "List application servicePrincipal"
+    )
+    | where Result =~ "success"
+    // Identify if the caller is itself a service principal (non-human)
+    | extend CallerType       = case(
+        isnotempty(tostring(InitiatedBy.app.servicePrincipalId)), "ServicePrincipal",
+        isnotempty(tostring(InitiatedBy.user.id)),                "User",
+        "Unknown")
+    | extend CallerSPId       = tostring(InitiatedBy.app.servicePrincipalId)
+    | extend CallerSPName     = tostring(InitiatedBy.app.displayName)
+    | extend CallerUserId     = tostring(InitiatedBy.user.id)
+    | extend CallerUpn        = tostring(InitiatedBy.user.userPrincipalName)
+    | extend CallerIdentity   = iff(CallerType == "ServicePrincipal", CallerSPName, CallerUpn)
+    | extend CallerObjectId   = iff(CallerType == "ServicePrincipal", CallerSPId, CallerUserId)
+    | extend TargetSPId       = tostring(TargetResources[0].id)
+    | extend TargetSPName     = tostring(TargetResources[0].displayName)
+    | extend AdditionalInfo   = tostring(AdditionalDetails);
+
+// --- Aggregate by caller and detect enumeration threshold ---
+SPListOps
+| summarize
+    OpCount           = count(),
+    UniqueTargetSPs   = dcount(TargetSPId),
+    UniqueOps         = dcount(OperationName),
+    TargetSPNames     = make_set(TargetSPName, 30),
+    OperationsUsed    = make_set(OperationName, 10),
+    FirstOp           = min(TimeGenerated),
+    LastOp            = max(TimeGenerated)
+    by CallerIdentity, CallerObjectId, CallerType
+| where OpCount >= SPListingThreshold
+// --- Corroborate: did the same caller recently have new credentials or role grants? ---
+| join kind=leftouter (
+    AuditLogs
+    | where TimeGenerated > ago(24h)
+    | where OperationName in (
+        "Add service principal credentials",
+        "Add app role assignment to service principal",
+        "Add delegated permission grant",
+        "Update service principal"
+    )
+    | where Result =~ "success"
+    | extend ActorSPId = tostring(InitiatedBy.app.servicePrincipalId)
+    | extend ActorUpn  = tostring(InitiatedBy.user.userPrincipalName)
+    | extend Actor     = coalesce(ActorSPId, ActorUpn)
+    | summarize RecentPrivChanges = count(), PrivOps = make_set(OperationName, 5)
+        by Actor
+) on $left.CallerObjectId == $right.Actor
+| extend RecentPrivChanges   = coalesce(RecentPrivChanges, 0)
+| extend HasPrivilegeContext = RecentPrivChanges > 0
+| extend DurationMinutes     = datetime_diff("minute", LastOp, FirstOp)
+| extend EnumerationRate     = round(todouble(OpCount) / iff(DurationMinutes < 1, 1.0, todouble(DurationMinutes)), 2)
+| extend SeverityLevel = case(
+    CallerType == "ServicePrincipal" and HasPrivilegeContext, "High — SP enumerating after privilege change",
+    CallerType == "ServicePrincipal" and OpCount >= 50,       "High — Bulk SP enumeration by service principal",
+    CallerType == "ServicePrincipal",                         "Medium — SP Graph API reconnaissance",
+    HasPrivilegeContext,                                      "Medium — User enumeration after privilege change",
+    "Medium — Graph API SP enumeration")
+| project
+    CallerIdentity, CallerObjectId, CallerType,
+    OpCount, UniqueTargetSPs, UniqueOps,
+    EnumerationRate, DurationMinutes,
+    OperationsUsed, TargetSPNames,
+    RecentPrivChanges, PrivOps,
+    HasPrivilegeContext, SeverityLevel,
+    FirstOp, LastOp

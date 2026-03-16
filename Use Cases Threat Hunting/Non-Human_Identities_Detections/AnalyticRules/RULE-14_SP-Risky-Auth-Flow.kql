@@ -1,0 +1,76 @@
+// Rule    : Workload Identity - SP Non-Standard or Risky Authentication Flow
+// Severity: High
+// Tactics : InitialAccess, CredentialAccess, DefenseEvasion
+// MITRE   : T1078.004, T1550.001, T1562
+// Freq    : PT1H   Period: PT1H
+// NOT a Sentinel built-in: The built-in "Legacy Authentication" rule targets USER sign-ins
+// in SigninLogs only. This rule targets SERVICE PRINCIPAL sign-ins specifically, using
+// ClientCredentialType and AuthenticationProtocol fields only available in
+// AADServicePrincipalSignInLogs, with multi-factor risk scoring.
+//==========================================================================================
+// Risky authentication patterns for Service Principals:
+// 1. ClientCredentialType == "none"  — no credential validated (CA-invisible sign-in)
+// 2. AuthenticationProtocol == "ropc" — Resource Owner Password Credentials (legacy, insecure)
+// 3. AuthenticationProtocol == "deviceCode" — Device code flow (user-interactive, inappropriate for SPs)
+// 4. CA not applied AND no CA policies recorded (blind spot in policy enforcement)
+// 5. SP authenticating non-interactively to user-oriented resources (delegated scope abuse)
+
+let PrivateRanges = dynamic(["10.", "192.168.", "172.16.", "172.17.", "172.18.",
+    "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+    "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
+    "127.", "169.254.", "168.63."]);
+// Resources that should only be accessed via explicit app-only flows
+let UserOrientedResources = dynamic([
+    "Office 365 Exchange Online", "Office 365 SharePoint Online",
+    "Microsoft Graph", "Azure Active Directory"
+]);
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(1h)
+| where ResultType == "0"
+| where isnotempty(IPAddress)
+| where not(IPAddress has_any (PrivateRanges))
+| extend GeoInfo = geo_info_from_ip_address(IPAddress)
+| extend Country = tostring(GeoInfo.country_iso_code)
+// --- Risk signal flags ---
+| extend IsRiskyCred   = ClientCredentialType in ("none", "")
+    or AuthenticationProtocol in ("ropc", "deviceCode", "usernamePassword")
+| extend IsCABlind     = ConditionalAccessStatus =~ "notApplied"
+    and isempty(tostring(ConditionalAccessPolicies))
+| extend IsDelegated   = ResourceDisplayName in (UserOrientedResources)
+    and ClientCredentialType =~ "none"
+// Only keep events with at least one risk signal
+| where IsRiskyCred or IsCABlind or IsDelegated
+| summarize
+    SigninCount       = count(),
+    RiskyCredCount    = countif(IsRiskyCred),
+    CABlindCount      = countif(IsCABlind),
+    DelegatedCount    = countif(IsDelegated),
+    AuthProtocols     = make_set(AuthenticationProtocol, 5),
+    CredTypes         = make_set(ClientCredentialType, 5),
+    CAStatuses        = make_set(ConditionalAccessStatus, 3),
+    Resources         = make_set(ResourceDisplayName, 10),
+    Countries         = make_set(Country, 5),
+    UniqueIPs         = dcount(IPAddress),
+    IPList            = make_set(IPAddress, 5),
+    FirstSeen         = min(TimeGenerated),
+    LastSeen          = max(TimeGenerated)
+    by ServicePrincipalName, ServicePrincipalId, AppId
+// --- Correlate: was this SP recently created or modified? ---
+| join kind=leftouter (
+    AuditLogs
+    | where TimeGenerated > ago(30d)
+    | where OperationName has_any (
+        "Add service principal", "Add service principal credentials",
+        "Update application – Certificates and secrets management")
+    | where Result =~ "success"
+    | extend SPId = tostring(TargetResources[0].id)
+    | summarize RecentSPChanges = count(), LastChange = max(TimeGenerated) by SPId
+) on $left.ServicePrincipalId == $right.SPId
+| extend IsRecentlyModified = isnotempty(LastChange)
+| extend RiskScore = case(
+    RiskyCredCount > 0 and IsRecentlyModified, "Critical",
+    RiskyCredCount > 0,                         "High",
+    CABlindCount > 5,                            "High",
+    DelegatedCount > 0,                          "Medium",
+    "Medium")
+| project-away SPId

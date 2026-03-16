@@ -1,0 +1,54 @@
+// Rule    : Workload Identity - SP Sign-in Anomaly Spike (Statistical Baseline Deviation)
+// Severity: Medium
+// Tactics : Discovery, CredentialAccess
+// MITRE   : T1078.004, T1087.004
+// Freq    : PT1H   Period: P14D
+//==========================================================================================
+
+let DeviationThreshold = 3.0;    // 3 standard deviations above mean
+let MinSigninsThreshold = 50;    // minimum sign-ins in current hour
+let MinBaselineDays     = 3;
+
+// --- Baseline: per-SP hourly sign-in counts (last 13 days) ---
+let Baseline = AADServicePrincipalSignInLogs
+    | where TimeGenerated between (ago(14d) .. ago(1h))
+    | where ResultType == "0"
+    | summarize HourlySignins = count()
+        by ServicePrincipalId, bin(TimeGenerated, 1h)
+    | summarize
+        AvgPerHour  = avg(HourlySignins),
+        StdDevPerHour = stdev(HourlySignins),
+        SampleDays  = dcount(bin(TimeGenerated, 1d))
+        by ServicePrincipalId
+    | where SampleDays >= MinBaselineDays;
+
+// --- Current 1-hour window ---
+let CurrentWindow = AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(1h)
+    | where ResultType == "0"
+    | summarize
+        CurrentSignins   = count(),
+        UniqueResources  = dcount(ResourceDisplayName),
+        Resources        = make_set(ResourceDisplayName, 10),
+        UniqueIPs        = dcount(IPAddress),
+        CredTypes        = make_set(ClientCredentialType, 5),
+        FirstSignin      = min(TimeGenerated),
+        LastSignin       = max(TimeGenerated)
+        by ServicePrincipalName, ServicePrincipalId, AppId;
+
+CurrentWindow
+| join kind=inner Baseline on ServicePrincipalId
+| where CurrentSignins >= MinSigninsThreshold
+| extend DeviationScore = iff(
+    StdDevPerHour > 0,
+    (CurrentSignins - AvgPerHour) / StdDevPerHour,
+    toreal(CurrentSignins))
+| where DeviationScore >= DeviationThreshold
+    or (AvgPerHour < 5 and CurrentSignins >= MinSigninsThreshold)
+| project
+    ServicePrincipalName, ServicePrincipalId, AppId,
+    CurrentSignins, AvgPerHour = round(AvgPerHour, 1),
+    StdDevPerHour = round(StdDevPerHour, 1),
+    DeviationScore = round(DeviationScore, 1),
+    UniqueResources, Resources, UniqueIPs, CredTypes,
+    FirstSignin, LastSignin

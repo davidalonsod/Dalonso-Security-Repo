@@ -1,0 +1,41 @@
+// Hunt     : Workload Identity - Managed Identity Out-of-Hours Full Timeline (90d)
+// Tactics  : Persistence, LateralMovement
+// MITRE    : T1078.004, T1550
+// Purpose  : Full 90-day history of Managed Identities authenticating outside business hours
+//            (Mon–Fri 06:00–22:00). Baseline normal patterns, identify persistent anomalies,
+//            and surface MIs accessing sensitive resources at unexpected times.
+//==========================================================================================
+
+let SensitiveResources = dynamic([
+    "Key Vault", "Storage", "SQL", "Cognitive", "OpenAI",
+    "Synapse", "Service Bus", "Event Hub", "Container Registry"
+]);
+// isfuzzy=true: AADManagedIdentitySignInLogs only exists when the Managed Identity diagnostic connector is enabled
+union isfuzzy=true
+    AADManagedIdentitySignInLogs,
+    (datatable(TimeGenerated:datetime, ResultType:string, ServicePrincipalName:string,
+               ServicePrincipalId:string, ResourceDisplayName:string, SourceAppClientId:string)[])
+| where TimeGenerated > ago(90d)
+| where ResultType == "0"
+| extend Hour        = hourofday(TimeGenerated)
+| extend DayOfWeek   = dayofweek(TimeGenerated)
+| extend IsWeekend   = DayOfWeek in (0d, 6d)
+| extend IsOOH       = Hour < 6 or Hour > 22 or IsWeekend
+| extend IsSensitive = ResourceDisplayName has_any (SensitiveResources)
+| summarize
+    TotalAuths        = count(),
+    OOHAuths          = countif(IsOOH),
+    BizHoursAuths     = countif(not(IsOOH)),
+    SensitiveOOH      = countif(IsOOH and IsSensitive),
+    UniqueResources   = dcount(ResourceDisplayName),
+    OOHResources      = make_set_if(ResourceDisplayName, IsOOH, 15),
+    SensitiveResources_List = make_set_if(ResourceDisplayName, IsOOH and IsSensitive, 10),
+    UniqueSourceApps  = dcount(SourceAppClientId),
+    SourceApps        = make_set(SourceAppClientId, 10),
+    OOHDays           = dcountif(bin(TimeGenerated, 1d), IsOOH),
+    FirstOOH          = minif(TimeGenerated, IsOOH),
+    LastOOH           = maxif(TimeGenerated, IsOOH)
+    by ServicePrincipalName, ServicePrincipalId
+| where OOHAuths > 0
+| extend OOHRatio = round(todouble(OOHAuths) / todouble(TotalAuths) * 100, 1)
+| order by SensitiveOOH desc, OOHAuths desc

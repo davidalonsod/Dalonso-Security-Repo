@@ -1,0 +1,45 @@
+// Hunt     : Workload Identity - SP Token Abuse Candidates (7d)
+// Tactics  : CredentialAccess, LateralMovement
+// MITRE    : T1528, T1550.001
+// Purpose  : Surfaces SPs whose tokens were used from 3+ different IPs or 2+ countries
+//            within a 60-minute window — a strong indicator of token replay/theft.
+//            Groups by token identifier to show exact replay timelines.
+//==========================================================================================
+
+let PrivateRanges = dynamic(["10.", "192.168.", "172.16.", "172.17.", "172.18.",
+    "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+    "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
+    "127.", "169.254.", "168.63."]);
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| where isnotempty(UniqueTokenIdentifier)
+| where isnotempty(IPAddress)
+| where not(IPAddress has_any (PrivateRanges))
+| extend GeoInfo  = geo_info_from_ip_address(IPAddress)
+| extend Country  = tostring(GeoInfo.country_iso_code)
+// --- Group by token within 1-hour sliding bins ---
+| summarize
+    UseCount        = count(),
+    UniqueIPs       = dcount(IPAddress),
+    UniqueCountries = dcount(Country),
+    IPList          = make_set(IPAddress, 10),
+    Countries       = make_set(Country, 10),
+    Resources       = make_set(ResourceDisplayName, 10),
+    FirstUse        = min(TimeGenerated),
+    LastUse         = max(TimeGenerated)
+    by UniqueTokenIdentifier, ServicePrincipalName, ServicePrincipalId, AppId
+| where UniqueIPs >= 3 or UniqueCountries >= 2
+| extend MinuteSpan = datetime_diff("minute", LastUse, FirstUse)
+| where MinuteSpan <= 60
+| extend RiskLevel = case(
+    UniqueCountries >= 3,  "Critical",
+    UniqueCountries >= 2,  "High",
+    UniqueIPs >= 5,        "High",
+                           "Medium")
+| project
+    ServicePrincipalName, ServicePrincipalId, AppId,
+    UniqueIPs, UniqueCountries, UseCount, MinuteSpan,
+    IPList, Countries, Resources,
+    FirstUse, LastUse, RiskLevel
+| order by UniqueCountries desc, UniqueIPs desc

@@ -1,0 +1,47 @@
+// Hunt     : Workload Identity - SP First-Time Resource Access (New Accesses, 30d lookback)
+// Tactics  : Discovery, CredentialAccess
+// MITRE    : T1087.004, T1552.001
+// Purpose  : Identifies SP–resource pairs where access was observed in the last 7 days
+//            but had NO history in the prior 23 days. Indicates a new or compromised SP
+//            expanding its access footprint. Correlated with AuditLogs for SP changes.
+//==========================================================================================
+
+let HistoricalAccess = AADServicePrincipalSignInLogs
+    | where TimeGenerated between (ago(30d) .. ago(7d))
+    | where ResultType == "0"
+    | distinct ServicePrincipalId, ResourceDisplayName;
+let RecentAccess = AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(7d)
+    | where ResultType == "0"
+    | extend GeoInfo = geo_info_from_ip_address(IPAddress)
+    | extend Country = tostring(GeoInfo.country_iso_code)
+    | summarize
+        NewAccessCount   = count(),
+        UniqueIPs        = dcount(IPAddress),
+        Countries        = make_set(Country, 10),
+        CredTypes        = make_set(ClientCredentialType, 5),
+        FirstAccess      = min(TimeGenerated),
+        LastAccess       = max(TimeGenerated)
+        by ServicePrincipalName, ServicePrincipalId, AppId, ResourceDisplayName
+    | join kind=leftanti HistoricalAccess on ServicePrincipalId, ResourceDisplayName;
+// --- Correlate with AuditLogs SP changes ---
+let RecentAuditChanges = AuditLogs
+    | where TimeGenerated > ago(30d)
+    | where OperationName has_any (
+        "Add service principal", "Add service principal credentials",
+        "Update application – Certificates and secrets management")
+    | where Result =~ "success"
+    | extend SPId      = tostring(TargetResources[0].id)
+    | extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+        tostring(InitiatedBy.app.displayName))
+    | summarize
+        ChangeCount    = count(),
+        ChangeTypes    = make_set(OperationName, 5),
+        Initiators     = make_set(Initiator, 5),
+        LastChange     = max(TimeGenerated)
+        by SPId;
+RecentAccess
+| join kind=leftouter RecentAuditChanges on $left.ServicePrincipalId == $right.SPId
+| extend HasRecentChange = isnotempty(LastChange)
+| project-away SPId
+| order by NewAccessCount desc

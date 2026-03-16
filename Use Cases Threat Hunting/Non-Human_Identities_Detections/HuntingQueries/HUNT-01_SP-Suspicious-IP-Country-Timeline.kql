@@ -1,0 +1,37 @@
+// Hunt     : Workload Identity - Service Principal Sign-ins from Suspicious IPs and Countries (7d)
+// Tactics  : InitialAccess, CredentialAccess
+// MITRE    : T1078.004
+// Purpose  : Full geo-analysis of SP sign-in IP activity. Surfaces SPs authenticating from high-risk
+//            countries and private/RFC1918 ranges (lateral movement via internal IPs). Use to baseline
+//            normal SP geolocations before tuning RULE-01.
+//==========================================================================================
+
+let HighRiskCountries = dynamic([
+    "CN", "RU", "KP", "IR", "NG", "IQ", "PK", "KZ", "UA", "BY",
+    "SY", "LY", "YE", "VE", "CU", "ZW", "MM", "AF"
+]);
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| extend GeoInfo        = geo_info_from_ip_address(IPAddress)
+| extend Country        = tostring(GeoInfo.country_iso_code)
+| extend City           = tostring(GeoInfo.city)
+| extend Latitude       = toreal(GeoInfo.latitude)
+| extend Longitude      = toreal(GeoInfo.longitude)
+| extend IsHighRisk     = Country in (HighRiskCountries)
+| extend IsPrivateRange = IPAddress startswith "10." or IPAddress startswith "172."
+    or IPAddress startswith "192.168."
+| summarize
+    AuthCount        = count(),
+    UniqueIPs        = dcount(IPAddress),
+    Countries        = make_set(Country, 20),
+    Cities           = make_set(City, 10),
+    HighRiskAuths    = countif(IsHighRisk),
+    PrivateRangeAuths = countif(IsPrivateRange),
+    IPList           = make_set(IPAddress, 20),
+    Resources        = make_set(ResourceDisplayName, 10),
+    CredTypes        = make_set(ClientCredentialType, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+    by ServicePrincipalName, ServicePrincipalId, AppId
+| order by HighRiskAuths desc, AuthCount desc

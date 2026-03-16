@@ -1,0 +1,48 @@
+// Rule    : Workload Identity - SP Created and Used Same Day from High-Risk Country
+// Severity: High
+// Tactics : Persistence, InitialAccess
+// MITRE   : T1136.003 (Create Cloud Account), T1078.004
+// Freq    : PT6H   Period: P1D
+//==========================================================================================
+
+let HighRiskCountries = dynamic([
+    "CN", "RU", "KP", "IR", "NG", "IQ", "PK", "KZ", "BY", "SY", "AF"
+]);
+let PrivateRanges = dynamic(["10.", "192.168.", "172.16.", "172.17.", "172.18.",
+    "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+    "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
+    "127.", "169.254.", "168.63."]);
+
+// --- Service principals created in the last 24 hours ---
+let NewSPs = AuditLogs
+    | where TimeGenerated > ago(1d)
+    | where OperationName =~ "Add service principal"
+    | where Result =~ "success"
+    | extend SPId        = tostring(TargetResources[0].id)
+    | extend SPName      = tostring(TargetResources[0].displayName)
+    | extend AppId       = tostring(TargetResources[0].modifiedProperties[0].newValue)
+    | extend Creator     = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+        tostring(InitiatedBy.app.displayName))
+    | project CreatedTime = TimeGenerated, SPId, SPName, Creator;
+
+// --- Sign-ins by those newly created SPs ---
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(1d)
+| where ResultType == "0"
+| where isnotempty(IPAddress)
+| where not(IPAddress has_any (PrivateRanges))
+| extend GeoInfo = geo_info_from_ip_address(IPAddress)
+| extend Country = tostring(GeoInfo.country_iso_code)
+| where Country in (HighRiskCountries)
+| join kind=inner NewSPs on $left.ServicePrincipalId == $right.SPId
+| where TimeGenerated >= CreatedTime
+| summarize
+    SigninCount      = count(),
+    UniqueIPs        = dcount(IPAddress),
+    IPList           = make_set(IPAddress, 5),
+    Countries        = make_set(Country, 5),
+    Resources        = make_set(ResourceDisplayName, 10),
+    MinutesAfterCreate = min(datetime_diff("minute", TimeGenerated, CreatedTime)),
+    FirstSignin      = min(TimeGenerated),
+    LastSignin       = max(TimeGenerated)
+    by ServicePrincipalName, ServicePrincipalId, AppId, Creator, CreatedTime

@@ -1,0 +1,52 @@
+// Hunt     : Workload Identity - SP Critical Resource Access Full History (90d)
+// Tactics  : CredentialAccess, Discovery
+// MITRE    : T1552.001, T1087.004
+// Purpose  : 90-day view of all SP accesses to critical Azure/M365 resources: Microsoft Graph,
+//            Key Vault, ARM, Exchange, SharePoint, AAD. Correlate with AuditLogs to link
+//            first-time access events to recent SP creation or credential changes.
+//==========================================================================================
+
+let CriticalResources = dynamic([
+    "Microsoft Graph", "Azure Key Vault", "Azure Active Directory",
+    "Windows Azure Active Directory", "Azure Resource Manager",
+    "Office 365 Exchange Online", "Office 365 SharePoint Online"
+]);
+let PrivateRanges = dynamic(["10.", "192.168.", "172.16.", "127.", "169.254.", "168.63."]);
+// --- SP access to critical resources ---
+let SPAccess = AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(90d)
+    | where ResultType == "0"
+    | where ResourceDisplayName in (CriticalResources)
+    | where isnotempty(IPAddress)
+    | extend GeoInfo = geo_info_from_ip_address(IPAddress)
+    | extend Country = tostring(GeoInfo.country_iso_code)
+    | summarize
+        AccessCount      = count(),
+        UniqueIPs        = dcount(IPAddress),
+        UniqueCountries  = dcount(Country),
+        Countries        = make_set(Country, 10),
+        CredTypes        = make_set(ClientCredentialType, 5),
+        FirstAccess      = min(TimeGenerated),
+        LastAccess       = max(TimeGenerated)
+        by ServicePrincipalName, ServicePrincipalId, AppId, ResourceDisplayName;
+// --- Recent SP lifecycle events from AuditLogs ---
+let SPLifecycleEvents = AuditLogs
+    | where TimeGenerated > ago(90d)
+    | where OperationName has_any (
+        "Add service principal", "Add service principal credentials",
+        "Update application – Certificates and secrets management",
+        "Delete service principal")
+    | where Result =~ "success"
+    | extend SPId      = tostring(TargetResources[0].id)
+    | extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+        tostring(InitiatedBy.app.displayName))
+    | summarize
+        LifecycleEvents  = count(),
+        EventTypes       = make_set(OperationName, 5),
+        Initiators       = make_set(Initiator, 5),
+        LatestChange     = max(TimeGenerated)
+        by SPId;
+SPAccess
+| join kind=leftouter SPLifecycleEvents on $left.ServicePrincipalId == $right.SPId
+| project-away SPId
+| order by AccessCount desc

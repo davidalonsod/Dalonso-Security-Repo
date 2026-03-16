@@ -1,0 +1,47 @@
+// Rule    : Workload Identity - SP Conditional Access Bypass → Cloud App Events Correlation
+// Severity: High
+// Tactics : InitialAccess, Exfiltration
+// MITRE   : T1078.004, T1567, T1530
+// Freq    : PT1H   Period: PT2H
+//==========================================================================================
+
+let PrivateRanges = dynamic(["10.", "192.168.", "172.16.", "172.17.", "172.18.",
+    "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+    "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
+    "127.", "169.254.", "168.63."]);
+let HighRiskActions = dynamic([
+    "FileDownloaded", "FileSyncDownloadedFull", "FileDeleted", "FileMoved",
+    "SendAs", "MailItemsAccessed", "MassDelete", "DataExfiltration"
+]);
+// --- SPs that bypassed CA in the last 2 hours ---
+let CABypassSPs = AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(2h)
+    | where ResultType == "0"
+    | where ConditionalAccessStatus in ("notApplied", "failure")
+    | where isnotempty(IPAddress)
+    | where not(IPAddress has_any (PrivateRanges))
+    | project SigninTime = TimeGenerated, ServicePrincipalId, ServicePrincipalName,
+        AppId, SigninIP = IPAddress, CAStatus = ConditionalAccessStatus,
+        Resource = ResourceDisplayName;
+// --- Subsequent high-risk cloud app activity from same SP within 1h ---
+// union isfuzzy=true + datatable fallback: deployment succeeds even if CloudAppEvents (M365D connector) is not enabled
+union isfuzzy=true
+    CloudAppEvents,
+    (datatable(TimeGenerated:datetime, ActionType:string, AccountObjectId:string, ObjectName:string, Application:string)[])
+| where TimeGenerated > ago(2h)
+| where ActionType in (HighRiskActions)
+| join kind=inner CABypassSPs on $left.AccountObjectId == $right.ServicePrincipalId
+| where TimeGenerated > SigninTime and TimeGenerated <= SigninTime + 1h
+| summarize
+    ActionCount      = count(),
+    Actions          = make_set(ActionType, 10),
+    AffectedObjects  = make_set(ObjectName, 20),
+    Applications     = make_set(Application, 5),
+    SigninIP         = any(SigninIP),
+    CAStatus         = any(CAStatus),
+    Resource         = any(Resource),
+    SigninTime       = any(SigninTime),
+    FirstAction      = min(TimeGenerated),
+    LastAction       = max(TimeGenerated)
+    by ServicePrincipalName, ServicePrincipalId, AppId
+| where ActionCount >= 2

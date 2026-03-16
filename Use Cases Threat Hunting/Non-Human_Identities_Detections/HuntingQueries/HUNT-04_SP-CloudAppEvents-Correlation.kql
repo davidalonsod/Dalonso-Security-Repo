@@ -1,0 +1,56 @@
+// Hunt     : Workload Identity - SP Activity Correlated with CloudAppEvents (7d)
+// Tactics  : Exfiltration, InitialAccess
+// MITRE    : T1567, T1530, T1078.004
+// Purpose  : Surfaces SPs that authenticated from high-risk geos AND performed high-risk cloud app
+//            actions (file downloads, mail access, deletions). Joins AADServicePrincipalSignInLogs
+//            with CloudAppEvents on ServicePrincipalId / AccountObjectId. Full 7-day investigation view.
+//==========================================================================================
+
+let HighRiskCountries = dynamic([
+    "CN", "RU", "KP", "IR", "NG", "IQ", "PK", "KZ", "BY", "AF", "SY"
+]);
+let HighRiskActions = dynamic([
+    "FileDownloaded", "FileSyncDownloadedFull", "FileDeleted", "FileMoved",
+    "FileCopied", "SendAs", "MailItemsAccessed", "MassDelete", "DataExfiltration",
+    "SharePointFileOperation"
+]);
+let PrivateRanges = dynamic(["10.", "192.168.", "172.16.", "127.", "169.254.", "168.63."]);
+// --- SPs with suspicious sign-ins in the last 7 days ---
+let SuspiciousSPSignins = AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(7d)
+    | where ResultType == "0"
+    | where isnotempty(IPAddress)
+    | where not(IPAddress has_any (PrivateRanges))
+    | extend GeoInfo = geo_info_from_ip_address(IPAddress)
+    | extend Country = tostring(GeoInfo.country_iso_code)
+    | where Country in (HighRiskCountries)
+        or ConditionalAccessStatus in ("notApplied", "failure")
+    | summarize
+        SigninCount   = count(),
+        Countries     = make_set(Country, 5),
+        Resources     = make_set(ResourceDisplayName, 5),
+        SigninIPs     = make_set(IPAddress, 10),
+        FirstSignin   = min(TimeGenerated),
+        LastSignin    = max(TimeGenerated)
+        by ServicePrincipalId, ServicePrincipalName, AppId;
+// --- Cloud app events by those SPs ---
+// isfuzzy=true: CloudAppEvents only exists when Defender for Cloud Apps is connected
+union isfuzzy=true
+    CloudAppEvents,
+    (datatable(TimeGenerated:datetime, ActionType:string, AccountObjectId:string,
+               ObjectName:string, Application:string, IPAddress:string)[])
+| where TimeGenerated > ago(7d)
+| where ActionType in (HighRiskActions)
+| join kind=inner SuspiciousSPSignins on $left.AccountObjectId == $right.ServicePrincipalId
+| summarize
+    ActionCount      = count(),
+    Actions          = make_set(ActionType, 10),
+    AffectedObjects  = make_set(ObjectName, 20),
+    Applications     = make_set(Application, 10),
+    CloudEventIPs    = make_set(IPAddress, 10),
+    Countries        = any(Countries),
+    SigninIPs        = any(SigninIPs),
+    FirstAction      = min(TimeGenerated),
+    LastAction       = max(TimeGenerated)
+    by ServicePrincipalName, ServicePrincipalId, AppId
+| order by ActionCount desc

@@ -1,0 +1,97 @@
+// Rule    : Workload Identity - SP Sensitive API Permission Grant Detected
+// Severity: High
+// Tactics : PrivilegeEscalation, Persistence
+// MITRE   : T1098.003 (Account Manipulation: Additional Cloud Roles),
+//           T1078.004 (Valid Accounts: Cloud Accounts)
+// Freq    : PT1H   Period: PT1H
+// Tables  : AuditLogs
+// Built-in differentiation: Sentinel built-in "Service Principal assigned privileged role"
+// detects Azure RBAC assignment (Microsoft.Authorization role assignments). This rule
+// detects OAuth2 / Microsoft Graph API permission consent grants — a separate and equally
+// dangerous escalation vector that assigns abilities like reading all mailboxes, writing
+// directory objects, or managing all app registrations, which are not Azure RBAC roles.
+//==========================================================================================
+// Attackers who compromise or control an app registration use OAuth2 permission consent
+// to grant the SP access to sensitive Microsoft Graph scopes without assigning any
+// traditional Azure RBAC role. These permissions can survive SP certificate rotation
+// and are often overlooked in role-based access reviews.
+
+// Sensitive OAuth2 scopes / app roles to monitor
+let DangerousPermissions = dynamic([
+    "RoleManagement.ReadWrite.Directory",   // Can assign any directory role
+    "Application.ReadWrite.All",            // Can create/modify apps and add creds
+    "AppRoleAssignment.ReadWrite.All",      // Can grant itself or others any app role
+    "Directory.ReadWrite.All",              // Full directory write access
+    "Mail.ReadWrite",                       // Read/write all mailboxes
+    "MailboxSettings.ReadWrite",            // Modify mailbox forwarding rules
+    "full_access_as_app",                   // Exchange full tenant access
+    "Exchange.ManageAsApp",                 // Exchange management
+    "User.ReadWrite.All",                   // Modify all user accounts
+    "Group.ReadWrite.All",                  // Modify all groups
+    "Contacts.ReadWrite",                   // Access all contact data
+    "Files.ReadWrite.All"                   // Read/write all OneDrive/SharePoint files
+]);
+
+// --- Capture permission grant events ---
+let PermissionGrants = AuditLogs
+    | where TimeGenerated > ago(1h)
+    | where OperationName in (
+        "Add delegated permission grant",
+        "Add app role assignment to service principal",
+        "Consent to application",
+        "Add OAuth2PermissionGrant"
+    )
+    | where Result =~ "success"
+    | extend InitiatorId          = tostring(InitiatedBy.user.id)
+    | extend InitiatorUpn         = tostring(InitiatedBy.user.userPrincipalName)
+    | extend InitiatorSPId        = tostring(InitiatedBy.app.servicePrincipalId)
+    | extend InitiatorDisplayName = coalesce(
+        tostring(InitiatedBy.user.userPrincipalName),
+        tostring(InitiatedBy.app.displayName),
+        "Unknown"
+    )
+    | extend TargetSPObjectId = tostring(TargetResources[0].id)
+    | extend TargetSPName     = tostring(TargetResources[0].displayName)
+    // Check the raw modifiedProperties array for the permission value
+    | mv-expand ModProp = TargetResources[0].modifiedProperties
+    | where tostring(ModProp.displayName) in (
+        "DelegatedPermissionGrant.Scope",
+        "ServicePrincipal.OAuth2PermissionGrants",
+        "AppRole.Value",
+        "ServicePrincipal.Oauth2PermissionGrants"
+    )
+    | extend PermissionValue = tostring(ModProp.newValue)
+    | where PermissionValue has_any (DangerousPermissions)
+    | summarize
+        GrantCount            = count(),
+        GrantedPerms          = make_set(PermissionValue, 20),
+        TargetSPs             = make_set(TargetSPName, 10),
+        TargetSPIds           = make_set(TargetSPObjectId, 10),
+        Operations            = make_set(OperationName, 5),
+        FirstGrant            = min(TimeGenerated),
+        LastGrant             = max(TimeGenerated)
+        by InitiatorDisplayName, InitiatorId, InitiatorSPId;
+
+// --- Correlate with recent SP creation (possible new malicious app) ---
+let RecentSPCreations = AuditLogs
+    | where TimeGenerated > ago(7d)
+    | where OperationName == "Add service principal"
+    | extend CreatedSPId   = tostring(TargetResources[0].id)
+    | extend CreatedSPName = tostring(TargetResources[0].displayName)
+    | project CreatedSPId, CreatedSPName, SPCreatedAt = TimeGenerated;
+
+PermissionGrants
+| mv-expand TargetSPId = TargetSPIds
+| extend TargetSPId = tostring(TargetSPId)
+| join kind=leftouter (RecentSPCreations) on $left.TargetSPId == $right.CreatedSPId
+| extend IsNewSP                = isnotempty(CreatedSPId) and (LastGrant - SPCreatedAt) < 7d
+| extend HasDangerousCombo      = GrantedPerms has "RoleManagement.ReadWrite.Directory"
+    or GrantedPerms has "Application.ReadWrite.All"
+    or GrantedPerms has "full_access_as_app"
+    or GrantedPerms has "Exchange.ManageAsApp"
+| extend SeverityLevel = case(
+    IsNewSP and HasDangerousCombo, "Critical — New SP granted tenant-wide admin Graph scope",
+    HasDangerousCombo,             "High — Dangerous OAuth2 scope granted",
+    IsNewSP,                       "High — Sensitive scope granted to recently created SP",
+    "Medium — Sensitive Graph API scope granted")
+| project-away CreatedSPId, TargetSPId
