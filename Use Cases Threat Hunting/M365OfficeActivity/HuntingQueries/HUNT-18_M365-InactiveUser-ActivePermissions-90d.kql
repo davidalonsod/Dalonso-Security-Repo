@@ -1,0 +1,101 @@
+// Hunt    : M365 - Inactive Internal Users with Active Mailbox or SharePoint Permissions (90d)
+// Purpose : Surface user accounts that still hold active mailbox delegations (FullAccess /
+//           SendAs) or SharePoint site-admin roles but have generated zero or very low
+//           OfficeActivity in the past 90 days. Such dormant-but-privileged accounts are a
+//           high-value target: they can be silently compromised and abused without triggering
+//           velocity-based detections. Does NOT include guest (#EXT#) users.
+// Tables  : OfficeActivity
+// Period  : P90D (permissions baseline), P90D (activity check)
+// Tactics : Persistence, Privilege Escalation
+// MITRE   : T1078.004, T1098.002
+//==========================================================================================
+
+let LookbackDays      = 90d;
+let InactivityDays    = 60;   // flag users with <InactivityDays of active ops
+
+// --- Step 1: All permission grants in the window ---
+// Mailbox delegations
+let MailboxDelegates = OfficeActivity
+    | where TimeGenerated > ago(LookbackDays)
+    | where RecordType in ("ExchangeAdmin", "ExchangeItem")
+    | where Operation in (
+        "Add-MailboxPermission",
+        "Set-Mailbox",
+        "Add-RecipientPermission")
+    | where Parameters has_any ("FullAccess", "SendAs", "SendOnBehalf")
+    | mv-expand todynamic(Parameters)
+    | extend ParamName  = tostring(parse_json(tostring(Parameters)).Name)
+    | extend ParamValue = tostring(parse_json(tostring(Parameters)).Value)
+    | where ParamName in~ ("AccessRights") and ParamValue has_any ("FullAccess", "SendAs")
+    | extend
+        PrivilegedUser    = tolower(OfficeObjectId),
+        PermissionType    = "MailboxDelegate",
+        GrantedTo         = tolower(UserId),
+        GrantedAt         = TimeGenerated
+    | where PrivilegedUser !has "#EXT#"
+    | project PrivilegedUser, PermissionType, GrantedTo, GrantedAt;
+
+// SharePoint site-admin grants
+let SPAdminGrants = OfficeActivity
+    | where TimeGenerated > ago(LookbackDays)
+    | where RecordType in ("SharePoint", "SharePointFileOperation")
+    | where Operation in (
+        "SiteCollectionAdminAdded",
+        "PermissionLevelAdded")
+    | where Event_Data has_any ("Full Control", "Site Collection Administrator")
+    | where UserId !has "#EXT#"
+    | extend
+        PrivilegedUser    = tolower(UserId),
+        PermissionType    = "SharePointSiteAdmin",
+        GrantedTo         = tolower(UserId),
+        GrantedAt         = TimeGenerated
+    | project PrivilegedUser, PermissionType, GrantedTo, GrantedAt;
+
+let AllPrivilegedGrants = union MailboxDelegates, SPAdminGrants
+    | summarize
+        PermissionTypes   = make_set(PermissionType, 10),
+        FirstGrant        = min(GrantedAt),
+        LastGrant         = max(GrantedAt),
+        GrantCount        = count()
+        by PrivilegedUser;
+
+// --- Step 2: Recent activity per internal user ---
+let UserActivity = OfficeActivity
+    | where TimeGenerated > ago(LookbackDays)
+    | where UserId !has "#EXT#"
+    | summarize
+        TotalEvents       = count(),
+        LastActivity      = max(TimeGenerated),
+        FirstActivity     = min(TimeGenerated),
+        Workloads         = make_set(RecordType, 10),
+        LastOperation     = arg_max(TimeGenerated, Operation)
+        by UserId;
+
+// --- Step 3: Join – keep only privileged users with no/low recent activity ---
+AllPrivilegedGrants
+| join kind=leftouter UserActivity
+    on $left.PrivilegedUser == $right.UserId
+| extend
+    DaysSinceLastActivity = iif(
+        isnotnull(LastActivity),
+        datetime_diff("day", now(), LastActivity),
+        datetime_diff("day", now(), FirstGrant))
+| where isnull(LastActivity) or DaysSinceLastActivity >= InactivityDays
+| extend ActivityStatus = case(
+    isnull(LastActivity),            "NeverActive",
+    DaysSinceLastActivity >= 90,     "Dormant (90d+)",
+    DaysSinceLastActivity >= 60,     "Inactive (60-89d)",
+    "RecentlyActive")
+| project
+    PrivilegedUser,
+    PermissionTypes,
+    FirstGrant,
+    LastGrant,
+    GrantCount,
+    TotalEvents       = coalesce(TotalEvents, 0),
+    LastActivity,
+    DaysSinceLastActivity,
+    ActivityStatus,
+    LastOperation     = tostring(LastOperation),
+    WorkloadsUsed     = tostring(Workloads)
+| sort by DaysSinceLastActivity desc

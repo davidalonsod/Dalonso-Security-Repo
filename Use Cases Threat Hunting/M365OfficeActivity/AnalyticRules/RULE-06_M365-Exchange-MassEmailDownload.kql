@@ -1,0 +1,46 @@
+// Rule    : M365 - Exchange Online Mass Email Download (eDiscovery / OWA Abuse)
+// Severity: High
+// Tactics : Collection, Exfiltration
+// MITRE   : T1114.001 (Email Collection: Local Email Collection),
+//           T1530 (Data from Cloud Storage)
+// Freq    : PT1H   Period: PT1H
+// Description: Detects users downloading or exporting a large volume of emails
+//              via OWA MessageViewed, MessageDownloaded, or eDiscovery export operations
+//              in a single hour — insider threat or compromised account signal.
+//==========================================================================================
+
+let MassDownloadThreshold = 200;   // emails exported/viewed in 1 hour
+let LookbackPeriod        = 1h;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType in ("ExchangeItem", "ExchangeItemGroup", "ExchangeAdmin")
+| where Operation in (
+    "MailItemsAccessed", "MessageViewed", "FolderBind",
+    "SearchQueryInitiatedExchange", "New-MailboxExportRequest",
+    "New-ComplianceSearch", "StartComplianceSearch",
+    "New-ComplianceSearchAction")
+| summarize
+    OperationCount  = count(),
+    Operations      = make_set(Operation, 10),
+    Folders         = make_set(FolderPath, 10),
+    ClientIPs       = make_set(ClientIP, 5),
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated)
+    by UserId, MailboxOwnerUPN
+| where OperationCount >= MassDownloadThreshold
+    or Operations has "New-MailboxExportRequest"
+    or Operations has "New-ComplianceSearchAction"
+| extend AlertSeverity = case(
+    Operations has "New-MailboxExportRequest", "High",
+    OperationCount >= 500,                     "High",
+    "Medium")
+| project
+    TimeGenerated  = LastSeen,
+    UserId,
+    MailboxOwnerUPN,
+    OperationCount,
+    Operations,
+    Folders,
+    ClientIPs,
+    AlertSeverity

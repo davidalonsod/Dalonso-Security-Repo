@@ -1,0 +1,50 @@
+// Rule    : M365 - Exchange Online Mailbox Accessed by Unusual Delegate
+// Severity: High
+// Tactics : Collection, CredentialAccess
+// MITRE   : T1114.002 (Email Collection: Remote Email Collection),
+//           T1078.004 (Valid Accounts: Cloud Accounts)
+// Freq    : PT1H   Period: PT1H
+// Description: Detects access to a mailbox by a delegate or service account
+//              (MailboxOwnerUPN != UserId) where the pattern is new in the past
+//              14 days — potential OAuth app abuse or compromised admin account.
+//==========================================================================================
+
+let LookbackPeriod    = 1h;
+let BaselineDays      = 14d;
+
+// Establish known delegate pairs from the past 14 days
+let KnownDelegatePairs = OfficeActivity
+    | where TimeGenerated between (ago(BaselineDays) .. ago(LookbackPeriod))
+    | where RecordType == "ExchangeItem" or RecordType == "ExchangeItemGroup"
+    | where isnotempty(MailboxOwnerUPN) and isnotempty(UserId)
+    | where MailboxOwnerUPN != UserId
+    | distinct MailboxOwnerUPN, UserId;
+
+// Current window
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType in ("ExchangeItem", "ExchangeItemGroup")
+| where isnotempty(MailboxOwnerUPN) and isnotempty(UserId)
+| where MailboxOwnerUPN != UserId         // accessed by delegate / another user
+| join kind=leftanti KnownDelegatePairs
+    on MailboxOwnerUPN, UserId            // new pair not seen in baseline
+| summarize
+    AccessCount     = count(),
+    Operations      = make_set(Operation, 10),
+    Subjects        = make_set(MailboxOwnerUPN, 5),
+    ClientIPs       = make_set(ClientIP, 5),
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated)
+    by MailboxOwnerUPN, UserId
+| extend AlertSeverity = case(
+    AccessCount >= 100, "High",
+    AccessCount >= 20,  "Medium",
+    "Low")
+| project
+    TimeGenerated  = LastSeen,
+    AccessedMailbox = MailboxOwnerUPN,
+    AccessedBy     = UserId,
+    AccessCount,
+    Operations,
+    ClientIPs,
+    AlertSeverity

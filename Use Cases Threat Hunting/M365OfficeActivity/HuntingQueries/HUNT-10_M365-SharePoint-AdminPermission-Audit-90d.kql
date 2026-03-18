@@ -1,0 +1,50 @@
+// Hunt    : M365 - SharePoint Admin Role and Permission Changes (90d)
+// Purpose : Full audit trail of SharePoint site permission escalations,
+//           site collection admin grants, and sharing policy changes over 90 days.
+//           Supports access review, privilege escalation, and compliance audits.
+// Tables  : OfficeActivity
+// Period  : P90D
+//==========================================================================================
+
+let LookbackDays = 90d;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType == "SharePoint"
+| where Operation in (
+    "SiteCollectionAdminAdded", "SiteCollectionAdminRemoved",
+    "PermissionLevelAdded", "PermissionLevelRemoved",
+    "GroupMemberAdded", "GroupMemberRemoved",
+    "SitePermissionsModified", "SharingPolicyChanged",
+    "SiteCollectionCreated", "SiteDeleted")
+| extend
+    TargetUser     = tostring(TargetUserOrGroupName),
+    RoleName       = tostring(parse_json(Event_Data).RoleAssignment),
+    SiteLower      = tolower(Site_Url)
+| extend
+    IsAdmin        = Operation has "Admin" or RoleName has "Full Control",
+    IsGuest        = TargetUser has "#EXT#" or TargetUser has "guest",
+    IsSensitive    = SiteLower has_any (dynamic([
+        "hr", "legal", "finance", "exec", "security", "payroll", "board"
+    ]))
+| summarize
+    OpCount        = count(),
+    Operations     = make_set(Operation, 10),
+    Targets        = make_set(TargetUser, 10),
+    SitesAffected  = make_set(Site_Url, 10),
+    AdminOps       = countif(IsAdmin),
+    GuestOps       = countif(IsGuest),
+    FirstChange    = min(TimeGenerated),
+    LastChange     = max(TimeGenerated)
+    by UserId
+| sort by AdminOps desc
+| project
+    UserId,
+    OpCount,
+    AdminOps,
+    GuestOps,
+    Operations,
+    Targets,
+    SitesAffected,
+    FirstChange,
+    LastChange

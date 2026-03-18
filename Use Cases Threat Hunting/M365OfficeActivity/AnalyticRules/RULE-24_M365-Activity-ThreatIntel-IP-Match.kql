@@ -1,0 +1,77 @@
+// Rule    : M365 - Office Activity from ThreatIntelligence-Known Malicious IP
+// Severity: High
+// Tactics : InitialAccess, Collection, Exfiltration
+// MITRE   : T1078.004 (Valid Accounts: Cloud Accounts),
+//           T1530 (Data from Cloud Storage)
+// Freq    : PT1H   Period: PT1H
+// Description: Enriches all M365 OfficeActivity events with the Microsoft Sentinel
+//              ThreatIntelligenceIndicator table. Flags any mailbox access, file
+//              download, SharePoint operation, or Teams activity performed from an IP
+//              address that matches an active threat intelligence indicator (malware C2,
+//              APT infrastructure, known-malicious hosting). This is the "known actor
+//              logging in" detection pattern.
+//
+//              Tables : OfficeActivity, ThreatIntelligenceIndicator
+//==========================================================================================
+
+let LookbackPeriod = 1h;
+
+// Active TI indicators — IPv4 only, not expired
+let MaliciousIPs = ThreatIntelligenceIndicator
+    | where TimeGenerated > ago(14d)
+    | where Active == true
+    | where isnotempty(NetworkIP) or isnotempty(NetworkSourceIP) or isnotempty(NetworkDestinationIP)
+    | where ExpirationDateTime > now() or isempty(ExpirationDateTime)
+    | extend TIIp = coalesce(NetworkIP, NetworkSourceIP, NetworkDestinationIP)
+    | where isnotempty(TIIp)
+    | summarize
+        ThreatType      = make_set(ThreatType, 5),
+        ThreatSeverity  = max(ConfidenceScore),
+        TIDescription   = any(Description),
+        TITags          = make_set(Tags, 5),
+        IndicatorCount  = count()
+        by TIIp;
+
+// Join all M365 activity against malicious IPs
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where isnotempty(ClientIP)
+| join kind=inner MaliciousIPs on $left.ClientIP == $right.TIIp
+| extend
+    RiskyOperation = Operation in (
+        "FileDownloaded", "FileSyncDownloadedFull",
+        "MailItemsAccessed", "New-InboxRule",
+        "SharingInvitationCreated", "AnonymousLinkCreated",
+        "AnonymousLinkUsed", "MessageCreated", "MemberAdded",
+        "Add-MailboxPermission", "New-MailboxExportRequest")
+| summarize
+    HitCount        = count(),
+    Operations      = make_set(Operation, 15),
+    Workloads       = make_set(OfficeWorkload, 5),
+    RiskyOps        = countif(RiskyOperation),
+    ThreatType      = any(ThreatType),
+    ThreatSeverity  = any(ThreatSeverity),
+    TIDescription   = any(TIDescription),
+    FilesOrItems    = make_set(coalesce(SourceFileName, ObjectId), 10),
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated)
+    by UserId, ClientIP
+| extend AlertSeverity = case(
+    RiskyOps >= 5,           "Critical",
+    RiskyOps >= 1,           "High",
+    HitCount >= 10,          "Medium",
+    "Low")
+| project
+    TimeGenerated   = LastSeen,
+    UserId,
+    MaliciousIP     = ClientIP,
+    ThreatType,
+    ThreatSeverity,
+    TIDescription,
+    HitCount,
+    RiskyOps,
+    Operations,
+    Workloads,
+    FilesOrItems,
+    FirstSeen,
+    AlertSeverity

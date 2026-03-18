@@ -1,0 +1,106 @@
+// Hunt    : M365 - Agent / Application ID Anomalous Access Profile (30d)
+// Purpose : Profile non-interactive application and agent access to M365 resources by
+//           AppId. In OfficeActivity, the AppId field identifies the OAuth client
+//           (application or agent) that performed the operation — covering Copilot agents,
+//           custom connectors, third-party apps, and OAuth-delegated scripts. This hunt
+//           surfaces AppIds with bulk, off-hours, or exfiltration-like patterns, and
+//           correlates them with the human users they acted on behalf of.
+//           Does NOT surface Service Principal sign-ins (see WorkloadIdentitiesDetections).
+// Tables  : OfficeActivity
+// Period  : P30D
+// Tactics : Collection, Exfiltration, Persistence, PrivilegeEscalation
+// MITRE   : T1530, T1048, T1119, T1078.004
+// Scope   : AppId-based operations on behalf of users or guests (not direct user sessions)
+//==========================================================================================
+
+let LookbackDays      = 30d;
+let MinEventsToSurface = 20;     // ignore AppIds with very low activity
+let HighVolumeThreshold = 500;   // AppIds over this are likely legitimate automation
+
+// Baseline per-app activity
+let AppActivity = OfficeActivity
+    | where TimeGenerated > ago(LookbackDays)
+    | where isnotempty(AppId) and AppId != "00000000-0000-0000-0000-000000000000"
+    // Keep only events where an app acted (not pure direct user browser session)
+    | where isnotempty(AppId)
+    | extend
+        IsGuest       = UserId has "#EXT#",
+        IsExfilOp     = Operation in (
+            "FileDownloaded", "FileSyncDownloadedFull",
+            "FileAccessed", "FileSyncUploadedFull",
+            "MailItemsAccessed", "Send",
+            "AnonymousLinkCreated", "SecureLinkCreated",
+            "SharingInvitationCreated"),
+        IsAfterHours  = hourofday(TimeGenerated) < 6 or hourofday(TimeGenerated) >= 22,
+        Workload      = case(
+            RecordType in ("ExchangeAdmin","ExchangeItem"),            "Exchange",
+            RecordType in ("SharePoint","SharePointFileOperation"),     "SharePoint",
+            RecordType in ("OneDrive","OneDriveFileOperation"),         "OneDrive",
+            RecordType == "MicrosoftTeams",                            "Teams",
+            RecordType == "ComplianceDLPEndpoint",                     "EndpointDLP",
+            RecordType == "AzureActiveDirectory",                      "AAD",
+            "Other");
+
+// Aggregate per AppId
+let AppProfile = AppActivity
+    | summarize
+        TotalEvents       = count(),
+        ExfilOpCount      = countif(IsExfilOp),
+        AfterHoursCount   = countif(IsAfterHours),
+        GuestOpCount      = countif(IsGuest),
+        DelegatedUsers    = dcount(UserId),
+        GuestUsers        = dcountif(UserId, IsGuest),
+        HumanUsers        = dcountif(UserId, not(IsGuest)),
+        DistinctWorkloads = dcount(Workload),
+        Workloads         = make_set(Workload, 5),
+        DistinctSites     = dcount(Site_Url),
+        DistinctOps       = dcount(Operation),
+        TopOps            = make_set(Operation, 15),
+        FirstSeen         = min(TimeGenerated),
+        LastSeen          = max(TimeGenerated)
+        by AppId
+    | where TotalEvents >= MinEventsToSurface;
+
+// Flag anomalous patterns
+AppProfile
+| extend
+    ExfilRatio         = round(todouble(ExfilOpCount)    / todouble(TotalEvents), 2),
+    AfterHoursRatio    = round(todouble(AfterHoursCount) / todouble(TotalEvents), 2),
+    GuestRatio         = round(todouble(GuestOpCount)    / todouble(TotalEvents), 2),
+    ActiveDays         = datetime_diff("day", LastSeen, FirstSeen)
+| extend RiskScore = toint(
+      iif(ExfilRatio       >= 0.5,              3, iif(ExfilRatio       >= 0.2, 1, 0))
+    + iif(AfterHoursRatio  >= 0.5,              2, iif(AfterHoursRatio  >= 0.3, 1, 0))
+    + iif(GuestRatio       >= 0.3,              2, 0)
+    + iif(DelegatedUsers   >= 50,               2, iif(DelegatedUsers   >= 10, 1, 0))
+    + iif(DistinctSites    >= 20,               1, 0)
+    + iif(TotalEvents      > HighVolumeThreshold, 1, 0))
+| extend AnomalyFlags = strcat_array(pack_array(
+    iif(ExfilRatio       >= 0.5,              "HighExfilRatio",         ""),
+    iif(AfterHoursRatio  >= 0.5,              "BulkAfterHours",         ""),
+    iif(GuestRatio       >= 0.3,              "HighGuestOpRatio",       ""),
+    iif(DelegatedUsers   >= 50,               "ManyDelegatedUsers",     ""),
+    iif(DistinctSites    >= 20,               "WideAccessSpread",       "")), ",")
+| project
+    AppId,
+    RiskScore,
+    TotalEvents,
+    ExfilOpCount,
+    ExfilRatio,
+    AfterHoursCount,
+    AfterHoursRatio,
+    GuestOpCount,
+    GuestRatio,
+    DelegatedUsers,
+    HumanUsers,
+    GuestUsers,
+    DistinctWorkloads,
+    Workloads,
+    DistinctSites,
+    DistinctOps,
+    ActiveDays,
+    FirstSeen,
+    LastSeen,
+    AnomalyFlags,
+    TopOps
+| sort by RiskScore desc, ExfilOpCount desc

@@ -1,0 +1,66 @@
+// Hunt    : M365 - Inactive Human Users with No M365 Activity (90d)
+// Purpose : Find internally-credentialed user accounts (NOT guests, NOT service principals,
+//           NOT shared/service mailboxes) that have produced zero OfficeActivity events
+//           in the past 90 days. These dormant accounts are prime targets for credential
+//           stuffing or password spray because they are unlikely to have active owners
+//           watching for alerts. The query cross-references prior activity to distinguish
+//           "never active" users from "formerly active / now dormant" ones.
+// Tables  : OfficeActivity
+// Period  : P180D (baseline) / P90D (inactivity window)
+// Tactics : InitialAccess, Persistence
+// MITRE   : T1078.004, T1098
+// Scope   : Human users only — excludes #EXT# (guest), service accounts, shared mailboxes
+//==========================================================================================
+
+let BaselinePeriod   = 180d;
+let InactivePeriod   = 90d;
+
+// Patterns indicative of non-human identities - exclude from results
+let ServiceAccountPatterns = dynamic([
+    "svc-", "svc.", "srv-", "srv.", "service-", "service.",
+    "noreply", "no-reply", "donotreply", "do-not-reply",
+    "backup", "monitor", "alert", "scan", "admin@",
+    "postmaster", "abuse@", "support@"]);
+
+// --- Users active at ANY point in the full baseline window ---
+let UsersWithPriorActivity = OfficeActivity
+    | where TimeGenerated > ago(BaselinePeriod)
+    | where UserId !has "#EXT#"                          // exclude guests
+    | where UserId has "@"                               // must be a UPN
+    | where not(UserId has_any (ServiceAccountPatterns)) // exclude service accounts
+    | summarize
+        TotalEvents      = count(),
+        LastActivity     = max(TimeGenerated),
+        FirstActivity    = min(TimeGenerated),
+        Workloads        = make_set(RecordType, 10),
+        LastOperation    = arg_max(TimeGenerated, Operation)
+        by UserId;
+
+// --- Users active in the RECENT inactivity window (still active) ---
+let RecentlyActiveUsers = OfficeActivity
+    | where TimeGenerated > ago(InactivePeriod)
+    | where UserId !has "#EXT#"
+    | summarize count() by UserId;
+
+// --- Dormant = had prior activity but NOTHING in last InactivePeriod ---
+UsersWithPriorActivity
+| join kind=leftanti RecentlyActiveUsers on UserId
+| extend
+    DaysSinceActivity   = datetime_diff("day", now(), LastActivity),
+    DaysEverActive      = datetime_diff("day", LastActivity, FirstActivity),
+    DormancyCategory    = case(
+        datetime_diff("day", now(), LastActivity) >= 180, "Abandoned (180d+)",
+        datetime_diff("day", now(), LastActivity) >= 90,  "Dormant (90-179d)",
+        "Fading (<90d)")
+| extend WorkloadsSummary = tostring(Workloads)
+| project
+    UserId,
+    DormancyCategory,
+    DaysSinceActivity,
+    LastActivity,
+    FirstActivity,
+    DaysEverActive,
+    TotalEvents,
+    WorkloadsSummary,
+    LastOperation    = tostring(LastOperation)
+| sort by DaysSinceActivity desc

@@ -1,0 +1,67 @@
+// Rule    : M365 - Cross-Workload Exfiltration Chain (Teams + OneDrive + Exchange)
+// Severity: Critical
+// Tactics : Collection, Exfiltration
+// MITRE   : T1530, T1537, T1114, T1213.003
+// Freq    : PT1H   Period: PT1H
+// Description: Detects a user who performs suspicious activity across at least two
+//              M365 workloads within one hour — combining mass downloads, external
+//              sharing, unusual mailbox access, and large file uploads. Multi-vector
+//              activity strongly elevates exfiltration confidence.
+//==========================================================================================
+
+let LookbackPeriod = 1h;
+
+// OneDrive/SharePoint suspicious activity
+let CloudStorageActivity = OfficeActivity
+    | where TimeGenerated > ago(LookbackPeriod)
+    | where RecordType in ("SharePoint", "OneDrive")
+    | where Operation in (
+        "FileDownloaded", "FileSyncDownloadedFull",
+        "AnonymousLinkCreated", "SharingInvitationCreated")
+    | summarize CloudCount = count() by UserId
+    | where CloudCount >= 20;
+
+// Exchange suspicious activity
+let MailActivity = OfficeActivity
+    | where TimeGenerated > ago(LookbackPeriod)
+    | where RecordType in ("ExchangeItem", "ExchangeAdmin")
+    | where Operation in (
+        "MailItemsAccessed", "New-InboxRule",
+        "New-MailboxExportRequest", "MessageViewed")
+    | summarize MailCount = count() by UserId
+    | where MailCount >= 30;
+
+// Teams suspicious activity
+let TeamsActivity = OfficeActivity
+    | where TimeGenerated > ago(LookbackPeriod)
+    | where RecordType == "MicrosoftTeams"
+    | where Operation in (
+        "FileShared", "FileSent",
+        "MessageCreatedHasLink", "MemberAdded")
+    | where UserId has "#EXT#"
+        or Operation in ("FileShared", "FileSent")
+    | summarize TeamsCount = count() by UserId
+    | where TeamsCount >= 10;
+
+// Correlate users present in >= 2 workloads
+CloudStorageActivity
+| join kind=inner MailActivity on UserId
+| join kind=leftouter TeamsActivity on UserId
+| extend
+    WorkloadsInvolved = case(
+        isnotempty(TeamsCount), "OneDrive+Exchange+Teams",
+        "OneDrive+Exchange"),
+    TeamsCount        = coalesce(TeamsCount, 0)
+| extend TotalSignals = CloudCount + MailCount + TeamsCount
+| project
+    TimeGenerated  = now(),
+    UserId,
+    CloudCount,
+    MailCount,
+    TeamsCount,
+    WorkloadsInvolved,
+    TotalSignals,
+    AlertSeverity  = case(
+        isnotempty(TeamsCount) and TeamsCount > 0, "Critical",
+        TotalSignals >= 100,                        "High",
+        "Medium")

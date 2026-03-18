@@ -1,0 +1,52 @@
+// Hunt    : M365 - Multiple Mailboxes Forwarding to Same External Address (BEC Campaign Map) (30d)
+// Purpose : Identify all external forwarding destinations that appear in more than one
+//           mailbox's forwarding rules over 30 days. Maps the full BEC campaign
+//           infrastructure — reveals how many accounts have been compromised and
+//           which external collection addresses the attacker controls.
+// Tables  : OfficeActivity
+// Period  : P30D
+//==========================================================================================
+
+let LookbackDays = 30d;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType == "ExchangeAdmin"
+| where Operation in (
+    "New-InboxRule", "Set-InboxRule",
+    "New-TransportRule", "Set-TransportRule",
+    "Set-Mailbox", "Set-MailboxAutoReplyConfiguration")
+| extend Params = tostring(Parameters)
+| extend ForwardingDest = coalesce(
+    extract(@"(ForwardTo|ForwardAsAttachmentTo|RedirectTo|DeliverToMailboxAndForward|ForwardingAddress|ForwardingSmtpAddress).*?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", 2, Params),
+    extract(@"(ForwardTo|ForwardAsAttachmentTo|RedirectTo).*?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", 2, Params)
+)
+| where isnotempty(ForwardingDest)
+| extend
+    ForwardDomain = tostring(split(ForwardingDest, "@")[1]),
+    IsExternal    = not(ForwardingDest has "onmicrosoft.com")
+| where IsExternal
+| summarize
+    SourceMailboxCount = dcount(UserId),
+    SourceMailboxes    = make_set(UserId, 30),
+    Operations         = make_set(Operation, 5),
+    SettingActors      = make_set(UserId, 10),
+    ClientIPs          = make_set(ClientIP, 10),
+    FirstRuleSeen      = min(TimeGenerated),
+    LastRuleSeen       = max(TimeGenerated)
+    by ForwardingDest, ForwardDomain
+| sort by SourceMailboxCount desc
+| extend CampaignIndicator = case(
+    SourceMailboxCount >= 5, "Likely BEC Campaign",
+    SourceMailboxCount >= 2, "Suspicious - Review",
+    "Single Occurrence")
+| project
+    ForwardingDest,
+    ForwardDomain,
+    SourceMailboxCount,
+    SourceMailboxes,
+    Operations,
+    ClientIPs,
+    CampaignIndicator,
+    FirstRuleSeen,
+    LastRuleSeen

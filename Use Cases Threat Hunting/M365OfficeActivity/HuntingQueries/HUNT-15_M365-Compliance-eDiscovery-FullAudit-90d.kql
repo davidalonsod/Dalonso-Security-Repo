@@ -1,0 +1,78 @@
+// Hunt    : M365 - eDiscovery and Compliance Search Activity History (90d)
+// Purpose : Full chronological inventory of all compliance center search and export
+//           activities over 90 days. Surfaces who performed searches, what content
+//           was scoped, and especially which searches were followed by an export.
+//           Start-to-export chains are key evidence in insider threat and compromised
+//           admin investigations. Also reveals audit log searches that could indicate
+//           an attacker checking what has been logged about their own activities.
+// Tables  : OfficeActivity
+// Period  : P90D
+//==========================================================================================
+
+let LookbackDays = 90d;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType in (
+    "SecurityComplianceCenter",
+    "ComplianceManager",
+    "OfficeSecurityComplianceCenter")
+| where Operation in (
+    "SearchCreated",
+    "SearchStarted",
+    "SearchExported",
+    "SearchPreviewed",
+    "SearchPurged",
+    "CaseCreated",
+    "CaseMemberAdded",
+    "CaseMemberRemoved",
+    "HoldCreated",
+    "HoldUpdated",
+    "New-ComplianceSearch",
+    "Start-ComplianceSearch",
+    "New-ComplianceSearchAction",
+    "Get-ComplianceSearch",
+    "New-eDiscoveryCase",
+    "New-UnifiedAuditLogRetentionPolicy",
+    "AuditLogSearchStarted",
+    "AuditLogSearchExported",
+    "ContentSearchExportDownloaded")
+| extend Params = tostring(Parameters)
+| extend
+    SearchName         = tostring(extract(@"Name.*?:([^\s,]+)", 1, Params)),
+    ContentSources     = tostring(extract(@"(ExchangeLocation|SharePointLocation|OneDriveLocation).*?:([^\n]+)", 2, Params)),
+    IsExport           = Operation in (
+        "SearchExported", "New-ComplianceSearchAction",
+        "ContentSearchExportDownloaded", "AuditLogSearchExported"),
+    IsAuditLogSearch   = Operation in ("AuditLogSearchStarted", "AuditLogSearchExported")
+// Build a timeline per user
+| summarize
+    TotalActions     = count(),
+    ExportActions    = countif(IsExport),
+    AuditLogSearches = countif(IsAuditLogSearch),
+    SearchPurges     = countif(Operation == "SearchPurged"),
+    Operations       = make_set(Operation, 15),
+    SearchNames      = make_set(SearchName, 10),
+    ClientIPs        = make_set(ClientIP, 5),
+    FirstAction      = min(TimeGenerated),
+    LastAction       = max(TimeGenerated)
+    by UserId
+| extend RiskIndicator = case(
+    SearchPurges >= 1 and ExportActions >= 1, "Export + Purge Chain — Critical",
+    ExportActions >= 3,                        "Repeated Exports — High",
+    AuditLogSearches >= 1,                     "Audit Log Self-Review — Suspicious",
+    ExportActions >= 1,                        "Export Performed",
+    "Informational")
+| sort by ExportActions desc, TotalActions desc
+| project
+    UserId,
+    TotalActions,
+    ExportActions,
+    AuditLogSearches,
+    SearchPurges,
+    Operations,
+    SearchNames,
+    ClientIPs,
+    RiskIndicator,
+    FirstAction,
+    LastAction

@@ -1,0 +1,45 @@
+// Rule    : M365 - Teams Bulk Guest User Invitation
+// Severity: Medium
+// Tactics : InitialAccess, Persistence
+// MITRE   : T1136.003 (Create Account: Cloud Account), T1078.004
+// Freq    : PT1H   Period: PT1H
+// Description: Detects when a single user invites an unusually high number of
+//              guest accounts to Microsoft Teams in a short window, which may
+//              indicate data-exfiltration staging or insider threat activity.
+//==========================================================================================
+
+let BulkThreshold = 10;        // invitations per hour that trigger the rule
+let LookbackPeriod = 1h;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType == "MicrosoftTeams"
+| where Operation in ("MemberAdded", "TeamsSessionStarted", "InviteAccepted")
+    or (Operation == "MemberAdded" and Members has "#EXT#")
+| extend MemberUPN = tostring(parse_json(Members)[0].UPN)
+| where MemberUPN has "#EXT#"                         // guest UPN pattern
+| summarize
+    GuestCount      = dcount(MemberUPN),
+    GuestList       = make_set(MemberUPN, 20),
+    TeamsInvolved   = make_set(TeamName, 10),
+    FirstInvite     = min(TimeGenerated),
+    LastInvite      = max(TimeGenerated)
+    by UserId, UserType, ClientIP, OfficeWorkload
+| where GuestCount >= BulkThreshold
+| extend
+    InviterDomain   = tostring(split(UserId, "@")[1]),
+    DurationMinutes = datetime_diff("minute", LastInvite, FirstInvite)
+| extend AlertSeverity = case(
+    GuestCount >= 30, "High",
+    GuestCount >= 15, "Medium",
+    "Low")
+| project
+    TimeGenerated  = LastInvite,
+    UserId,
+    InviterDomain,
+    GuestCount,
+    GuestList,
+    TeamsInvolved,
+    DurationMinutes,
+    ClientIP,
+    AlertSeverity

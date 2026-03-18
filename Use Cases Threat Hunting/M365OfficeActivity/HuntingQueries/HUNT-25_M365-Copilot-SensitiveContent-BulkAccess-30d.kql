@@ -1,0 +1,141 @@
+// Hunt    : M365 Copilot - Bulk or Sensitive Data Access via Copilot Interactions (30d)
+// Purpose : Every CopilotInteraction event carries a "Contexts" array in AuditData that
+//           lists the files, emails, calendar items, and web pages that Copilot read to
+//           compose its response. This hunt expands those arrays and profiles each user
+//           on two risk axes:
+//
+//             Bulk access — interactions where Copilot ingested an unusually high number
+//               of documents in a single prompt (≥5 contexts = bulk threshold). This can
+//               indicate a user harvesting document contents at scale via Copilot rather
+//               than downloading individual files — a pattern that bypasses DLP file-
+//               transfer controls entirely.
+//
+//             Sensitive-label access — any resource whose SensitivityLabel field maps to
+//               Confidential, Highly Confidential, Secret, Restricted, or equivalent.
+//               Copilot happily surfaces labelled content to any user who has access;
+//               volume and breadth of sensitive-label usage is a key indicator of
+//               misuse or insider data staging.
+//
+//           Results are grouped by user and include: total interactions, total resources
+//           accessed, sensitive-resource count, the specific labels encountered, sample
+//           resource IDs/URLs for the sensitive hits, apps used, and a WhySuspicious
+//           plain-English summary. Pair with HUNT-24 (volume/timing) and HUNT-26
+//           (XPIA/jailbreak) for a full Copilot threat picture.
+// Tables  : OfficeActivity
+// Period  : P30D
+// Tactics : Collection, Exfiltration, Discovery
+// MITRE   : T1119 (Automated Collection), T1530 (Cloud Storage Object Access),
+//           T1213.003 (Information Repositories), T1074.001 (Local Data Staging)
+// Scope   : All users; Contexts array mv-expand produces one row per resource accessed
+//==========================================================================================
+
+let LookbackDays      = 30d;
+let BulkContextThresh = 5;    // single interaction accessing ≥5 resources = bulk
+let SensitiveLabels   = dynamic([
+    "Confidential", "Highly Confidential", "Secret", "Restricted",
+    "Internal Only", "Sensitive", "Protected", "Classification: Confidential",
+    "Classification: Highly Confidential"]);
+
+// ── Step 1: All Copilot events — retain interaction-level metadata ───────────────────────
+let CopilotInteractions = OfficeActivity
+    | where TimeGenerated > ago(LookbackDays)
+    | where RecordType == "CopilotInteraction"
+    | extend AppHost       = tostring(OperationProperties.AppHost)
+    | extend Contexts      = OperationProperties.Contexts
+    | extend ContextCount  = array_length(Contexts)
+    | extend IsBulkContext = ContextCount >= BulkContextThresh
+    // Drop interactions where Copilot accessed nothing (e.g., pure text prompts)
+    | where ContextCount > 0;
+
+// ── Step 2: Expand to one row per resource accessed ──────────────────────────────────────
+let ContextExpanded = CopilotInteractions
+    | mv-expand Context = Contexts
+    | extend ContextId    = tostring(Context.Id)           // URL or document ID
+    | extend ContextType  = tostring(Context.Type)         // file, email, page, etc.
+    | extend ContextLabel = tostring(Context.SensitivityLabel)
+    | extend IsSensitive  = isnotempty(ContextLabel)
+                         and ContextLabel has_any (SensitiveLabels);
+
+// ── Step 3: Per-user aggregate across all interactions ───────────────────────────────────
+ContextExpanded
+| summarize
+    TotalInteractions          = dcount(TimeGenerated),
+    TotalResourcesAccessed     = count(),
+    SensitiveResourceCount     = countif(IsSensitive),
+    BulkInteractionCount       = dcountif(TimeGenerated, IsBulkContext),
+    DistinctAppHosts           = dcount(AppHost),
+    AppHostsUsed               = make_set(AppHost, 8),
+    // All unique label strings seen, including benign ones  
+    LabelsEncountered          = make_set(ContextLabel, 20),
+    // Only the sensitive-tier labels
+    SensitiveLabelsFound       = make_set_if(ContextLabel, IsSensitive, 10),
+    // Up to 20 sample resource IDs/URLs for sensitive hits — use in investigation
+    SampleSensitiveResources   = make_set_if(ContextId, IsSensitive, 20),
+    // Up to 10 sample resource IDs for non-sensitive hits (for completeness)
+    SampleOtherResources       = make_set_if(ContextId, not(IsSensitive), 10),
+    FirstSeen                  = min(TimeGenerated),
+    LastSeen                   = max(TimeGenerated)
+    by UserId
+| extend
+    SensitiveRatio             = round(todouble(SensitiveResourceCount) / todouble(TotalResourcesAccessed), 2),
+    AvgResourcesPerInteraction = round(todouble(TotalResourcesAccessed) / todouble(TotalInteractions), 1)
+| extend RiskScore = toint(
+    // Absolute sensitive-resource volume
+      iif(SensitiveResourceCount  >= 50, 4,
+      iif(SensitiveResourceCount  >= 10, 3,
+      iif(SensitiveResourceCount  >= 3,  2,
+      iif(SensitiveResourceCount  >= 1,  1, 0))))
+    // Proportion of interactions touching sensitive files
+    + iif(SensitiveRatio          >= 0.5, 2,
+      iif(SensitiveRatio          >= 0.2, 1, 0))
+    // Many interactions each pulling many documents (batch harvesting pattern)
+    + iif(BulkInteractionCount    >= 10,  2,
+      iif(BulkInteractionCount    >= 1,   1, 0))
+    // Total resource volume: high absolute number even without labels is notable
+    + iif(TotalResourcesAccessed  >= 200, 2,
+      iif(TotalResourcesAccessed  >= 50,  1, 0))
+    // High average: each prompt pulls many docs → harvesting via summarise/compare
+    + iif(AvgResourcesPerInteraction >= 8, 2,
+      iif(AvgResourcesPerInteraction >= 5, 1, 0)))
+| extend AnomalyFlags = strcat_array(pack_array(
+    iif(SensitiveResourceCount >= 1,
+        strcat("SensitiveFiles(", tostring(SensitiveResourceCount), ")"),           ""),
+    iif(SensitiveRatio >= 0.3,            "HighSensitiveRatio",                     ""),
+    iif(BulkInteractionCount >= 1,
+        strcat("BulkContextPrompts(", tostring(BulkInteractionCount), ")"),         ""),
+    iif(TotalResourcesAccessed >= 50,
+        strcat("HighResourceVolume(", tostring(TotalResourcesAccessed), ")"),       ""),
+    iif(AvgResourcesPerInteraction >= 5,
+        strcat("HighAvgPerPrompt(", tostring(AvgResourcesPerInteraction), ")"),     "")),
+    ",")
+| extend WhySuspicious = strcat(
+    "User '", UserId, "' had Copilot access ", tostring(TotalResourcesAccessed),
+    " resource(s) across ", tostring(TotalInteractions), " interaction(s) in 30d ",
+    "(avg ", tostring(AvgResourcesPerInteraction), " resources/prompt). ",
+    tostring(SensitiveResourceCount), " resource(s) carried a sensitivity label: [",
+    strcat_array(SensitiveLabelsFound, " | "), "]. ",
+    tostring(BulkInteractionCount), " prompt(s) accessed ≥", tostring(BulkContextThresh),
+    " files in a single call (bulk harvesting pattern). ",
+    "Apps used: [", strcat_array(AppHostsUsed, ", "), "]. ",
+    "Sample sensitive resource IDs/URLs: [",
+    strcat_array(SampleSensitiveResources, " | "), "].")
+| where RiskScore >= 1
+| project
+    UserId,
+    TotalInteractions,
+    TotalResourcesAccessed,
+    AvgResourcesPerInteraction,
+    SensitiveResourceCount,
+    SensitiveRatio,
+    SensitiveLabelsFound,
+    BulkInteractionCount,
+    AppHostsUsed,
+    SampleSensitiveResources,
+    SampleOtherResources,
+    LabelsEncountered,
+    FirstSeen,
+    LastSeen,
+    RiskScore,
+    AnomalyFlags,
+    WhySuspicious
+| sort by RiskScore desc, SensitiveResourceCount desc

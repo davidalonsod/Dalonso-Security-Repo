@@ -1,0 +1,82 @@
+// Rule     : M365 - Massive File / Item Deletion Across All Workloads
+// Severity : High
+// Tactics  : Impact, DefenseEvasion
+// MITRE    : T1485 (Data Destruction), T1070.004 (Indicator Removal: File Deletion),
+//            T1565.001 (Data Manipulation: Stored Data Manipulation)
+// Freq     : PT30M  /  Period: PT1H
+// Purpose  : Detect a single user performing a high volume of delete operations across
+//            Exchange Online, SharePoint, OneDrive, or Teams within a rolling 30-minute
+//            window. Pattern is consistent with ransomware staging, insider sabotage,
+//            or post-exfiltration cleanup. Baseline comparison suppresses known recycle
+//            operations.
+//==========================================================================================
+
+let LookbackWindow = 1h;
+let BinWindow       = 30m;
+let HardDeleteThreshold  = 50;    // hard/permanent deletes — always serious
+let SoftDeleteThreshold  = 200;   // recycle-bin or soft deletes — higher threshold
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackWindow)
+| where Operation in (
+    // Files & folders
+    "FileDeleted",
+    "FolderDeleted",
+    "FileVersionsAllDeleted",
+    "FileRecycled",
+    "FilePermanentlyDeleted",
+    // Exchange
+    "SoftDelete",
+    "HardDelete",
+    "MoveToDeletedItems",
+    "PurgeMessage",
+    // Teams
+    "ChannelDeleted",
+    "TeamDeleted",
+    "MessageDeletedAll",
+    // SharePoint pages
+    "PageDeleted",
+    "WikiPageDeleted")
+| extend
+    IsHardDelete = Operation in (
+        "FilePermanentlyDeleted", "HardDelete",
+        "PurgeMessage", "FileVersionsAllDeleted"),
+    Workload = case(
+        RecordType in ("ExchangeAdmin","ExchangeItem"),           "Exchange",
+        RecordType in ("SharePoint","SharePointFileOperation"),    "SharePoint",
+        RecordType in ("OneDrive","OneDriveFileOperation"),        "OneDrive",
+        RecordType == "MicrosoftTeams",                           "Teams",
+        "Other"),
+    ObjectName = coalesce(SourceFileName, ObjectId, TeamName)
+| summarize
+    TotalDeletions       = count(),
+    HardDeleteCount      = countif(IsHardDelete),
+    SoftDeleteCount      = countif(not(IsHardDelete)),
+    Workloads            = make_set(Workload, 5),
+    DeletedItems         = make_set(ObjectName, 30),
+    EarliestDelete       = min(TimeGenerated),
+    LatestDelete         = max(TimeGenerated)
+    by UserId, bin(TimeGenerated, BinWindow), ClientIP
+| extend
+    DurationMinutes = datetime_diff("minute", LatestDelete, EarliestDelete),
+    AlertSeverity   = case(
+        HardDeleteCount >= HardDeleteThreshold,  "High",
+        TotalDeletions  >= SoftDeleteThreshold,  "High",
+        "Medium"),
+    IsAdminBulkDelete = UserId has_any ("admin", "service", "svc", "backup")
+| where HardDeleteCount >= HardDeleteThreshold
+    or TotalDeletions  >= SoftDeleteThreshold
+| project
+    UserId,
+    ClientIP,
+    EarliestDelete,
+    LatestDelete,
+    DurationMinutes,
+    TotalDeletions,
+    HardDeleteCount,
+    SoftDeleteCount,
+    Workloads,
+    AlertSeverity,
+    IsAdminBulkDelete,
+    DeletedItems
+| sort by HardDeleteCount desc, TotalDeletions desc

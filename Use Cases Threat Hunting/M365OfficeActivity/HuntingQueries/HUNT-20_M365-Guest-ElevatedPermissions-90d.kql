@@ -1,0 +1,117 @@
+// Hunt    : M365 - Guest Users with Elevated Permissions (Admin Roles or Full Control) (90d)
+// Purpose : Identify external guest accounts (#EXT#) that have been granted elevated
+//           roles such as SharePoint Site Collection Administrator, Teams channel/team
+//           Owner, or Exchange FullAccess delegation. Guests with elevated permissions
+//           represent an elevated insider threat risk and should be reviewed periodically.
+//           Includes activity profile post-elevation to flag misuse.
+// Tables  : OfficeActivity
+// Period  : P90D
+// Tactics : Persistence, Privilege Escalation, Collection
+// MITRE   : T1098.003, T1069.003, T1530
+//==========================================================================================
+
+let LookbackDays = 90d;
+
+// --- Step 1: Elevation events where the RECIPIENT is a guest ---
+let GuestElevations = OfficeActivity
+    | where TimeGenerated > ago(LookbackDays)
+    | where Operation in (
+        // SharePoint admin grants
+        "SiteCollectionAdminAdded",
+        "PermissionLevelAdded",
+        "AddedToSecureLink",
+        // Exchange delegation
+        "Add-MailboxPermission",
+        "Add-RecipientPermission",
+        // Teams ownership grants
+        "MemberRoleChanged",
+        "TeamCreated",
+        "ChannelAdded")
+    // Target is a guest
+    | where TargetUserOrGroupName has "#EXT#"
+        or TargetUserOrGroupName has "guest"
+        or UserId has "#EXT#"
+    | extend
+        GuestUPN        = tolower(coalesce(
+                            iif(TargetUserOrGroupName has "#EXT#", TargetUserOrGroupName, ""),
+                            iif(UserId has "#EXT#", UserId, ""))),
+        ElevationType   = case(
+            Operation in ("SiteCollectionAdminAdded", "PermissionLevelAdded"),
+                "SharePointAdmin",
+            Operation in ("AddedToSecureLink"),
+                "SecureLinkMember",
+            Operation in ("Add-MailboxPermission", "Add-RecipientPermission"),
+                "MailboxDelegate",
+            Operation in ("MemberRoleChanged"),
+                "TeamsRoleChange",
+            "Other"),
+        ElevatedAt      = TimeGenerated,
+        TargetResource  = coalesce(Site_Url, OfficeObjectId, TeamName)
+    | where isnotempty(GuestUPN)
+    | extend ExternalDomain = extract(@"_([^_#]+)#EXT#", 1, tolower(GuestUPN))
+    | summarize
+        ElevationCount  = count(),
+        ElevationTypes  = make_set(ElevationType, 10),
+        FirstElevated   = min(ElevatedAt),
+        LastElevated    = max(ElevatedAt),
+        ElevatedOn      = make_set(TargetResource, 10),
+        GrantedByUsers  = make_set(UserId, 5)
+        by GuestUPN, ExternalDomain;
+
+// --- Step 2: Post-elevation activity of those same guests ---
+let GuestNames = GuestElevations | project GuestUPN;
+
+let PostElevationActivity = OfficeActivity
+    | where TimeGenerated > ago(LookbackDays)
+    | where UserId has "#EXT#"
+    | join kind=inner GuestNames on $left.UserId == $right.GuestUPN
+    | extend IsExfilOp = Operation in (
+        "FileDownloaded", "FileAccessed", "FileSyncDownloadedFull",
+        "MailItemsAccessed", "Send", "AnonymousLinkCreated",
+        "SecureLinkCreated", "SharingInvitationCreated")
+    | summarize
+        TotalPostElevationEvents   = count(),
+        LastActivityDate           = max(TimeGenerated),
+        ExfilOpCount               = countif(IsExfilOp),
+        DistinctSites              = dcount(Site_Url),
+        DistinctOps                = dcount(Operation),
+        Workloads                  = make_set(RecordType, 5)
+        by UserId;
+
+// --- Step 3: Combine ---
+GuestElevations
+| join kind=leftouter PostElevationActivity
+    on $left.GuestUPN == $right.UserId
+| extend
+    IsActive            = isnotnull(LastActivityDate),
+    DaysSinceActivity   = iif(isnotnull(LastActivityDate),
+        datetime_diff("day", now(), LastActivityDate),
+        datetime_diff("day", now(), LastElevated)),
+    ActivityStatus      = case(
+        isnull(LastActivityDate),                    "NeverActivePostElevation",
+        datetime_diff("day", now(), LastActivityDate) >= 60, "Dormant",
+        datetime_diff("day", now(), LastActivityDate) >= 30, "LowActivity",
+        "Active")
+| extend RiskScore = toint(
+      iif(ElevationCount  >= 3, 2, 0)
+    + iif(ExfilOpCount    >  0, 2, 0)
+    + iif(DistinctSites   >= 5, 1, 0)
+    + iif(ElevationTypes has "SharePointAdmin" or ElevationTypes has "MailboxDelegate", 2, 0))
+| project
+    GuestUPN,
+    ExternalDomain,
+    ElevationCount,
+    ElevationTypes,
+    FirstElevated,
+    LastElevated,
+    ElevatedOn,
+    GrantedByUsers,
+    TotalPostElevationEvents  = coalesce(TotalPostElevationEvents, 0),
+    LastActivityDate,
+    DaysSinceActivity,
+    ActivityStatus,
+    ExfilOpCount              = coalesce(ExfilOpCount, 0),
+    DistinctSites             = coalesce(DistinctSites, 0),
+    Workloads,
+    RiskScore
+| sort by RiskScore desc, ElevationCount desc

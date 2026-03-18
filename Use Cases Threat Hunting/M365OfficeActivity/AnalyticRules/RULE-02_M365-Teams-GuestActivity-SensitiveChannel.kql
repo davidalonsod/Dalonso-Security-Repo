@@ -1,0 +1,48 @@
+// Rule    : M365 - Teams External Guest Message in Sensitive Channel
+// Severity: Medium
+// Tactics : Collection, Exfiltration
+// MITRE   : T1213.003 (Data from Information Repositories: Code Repositories),
+//           T1537 (Transfer Data to Cloud Account)
+// Freq    : PT1H   Period: PT1H
+// Description: Flags when a guest user (external account) sends messages or
+//              shares files in Teams channels that are likely sensitive
+//              (internal-only, security, finance, exec naming patterns).
+//==========================================================================================
+
+let SensitiveChannelPatterns = dynamic([
+    "security", "finance", "exec", "board", "legal", "hr", "payroll",
+    "confidential", "restricted", "secret", "infrastr", "soc", "threat"
+]);
+let LookbackPeriod = 1h;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType == "MicrosoftTeams"
+| where Operation in ("MessageCreatedHasLink", "MessageCreated", "FileSent", "FileShared")
+| where UserId has "#EXT#"     // external/guest user
+| extend ChannelLower = tolower(tostring(ChannelName))
+| where ChannelLower has_any (SensitiveChannelPatterns)
+    or CommunicationType == "OneOnOne"     // private DM with internal user
+| summarize
+    MessageCount    = count(),
+    Channels        = make_set(ChannelName, 10),
+    Teams           = make_set(TeamName, 10),
+    FilesShared     = countif(Operation in ("FileSent", "FileShared")),
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated)
+    by UserId, ClientIP, UserAgent
+| extend GuestDomain = tostring(extract(@"#EXT#@(.+)", 1, UserId))
+| extend AlertSeverity = case(
+    FilesShared > 5, "High",
+    MessageCount > 20, "Medium",
+    "Low")
+| project
+    TimeGenerated  = LastSeen,
+    UserId,
+    GuestDomain,
+    MessageCount,
+    FilesShared,
+    Channels,
+    Teams,
+    ClientIP,
+    AlertSeverity

@@ -1,0 +1,49 @@
+// Rule    : M365 - SharePoint Site Collection Admin Added (Privilege Escalation)
+// Severity: High
+// Tactics : PrivilegeEscalation, Persistence
+// MITRE   : T1098 (Account Manipulation), T1078.004
+// Freq    : PT1H   Period: PT1H
+// Description: Detects when a user is added as Site Collection Administrator on a
+//              SharePoint site, particularly for sites with sensitive naming patterns
+//              or when the actor is not a known Global Admin.
+//==========================================================================================
+
+let LookbackPeriod = 1h;
+let SensitiveSitePatterns = dynamic([
+    "hr", "legal", "finance", "exec", "security", "payroll",
+    "board", "audit", "compliance", "m&a", "merger"
+]);
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType == "SharePoint"
+| where Operation in (
+    "SiteCollectionAdminAdded", "PermissionLevelAdded",
+    "SiteCollectionCreated", "GroupMemberAdded")
+| extend
+    TargetUser     = tostring(parse_json(TargetUserOrGroupName)),
+    RoleAssigned   = tostring(parse_json(EventData).RoleAssignment),
+    SiteLower      = tolower(SiteUrl)
+| extend
+    IsSiteAdmin    = Operation == "SiteCollectionAdminAdded"
+        or RoleAssigned has "Full Control"
+        or RoleAssigned has "Site Collection Administrator",
+    IsSensitiveSite = SiteLower has_any (SensitiveSitePatterns),
+    IsGuest        = TargetUser has "#EXT#" or TargetUser has "guest"
+| where IsSiteAdmin or IsSensitiveSite
+| project
+    TimeGenerated,
+    ActorUserId    = UserId,
+    TargetUser,
+    SiteUrl,
+    Operation,
+    RoleAssigned,
+    ClientIP,
+    IsSiteAdmin,
+    IsSensitiveSite,
+    IsGuest,
+    AlertSeverity  = case(
+        IsGuest and IsSiteAdmin,          "Critical",
+        IsSensitiveSite and IsSiteAdmin,  "High",
+        IsSiteAdmin,                      "Medium",
+        "Low")

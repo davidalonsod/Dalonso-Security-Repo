@@ -1,0 +1,47 @@
+// Rule    : M365 - Teams Application or Bot Added to Channel (Suspicious App)
+// Severity: Medium
+// Tactics : Persistence, Execution
+// MITRE   : T1546 (Event Triggered Execution), T1059 (Command and Scripting Interpreter)
+// Freq    : PT1H   Period: PT1H
+// Description: Detects installation of bots or third-party applications into Teams
+//              channels, particularly those associated with known post-exploitation
+//              tooling names or unexpected app publishers.
+//==========================================================================================
+
+let SuspiciousAppPatterns = dynamic([
+    "ngrok", "webhook", "tunnel", "shell", "exec", "bot", "forward",
+    "proxy", "exfil", "revealer", "bypass"
+]);
+let LookbackPeriod = 1h;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType == "MicrosoftTeams"
+| where Operation in ("AppInstalled", "BotAddedToTeam", "TabAdded", "ConnectorAdded")
+| extend
+    AppNameRaw = tostring(parse_json(ExtraProperties)[0].Value),
+    AppLower   = tolower(tostring(parse_json(ExtraProperties)[0].Value))
+| extend IsSuspicious = AppLower has_any (SuspiciousAppPatterns)
+| summarize
+    InstallCount    = count(),
+    AppsInstalled   = make_set(AppNameRaw, 10),
+    TeamsAffected   = make_set(TeamName, 10),
+    Channels        = make_set(ChannelName, 10),
+    IsSuspicious    = any(IsSuspicious),
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated)
+    by UserId, ClientIP
+| extend AlertSeverity = case(
+    IsSuspicious == true,  "High",
+    InstallCount > 5,      "Medium",
+    "Low")
+| project
+    TimeGenerated  = LastSeen,
+    UserId,
+    AppsInstalled,
+    TeamsAffected,
+    Channels,
+    InstallCount,
+    IsSuspicious,
+    ClientIP,
+    AlertSeverity

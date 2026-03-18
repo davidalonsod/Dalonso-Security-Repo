@@ -1,0 +1,59 @@
+// Rule    : M365 - Teams Mass Channel Message Deletion (Evidence Removal)
+// Severity: High
+// Tactics : DefenseEvasion, Impact
+// MITRE   : T1070 (Indicator Removal), T1485 (Data Destruction)
+// Freq    : PT30M   Period: PT30M
+// Description: Detects bulk deletion of individual Teams channel MESSAGES by a single
+//              user or bot. Note: RULE-15 covers channel/team deletion at the container
+//              level. This rule targets message-level deletion — specifically relevant to
+//              attackers or malicious insiders removing conversation evidence
+//              (phishing coordination, data-sharing messages) before investigation.
+//              Triggered by 30+ message deletions in 30 minutes, or any use of
+//              bulk-delete APIs (MessageDeletedAll).
+//==========================================================================================
+
+let LookbackPeriod       = 30m;
+let MsgDeleteThreshold   = 30;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType == "MicrosoftTeams"
+| where Operation in (
+    "MessageDeleted",
+    "MessageDeletedAll",   // bulk / admin-level API
+    "ChatMessageDeleted",
+    "MessageDeletedForAll",
+    "MessageHardDeletedAll")
+| summarize
+    DeletedCount     = count(),
+    BulkDeletes      = countif(Operation in ("MessageDeletedAll", "MessageHardDeletedAll")),
+    Operations       = make_set(Operation, 5),
+    TeamsAffected    = make_set(TeamName, 10),
+    ChannelsAffected = make_set(ChannelName, 10),
+    ClientIPs        = make_set(ClientIP, 5),
+    FirstDelete      = min(TimeGenerated),
+    LastDelete       = max(TimeGenerated)
+    by UserId, UserType
+| where DeletedCount >= MsgDeleteThreshold
+    or BulkDeletes >= 1
+| extend
+    DurationMinutes   = datetime_diff("minute", LastDelete, FirstDelete),
+    IsAdminBulkDelete = BulkDeletes >= 1
+| extend AlertSeverity = case(
+    IsAdminBulkDelete,         "Critical",  // bulk API = intentional sweep
+    DeletedCount >= 200,       "High",
+    DeletedCount >= 50,        "Medium",
+    "Low")
+| project
+    TimeGenerated    = LastDelete,
+    UserId,
+    UserType,
+    DeletedCount,
+    BulkDeletes,
+    IsAdminBulkDelete,
+    Operations,
+    TeamsAffected,
+    ChannelsAffected,
+    DurationMinutes,
+    ClientIPs,
+    AlertSeverity
