@@ -57,5 +57,32 @@ All ARM templates now also deploy **hunting queries** as `savedSearches` resourc
 | Q20 – Risky Identity Correlation | `ManagerUPN` — not a column in `IdentityInfo` | Replaced with `Manager` |
 | Q20 – Risky Identity Correlation | `AccountEnabled` — not a column in `IdentityInfo` | Replaced with `IsAccountEnabled` |
 | Q31 – APT Control Evasion | `Message` / `RenderedDescription` — not resolvable in `SecurityEvent` summarize | Replaced with `Activity` |
+| Q03, Q15, Q24 – TI Correlation queries | `ThreatIntelligenceIndicator` — deprecated table | Migrated to `ThreatIntelIndicators` with updated schema (see section below) |
 
 All fixes applied to: source TXT, KQL files, YAML analytic rules, and ARM template JSON.
+
+---
+
+## ThreatIntelligenceIndicator → ThreatIntelIndicators Migration
+
+`ThreatIntelligenceIndicator` is deprecated. All three TI-correlated queries have been migrated to `ThreatIntelIndicators`.
+
+**Schema changes applied:**
+
+| Old (`ThreatIntelligenceIndicator`) | New (`ThreatIntelIndicators`) |
+|---|---|
+| `Active == true` | `isempty(ValidUntil) or ValidUntil > now()` |
+| `ThreatType` (string) | `make_set(Tags)` — `Tags` is the string column; `ThreatTypes` dynamic column does not exist |
+| `ConfidenceScore` | `Confidence` |
+| `NetworkIP` | `isnotnull(parse_ipv4(ObservableValue))` — IPs are filtered by value format |
+| `DomainName` | `ObservableKey has "domain"` + `ObservableValue` |
+| `Url` | `ObservableKey has "url"` + `ObservableValue` |
+| `coalesce(DomainName, NetworkIP)` | `(ipv4_is_valid(ObservableValue) or ObservableKey has "domain")` + `ObservableValue` |
+| `Value` (indicator value column) | `ObservableValue` — STIX observable value column |
+
+**Migrated queries:**
+- **Q03** – Threat Intelligence IP Correlation (Firewall folder)
+- **Q15** – Correlation: Firewall Traffic + TI Domain/URL Match (Firewall folder)
+- **Q24** – ZIA Allowed Traffic to TI-Listed Domains/IPs (Zscaler folder)
+
+> **Prerequisite:** The `ThreatIntelIndicators` table must be provisioned in the workspace (i.e., the **Microsoft Defender Threat Intelligence** or **Threat Intelligence Platforms** data connector must be enabled) before deploying these rules.
