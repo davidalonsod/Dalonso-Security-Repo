@@ -1,0 +1,1512 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace where Microsoft Sentinel is deployed"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Firewall Beaconing Detection - Regular Outbound Connections",
+        "description": "Detects internal hosts making very regular, high-frequency connections to the same external IP across multiple hours. Beacon score = connections / hourly buckets. Covers Fortinet, Palo Alto Networks, and Zscaler. MITRE ATT&CK: T1071, T1571.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "CommandAndControl"
+        ],
+        "techniques": [
+          "T1071",
+          "T1571"
+        ],
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\", \"Reset-Both\")\n| where isnotempty(DestinationIP)\n| where ipv4_is_private(DestinationIP) == false\n| where isnotempty(SourceIP)\n| summarize\n    ConnectionCount  = count(),\n    BytesSent        = sum(SentBytes),\n    BytesReceived    = sum(ReceivedBytes),\n    HourlyBuckets    = dcount(bin(TimeGenerated, 1h)),\n    Ports            = make_set(DestinationPort, 10),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SourceIP, DestinationIP, DeviceVendor\n| where ConnectionCount > 20 and HourlyBuckets >= 3\n| extend BeaconScore = round(toreal(ConnectionCount) / toreal(HourlyBuckets), 1)\n| where BeaconScore > 5\n| order by BeaconScore desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "DestinationIP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "BeaconScore": "BeaconScore",
+          "ConnectionCount": "ConnectionCount",
+          "HourlyBuckets": "HourlyBuckets",
+          "DestinationIP": "DestinationIP",
+          "SourceIP": "SourceIP"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Beaconing Detected - {{SourceIP}} \u00e2\u2020\u2019 {{DestinationIP}}",
+          "alertDescriptionFormat": "Internal host {{SourceIP}} made regular-interval connections to {{DestinationIP}} (beacon score: {{BeaconScore}})."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "IP"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Firewall Anomalous Outbound Data Volume - Exfiltration Risk",
+        "description": "Detects internal hosts sending more than 500 MB to external destinations in 24 hours via Fortinet, Palo Alto, or Zscaler. MITRE ATT&CK: T1048.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Exfiltration"
+        ],
+        "techniques": [
+          "T1048"
+        ],
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\", \"Reset-Both\")\n| where isnotempty(SourceIP) and isnotempty(DestinationIP)\n| where ipv4_is_private(SourceIP) == true\n| where ipv4_is_private(DestinationIP) == false\n| summarize\n    TotalBytesSent    = sum(SentBytes),\n    TotalBytesRecv    = sum(ReceivedBytes),\n    SessionCount      = count(),\n    DestIPs           = make_set(DestinationIP, 20),\n    DestPorts         = make_set(DestinationPort, 10),\n    HourlyBuckets     = dcount(bin(TimeGenerated, 1h)),\n    DeviceVendors     = make_set(DeviceVendor)\n  by SourceIP\n| extend TotalMBSent = round(toreal(TotalBytesSent) / 1048576, 2)\n| where TotalMBSent > 500\n| order by TotalMBSent desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "TotalMBSent": "TotalMBSent",
+          "SessionCount": "SessionCount",
+          "HourlyBuckets": "HourlyBuckets",
+          "SourceIP": "SourceIP"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Data Exfiltration Risk - {{SourceIP}} sent {{TotalMBSent}} MB outbound",
+          "alertDescriptionFormat": "Host {{SourceIP}} transmitted {{TotalMBSent}} MB to external destinations across {{SessionCount}} sessions. Possible data exfiltration activity."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "IP"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/c3d4e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Firewall Traffic to Threat Intelligence Flagged IP",
+        "description": "Correlates allowed firewall traffic against active ThreatIntelIndicators entries. Any allowed connection to a TI-flagged IP is a high-confidence IOC. MITRE ATT&CK: T1071, T1078.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT15M",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "CommandAndControl",
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1071",
+          "T1078"
+        ],
+        "query": "let TI_IPs =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where isempty(ValidUntil) or ValidUntil > now()\n    | where isnotnull(parse_ipv4(ObservableValue))\n    | where isnotempty(ObservableValue)\n    | summarize ThreatTypes = make_set(Tags), ConfidenceScore = max(Confidence)\n        by TI_IP = ObservableValue;\nCommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\", \"Reset-Both\")\n| where isnotempty(DestinationIP) or isnotempty(SourceIP)\n| extend CheckIP = iff(ipv4_is_private(DestinationIP) == false, DestinationIP, SourceIP)\n| join kind=inner TI_IPs on $left.CheckIP == $right.TI_IP\n| summarize\n    HitCount         = count(),\n    InternalIPs      = make_set(SourceIP, 20),\n    DeviceVendors    = make_set(DeviceVendor),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated),\n    ThreatTypes      = make_set(ThreatTypes),\n    ConfidenceScore  = max(ConfidenceScore)\n  by TI_IP\n| order by HitCount desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "TI_IP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "HitCount": "HitCount",
+          "ConfidenceScore": "ConfidenceScore",
+          "TI_IP": "TI_IP"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "TI Match - Firewall Allowed Traffic to {{TI_IP}}",
+          "alertDescriptionFormat": "TI-flagged IP {{TI_IP}} (confidence: {{ConfidenceScore}}) was seen in {{HitCount}} allowed firewall events. Possible C2 communication or active IOC."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "IP"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f8a')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Firewall Port Scan Detection - Vertical and Horizontal Sweeps",
+        "description": "Detects source IPs hitting >30 unique destination ports (vertical scan) or >50 unique destination IPs (horizontal scan) in 1 hour. Indicates reconnaissance. MITRE ATT&CK: T1046.",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Discovery"
+        ],
+        "techniques": [
+          "T1046"
+        ],
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(1h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where isnotempty(SourceIP) and isnotempty(DestinationIP)\n| summarize\n    UniqueDestPorts = dcount(DestinationPort),\n    UniqueDestIPs   = dcount(DestinationIP),\n    TotalAttempts   = count(),\n    Actions         = make_set(DeviceAction, 5),\n    Protocols       = make_set(Protocol, 5),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by SourceIP, DeviceVendor\n| where UniqueDestPorts > 30 or UniqueDestIPs > 50\n| extend ScanType = case(\n    UniqueDestPorts > 30 and UniqueDestIPs <= 10, \"Vertical Scan (port sweep)\",\n    UniqueDestIPs   > 50 and UniqueDestPorts <= 5, \"Horizontal Scan (host sweep)\",\n    \"Combined Scan\")\n| order by UniqueDestPorts desc, UniqueDestIPs desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "UniqueDestPorts": "UniqueDestPorts",
+          "UniqueDestIPs": "UniqueDestIPs",
+          "TotalAttempts": "TotalAttempts",
+          "SourceIP": "SourceIP"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Port Scan Detected - {{SourceIP}} hit {{UniqueDestPorts}} ports",
+          "alertDescriptionFormat": "Source {{SourceIP}} targeted {{UniqueDestIPs}} IPs across {{UniqueDestPorts}} unique ports. Possible network reconnaissance activity."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT3H",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "IP"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8a9b')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Firewall Allowed Traffic to High-Risk Country",
+        "description": "Detects allowed firewall traffic to/from APT-associated countries (CN, RU, KP, IR, SY, CU, BY, VE, AF, LY). MITRE ATT&CK: T1078.",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "InitialAccess",
+          "Exfiltration"
+        ],
+        "techniques": [
+          "T1078"
+        ],
+        "query": "let HighRiskCountries = dynamic([\n    \"China\", \"Russia\", \"North Korea\", \"Iran\", \"Syria\",\n    \"Cuba\", \"Belarus\", \"Venezuela\", \"Afghanistan\", \"Libya\"]);\nCommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\", \"Reset-Both\")\n| where isnotempty(DestinationIP)\n| where ipv4_is_private(DestinationIP) == false\n| extend DestCountry = tostring(geo_info_from_ip_address(DestinationIP).country)\n| where DestCountry in (HighRiskCountries)\n| summarize\n    ConnectionCount  = count(),\n    BytesSent        = sum(SentBytes),\n    InternalIPs      = make_set(SourceIP, 20),\n    ExternalIPs      = make_set(DestinationIP, 20),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated),\n    RepresentativeIP = any(SourceIP)\n  by DestCountry, DeviceVendor\n| order by ConnectionCount desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "RepresentativeIP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "ConnectionCount": "ConnectionCount",
+          "DestCountry": "DestCountry"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "High-Risk Country Traffic Allowed - {{DestCountry}} ({{ConnectionCount}} connections)",
+          "alertDescriptionFormat": "{{ConnectionCount}} allowed firewall connections to {{DestCountry}} detected. Review for C2 or data exfiltration."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [
+              "DestCountry"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/f6a7b8c9-d0e1-4f2a-3b4c-5d6e7f8a9b0c')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Lateral Movement - Internal Host Port Sweep on Admin/Pivot Ports",
+        "description": "Detects an internal host connecting to more than 5 distinct internal targets on SMB, RDP, WinRM, SSH, or database ports. MITRE ATT&CK: T1021, T1570.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT6H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "LateralMovement"
+        ],
+        "techniques": [
+          "T1021",
+          "T1570"
+        ],
+        "query": "let LateralPorts = dynamic([22, 23, 135, 139, 445, 3389, 5985, 5986, 1433, 3306, 5432]);\nCommonSecurityLog\n| where TimeGenerated > ago(6h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\")\n| where ipv4_is_private(SourceIP) == true\n| where ipv4_is_private(DestinationIP) == true\n| where DestinationPort in (LateralPorts)\n| summarize\n    UniqueTargets   = dcount(DestinationIP),\n    UniquePorts     = dcount(DestinationPort),\n    TotalAttempts   = count(),\n    TargetIPs       = make_set(DestinationIP, 30),\n    PortsUsed       = make_set(DestinationPort, 10),\n    Actions         = make_set(DeviceAction, 5),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by SourceIP, DeviceVendor\n| where UniqueTargets > 5\n| order by UniqueTargets desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "UniqueTargets": "UniqueTargets",
+          "UniquePorts": "UniquePorts",
+          "TotalAttempts": "TotalAttempts",
+          "SourceIP": "SourceIP"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Lateral Movement - {{SourceIP}} swept {{UniqueTargets}} internal hosts",
+          "alertDescriptionFormat": "Host {{SourceIP}} connected to {{UniqueTargets}} internal targets on {{UniquePorts}} admin/pivot ports. Possible lateral movement or reconnaissance."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "IP"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/a7b8c9d0-e1f2-4a3b-4c5d-6e7f8a9b0c1d')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Fortinet IPS - High-Frequency Intrusion Prevention Alerts",
+        "description": "Surfaces Fortinet IPS/App Control signatures firing more than 10 times in 24 hours. Indicates active exploitation attempts or compromised hosts. MITRE ATT&CK: T1190, T1203.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "InitialAccess",
+          "Execution"
+        ],
+        "techniques": [
+          "T1190",
+          "T1203"
+        ],
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor == \"Fortinet\"\n| where DeviceEventClassID has_any (\"IPS\", \"anomaly\", \"signature\")\n    or Activity has_any (\"ips-packet\", \"app-ctrl\", \"anomaly\")\n| summarize\n    HitCount         = count(),\n    SourceIPs        = make_set(SourceIP, 20),\n    DestinationIPs   = make_set(DestinationIP, 20),\n    ProtocolsUsed    = make_set(Protocol, 5),\n    SeverityValues   = make_set(LogSeverity, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated),\n    RepresentativeIP = any(SourceIP)\n  by Activity, DeviceEventClassID\n| where HitCount > 10\n| order by HitCount desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "RepresentativeIP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "HitCount": "HitCount",
+          "Activity": "Activity"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Fortinet IPS Alert - {{Activity}} ({{HitCount}} hits)",
+          "alertDescriptionFormat": "Fortinet IPS/App Control signature {{Activity}} triggered {{HitCount}} events. Review source IPs and affected destinations for active exploitation."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [
+              "Activity"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/b8c9d0e1-f2a3-4b4c-5d6e-7f8a9b0c1d2e')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Palo Alto Networks - Threat Log Events (Spyware, Wildfire, Vulnerability)",
+        "description": "Surfaces Palo Alto threat log entries (malware, spyware, wildfire, virus, vulnerability) firing more than 5 times. MITRE ATT&CK: T1190, T1071.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "InitialAccess",
+          "CommandAndControl"
+        ],
+        "techniques": [
+          "T1190",
+          "T1071"
+        ],
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor == \"Palo Alto Networks\"\n| where DeviceEventClassID has_any (\"THREAT\", \"threat\", \"WILDFIRE-VIRUS\", \"SPYWARE\", \"VULNERABILITY\")\n    or Activity has_any (\"threat\", \"wildfire\", \"spyware\", \"vulnerability\", \"virus\")\n| summarize\n    HitCount         = count(),\n    SourceIPs        = make_set(SourceIP, 20),\n    DestinationIPs   = make_set(DestinationIP, 20),\n    DestinationURLs  = make_set(RequestURL, 10),\n    SeverityValues   = make_set(LogSeverity, 5),\n    Actions          = make_set(DeviceAction, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated),\n    RepresentativeIP = any(SourceIP)\n  by Activity, DeviceEventClassID\n| where HitCount > 5\n| order by HitCount desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "RepresentativeIP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "HitCount": "HitCount",
+          "Activity": "Activity",
+          "DeviceEventClassID": "DeviceEventClassID"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Palo Alto Threat Alert - {{Activity}} ({{HitCount}} events)",
+          "alertDescriptionFormat": "Palo Alto threat signature {{Activity}} (class: {{DeviceEventClassID}}) fired {{HitCount}} times. Review for active malware, spyware, or vulnerability exploitation."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [
+              "Activity"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/f2a3b4c5-d6e7-4f8a-9b0c-1d2e3f4a5b6c')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Firewall New First-Seen External IP Contacted",
+        "description": "Identifies external IPs with >5 connections in 24 hours that were not seen in the prior 7-day baseline. May indicate freshly activated C2 infrastructure. MITRE ATT&CK: T1071.",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "CommandAndControl"
+        ],
+        "techniques": [
+          "T1071"
+        ],
+        "query": "let HistoricalIPs =\n    CommonSecurityLog\n    | where TimeGenerated between (ago(7d) .. ago(1d))\n    | where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n    | where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n    | where ipv4_is_private(DestinationIP) == false\n    | summarize by DestinationIP;\nCommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n| where ipv4_is_private(DestinationIP) == false\n| where isnotempty(DestinationIP)\n| summarize\n    ConnectionCount  = count(),\n    SourceIPs        = make_set(SourceIP, 20),\n    BytesSent        = sum(SentBytes),\n    Ports            = make_set(DestinationPort, 10),\n    Protocols        = make_set(Protocol, 5),\n    DeviceVendors    = make_set(DeviceVendor),\n    FirstSeen        = min(TimeGenerated)\n  by DestinationIP\n| where ConnectionCount > 5\n| join kind=leftanti HistoricalIPs on DestinationIP\n| order by ConnectionCount desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "DestinationIP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "ConnectionCount": "ConnectionCount",
+          "DestinationIP": "DestinationIP"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "First-Seen External IP - {{DestinationIP}} ({{ConnectionCount}} connections)",
+          "alertDescriptionFormat": "External IP {{DestinationIP}} received {{ConnectionCount}} allowed firewall connections in the last 24 hours but was not seen in the prior 7-day baseline. Possible new attacker infrastructure."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "IP"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/a3b4c5d6-e7f8-4a9b-0c1d-2e3f4a5b6c7d')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Correlation: Firewall Allowed Traffic + Azure AD Sign-In from Same IP",
+        "description": "Correlates firewall-allowed outbound traffic with Azure AD sign-in events sharing the same external IP. Multi-vector activity from a single IP amplifies the compromise signal. MITRE ATT&CK: T1078.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "InitialAccess",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1078"
+        ],
+        "query": "let FirewallExternalIPs =\n    CommonSecurityLog\n    | where TimeGenerated > ago(1d)\n    | where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n    | where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n    | where ipv4_is_private(DestinationIP) == false\n    | summarize\n        FW_Connections = count(),\n        FW_Sources     = make_set(SourceIP, 10),\n        FW_BytesSent   = sum(SentBytes),\n        FW_Vendors     = make_set(DeviceVendor)\n      by ExternalIP = DestinationIP;\nSigninLogs\n| where TimeGenerated > ago(1d)\n| where ResultType == 0\n| where isnotempty(IPAddress)\n| summarize\n    AAD_SignInCount  = count(),\n    AAD_Users        = make_set(UserPrincipalName, 20),\n    AAD_AppNames     = make_set(AppDisplayName, 10),\n    AAD_Countries    = make_set(Location, 5),\n    AAD_RiskLevels   = make_set(RiskLevelDuringSignIn, 5)\n  by IPAddress\n| join kind=inner FirewallExternalIPs on $left.IPAddress == $right.ExternalIP\n| project\n    IPAddress,\n    AAD_SignInCount,\n    AAD_Users,\n    AAD_Countries,\n    AAD_RiskLevels,\n    FW_Connections,\n    FW_Sources,\n    FW_BytesSent,\n    FW_Vendors\n| order by FW_Connections desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "AAD_SignInCount": "AAD_SignInCount",
+          "FW_Connections": "FW_Connections",
+          "IPAddress": "IPAddress"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Cross-Signal IP Match - {{IPAddress}} in Firewall + AAD Sign-In",
+          "alertDescriptionFormat": "IP {{IPAddress}} generated {{AAD_SignInCount}} AAD sign-ins and {{FW_Connections}} firewall sessions. Multi-vector activity from a single source is a strong compromise indicator."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "IP"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/b4c5d6e7-f8a9-4b0c-1d2e-3f4a5b6c7d8e')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Correlation: Firewall Traffic + Active Security Alert - Shared IOC IP",
+        "description": "Identifies IPs in both active Sentinel alerts (7 days) and live allowed firewall traffic (24 hours). Confirms flagged IOC is still communicating through the perimeter. MITRE ATT&CK: T1078, T1071.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "InitialAccess",
+          "CommandAndControl"
+        ],
+        "techniques": [
+          "T1078",
+          "T1071"
+        ],
+        "query": "let AlertIPs =\n    SecurityAlert\n    | where TimeGenerated > ago(7d)\n    | where AlertSeverity in (\"High\", \"Medium\")\n    | mv-expand todynamic(Entities)\n    | where Entities.Type == \"ip\"\n    | extend AlertIP = tostring(Entities.Address)\n    | where isnotempty(AlertIP)\n    | summarize\n        AlertCount    = count(),\n        AlertNames    = make_set(AlertName, 10),\n        Severities    = make_set(AlertSeverity, 3),\n        Products      = make_set(ProductName, 5)\n      by AlertIP;\nCommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where isnotempty(SourceIP) or isnotempty(DestinationIP)\n| extend CheckIP = iff(ipv4_is_private(DestinationIP) == false, DestinationIP, SourceIP)\n| summarize\n    FW_HitCount     = count(),\n    FW_Actions      = make_set(DeviceAction, 5),\n    FW_InternalIPs  = make_set(SourceIP, 10),\n    FW_Vendors      = make_set(DeviceVendor),\n    FW_FirstSeen    = min(TimeGenerated),\n    FW_LastSeen     = max(TimeGenerated)\n  by CheckIP\n| join kind=inner AlertIPs on $left.CheckIP == $right.AlertIP\n| project\n    IOC_IP        = CheckIP,\n    AlertCount,\n    AlertNames,\n    Severities,\n    Products,\n    FW_HitCount,\n    FW_Actions,\n    FW_InternalIPs,\n    FW_Vendors,\n    FW_FirstSeen,\n    FW_LastSeen\n| order by AlertCount desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IOC_IP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "AlertCount": "AlertCount",
+          "FW_HitCount": "FW_HitCount",
+          "IOC_IP": "IOC_IP"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Active IOC in Firewall Traffic - {{IOC_IP}} ({{AlertCount}} alerts)",
+          "alertDescriptionFormat": "IP {{IOC_IP}} is referenced in {{AlertCount}} Sentinel alerts and generated {{FW_HitCount}} live firewall events. Confirmed active IOC still communicating through the perimeter."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "IP"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/c5d6e7f8-a9b0-4c1d-2e3f-4a5b6c7d8e9f')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Correlation: Firewall Traffic Matching Threat Intelligence Domain / URL",
+        "description": "Matches firewall/proxy destination hostnames against active TI domain indicators. TI-flagged domain accessed through the perimeter indicates active C2 or malware staging. MITRE ATT&CK: T1071.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT15M",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "CommandAndControl"
+        ],
+        "techniques": [
+          "T1071"
+        ],
+        "query": "let TI_Domains =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where isempty(ValidUntil) or ValidUntil > now()\n    | where ObservableKey has \"domain\"\n    | where isnotempty(ObservableValue)\n    | summarize\n        TI_ThreatTypes = make_set(Tags),\n        TI_Confidence  = max(Confidence)\n      by DomainName = ObservableValue;\nCommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where isnotempty(DestinationHostName) or isnotempty(RequestURL)\n| extend MatchKey = coalesce(DestinationHostName, RequestURL)\n| join kind=inner TI_Domains on $left.MatchKey == $right.DomainName\n| summarize\n    FW_HitCount    = count(),\n    FW_Users       = make_set(SourceUserName, 10),\n    FW_SourceIPs   = make_set(SourceIP, 10),\n    FW_Actions     = make_set(DeviceAction, 5),\n    FW_Vendors     = make_set(DeviceVendor),\n    TI_ThreatTypes = make_set(TI_ThreatTypes),\n    TI_Confidence  = max(TI_Confidence),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated)\n  by MatchKey\n| order by FW_HitCount desc",
+        "entityMappings": [
+          {
+            "entityType": "DNS",
+            "fieldMappings": [
+              {
+                "identifier": "DomainName",
+                "columnName": "MatchKey"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "FW_HitCount": "FW_HitCount",
+          "TI_Confidence": "TI_Confidence",
+          "MatchKey": "MatchKey"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "TI Domain Match in Firewall - {{MatchKey}} ({{FW_HitCount}} hits)",
+          "alertDescriptionFormat": "TI-flagged domain {{MatchKey}} (confidence: {{TI_Confidence}}) was contacted through the firewall {{FW_HitCount}} times. Possible C2 or active malware communication."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "DNS"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/d6e7f8a9-b0c1-4d2e-3f4a-5b6c7d8e9f0a')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Palo Alto Networks - High-Volume Inter-Zone Policy Denies",
+        "description": "Detects Palo Alto inter-zone policy deny spikes (>50 denies per policy). May indicate zone bypass attempts or firewall rule probing. MITRE ATT&CK: T1562, T1046.",
+        "severity": "Medium",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "DefenseEvasion",
+          "Discovery"
+        ],
+        "techniques": [
+          "T1562",
+          "T1046"
+        ],
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor == \"Palo Alto Networks\"\n| where DeviceAction in (\"deny\", \"drop\", \"reset-client\", \"reset-server\", \"reset-both\",\n                         \"Reset-Both\", \"Drop\", \"Deny\")\n| where isnotempty(DeviceCustomString1) or isnotempty(DeviceCustomString2)\n| summarize\n    DenyCount        = count(),\n    SourceIPs        = make_set(SourceIP, 20),\n    DestinationIPs   = make_set(DestinationIP, 20),\n    Ports            = make_set(DestinationPort, 10),\n    Protocols        = make_set(Protocol, 5),\n    PolicyNames      = make_set(DeviceCustomString1, 10),\n    SourceZones      = make_set(DeviceCustomString2, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated),\n    RepresentativeIP = any(SourceIP)\n  by DeviceCustomString1, DeviceCustomString2, DeviceAction\n| where DenyCount > 50\n| order by DenyCount desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "RepresentativeIP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "DenyCount": "DenyCount",
+          "DeviceCustomString1": "DeviceCustomString1"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Palo Alto Policy Deny Spike - {{DeviceCustomString1}} ({{DenyCount}} denies)",
+          "alertDescriptionFormat": "Palo Alto policy {{DeviceCustomString1}} generated {{DenyCount}} deny events. High deny volume may indicate zone bypass attempts or firewall rule testing."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [
+              "DeviceCustomString1"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/e7f8a9b0-c1d2-4e3f-4a5b-6c7d8e9f0a1b')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Fortinet SSL-VPN and Admin Authentication Brute Force",
+        "description": "Detects >5 Fortinet SSL-VPN or admin authentication failures from a single source. VPN brute force is a primary initial access vector. MITRE ATT&CK: T1110.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "CredentialAccess"
+        ],
+        "techniques": [
+          "T1110"
+        ],
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor == \"Fortinet\"\n| where DeviceEventClassID has_any (\"32001\", \"32002\", \"39424\", \"39952\")\n    or Activity has_any (\"ssl-vpn-tunnel\", \"vpn\", \"admin-login\", \"loginfailed\",\n                         \"login failure\", \"authentication failed\")\n    or DeviceAction has_any (\"failed\", \"denied\", \"reject\", \"failure\")\n| summarize\n    FailureCount     = count(),\n    UniqueUsers      = dcount(SourceUserName),\n    UserList         = make_set(SourceUserName, 20),\n    DestinationIPs   = make_set(DestinationIP, 5),\n    SourcePorts      = make_set(SourcePort, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SourceIP, DeviceEventClassID\n| where FailureCount > 5\n| order by FailureCount desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "FailureCount": "FailureCount",
+          "UniqueUsers": "UniqueUsers",
+          "SourceIP": "SourceIP"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Fortinet VPN Brute Force - {{SourceIP}} ({{FailureCount}} failures)",
+          "alertDescriptionFormat": "Source {{SourceIP}} generated {{FailureCount}} Fortinet authentication failures targeting {{UniqueUsers}} unique accounts. Possible VPN credential brute force attack."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "IP"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/a9b0c1d2-e3f4-4a5b-6c7d-8e9f0a1b2c3d')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Protocol Anomaly - HTTP or HTTPS on Non-Standard Ports",
+        "description": "Detects allowed HTTP/HTTPS traffic on non-standard ports. C2 frameworks use alternate ports to blend into web traffic while evading port-based rules. MITRE ATT&CK: T1571.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "CommandAndControl"
+        ],
+        "techniques": [
+          "T1571"
+        ],
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n| where (ApplicationProtocol in (\"HTTP\", \"http\") and DestinationPort !in (80, 8080, 8000, 3128))\n    or (ApplicationProtocol in (\"HTTPS\", \"https\", \"SSL\", \"ssl\") and DestinationPort !in (443, 8443))\n    or (Protocol in (\"HTTP\", \"http\") and DestinationPort !in (80, 8080, 8000, 3128))\n    or (Protocol in (\"HTTPS\", \"https\") and DestinationPort !in (443, 8443))\n| summarize\n    ConnectionCount  = count(),\n    SourceIPs        = make_set(SourceIP, 20),\n    DestIPs          = make_set(DestinationIP, 20),\n    BytesSent        = sum(SentBytes),\n    URLSamples       = make_set(RequestURL, 10),\n    DeviceVendors    = make_set(DeviceVendor),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated),\n    RepresentativeIP = any(SourceIP)\n  by DestinationPort, ApplicationProtocol, Protocol\n| order by ConnectionCount desc",
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "RepresentativeIP"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "ConnectionCount": "ConnectionCount",
+          "DestinationPort": "DestinationPort",
+          "ApplicationProtocol": "ApplicationProtocol"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Non-Standard Protocol Port - {{ApplicationProtocol}} on port {{DestinationPort}}",
+          "alertDescriptionFormat": "{{ConnectionCount}} allowed connections using {{ApplicationProtocol}} on non-standard port {{DestinationPort}}. Possible C2 channel disguised as web traffic."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [
+              "DestinationPort"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/b0c1d2e3-f4a5-4b6c-7d8e-9f0a1b2c3d4e')]",
+      "apiVersion": "2022-11-01-preview",
+      "kind": "Scheduled",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "Anomalous User Firewall Activity - High Request Count or Data Volume",
+        "description": "Detects users generating more than 1,000 allowed firewall requests or sending more than 200 MB in 24 hours across Fortinet, Palo Alto, or Zscaler. Anomalously high per-user traffic is a strong insider threat or compromised account indicator. No UEBA connector required. MITRE ATT&CK: T1078.",
+        "severity": "High",
+        "enabled": true,
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "InitialAccess",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1078"
+        ],
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n| where isnotempty(SourceUserName)\n| summarize\n    FW_RequestCount  = count(),\n    FW_BytesSent     = sum(SentBytes),\n    FW_BytesRecv     = sum(ReceivedBytes),\n    FW_DestIPs       = dcount(DestinationIP),\n    FW_Vendors       = make_set(DeviceVendor),\n    FW_SrcIPs        = make_set(SourceIP, 5),\n    FW_FirstSeen     = min(TimeGenerated),\n    FW_LastSeen      = max(TimeGenerated)\n  by UserName = tolower(SourceUserName)\n| extend TotalMBSent = round(toreal(FW_BytesSent) / 1048576, 2)\n| where FW_RequestCount > 1000 or TotalMBSent > 200\n| extend RiskScore = case(\n    TotalMBSent > 1000, \"Critical\",\n    TotalMBSent > 500 or FW_RequestCount > 5000, \"High\",\n    TotalMBSent > 200 or FW_RequestCount > 1000, \"Medium\",\n    \"Low\")\n| project\n    UserName,\n    FW_RequestCount,\n    TotalMBSent,\n    FW_DestIPs,\n    FW_Vendors,\n    FW_SrcIPs,\n    RiskScore\n| order by TotalMBSent desc, FW_RequestCount desc",
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserName"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "FW_RequestCount": "FW_RequestCount",
+          "TotalMBSent": "TotalMBSent",
+          "RiskScore": "RiskScore",
+          "UserName": "UserName"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "High-Volume User Activity - {{UserName}} ({{TotalMBSent}} MB / {{FW_RequestCount}} reqs)",
+          "alertDescriptionFormat": "User {{UserName}} generated {{TotalMBSent}} MB and {{FW_RequestCount}} firewall requests in 24h. Possible data exfiltration or compromised account."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "Selected",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q01')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q01 - Beaconing Detection - All Vendors",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\", \"Reset-Both\")\n| where isnotempty(DestinationIP)\n| where ipv4_is_private(DestinationIP) == false\n| where isnotempty(SourceIP)\n| summarize\n    ConnectionCount  = count(),\n    BytesSent        = sum(SentBytes),\n    BytesReceived    = sum(ReceivedBytes),\n    HourlyBuckets    = dcount(bin(TimeGenerated, 1h)),\n    Ports            = make_set(DestinationPort, 10),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SourceIP, DestinationIP, DeviceVendor\n| where ConnectionCount > 20 and HourlyBuckets >= 3\n| extend BeaconScore = round(toreal(ConnectionCount) / toreal(HourlyBuckets), 1)\n| where BeaconScore > 5\n| order by BeaconScore desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects internal hosts making regular high-frequency connections to the same external IP across multiple hours. Beacon score = connections / hourly buckets."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071,T1571"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q02')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q02 - Data Exfiltration - Anomalous Outbound Volume",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\", \"Reset-Both\")\n| where isnotempty(SourceIP) and isnotempty(DestinationIP)\n| where ipv4_is_private(SourceIP) == true\n| where ipv4_is_private(DestinationIP) == false\n| summarize\n    TotalBytesSent    = sum(SentBytes),\n    TotalBytesRecv    = sum(ReceivedBytes),\n    SessionCount      = count(),\n    DestIPs           = make_set(DestinationIP, 20),\n    DestPorts         = make_set(DestinationPort, 10),\n    HourlyBuckets     = dcount(bin(TimeGenerated, 1h)),\n    DeviceVendors     = make_set(DeviceVendor)\n  by SourceIP\n| extend TotalMBSent = round(toreal(TotalBytesSent) / 1048576, 2)\n| where TotalMBSent > 500\n| order by TotalMBSent desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects internal hosts sending more than 500 MB to external destinations in 24 hours."
+          },
+          {
+            "name": "tactics",
+            "value": "Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1048"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q03')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q03 - Threat Intelligence IP Correlation",
+        "category": "Hunting Queries",
+        "query": "let TI_IPs =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where isempty(ValidUntil) or ValidUntil > now()\n    | where isnotnull(parse_ipv4(ObservableValue))\n    | where isnotempty(ObservableValue)\n    | summarize ThreatTypes = make_set(Tags), ConfidenceScore = max(Confidence)\n        by TI_IP = ObservableValue;\nCommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\", \"Reset-Both\")\n| where isnotempty(DestinationIP) or isnotempty(SourceIP)\n| extend CheckIP = iff(ipv4_is_private(DestinationIP) == false, DestinationIP, SourceIP)\n| join kind=inner TI_IPs on $left.CheckIP == $right.TI_IP\n| summarize\n    HitCount         = count(),\n    InternalIPs      = make_set(SourceIP, 20),\n    DeviceVendors    = make_set(DeviceVendor),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated),\n    ThreatTypes      = make_set(ThreatTypes),\n    ConfidenceScore  = max(ConfidenceScore)\n  by TI_IP\n| order by HitCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Matches allowed firewall traffic source/dest IPs against active ThreatIntelIndicators entries."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl,InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q04')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q04 - Port Scanning - Single Source to Many Destinations",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(1h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where isnotempty(SourceIP) and isnotempty(DestinationIP)\n| summarize\n    UniqueDestPorts = dcount(DestinationPort),\n    UniqueDestIPs   = dcount(DestinationIP),\n    TotalAttempts   = count(),\n    Actions         = make_set(DeviceAction, 5),\n    Protocols       = make_set(Protocol, 5),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by SourceIP, DeviceVendor\n| where UniqueDestPorts > 30 or UniqueDestIPs > 50\n| extend ScanType = case(\n    UniqueDestPorts > 30 and UniqueDestIPs <= 10, \"Vertical Scan (port sweep, single host)\",\n    UniqueDestIPs   > 50 and UniqueDestPorts <= 5, \"Horizontal Scan (host sweep, single port)\",\n    \"Combined Scan\")\n| order by UniqueDestPorts desc, UniqueDestIPs desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects port sweep or host sweep: source IP hitting more than 30 unique dest ports or 50 unique dest IPs in 1 hour."
+          },
+          {
+            "name": "tactics",
+            "value": "Discovery"
+          },
+          {
+            "name": "techniques",
+            "value": "T1046"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q05')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q05 - High-Risk Country Inbound and Outbound Traffic",
+        "category": "Hunting Queries",
+        "query": "let HighRiskCountries = dynamic([\n    \"China\", \"Russia\", \"North Korea\", \"Iran\", \"Syria\",\n    \"Cuba\", \"Belarus\", \"Venezuela\", \"Afghanistan\", \"Libya\"]);\nCommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\", \"Reset-Both\")\n| where isnotempty(DestinationIP) or isnotempty(SourceIP)\n| extend\n    DstCountry = tostring(geo_info_from_ip_address(DestinationIP).country),\n    SrcCountry = tostring(geo_info_from_ip_address(SourceIP).country)\n| where DstCountry in (HighRiskCountries) or SrcCountry in (HighRiskCountries)\n| summarize\n    ConnectionCount  = count(),\n    BytesSent        = sum(SentBytes),\n    InternalIPs      = make_set(SourceIP, 20),\n    ExternalIPs      = make_set(DestinationIP, 20),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by DstCountry, SrcCountry, DeviceVendor\n| order by ConnectionCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects allowed firewall traffic to/from APT-associated countries."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q06')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q06 - Lateral Movement - Internal Port Sweep",
+        "category": "Hunting Queries",
+        "query": "let LateralPorts = dynamic([22, 23, 135, 139, 445, 3389, 5985, 5986, 1433, 3306, 5432]);\nCommonSecurityLog\n| where TimeGenerated > ago(6h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\")\n| where ipv4_is_private(SourceIP) == true\n| where ipv4_is_private(DestinationIP) == true\n| where DestinationPort in (LateralPorts)\n| summarize\n    UniqueTargets   = dcount(DestinationIP),\n    UniquePorts     = dcount(DestinationPort),\n    TotalAttempts   = count(),\n    TargetIPs       = make_set(DestinationIP, 30),\n    PortsUsed       = make_set(DestinationPort, 10),\n    Actions         = make_set(DeviceAction, 5),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by SourceIP, DeviceVendor\n| where UniqueTargets > 5\n| order by UniqueTargets desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects an internal IP connecting to many internal hosts on SMB, RDP, WinRM, SSH, or database ports."
+          },
+          {
+            "name": "tactics",
+            "value": "LateralMovement"
+          },
+          {
+            "name": "techniques",
+            "value": "T1021"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q07')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q07 - Fortinet - IPS and Application Control Blocks",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor == \"Fortinet\"\n| where DeviceEventClassID has_any (\"IPS\", \"anomaly\", \"signature\")\n    or Activity has_any (\"ips-packet\", \"app-ctrl\", \"anomaly\")\n| summarize\n    HitCount         = count(),\n    SourceIPs        = make_set(SourceIP, 20),\n    DestinationIPs   = make_set(DestinationIP, 20),\n    ProtocolsUsed    = make_set(Protocol, 5),\n    SeverityValues   = make_set(LogSeverity, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by Activity, DeviceEventClassID\n| order by HitCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surfaces Fortinet IPS events grouped by signature name and source IP."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Execution"
+          },
+          {
+            "name": "techniques",
+            "value": "T1190,T1059"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q08')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q08 - Palo Alto - Threat Logs Breakdown",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor == \"Palo Alto Networks\"\n| where DeviceEventClassID has_any (\"THREAT\", \"threat\", \"WILDFIRE-VIRUS\", \"SPYWARE\", \"VULNERABILITY\")\n    or Activity has_any (\"threat\", \"wildfire\", \"spyware\", \"vulnerability\", \"virus\")\n| summarize\n    HitCount         = count(),\n    SourceIPs        = make_set(SourceIP, 20),\n    DestinationIPs   = make_set(DestinationIP, 20),\n    DestinationURLs  = make_set(RequestURL, 10),\n    SeverityValues   = make_set(LogSeverity, 5),\n    Actions          = make_set(DeviceAction, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by Activity, DeviceEventClassID\n| order by HitCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surfaces all Palo Alto threat-type events grouped by threat name and source IP."
+          },
+          {
+            "name": "tactics",
+            "value": "Execution"
+          },
+          {
+            "name": "techniques",
+            "value": "T1203"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q12')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q12 - New and First-Seen External IP Allowed Through Firewall",
+        "category": "Hunting Queries",
+        "query": "let HistoricalIPs =\n    CommonSecurityLog\n    | where TimeGenerated between (ago(7d) .. ago(1d))\n    | where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n    | where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n    | where ipv4_is_private(DestinationIP) == false\n    | summarize by DestinationIP;\nCommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n| where ipv4_is_private(DestinationIP) == false\n| where isnotempty(DestinationIP)\n| summarize\n    ConnectionCount  = count(),\n    SourceIPs        = make_set(SourceIP, 20),\n    BytesSent        = sum(SentBytes),\n    Ports            = make_set(DestinationPort, 10),\n    Protocols        = make_set(Protocol, 5),\n    DeviceVendors    = make_set(DeviceVendor),\n    FirstSeen        = min(TimeGenerated)\n  by DestinationIP\n| where ConnectionCount > 5\n| join kind=leftanti HistoricalIPs on DestinationIP\n| order by ConnectionCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identifies external destination IPs not seen in the prior 7 days that appeared in the last 24 hours."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q13')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q13 - Firewall Allow plus Azure AD Sign-In Correlation",
+        "category": "Hunting Queries",
+        "query": "let FirewallExternalIPs =\n    CommonSecurityLog\n    | where TimeGenerated > ago(24h)\n    | where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n    | where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n    | where ipv4_is_private(DestinationIP) == false\n    | summarize\n        FW_Connections = count(),\n        FW_Sources     = make_set(SourceIP, 10),\n        FW_BytesSent   = sum(SentBytes),\n        FW_Vendors     = make_set(DeviceVendor)\n      by ExternalIP = DestinationIP;\nSigninLogs\n| where TimeGenerated > ago(24h)\n| where ResultType == 0\n| where isnotempty(IPAddress)\n| summarize\n    AAD_SignInCount  = count(),\n    AAD_Users        = make_set(UserPrincipalName, 20),\n    AAD_AppNames     = make_set(AppDisplayName, 10),\n    AAD_Countries    = make_set(Location, 5),\n    AAD_RiskLevels   = make_set(RiskLevelDuringSignIn, 5)\n  by IPAddress\n| join kind=inner FirewallExternalIPs on $left.IPAddress == $right.ExternalIP\n| project\n    IPAddress,\n    AAD_SignInCount,\n    AAD_Users,\n    AAD_Countries,\n    AAD_RiskLevels,\n    FW_Connections,\n    FW_Sources,\n    FW_BytesSent,\n    FW_Vendors\n| order by FW_Connections desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Correlates firewall-allowed external IPs against Azure AD successful sign-ins from the same IP."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q14')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q14 - CommonSecurityLog plus SecurityAlert IOC Correlation",
+        "category": "Hunting Queries",
+        "query": "let AlertIPs =\n    SecurityAlert\n    | where TimeGenerated > ago(7d)\n    | where AlertSeverity in (\"High\", \"Medium\")\n    | mv-expand todynamic(Entities)\n    | where Entities.Type == \"ip\"\n    | extend AlertIP = tostring(Entities.Address)\n    | where isnotempty(AlertIP)\n    | summarize\n        AlertCount    = count(),\n        AlertNames    = make_set(AlertName, 10),\n        Severities    = make_set(AlertSeverity, 3),\n        Products      = make_set(ProductName, 5)\n      by AlertIP;\nCommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where isnotempty(SourceIP) or isnotempty(DestinationIP)\n| extend CheckIP = iff(ipv4_is_private(DestinationIP) == false, DestinationIP, SourceIP)\n| summarize\n    FW_HitCount     = count(),\n    FW_Actions      = make_set(DeviceAction, 5),\n    FW_InternalIPs  = make_set(SourceIP, 10),\n    FW_Vendors      = make_set(DeviceVendor),\n    FW_FirstSeen    = min(TimeGenerated),\n    FW_LastSeen     = max(TimeGenerated)\n  by CheckIP\n| join kind=inner AlertIPs on $left.CheckIP == $right.AlertIP\n| project\n    IOC_IP        = CheckIP,\n    AlertCount,\n    AlertNames,\n    Severities,\n    Products,\n    FW_HitCount,\n    FW_Actions,\n    FW_InternalIPs,\n    FW_Vendors,\n    FW_FirstSeen,\n    FW_LastSeen\n| order by AlertCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identifies firewall IPs that also appear in active Security Alerts from Defender or Sentinel."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q15')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q15 - CommonSecurityLog plus ThreatIntelligence Domain Match",
+        "category": "Hunting Queries",
+        "query": "let TI_Domains =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where isempty(ValidUntil) or ValidUntil > now()\n    | where ObservableKey has \"domain\"\n    | where isnotempty(ObservableValue)\n    | summarize\n        TI_ThreatTypes = make_set(Tags),\n        TI_Confidence  = max(Confidence)\n      by DomainName = ObservableValue;\nlet TI_URLs =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where isempty(ValidUntil) or ValidUntil > now()\n    | where ObservableKey has \"url\"\n    | where isnotempty(ObservableValue)\n    | summarize\n        TI_ThreatTypes = make_set(Tags),\n        TI_Confidence  = max(Confidence)\n      by Url = ObservableValue;\nCommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where isnotempty(DestinationHostName) or isnotempty(RequestURL)\n| extend MatchKey = coalesce(DestinationHostName, RequestURL)\n| join kind=inner TI_Domains on $left.MatchKey == $right.DomainName\n| summarize\n    FW_HitCount    = count(),\n    FW_Users       = make_set(SourceUserName, 10),\n    FW_SourceIPs   = make_set(SourceIP, 10),\n    FW_Actions     = make_set(DeviceAction, 5),\n    FW_Vendors     = make_set(DeviceVendor),\n    TI_ThreatTypes = make_set(TI_ThreatTypes),\n    TI_Confidence  = max(TI_Confidence),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated)\n  by MatchKey\n| order by FW_HitCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Joins firewall traffic against TI feed URLs and domains across all three vendors."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q16')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q16 - Palo Alto - Zone Transfer Violations and Policy Denies",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor == \"Palo Alto Networks\"\n| where DeviceAction in (\"deny\", \"drop\", \"reset-client\", \"reset-server\", \"reset-both\",\n                         \"Reset-Both\", \"Drop\", \"Deny\")\n| where isnotempty(DeviceCustomString1) or isnotempty(DeviceCustomString2) // zone fields\n| summarize\n    DenyCount        = count(),\n    SourceIPs        = make_set(SourceIP, 20),\n    DestinationIPs   = make_set(DestinationIP, 20),\n    Ports            = make_set(DestinationPort, 10),\n    Protocols        = make_set(Protocol, 5),\n    PolicyNames      = make_set(DeviceCustomString1, 10),\n    SourceZones      = make_set(DeviceCustomString2, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by DeviceCustomString1, DeviceCustomString2, DeviceAction\n| order by DenyCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surfaces Palo Alto deny events from inter-zone policy grouped by source/destination zone pair."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1190"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q17')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q17 - Fortinet - Repeated Auth Failures SSL-VPN and Admin",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor == \"Fortinet\"\n| where DeviceEventClassID has_any (\"32001\", \"32002\", \"39424\", \"39952\")\n    or Activity has_any (\"ssl-vpn-tunnel\", \"vpn\", \"admin-login\", \"loginfailed\",\n                         \"login failure\", \"authentication failed\")\n    or DeviceAction has_any (\"failed\", \"denied\", \"reject\", \"failure\")\n| summarize\n    FailureCount     = count(),\n    UniqueUsers      = dcount(SourceUserName),\n    UserList         = make_set(SourceUserName, 20),\n    DestinationIPs   = make_set(DestinationIP, 5),\n    SourcePorts      = make_set(SourcePort, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SourceIP, DeviceEventClassID\n| where FailureCount > 5\n| order by FailureCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects brute force or credential stuffing against Fortinet VPN infrastructure."
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1110"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q19')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q19 - Protocol Anomaly - HTTP and HTTPS on Non-Standard Ports",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n| where (ApplicationProtocol in (\"HTTP\", \"http\") and DestinationPort !in (80, 8080, 8000, 3128))\n    or (ApplicationProtocol in (\"HTTPS\", \"https\", \"SSL\", \"ssl\") and DestinationPort !in (443, 8443))\n    or (Protocol in (\"HTTP\", \"http\") and DestinationPort !in (80, 8080, 8000, 3128))\n    or (Protocol in (\"HTTPS\", \"https\") and DestinationPort !in (443, 8443))\n| summarize\n    ConnectionCount  = count(),\n    SourceIPs        = make_set(SourceIP, 20),\n    DestIPs          = make_set(DestinationIP, 20),\n    BytesSent        = sum(SentBytes),\n    URLSamples       = make_set(RequestURL, 10),\n    DeviceVendors    = make_set(DeviceVendor),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by DestinationPort, ApplicationProtocol, Protocol\n| order by ConnectionCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects HTTP/HTTPS running on non-standard ports, common in C2 malware evasion techniques."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1571"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q20')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q20 - Firewall plus IdentityInfo Risky User Correlation",
+        "category": "Hunting Queries",
+        "query": "let RiskyIdentities =\n    IdentityInfo\n    | where TimeGenerated > ago(14d)\n    | where isnotempty(AccountUPN)\n    | summarize\n        RiskScore        = max(InvestigationPriority),\n        JobTitle         = any(JobTitle),\n        Department       = any(Department),\n        Manager          = any(Manager),\n        IsAccountEnabled = any(IsAccountEnabled)\n      by AccountUPN;\nCommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n| where isnotempty(SourceUserName)\n| summarize\n    FW_RequestCount  = count(),\n    FW_BytesSent     = sum(SentBytes),\n    FW_BytesRecv     = sum(ReceivedBytes),\n    FW_DestIPs       = dcount(DestinationIP),\n    FW_Vendors       = make_set(DeviceVendor),\n    FW_SrcIPs        = make_set(SourceIP, 5),\n    FW_FirstSeen     = min(TimeGenerated)\n  by UserName = tolower(SourceUserName)\n| join kind=inner RiskyIdentities on $left.UserName == $right.AccountUPN\n| extend TotalMBSent = round(toreal(FW_BytesSent) / 1048576, 2)\n| project\n    UserName,\n    JobTitle,\n    Department,\n    RiskScore,\n    FW_RequestCount,\n    TotalMBSent,\n    FW_DestIPs,\n    FW_Vendors,\n    FW_SrcIPs\n| order by RiskScore desc, TotalMBSent desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Matches firewall traffic source users against IdentityInfo to surface high-risk accounts."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    }
+  ]
+}
