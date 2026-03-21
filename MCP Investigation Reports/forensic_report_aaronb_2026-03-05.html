@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Forensic Investigation Report — Aaron Buxton (aaronb@zava-corp.com)</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --border: #30363d; --accent: #58a6ff;
+    --danger: #f85149; --warn: #e3b341; --ok: #3fb950; --info: #79c0ff;
+    --text: #c9d1d9; --muted: #8b949e; --heading: #f0f6fc;
+    --critical: #ff4d4f; --high: #fa8c16; --medium: #fadb14; --low: #52c41a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 13px; line-height: 1.6; }
+  a { color: var(--accent); text-decoration: none; }
+  .page-header { background: linear-gradient(135deg, #1a1f2e 0%, #0d1117 60%, #0d1a10 100%); border-bottom: 2px solid var(--warn); padding: 40px 48px 32px; position: relative; overflow: hidden; }
+  .page-header::before { content: ''; position: absolute; top: 0; right: 0; width: 400px; height: 400px; background: radial-gradient(circle, rgba(227,179,65,.1) 0%, transparent 70%); }
+  .classification { font-size: 10px; font-weight: 700; letter-spacing: 3px; color: var(--warn); border: 1px solid var(--warn); display: inline-block; padding: 3px 12px; border-radius: 2px; margin-bottom: 18px; }
+  .report-title { font-size: 26px; font-weight: 700; color: var(--heading); margin-bottom: 6px; }
+  .report-subtitle { font-size: 14px; color: var(--muted); }
+  .report-meta { display: flex; gap: 32px; margin-top: 22px; flex-wrap: wrap; }
+  .report-meta-item { display: flex; flex-direction: column; }
+  .report-meta-item .label { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); }
+  .report-meta-item .value { font-size: 13px; font-weight: 600; color: var(--heading); margin-top: 2px; }
+  .risk-badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(227,179,65,.15); border: 1px solid var(--warn); color: var(--warn); font-weight: 700; font-size: 12px; letter-spacing: 1px; padding: 4px 12px; border-radius: 4px; }
+  .risk-badge::before { content: '⬤'; font-size: 8px; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 32px 48px; }
+  .section { margin-bottom: 40px; }
+  .section-title { font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
+  .section-title::before { content: ''; display: block; width: 3px; height: 14px; background: var(--accent); border-radius: 2px; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 14px; margin-bottom: 32px; }
+  .kpi-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; position: relative; overflow: hidden; }
+  .kpi-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
+  .kpi-card.danger::before { background: var(--danger); }
+  .kpi-card.warn::before { background: var(--warn); }
+  .kpi-card.ok::before { background: var(--ok); }
+  .kpi-card.info::before { background: var(--info); }
+  .kpi-value { font-size: 28px; font-weight: 700; color: var(--heading); line-height: 1; }
+  .kpi-label { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .kpi-sub { font-size: 10px; color: var(--accent); margin-top: 6px; font-weight: 600; }
+  .data-table { width: 100%; border-collapse: collapse; }
+  .data-table th { background: #1c2128; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+  .data-table td { padding: 10px 14px; border-bottom: 1px solid #21262d; font-size: 12px; vertical-align: top; }
+  .data-table tr:last-child td { border-bottom: none; }
+  .data-table tr:hover td { background: #1c2128; }
+  .table-wrap { background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .timeline { position: relative; padding-left: 28px; }
+  .timeline::before { content: ''; position: absolute; left: 8px; top: 4px; bottom: 4px; width: 2px; background: linear-gradient(to bottom, var(--warn), var(--danger)); border-radius: 1px; }
+  .tl-item { position: relative; margin-bottom: 24px; }
+  .tl-item::before { content: ''; position: absolute; left: -24px; top: 6px; width: 12px; height: 12px; border-radius: 50%; background: var(--card); border: 2px solid var(--accent); }
+  .tl-item.critical::before { border-color: var(--danger); background: rgba(248,81,73,.3); }
+  .tl-item.high::before { border-color: var(--warn); background: rgba(227,179,65,.3); }
+  .tl-item.medium::before { border-color: var(--medium); background: rgba(250,219,20,.15); }
+  .tl-item.low::before { border-color: var(--ok); background: rgba(63,185,80,.15); }
+  .tl-date { font-size: 10px; font-weight: 700; letter-spacing: 1px; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
+  .tl-title { font-size: 13px; font-weight: 600; color: var(--heading); margin-bottom: 4px; }
+  .tl-desc { font-size: 12px; color: var(--text); }
+  .tl-desc code { background: #1c2128; color: var(--warn); padding: 1px 5px; border-radius: 3px; font-family: 'Cascadia Code', monospace; font-size: 11px; }
+  .tl-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .tag { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 10px; }
+  .tag-danger { background: rgba(248,81,73,.15); color: var(--danger); border: 1px solid rgba(248,81,73,.3); }
+  .tag-warn { background: rgba(227,179,65,.15); color: var(--warn); border: 1px solid rgba(227,179,65,.3); }
+  .tag-info { background: rgba(88,166,255,.15); color: var(--accent); border: 1px solid rgba(88,166,255,.3); }
+  .tag-ok { background: rgba(63,185,80,.15); color: var(--ok); border: 1px solid rgba(63,185,80,.3); }
+  .sev { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 3px; }
+  .sev-critical { background: rgba(248,81,73,.2); color: var(--danger); }
+  .sev-high { background: rgba(250,140,22,.2); color: var(--high); }
+  .sev-medium { background: rgba(250,219,20,.15); color: var(--medium); }
+  .sev-low { background: rgba(63,185,80,.15); color: var(--low); }
+  .sev-info { background: rgba(121,192,255,.15); color: var(--info); }
+  .profile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .profile-item { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; }
+  .profile-item .label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+  .profile-item .val { font-size: 13px; font-weight: 600; color: var(--heading); margin-top: 3px; }
+  .profile-item .val.compromised { color: var(--danger); }
+  .profile-item .val.high-risk { color: var(--high); }
+  .graph-container { background: #0d1117; border: 1px solid var(--border); border-radius: 8px; padding: 24px; overflow: hidden; }
+  .graph-container svg { display: block; margin: 0 auto; }
+  .flow-container { display: flex; align-items: center; flex-wrap: wrap; gap: 0; margin: 16px 0; }
+  .flow-node { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; font-size: 11px; text-align: center; min-width: 120px; }
+  .flow-node.start { border-color: var(--ok); }
+  .flow-node.mid { border-color: var(--warn); }
+  .flow-node.end { border-color: var(--danger); }
+  .flow-node .fn-label { font-size: 10px; letter-spacing: 0.5px; color: var(--muted); }
+  .flow-node .fn-title { font-size: 12px; font-weight: 600; color: var(--heading); margin-top: 2px; }
+  .flow-arrow { font-size: 18px; color: var(--muted); padding: 0 6px; }
+  .mitre-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+  .mitre-card { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 12px 14px; }
+  .mitre-tactic { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--accent); }
+  .mitre-technique { font-size: 12px; font-weight: 600; color: var(--heading); margin: 4px 0 2px; }
+  .mitre-id { font-size: 10px; color: var(--muted); font-family: monospace; }
+  .mitre-desc { font-size: 11px; color: var(--text); margin-top: 4px; }
+  .rec-list { list-style: none; }
+  .rec-list li { display: flex; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+  .rec-list li:last-child { border-bottom: none; }
+  .rec-num { width: 24px; height: 24px; border-radius: 50%; background: rgba(88,166,255,.15); border: 1px solid var(--accent); color: var(--accent); font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
+  .rec-content .rec-title { font-size: 13px; font-weight: 600; color: var(--heading); }
+  .rec-content .rec-body { font-size: 12px; color: var(--text); margin-top: 4px; }
+  .hunt-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .hunt-card { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+  .hunt-card .hunt-title { font-size: 11px; font-weight: 700; color: var(--accent); margin-bottom: 6px; }
+  .hunt-card code { display: block; font-size: 10px; color: var(--warn); font-family: 'Cascadia Code', monospace; background: #0d1117; padding: 6px 8px; border-radius: 4px; margin-top: 4px; white-space: pre-wrap; }
+  .alert-box { background: var(--card); border: 1px solid var(--border); border-left: 4px solid var(--warn); border-radius: 6px; padding: 16px 20px; margin-bottom: 12px; }
+  .alert-box.high { border-left-color: var(--high); }
+  .alert-title { font-size: 13px; font-weight: 700; color: var(--heading); }
+  .alert-detail { font-size: 12px; color: var(--text); margin-top: 8px; }
+  .alert-detail code { background: #0d1117; color: var(--warn); padding: 1px 5px; border-radius: 3px; font-family: monospace; font-size: 11px; }
+  .page-footer { background: var(--card); border-top: 1px solid var(--border); padding: 20px 48px; display: flex; justify-content: space-between; align-items: center; margin-top: 48px; }
+  .footer-left { font-size: 11px; color: var(--muted); }
+  .footer-right { font-size: 11px; color: var(--muted); }
+  .chain-box { background: #161b22; border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin-bottom: 10px; }
+  .chain-box .chain-title { font-size: 12px; font-weight: 700; color: var(--warn); margin-bottom: 6px; }
+  .chain-box p { font-size: 12px; color: var(--text); }
+</style>
+</head>
+<body>
+
+<div class="page-header">
+  <div class="classification">CONFIDENTIAL — INTERNAL SECURITY USE ONLY</div>
+  <div class="report-title">Forensic Investigation Report</div>
+  <div class="report-subtitle">Lateral Movement Victim &amp; Credential Harvest — Aaron Buxton</div>
+  <div class="report-meta">
+    <div class="report-meta-item">
+      <span class="label">Subject</span>
+      <span class="value">aaronb@zava-corp.com</span>
+    </div>
+    <div class="report-meta-item">
+      <span class="label">Display Name</span>
+      <span class="value">Aaron Buxton</span>
+    </div>
+    <div class="report-meta-item">
+      <span class="label">Object ID</span>
+      <span class="value">83cd2603-3722-4d6f-84b8-b24196df544e</span>
+    </div>
+    <div class="report-meta-item">
+      <span class="label">Report Date</span>
+      <span class="value">2026-03-05</span>
+    </div>
+    <div class="report-meta-item">
+      <span class="label">Workspace</span>
+      <span class="value">CyberSOC — e34d562e</span>
+    </div>
+    <div class="report-meta-item">
+      <span class="label">Risk Status</span>
+      <span class="value"><span class="risk-badge">HIGH — Credential Stolen</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- KPI CARDS -->
+  <div class="kpi-grid">
+    <div class="kpi-card warn">
+      <div class="kpi-value">HIGH</div>
+      <div class="kpi-label">Overall Risk Level</div>
+      <div class="kpi-sub">Credential Harvested</div>
+    </div>
+    <div class="kpi-card warn">
+      <div class="kpi-value">4</div>
+      <div class="kpi-label">Security Alerts</div>
+      <div class="kpi-sub">1 High / 1 Medium</div>
+    </div>
+    <div class="kpi-card ok">
+      <div class="kpi-value">0</div>
+      <div class="kpi-label">Sign-In Failures</div>
+      <div class="kpi-sub">All successful</div>
+    </div>
+    <div class="kpi-card warn">
+      <div class="kpi-value">85d</div>
+      <div class="kpi-label">Dormancy Gap</div>
+      <div class="kpi-sub">Last login Dec 10 2025</div>
+    </div>
+    <div class="kpi-card danger">
+      <div class="kpi-value">FALSE</div>
+      <div class="kpi-label">MFA Registered</div>
+      <div class="kpi-sub">No MFA on account</div>
+    </div>
+    <div class="kpi-card danger">
+      <div class="kpi-value">STOLEN</div>
+      <div class="kpi-label">NTLM Hash</div>
+      <div class="kpi-sub">e8503a9a... abused</div>
+    </div>
+    <div class="kpi-card warn">
+      <div class="kpi-value">VICTIM</div>
+      <div class="kpi-label">Attack Role</div>
+      <div class="kpi-sub">Lateral hop for rayt</div>
+    </div>
+    <div class="kpi-card info">
+      <div class="kpi-value">1</div>
+      <div class="kpi-label">Source IP</div>
+      <div class="kpi-sub">4.152.23.243 only</div>
+    </div>
+  </div>
+
+  <!-- EXECUTIVE SUMMARY -->
+  <div class="section">
+    <div class="section-title">Executive Summary</div>
+    <div class="alert-box">
+      <div class="alert-title">⚠ Account Used as Lateral Movement Pivot and Credential Harvest Target</div>
+      <div class="alert-detail">
+        Aaron Buxton (aaronb@zava-corp.com), Technology department in Vancouver, was a primary target for lateral movement
+        originating from the compromised account rayt@zava-corp.com. Aaron's NTLM password hash
+        (<code>e8503a9a31aa40891a638e9e7515bcf9</code>) was stolen by the attacker and used repeatedly to perform
+        pass-the-hash authentication against aaronb-pc.zava-corp.com beginning in November 2025. On December 10, 2025,
+        rayt used PsExec to deploy Rubeus.exe onto aaronb-pc (under cover of a disabled Windows Defender), extract 
+        Kerberos service tickets for the krbtgt account using nestorw, and stage additional attack tools. 
+        The account has been dormant for 85+ days with no sign-in since December 10, 2025.
+        Aaron's manager is Johnie McConnell (johniemcc@zava-corp.com), also under investigation.
+      </div>
+    </div>
+  </div>
+
+  <!-- IDENTITY PROFILE -->
+  <div class="section">
+    <div class="section-title">Identity Profile</div>
+    <div class="profile-grid">
+      <div class="profile-item">
+        <div class="label">Display Name</div>
+        <div class="val">Aaron Buxton</div>
+      </div>
+      <div class="profile-item">
+        <div class="label">UPN</div>
+        <div class="val">aaronb@zava-corp.com</div>
+      </div>
+      <div class="profile-item">
+        <div class="label">Department</div>
+        <div class="val">Technology</div>
+      </div>
+      <div class="profile-item">
+        <div class="label">City / Location</div>
+        <div class="val">Vancouver</div>
+      </div>
+      <div class="profile-item">
+        <div class="label">Manager</div>
+        <div class="val">Johnie McConnell (johniemcc@zava-corp.com)</div>
+      </div>
+      <div class="profile-item">
+        <div class="label">Account Created</div>
+        <div class="val">2025-07-23</div>
+      </div>
+      <div class="profile-item">
+        <div class="label">Account Enabled</div>
+        <div class="val">Yes (Active)</div>
+      </div>
+      <div class="profile-item">
+        <div class="label">MFA Registered</div>
+        <div class="val compromised">NO — Critical Gap</div>
+      </div>
+      <div class="profile-item">
+        <div class="label">Risk State</div>
+        <div class="val">None (Entra)</div>
+      </div>
+      <div class="profile-item">
+        <div class="label">Risk Level</div>
+        <div class="val">None (Entra)</div>
+      </div>
+      <div class="profile-item">
+        <div class="label">Device</div>
+        <div class="val">aaronb-pc.zava-corp.com (Windows 11 24H2)</div>
+      </div>
+      <div class="profile-item">
+        <div class="label">Group Memberships</div>
+        <div class="val">Vallee Nevado · <span style="color:var(--warn)">Zava static</span> · <span style="color:var(--warn)">MDE-Users-Misconfigured</span> · All Users - No Guest · zava users manual · Zava users</div>
+      </div>
+    </div>
+    <div style="margin-top:14px;background:var(--card);border:1px solid var(--border);border-left:4px solid var(--warn);border-radius:6px;padding:12px 16px;">
+      <span style="font-size:11px;font-weight:700;color:var(--warn);">NOTE — MDE-Users-Misconfigured Group</span>
+      <p style="font-size:12px;color:var(--text);margin-top:4px;">Aaron Buxton is a member of <strong>MDE-Users-Misconfigured</strong>, indicating a known Microsoft Defender for Endpoint configuration gap. This group membership likely contributed to the attacker's success in disabling Defender on aaronb-pc remotely.</p>
+    </div>
+  </div>
+
+  <!-- SIGN-IN ANALYSIS -->
+  <div class="section">
+    <div class="section-title">Sign-In Analysis (365 Days)</div>
+    <div class="table-wrap" style="margin-bottom:16px;">
+      <table class="data-table">
+        <thead>
+          <tr><th>Metric</th><th>Value</th><th>Assessment</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Total Sign-Ins</td><td>11</td><td><span class="tag tag-info">Low Volume</span></td></tr>
+          <tr><td>Successful</td><td>11</td><td><span class="tag tag-ok">All Success</span></td></tr>
+          <tr><td>Failed</td><td>0</td><td><span class="tag tag-ok">No Failures</span></td></tr>
+          <tr><td>Unique IPs</td><td>1 (4.152.23.243)</td><td><span class="tag tag-ok">Single Location</span></td></tr>
+          <tr><td>Applications</td><td>Windows Sign In Only</td><td><span class="tag tag-warn">No Cloud App Access</span></td></tr>
+          <tr><td>Auth Method</td><td>singleFactorAuthentication</td><td><span class="tag tag-danger">No MFA Enforced</span></td></tr>
+          <tr><td>CA Policy</td><td>notApplied</td><td><span class="tag tag-danger">CA Not Enforced</span></td></tr>
+          <tr><td>First Sign-In</td><td>2025-07-28</td><td>—</td></tr>
+          <tr><td>Last Sign-In</td><td>2025-12-10</td><td><span class="tag tag-danger">85-day gap</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr><th>IP Address</th><th>Location</th><th>Applications</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code style="font-family:monospace;color:#79c0ff;">4.152.23.243</code></td>
+            <td>US, Boydton VA</td>
+            <td>Windows Sign In</td>
+            <td><span class="tag tag-ok">Only IP — consistent corporate egress</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ATTACK TIMELINE -->
+  <div class="section">
+    <div class="section-title">Attack Timeline — Events Targeting This Account</div>
+    <div class="timeline">
+      <div class="tl-item high">
+        <div class="tl-date">Nov 24, 2025</div>
+        <div class="tl-title">NTLM Hash Stolen &amp; First Pass-the-Hash Attack</div>
+        <div class="tl-desc">
+          Mimikatz executed on <code>rayt-pc.zava-corp.com</code> by the attacker:
+          <code>mimikatz.exe sekurlsa::pth /user:aaronb /ntlm:e8503a9a31aa40891a638e9e7515bcf9 /domain:zava-corp.com</code>.
+          Aaron's NTLM password hash was extracted from LSASS memory (likely harvested in a prior credential dump on rayt-pc)
+          and used to authenticate as aaronb without his password, gaining access to <code>\\aaronb-pc\C$</code> administrative share.
+          This is the first evidence of lateral movement targeting Aaron's device.
+        </div>
+        <div class="tl-tags">
+          <span class="tag tag-danger">T1550.002 — Pass-the-Hash</span>
+          <span class="tag tag-danger">NTLM Hash Compromised</span>
+        </div>
+      </div>
+
+      <div class="tl-item critical">
+        <div class="tl-date">Dec 10, 2025</div>
+        <div class="tl-title">PsExec Deployment — Defender Disabled — Rubeus.exe Ticket Dump</div>
+        <div class="tl-desc">
+          Following the Golden Ticket creation on rayt-pc, the attacker used PsExec with aaronb's stolen NTLM to execute the following commands on <code>aaronb-pc</code>:
+          <ul style="margin:8px 0 0 16px;font-size:12px;">
+            <li><code>PsExec.exe \\aaronb-pc -accepteula cmd /c "C:\Temp\Rubeus.exe dump /service:krbtgt /user:nestorw &gt; C:\Temp\AdminTicket.txt"</code> — extract privileged Kerberos ticket for nestorw</li>
+            <li><code>PsExec.exe \\aaronb-pc -accepteula cmd /c "powershell -command Set-MpPreference -DisableRealtimeMonitoring 1"</code> — disable Windows Defender real-time protection</li>
+            <li>PSEXESVC.exe deployed and ran as a system service on aaronb-pc</li>
+          </ul>
+          After Defender was disabled, the attacker had unrestricted lateral access to aaronb-pc for tool staging.
+        </div>
+        <div class="tl-tags">
+          <span class="tag tag-danger">T1569.002 — PsExec Service</span>
+          <span class="tag tag-danger">T1562.001 — Disable AV</span>
+          <span class="tag tag-danger">T1558 — Kerberos Ticket Harvest</span>
+          <span class="tag tag-danger">T1021.002 — SMB Admin Share</span>
+        </div>
+      </div>
+
+      <div class="tl-item high">
+        <div class="tl-date">Dec 14, 2025</div>
+        <div class="tl-title">Hands-on-Keyboard Attack — Multiple Devices Involved</div>
+        <div class="tl-desc">
+          Sentinel alert: <em>"Hands-on-keyboard attack involving multiple devices"</em> — HIGH severity, covering both rayt-pc and aaronb-pc.
+          Tactics: InitialAccess, Persistence, PrivilegeEscalation, DefenseEvasion, LateralMovement, Collection.
+          Techniques: T1021 (Remote Services), T1074 (Data Staged), T1078 (Valid Accounts), T1080 (Taint Shared Content), 
+          T1543 (Persistent System Service), T1570 (Lateral Tool Transfer).
+        </div>
+        <div class="tl-tags">
+          <span class="tag tag-danger">High Severity Incident</span>
+          <span class="tag tag-warn">T1074 — Data Staged</span>
+          <span class="tag tag-warn">T1543 — Persistent Service</span>
+          <span class="tag tag-warn">T1570 — Tool Transfer</span>
+        </div>
+      </div>
+
+      <div class="tl-item medium">
+        <div class="tl-date">Dec 14, 2025</div>
+        <div class="tl-title">Possible Lateral Movement via Pass-the-Hash on aaronb-pc</div>
+        <div class="tl-desc">
+          Alert: <em>"Possible lateral movement using pass-the-hash"</em> — Medium severity, DefenseEvasion + LateralMovement (T1550).
+          aaronb-pc identified as the device where the pass-the-hash activity was detected. Follow-on attack after
+          Defender was disabled (Dec 10) — aaronb-pc may have been used as a further pivot point for attacks against
+          other systems in the network.
+        </div>
+        <div class="tl-tags">
+          <span class="tag tag-warn">T1550 — Pass-the-Hash</span>
+          <span class="tag tag-warn">DefenseEvasion</span>
+        </div>
+      </div>
+
+      <div class="tl-item high">
+        <div class="tl-date">Feb 27, 2026</div>
+        <div class="tl-title">Post-Jan 23 SMB and RDP Lateral Movement Blocked</div>
+        <div class="tl-desc">
+          Two informational alerts: <em>"Lateral movement using SMB remote file access blocked on multiple devices"</em>
+          and <em>"Lateral movement using RDP blocked"</em> — both involving aaronb@zava-corp.com account attempting 
+          to access <code>main-dc.zava-corp.com</code>. SMB and RDP access was blocked by a network control.
+          This activity postdates the Jan 23 password reset for rayt — suggesting aaronb's credentials were still being 
+          actively abused in late February 2026, or the attacker retained access through the stolen NTLM hash.
+        </div>
+        <div class="tl-tags">
+          <span class="tag tag-warn">T1021 — Remote Services</span>
+          <span class="tag tag-ok">BLOCKED by Controls</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECURITY ALERTS -->
+  <div class="section">
+    <div class="section-title">Security Alert Inventory</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr><th>Date</th><th>Alert Name</th><th>Severity</th><th>Tactics</th><th>Techniques</th><th>Device</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>2025-12-14</td>
+            <td>Possible lateral movement using pass-the-hash</td>
+            <td><span class="sev sev-medium">Medium</span></td>
+            <td>DefenseEvasion, LateralMovement</td>
+            <td>T1550</td>
+            <td>aaronb-pc</td>
+          </tr>
+          <tr>
+            <td>2025-12-14</td>
+            <td>Hands-on-keyboard attack involving multiple devices</td>
+            <td><span class="sev sev-high">High</span></td>
+            <td>InitialAccess, Persistence, PrivEsc, LateralMovement, Collection</td>
+            <td>T1021, T1074, T1078, T1080, T1543, T1570</td>
+            <td>aaronb-pc, rayt-pc</td>
+          </tr>
+          <tr>
+            <td>2026-02-27</td>
+            <td>Lateral movement using SMB remote file access blocked</td>
+            <td><span class="sev sev-info">Info</span></td>
+            <td>LateralMovement</td>
+            <td>T1021</td>
+            <td>multiple (→ main-dc)</td>
+          </tr>
+          <tr>
+            <td>2026-02-27</td>
+            <td>Lateral movement using RDP blocked</td>
+            <td><span class="sev sev-info">Info</span></td>
+            <td>LateralMovement</td>
+            <td>T1021</td>
+            <td>aaronb-pc</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- BLAST RADIUS GRAPH -->
+  <div class="section">
+    <div class="section-title">Blast Radius &amp; Lateral Movement Graph</div>
+    <div class="graph-container">
+      <svg width="900" height="420" viewBox="0 0 900 420" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrow-r" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#f85149" opacity="0.9"/>
+          </marker>
+          <marker id="arrow-w" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#e3b341" opacity="0.9"/>
+          </marker>
+          <marker id="arrow-g" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#3fb950" opacity="0.7"/>
+          </marker>
+          <radialGradient id="nA" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#e3b341" stop-opacity="0.3"/>
+            <stop offset="100%" stop-color="#e3b341" stop-opacity="0.05"/>
+          </radialGradient>
+          <filter id="gw">
+            <feGaussianBlur stdDeviation="3" result="b"/>
+            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+        <rect width="900" height="420" fill="#0d1117" rx="8"/>
+        <g stroke="#1c2128" stroke-width="1">
+          <line x1="0" y1="70" x2="900" y2="70"/><line x1="0" y1="140" x2="900" y2="140"/>
+          <line x1="0" y1="210" x2="900" y2="210"/><line x1="0" y1="280" x2="900" y2="280"/>
+          <line x1="0" y1="350" x2="900" y2="350"/>
+          <line x1="180" y1="0" x2="180" y2="420"/><line x1="360" y1="0" x2="360" y2="420"/>
+          <line x1="540" y1="0" x2="540" y2="420"/><line x1="720" y1="0" x2="720" y2="420"/>
+        </g>
+
+        <!-- Halos -->
+        <circle cx="450" cy="210" r="90" fill="url(#nA)" opacity="0.6"/>
+
+        <!-- Edges -->
+        <!-- rayt-pc → aaronb-pc (PtH) -->
+        <line x1="220" y1="210" x2="400" y2="210" stroke="#f85149" stroke-width="2.5" marker-end="url(#arrow-r)"/>
+        <text x="312" y="200" text-anchor="middle" fill="#f85149" font-size="9">PtH / PsExec</text>
+        <!-- aaronb-pc → main-dc BLOCKED -->
+        <line x1="500" y1="210" x2="660" y2="210" stroke="#e3b341" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-w)"/>
+        <text x="580" y="200" text-anchor="middle" fill="#e3b341" font-size="9">SMB/RDP (BLOCKED)</text>
+        <!-- aaronb-pc → nestorw krbtgt -->
+        <line x1="450" y1="252" x2="450" y2="340" stroke="#e3b341" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-w)"/>
+        <text x="490" y="302" fill="#8b949e" font-size="9">Rubeus dump</text>
+        <!-- aaronb-pc → rayt (feedback) -->
+        <path d="M 450,172 Q 340,100 250,182" stroke="#79c0ff" stroke-width="1" stroke-dasharray="3,4" fill="none" marker-end="url(#arrow-g)" opacity="0.5"/>
+        <text x="340" y="130" text-anchor="middle" fill="#79c0ff" font-size="8">tools staged</text>
+
+        <!-- NODES -->
+        <!-- rayt-pc (source) -->
+        <circle cx="195" cy="210" r="28" fill="#1a0a0a" stroke="#f85149" stroke-width="2"/>
+        <text x="195" y="205" text-anchor="middle" fill="#f85149" font-size="9">SOURCE</text>
+        <text x="195" y="219" text-anchor="middle" fill="#c9d1d9" font-size="9">rayt-pc</text>
+        <text x="195" y="231" text-anchor="middle" fill="#8b949e" font-size="7">Ray Tanaka</text>
+
+        <!-- aaronb-pc (victim / center) -->
+        <circle cx="450" cy="210" r="32" fill="#1a1208" stroke="#e3b341" stroke-width="2.5" filter="url(#gw)"/>
+        <text x="450" y="204" text-anchor="middle" fill="#e3b341" font-size="9" font-weight="700">VICTIM / PIVOT</text>
+        <text x="450" y="217" text-anchor="middle" fill="#c9d1d9" font-size="9">aaronb-pc</text>
+        <text x="450" y="230" text-anchor="middle" fill="#8b949e" font-size="7">Aaron Buxton</text>
+
+        <!-- main-dc (blocked) -->
+        <circle cx="690" cy="210" r="28" fill="#0d1a10" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4,3"/>
+        <text x="690" y="205" text-anchor="middle" fill="#528e57" font-size="9">BLOCKED</text>
+        <text x="690" y="219" text-anchor="middle" fill="#c9d1d9" font-size="9">main-dc</text>
+        <text x="690" y="231" text-anchor="middle" fill="#8b949e" font-size="7">Domain Controller</text>
+
+        <!-- nestorw krbtgt -->
+        <rect x="370" y="350" width="160" height="42" rx="6" fill="#1a0a0a" stroke="#e3b341" stroke-width="1.5"/>
+        <text x="450" y="368" text-anchor="middle" fill="#e3b341" font-size="9" font-weight="700">nestorw TGT</text>
+        <text x="450" y="382" text-anchor="middle" fill="#8b949e" font-size="7">krbtgt dump — AdminTicket.txt</text>
+
+        <!-- NTLM hash box -->
+        <rect x="25" y="300" width="150" height="50" rx="6" fill="#1a0a0a" stroke="#f85149" stroke-width="1"/>
+        <text x="100" y="320" text-anchor="middle" fill="#f85149" font-size="9" font-weight="700">NTLM Hash Stolen</text>
+        <text x="100" y="334" text-anchor="middle" fill="#8b949e" font-size="8">e8503a9a31aa...</text>
+        <text x="100" y="345" text-anchor="middle" fill="#8b949e" font-size="7">Used Nov 24 + Dec 10</text>
+
+        <!-- PSEXESVC -->
+        <rect x="558" y="290" width="110" height="40" rx="4" fill="#1c1810" stroke="#e3b341" stroke-width="1"/>
+        <text x="613" y="307" text-anchor="middle" fill="#e3b341" font-size="9">PSEXESVC.exe</text>
+        <text x="613" y="321" text-anchor="middle" fill="#8b949e" font-size="7">Dropped on aaronb-pc</text>
+        <line x1="476" y1="236" x2="568" y2="295" stroke="#e3b341" stroke-width="1" stroke-dasharray="2,3" opacity="0.5"/>
+
+        <!-- Rubeus -->
+        <rect x="740" y="300" width="110" height="40" rx="4" fill="#1c1810" stroke="#e3b341" stroke-width="1"/>
+        <text x="795" y="317" text-anchor="middle" fill="#e3b341" font-size="9">Rubeus.exe</text>
+        <text x="795" y="330" text-anchor="middle" fill="#8b949e" font-size="7">C:\Temp\Rubeus.exe</text>
+        <line x1="476" y1="236" x2="745" y2="305" stroke="#e3b341" stroke-width="1" stroke-dasharray="2,3" opacity="0.4"/>
+
+        <!-- Defender disabled badge -->
+        <rect x="310" y="44" width="140" height="34" rx="4" fill="#1a0a0a" stroke="#f85149" stroke-width="1.5"/>
+        <text x="380" y="59" text-anchor="middle" fill="#f85149" font-size="9" font-weight="700">Defender DISABLED</text>
+        <text x="380" y="71" text-anchor="middle" fill="#8b949e" font-size="7">Set-MpPreference via PsExec</text>
+        <line x1="450" y1="178" x2="400" y2="78" stroke="#f85149" stroke-width="1" stroke-dasharray="2,3" opacity="0.5"/>
+
+        <!-- Legend -->
+        <rect x="18" y="18" width="180" height="78" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+        <text x="28" y="34" fill="#8b949e" font-size="9" font-weight="700">LEGEND</text>
+        <line x1="28" y1="46" x2="58" y2="46" stroke="#f85149" stroke-width="2" marker-end="url(#arrow-r)"/>
+        <text x="64" y="50" fill="#c9d1d9" font-size="9">Attack (PtH/PsExec)</text>
+        <line x1="28" y1="60" x2="58" y2="60" stroke="#e3b341" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-w)"/>
+        <text x="64" y="64" fill="#c9d1d9" font-size="9">Lateral (blocked)</text>
+        <line x1="28" y1="74" x2="58" y2="74" stroke="#79c0ff" stroke-width="1" stroke-dasharray="3,4" marker-end="url(#arrow-g)"/>
+        <text x="64" y="78" fill="#c9d1d9" font-size="9">Tool staging</text>
+
+        <text x="450" y="406" text-anchor="middle" fill="#30363d" font-size="9">aaronb@zava-corp.com — Lateral Movement &amp; Blast Radius — 2026-03-05</text>
+      </svg>
+    </div>
+  </div>
+
+  <!-- ATTACK KILL CHAIN -->
+  <div class="section">
+    <div class="section-title">Kill Chain — aaronb as Lateral Pivot</div>
+
+    <div style="margin-bottom:20px;">
+      <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px;">STAGE 1 — Credential Harvesting (Prior to Nov 24)</div>
+      <div class="flow-container">
+        <div class="flow-node start"><div class="fn-label">rayt-pc</div><div class="fn-title">LSASS Dump</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node mid"><div class="fn-label">Mimikatz</div><div class="fn-title">logonpasswords</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node end"><div class="fn-label">NTLM Hash</div><div class="fn-title">e8503a9a… (aaronb)</div></div>
+      </div>
+    </div>
+
+    <div style="margin-bottom:20px;">
+      <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px;">STAGE 2 — Pass-the-Hash Lateral Movement (Nov 24)</div>
+      <div class="flow-container">
+        <div class="flow-node start"><div class="fn-label">rayt-pc</div><div class="fn-title">sekurlsa::pth aaronb</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node mid"><div class="fn-label">Auth as aaronb</div><div class="fn-title">No password needed</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node end"><div class="fn-label">aaronb-pc C$</div><div class="fn-title">Admin Share Access</div></div>
+      </div>
+    </div>
+
+    <div style="margin-bottom:20px;">
+      <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px;">STAGE 3 — Remote Tool Execution (Dec 10)</div>
+      <div class="flow-container">
+        <div class="flow-node start"><div class="fn-label">rayt-pc</div><div class="fn-title">PsExec deploy PSEXESVC</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node mid"><div class="fn-label">aaronb-pc</div><div class="fn-title">Defender Disabled</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node mid"><div class="fn-label">Rubeus.exe</div><div class="fn-title">dump nestorw krbtgt</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node end"><div class="fn-label">AdminTicket.txt</div><div class="fn-title">Staged C:\Temp\</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MITRE ATT&CK -->
+  <div class="section">
+    <div class="section-title">MITRE ATT&amp;CK Coverage</div>
+    <div class="mitre-grid">
+      <div class="mitre-card">
+        <div class="mitre-tactic">Credential Access</div>
+        <div class="mitre-technique">OS Credential Dumping — LSASS</div>
+        <div class="mitre-id">T1003.001</div>
+        <div class="mitre-desc">aaronb NTLM hash extracted from LSASS cache on rayt-pc; hash used for Pass-the-Hash attacks</div>
+      </div>
+      <div class="mitre-card">
+        <div class="mitre-tactic">Lateral Movement</div>
+        <div class="mitre-technique">Pass-the-Hash</div>
+        <div class="mitre-id">T1550.002</div>
+        <div class="mitre-desc">NTLM hash e8503a9a... used repeatedly to authenticate as aaronb from rayt-pc without plaintext password</div>
+      </div>
+      <div class="mitre-card">
+        <div class="mitre-tactic">Lateral Movement</div>
+        <div class="mitre-technique">Remote Services — SMB Admin Share</div>
+        <div class="mitre-id">T1021.002</div>
+        <div class="mitre-desc">PsExec connected to \\aaronb-pc admin shares; lateral movement to main-dc via SMB blocked Feb 27</div>
+      </div>
+      <div class="mitre-card">
+        <div class="mitre-tactic">Execution</div>
+        <div class="mitre-technique">System Services — Service Execution</div>
+        <div class="mitre-id">T1569.002</div>
+        <div class="mitre-desc">PSEXESVC.exe installed as service on aaronb-pc; used to run Rubeus.exe and PowerShell commands</div>
+      </div>
+      <div class="mitre-card">
+        <div class="mitre-tactic">Defense Evasion</div>
+        <div class="mitre-technique">Impair Defenses — Disable/Modify AV</div>
+        <div class="mitre-id">T1562.001</div>
+        <div class="mitre-desc">Set-MpPreference -DisableRealtimeMonitoring 1 executed on aaronb-pc remotely via PsExec</div>
+      </div>
+      <div class="mitre-card">
+        <div class="mitre-tactic">Credential Access</div>
+        <div class="mitre-technique">Steal or Forge Kerberos Tickets</div>
+        <div class="mitre-id">T1558</div>
+        <div class="mitre-desc">Rubeus.exe dump /service:krbtgt /user:nestorw executed on aaronb-pc; Kerberos TGT harvested to AdminTicket.txt</div>
+      </div>
+      <div class="mitre-card">
+        <div class="mitre-tactic">Collection</div>
+        <div class="mitre-technique">Data Staged — Local Data Staging</div>
+        <div class="mitre-id">T1074.001</div>
+        <div class="mitre-desc">AdminTicket.txt staged to C:\Temp\ on aaronb-pc; attack tools placed in user-writable directories</div>
+      </div>
+      <div class="mitre-card">
+        <div class="mitre-tactic">Lateral Movement</div>
+        <div class="mitre-technique">Lateral Tool Transfer</div>
+        <div class="mitre-id">T1570</div>
+        <div class="mitre-desc">Rubeus.exe and PSEXESVC.exe transferred to aaronb-pc from rayt-pc via SMB admin share access</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- THREAT HUNT QUERIES -->
+  <div class="section">
+    <div class="section-title">Threat Hunting Queries</div>
+    <div class="hunt-grid">
+      <div class="hunt-card">
+        <div class="hunt-title">PSEXESVC on aaronb-pc</div>
+        <code>DeviceProcessEvents
+| where DeviceName == "aaronb-pc"
+| where FileName == "PSEXESVC.exe"
+| project TimeGenerated, FileName, ProcessCommandLine, InitiatingProcessCommandLine</code>
+      </div>
+      <div class="hunt-card">
+        <div class="hunt-title">Rubeus Execution</div>
+        <code>DeviceProcessEvents
+| where DeviceName == "aaronb-pc"
+| where FileName == "Rubeus.exe"
+| project TimeGenerated, ProcessCommandLine, InitiatingProcessFileName</code>
+      </div>
+      <div class="hunt-card">
+        <div class="hunt-title">Defender Disable Event</div>
+        <code>DeviceProcessEvents
+| where DeviceName == "aaronb-pc"
+| where ProcessCommandLine has "DisableRealtimeMonitoring"
+| project TimeGenerated, ProcessCommandLine, InitiatingProcessFileName</code>
+      </div>
+      <div class="hunt-card">
+        <div class="hunt-title">PtH Auth from rayt-pc</div>
+        <code>SecurityEvent
+| where EventID in (4624, 4625)
+| where WorkstationName == "rayt-pc"
+| where TargetUserName == "aaronb"
+| where LogonType == 3
+| project TimeGenerated, IpAddress, LogonType, Status</code>
+      </div>
+      <div class="hunt-card">
+        <div class="hunt-title">Admin Ticket File</div>
+        <code>DeviceFileEvents
+| where DeviceName == "aaronb-pc"
+| where FileName == "AdminTicket.txt"
+| project TimeGenerated, FileName, FolderPath, InitiatingProcessFileName</code>
+      </div>
+      <div class="hunt-card">
+        <div class="hunt-title">SMB/RDP Block Events</div>
+        <code>DeviceNetworkEvents
+| where DeviceName == "aaronb-pc"
+| where RemoteUrl has "main-dc"
+  or RemotePort in (445, 3389)
+| where ActionType == "ConnectionRequest"
+| project TimeGenerated, RemoteUrl, RemotePort, ActionType</code>
+      </div>
+    </div>
+  </div>
+
+  <!-- RECOMMENDATIONS -->
+  <div class="section">
+    <div class="section-title">Recommendations</div>
+    <ul class="rec-list">
+      <li>
+        <div class="rec-num">1</div>
+        <div class="rec-content">
+          <div class="rec-title">IMMEDIATE — Reset aaronb Password and Revoke All Sessions</div>
+          <div class="rec-body">The NTLM hash e8503a9a31aa40891a638e9e7515bcf9 is confirmed stolen and was used for pass-the-hash attacks in November and December. Full password reset, session invalidation, and token revocation are required. The new password must be set from a clean workstation.</div>
+        </div>
+      </li>
+      <li>
+        <div class="rec-num">2</div>
+        <div class="rec-content">
+          <div class="rec-title">IMMEDIATE — Rebuild aaronb-pc from Clean Image</div>
+          <div class="rec-body">Windows Defender was disabled on aaronb-pc by a remote PsExec command. The machine should be considered fully compromised. PSEXESVC.exe, Rubeus.exe, and AdminTicket.txt were staged on this device. Rebuild from a known-good image before reconnecting to the domain.</div>
+        </div>
+      </li>
+      <li>
+        <div class="rec-num">3</div>
+        <div class="rec-content">
+          <div class="rec-title">HIGH — Enforce MFA Registration and Conditional Access</div>
+          <div class="rec-body">IsMFARegistered=false and Conditional Access policy is notApplied for aaronb. All authentication is single-factor. Enforce MFA registration within 24 hours and apply a Conditional Access policy requiring phishing-resistant authentication. Block sign-in until MFA is registered.</div>
+        </div>
+      </li>
+      <li>
+        <div class="rec-num">4</div>
+        <div class="rec-content">
+          <div class="rec-title">HIGH — Investigate nestorw Account Compromise</div>
+          <div class="rec-body">Rubeus.exe was used to dump krbtgt service tickets for user nestorw from aaronb-pc. The resulting AdminTicket.txt file was staged for use. Treat nestorw as a potentially compromised account — reset credentials, audit authentication history, and check for Golden Ticket usage under nestorw's identity.</div>
+        </div>
+      </li>
+      <li>
+        <div class="rec-num">5</div>
+        <div class="rec-content">
+          <div class="rec-title">MEDIUM — Audit and Remove MDE-Users-Misconfigured Group</div>
+          <div class="rec-body">Aaron Buxton's membership in MDE-Users-Misconfigured indicates a known Defender configuration issue. Audit what policies or exclusions apply to this group and remediate the misconfiguration immediately. Re-enable Defender on aaronb-pc after rebuild and confirm operational status.</div>
+        </div>
+      </li>
+      <li>
+        <div class="rec-num">6</div>
+        <div class="rec-content">
+          <div class="rec-title">MEDIUM — Review johniemcc (Manager) for Potential Risk</div>
+          <div class="rec-body">Aaron Buxton's direct manager is Johnie McConnell (johniemcc@zava-corp.com), who has exhibited suspicious browser sign-ins from IP 128.94.2.136 on Jan 23, 2026 — the same IP linked to the rayt phishing attack. Review the manager's account for possible insider risk or external compromise.</div>
+        </div>
+      </li>
+    </ul>
+  </div>
+
+</div>
+
+<div class="page-footer">
+  <div class="footer-left">Forensic Report — aaronb@zava-corp.com — Generated 2026-03-05 | CyberSOC Workspace e34d562e</div>
+  <div class="footer-right">CONFIDENTIAL — Zava Corp Information Security</div>
+</div>
+
+</body>
+</html>

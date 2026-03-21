@@ -1,0 +1,1158 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forensic Investigation -- lydiab@zava-corp.com</title>
+<style>:root {
+    --bg: #0d1117; --surface: #161b22; --surface2: #1e2530;
+    --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --red: #f85149; --orange: #fb8500; --yellow: #d29922;
+    --green: #3fb950; --blue: #58a6ff; --purple: #bc8cff;
+    --cr: #7b0000; --ch: #c62828; --cm: #e65100; --cl: #1565c0;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', 'SF Pro Text', Arial, sans-serif; font-size: 13px; line-height: 1.6; }
+h1 { font-size: 2rem; font-weight: 700; color: var(--blue); margin-bottom: .25rem; }
+h2 { font-size: 1.25rem; font-weight: 600; color: var(--text); border-left: 4px solid var(--blue); padding-left: 12px; margin: 2rem 0 1rem; }
+h3 { font-size: 1rem; font-weight: 600; color: var(--yellow); margin: 1rem 0 .5rem; }
+.page { max-width: 1400px; margin: 0 auto; padding: 2rem 2rem; }
+.header { background: linear-gradient(135deg,#0d2137 0%,#1a2f4e 60%,#0d1117 100%); border: 1px solid var(--border); border-radius: 12px; padding: 2rem; margin-bottom: 2rem; }
+.header-meta { display: flex; gap: 3rem; flex-wrap: wrap; margin-top: 1rem; }
+.meta-item { display: flex; flex-direction: column; }
+.meta-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+.meta-value { font-size: 14px; font-weight: 600; color: var(--text); }
+.criticality-banner { background: linear-gradient(90deg,#4a0000,#7b0000); border: 1px solid #c62828; border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 12px; }
+.criticality-banner .icon { font-size: 1.75rem; }
+.criticality-banner .title { font-size: 1rem; font-weight: 700; color: #ff8a80; }
+.criticality-banner .sub { font-size: 12px; color: #ffcdd2; margin-top: 2px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem 1.5rem; margin-bottom: 1rem; }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+.stat-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; text-align: center; }
+.stat-number { font-size: 2rem; font-weight: 700; }
+.stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-top: 4px; }
+.stat-red { color: var(--red); }
+.stat-orange { color: var(--orange); }
+.stat-yellow { color: var(--yellow); }
+.stat-green { color: var(--green); }
+.stat-blue { color: var(--blue); }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { background: var(--surface2); color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 1px; padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+td { padding: 7px 10px; border-bottom: 1px solid #21262d; vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(88,166,255,.04); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; color: #fff; white-space: nowrap; }
+.badge-critical { background: #7b0000; }
+.badge-high     { background: #c62828; }
+.badge-medium   { background: #e65100; }
+.badge-low      { background: #1565c0; }
+.badge-info     { background: #37474f; }
+.badge-green    { background: #1b5e20; color: #a5d6a7; }
+.badge-blue     { background: #0d47a1; color: #90caf9; }
+.badge-attacker { background: #7b0000; }
+.badge-legit    { background: #1b5e20; }
+.badge-suspicious { background: #e65100; }
+.tag { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 10px; background: var(--surface2); border: 1px solid var(--border); margin: 1px 2px; }
+.timeline { position: relative; padding-left: 2rem; }
+.timeline::before { content: ''; position: absolute; left: 8px; top: 0; bottom: 0; width: 2px; background: var(--border); }
+.tl-item { position: relative; margin-bottom: 1rem; }
+.tl-dot { position: absolute; left: -2rem; top: 6px; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border); }
+.tl-critical { background: var(--red); border-color: #f85149; }
+.tl-high     { background: var(--orange); border-color: #fb8500; }
+.tl-medium   { background: var(--yellow); border-color: #d29922; }
+.tl-info     { background: var(--surface2); border-color: var(--muted); }
+.tl-response { background: var(--green); border-color: #3fb950; }
+.tl-remediation { background: var(--blue); border-color: #58a6ff; }
+.tl-blastradius { background: var(--purple); border-color: #bc8cff; }
+.tl-detection { background: #00bcd4; border-color: #00bcd4; }
+.tl-content { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: .75rem 1rem; }
+.tl-date { font-size: 11px; color: var(--muted); font-family: monospace; }
+.tl-phase { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-left: 8px; }
+.tl-phase-recon { color: var(--yellow); }
+.tl-phase-compromise { color: var(--red); }
+.tl-phase-ransomware { color: #ff1744; }
+.tl-phase-response { color: var(--green); }
+.tl-phase-remediation { color: var(--blue); }
+.tl-phase-blastradius { color: var(--purple); }
+.tl-phase-detection { color: #00bcd4; }
+.tl-event { margin-top: 4px; font-size: 12px; }
+.tl-ip { font-size: 10px; font-family: monospace; color: var(--muted); margin-top: 4px; }
+.mitre-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: .75rem; }
+.mitre-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: .75rem 1rem; }
+.mitre-tid { font-family: monospace; font-size: 12px; font-weight: 700; color: var(--blue); }
+.mitre-phase { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+.mitre-name { font-size: 13px; font-weight: 600; margin: 4px 0; }
+.mitre-evidence { font-size: 11px; color: var(--muted); }
+.ioc-hit0 { color: var(--green); font-weight: 600; }
+.ioc-hit-na { color: var(--muted); }
+.rec-p0 { border-left: 3px solid var(--red); }
+.rec-p1 { border-left: 3px solid var(--orange); }
+.rec-p2 { border-left: 3px solid var(--yellow); }
+.rec-p3 { border-left: 3px solid var(--blue); }
+.rec-area { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+.rec-text { font-size: 12px; margin-top: 4px; }
+.graph-container { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; overflow: auto; }
+.graph svg { display: block; margin: 0 auto; }
+.node-attacker { fill: #7b0000; stroke: #f85149; stroke-width: 2; }
+.node-victim   { fill: #1a2f4e; stroke: #58a6ff; stroke-width: 2; }
+.node-device   { fill: #1e3320; stroke: #3fb950; stroke-width: 2; }
+.node-blast    { fill: #2d1f47; stroke: #bc8cff; stroke-width: 2; }
+.node-malware  { fill: #3d1a00; stroke: #fb8500; stroke-width: 2; }
+.edge { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.edge-attack { stroke: var(--red); stroke-width: 2; }
+.edge-lateral { stroke: var(--orange); stroke-width: 1.5; stroke-dasharray: 5,3; }
+.edge-blast   { stroke: var(--purple); stroke-width: 1.5; stroke-dasharray: 3,3; }
+.node-label { fill: var(--text); font-size: 10px; font-family: 'Segoe UI', sans-serif; text-anchor: middle; pointer-events: none; }
+.section-divider { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+.highlight-box { background: rgba(248,81,73,.08); border: 1px solid rgba(248,81,73,.4); border-radius: 6px; padding: .75rem 1rem; margin-bottom: .75rem; }
+.highlight-blue { background: rgba(88,166,255,.06); border: 1px solid rgba(88,166,255,.3); border-radius: 6px; padding: .75rem 1rem; margin-bottom: .75rem; }
+.highlight-green { background: rgba(63,185,80,.06); border: 1px solid rgba(63,185,80,.3); border-radius: 6px; padding: .75rem 1rem; margin-bottom: .75rem; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+@media print {
+    body { background: #fff !important; color: #000 !important; }
+    .header { background: #f0f4f8 !important; border-color: #ccc !important; }
+    h2 { color: #000 !important; border-color: #2563eb !important; }
+    .card, .stat-box, .tl-content, .mitre-card { background: #f9fafb !important; border-color: #d1d5db !important; }
+    th { background: #e5e7eb !important; color: #374151 !important; }
+    table { font-size: 11px; }
+}</style>
+</head>
+<body>
+<div class="page">
+
+<!-- ===== HEADER ===== -->
+<div class="header">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:1rem">
+    <div>
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:2px;color:var(--muted);margin-bottom:.5rem">CONFIDENTIAL -- SECURITY FORENSIC INVESTIGATION REPORT</div>
+      <h1>&#x26A0;&#xFE0F; Identity Forensic Investigation</h1>
+      <div style="font-size:1rem;color:var(--muted);margin-top:.25rem">lydiab@zava-corp.com &nbsp;|&nbsp; lydiab-pc &nbsp;|&nbsp; Zava Corp</div>
+    </div>
+    <div style="text-align:right;font-size:12px;color:var(--muted)">
+      <div>Report Date: <strong style="color:var(--text)">2026-03-11</strong></div>
+      <div>Sentinel Workspace: <strong style="color:var(--text)">CyberSOC</strong></div>
+      <div>Investigation Window: <strong style="color:var(--text)">365 Days</strong></div>
+      <div style="margin-top:.5rem"><span class="badge badge-critical">CONFIRMED COMPROMISE</span> <span class="badge badge-high">LOCKBIT RANSOMWARE</span></div>
+    </div>
+  </div>
+  <div class="header-meta">
+    <div class="meta-item"><span class="meta-label">Subject</span><span class="meta-value">Lydia Bauer (lydiab)</span></div>
+    <div class="meta-item"><span class="meta-label">Department</span><span class="meta-value">Technology</span></div>
+    <div class="meta-item"><span class="meta-label">Manager</span><span class="meta-value">Carlos Slattery</span></div>
+    <div class="meta-item"><span class="meta-label">Device</span><span class="meta-value">lydiab-pc.zava-corp.com</span></div>
+    <div class="meta-item"><span class="meta-label">Compromise Date</span><span class="meta-value">2026-01-08T13:09 UTC</span></div>
+    <div class="meta-item"><span class="meta-label">Incidents</span><span class="meta-value">&#35;36193 (Ransomware), &#35;40597 (Phishing)</span></div>
+  </div>
+</div>
+
+<!-- ===== CRITICAL BANNERS ===== -->
+<div class="criticality-banner">
+  <span class="icon">&#x1F6A8;</span>
+  <div>
+    <div class="title">CONFIRMED COMPROMISE -- 2026-01-08T13:09:08 UTC -- Kyiv, Ukraine (185.156.72.7)</div>
+    <div class="sub">AADRiskyUsers: HIGH / confirmedCompromised | MFA bypassed via MFA_Demo_Exclusion group manipulation | Attacker maintained access through 2026-01-12</div>
+  </div>
+</div>
+<div class="criticality-banner" style="background:linear-gradient(90deg,#3d1a00,#5d2600)">
+  <span class="icon">&#x1F480;</span>
+  <div>
+    <div class="title">LOCKBIT RANSOMWARE -- 2025-12-02 -- lydiab-pc -- Files Encrypted</div>
+    <div class="sub">Operator: johniemcc@zava-corp.com via WMI (10.2.0.8) | vssadmin delete shadows /all | bcdedit recovery disabled | Incident &#35;36193 MultiStagedAttack TruePositive</div>
+  </div>
+</div>
+<div class="criticality-banner" style="background:linear-gradient(90deg,#2d1f47,#3d2a5a)">
+  <span class="icon">&#x1F4A5;</span>
+  <div>
+    <div class="title">BLAST RADIUS -- elviaa@zava-corp.com -- 185 sign-ins from attacker IP 192.159.99.162 on 2026-02-02</div>
+    <div class="sub">Accessed Azure Portal, AAD admin, RegisteredApps from same attacker IP. Secondary compromise highly probable. Immediate investigation required.</div>
+  </div>
+</div>
+
+<!-- ===== SECTION 1 -- EXECUTIVE SUMMARY ===== -->
+<h2>1. Executive Summary</h2>
+<div class="card">
+<p style="margin-bottom:.75rem">This report presents findings from a deep forensic investigation of <strong>Lydia Bauer (lydiab@zava-corp.com)</strong>, a Technology department user at Zava Corp, and her assigned workstation <strong>lydiab-pc.zava-corp.com</strong>. The investigation covers 365 days of telemetry collected from Microsoft Sentinel (CyberSOC workspace), Microsoft Defender for Endpoint, and Microsoft Defender for Office 365.</p>
+
+<p style="margin-bottom:.75rem">The investigation uncovered <strong>three overlapping threat campaigns</strong> targeting this identity:</p>
+
+<div class="highlight-box">
+<strong>Campaign 1 -- Privilege Reconnaissance (August--September 2025)</strong><br>
+An unknown threat actor used multiple anonymizing proxies (Tor exit nodes, Vienna, Seychelles, Netherlands) to access Azure admin portals -- including Privileged Identity Management (PIM) and Entra ID RegisteredApps -- using lydiab's credentials. 63 sign-ins from a single Tor exit node in Germany on 2025-08-27 suggest systematic privilege enumeration.
+</div>
+
+<div class="highlight-box">
+<strong>Campaign 2 -- Account Compromise via Phishing + MFA Bypass (January 8, 2026)</strong><br>
+lydiab received a targeted spearphishing email on 2026-01-06 containing a malicious Azure ContainerApps URL. On 2026-01-08, her account was used to distribute phishing to other users. An unknown actor manipulated her MFA exclusion group membership (<strong>MFA_Demo_Exclusion</strong>) twice -- bypassing Conditional Access controls. A brute-force attack from Kyiv, Ukraine (<strong>185.156.72.7</strong>) succeeded at 13:09 UTC. Critically, an admin re-enabled the account at 10:04 after an automated disable -- directly enabling the successful compromise two hours later. The account was confirmed compromised by Azure AD Identity Protection at 13:09 UTC.
+</div>
+
+<div class="highlight-box" style="background:rgba(248,81,73,.12);border-color:rgba(248,81,73,.5)">
+<strong>Campaign 3 -- LockBit Ransomware Lateral Movement (December 2, 2025)</strong><br>
+User <strong>johniemcc@zava-corp.com</strong> conducted a hands-on-keyboard ransomware attack originating from internal IP <strong>10.2.0.8</strong>, using Windows Management Instrumentation (WMI) to execute remote commands on lydiab-pc. Shadow copies were deleted, boot recovery disabled, and files in lydiab's OneDrive Documents\Projets folder were encrypted with the <strong>.lockbit</strong> extension. User <strong>aaronb@zava-corp.com</strong> was also implicated. This constitutes Incident &#35;36193 -- classified as MultiStagedAttack/TruePositive by MDE.
+</div>
+
+<p><strong>Key Finding:</strong> These campaigns may be interconnected -- the August 2025 reconnaissance may have provided the attacker with sufficient knowledge to craft the targeted phishing campaign in January 2026. The LockBit ransomware deployment in December 2025 by johniemcc may indicate a pre-positioned threat actor who obtained credentials through the same August reconnaissance activity.</p>
+</div>
+
+<!-- KPI STATS -->
+<div class="card-grid">
+  <div class="stat-box"><div class="stat-number stat-red">2</div><div class="stat-label">Confirmed Incidents</div></div>
+  <div class="stat-box"><div class="stat-number stat-red">14</div><div class="stat-label">Distinct Source IPs</div></div>
+  <div class="stat-box"><div class="stat-number stat-orange">3</div><div class="stat-label">Attacker IPs (anonymized)</div></div>
+  <div class="stat-box"><div class="stat-number stat-red">13</div><div class="stat-label">High Risk Sign-In Events (Kyiv)</div></div>
+  <div class="stat-box"><div class="stat-number stat-red">14</div><div class="stat-label">Security Alerts Generated</div></div>
+  <div class="stat-box"><div class="stat-number stat-orange">6</div><div class="stat-label">Ransomware Artifacts (.lockbit)</div></div>
+  <div class="stat-box"><div class="stat-number stat-orange">2</div><div class="stat-label">MFA Bypass Events</div></div>
+  <div class="stat-box"><div class="stat-number stat-yellow">18</div><div class="stat-label">MITRE ATT&amp;CK Techniques</div></div>
+  <div class="stat-box"><div class="stat-number stat-yellow">185</div><div class="stat-label">Blast Radius Sign-ins (elviaa)</div></div>
+  <div class="stat-box"><div class="stat-number stat-green">0</div><div class="stat-label">TI Hits (Novel Threat Actor)</div></div>
+</div>
+
+<!-- ===== SECTION 2 -- IDENTITY PROFILE ===== -->
+<h2>2. Identity Profile</h2>
+<div class="two-col">
+<div class="card">
+  <h3>User Account Details</h3>
+  <table>
+    <tr><th>Attribute</th><th>Value</th></tr>
+    <tr><td>Display Name</td><td><strong>Lydia Bauer</strong></td></tr>
+    <tr><td>UPN</td><td><code>lydiab@zava-corp.com</code></td></tr>
+    <tr><td>AAD Object ID</td><td><code>10aa82fa-c500-476e-882b-08a9f9b3f3e6</code></td></tr>
+    <tr><td>SID</td><td><code>S-1-5-21-4059190129-3803843963-274501666-1113</code></td></tr>
+    <tr><td>Department</td><td>Technology</td></tr>
+    <tr><td>Manager</td><td>Carlos Slattery</td></tr>
+    <tr><td>City</td><td>Vancouver</td></tr>
+    <tr><td>Account Status</td><td><span class="badge badge-critical">DISABLED (post-incident)</span></td></tr>
+    <tr><td>Admin Roles</td><td>None</td></tr>
+    <tr><td>Critical Asset Tag</td><td><span class="badge" style="background:#e65100">&#x2605; Critical Asset (M365D)</span></td></tr>
+  </table>
+</div>
+<div class="card">
+  <h3>Device: lydiab-pc</h3>
+  <table>
+    <tr><th>Attribute</th><th>Value</th></tr>
+    <tr><td>FQDN</td><td><code>lydiab-pc.zava-corp.com</code></td></tr>
+    <tr><td>OS</td><td>Windows 11 24H2</td></tr>
+    <tr><td>AAD Device ID</td><td><code>b10d1e8a-9fed-4ad9-9aff-90cb0d7a4ac0</code></td></tr>
+    <tr><td>MDE Device ID</td><td><code>d4fc81471a541de6830da592cf726bcae00fce45</code></td></tr>
+    <tr><td>Internal IP</td><td><code>10.2.0.110</code></td></tr>
+    <tr><td>External IP</td><td><code>4.152.23.243</code> (Boydton, VA -- Azure)</td></tr>
+    <tr><td>Last Seen</td><td>2026-03-11T17:09 UTC</td></tr>
+    <tr><td>Onboarding</td><td><span class="badge badge-green">Onboarded (MDE)</span></td></tr>
+    <tr><td>Logged On Users</td><td>lydiab (ZAVA-CORP domain)</td></tr>
+  </table>
+</div>
+</div>
+
+<div class="card">
+  <h3>Group Memberships (IdentityInfo)</h3>
+  <div style="display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.5rem">
+    <span class="badge" style="background:#1b5e20">Vallee Nevado</span>
+    <span class="badge" style="background:#37474f">All Users - No Guest</span>
+    <span class="badge" style="background:#37474f">zava users manual</span>
+    <span class="badge" style="background:#37474f">Zava users</span>
+    <span class="badge" style="background:#1a237e">Zava Dev team</span>
+    <span class="badge" style="background:#7b0000">&#x26A0; MFA exclusion eligibility</span>
+    <span class="badge" style="background:#7b0000">&#x26A0; MFA_Demo_Exclusion (manipulated Jan 8)</span>
+  </div>
+  <p style="margin-top:.75rem;font-size:12px;color:var(--muted)">Note: Membership in <strong>MFA exclusion eligibility</strong> and <strong>MFA_Demo_Exclusion</strong> were exploited by the attacker to bypass MFA/Conditional Access controls.</p>
+</div>
+
+<!-- ===== SECTION 3 -- SIGN-IN ANALYSIS ===== -->
+<h2>3. Sign-In Analysis with Geolocation (365 Days)</h2>
+<div class="card">
+<div class="highlight-box">
+  <strong>Summary:</strong> 14 distinct IP addresses recorded over 365 days. 3 confirmed attacker IPs with anonymizedIPAddress risk tags. Tor exit node access (Erlangen, Germany) indicating privacy tool usage. Multiple European proxy IPs accessing Entra admin interfaces. Primary attack from Ukraine (Kyiv) in January 2026.
+</div>
+<table>
+  <thead><tr>
+    <th>IP Address</th><th>Country</th><th>City</th><th>Total</th><th>Success</th><th>Fail</th><th>High Risk</th><th>First Seen</th><th>Last Seen</th><th>Applications</th><th>Device</th><th>Classification</th>
+  </tr></thead>
+  <tbody>    <tr >
+      <td><code>4.152.23.243</code></td>
+      <td>US</td>
+      <td>Boydton, VA</td>
+      <td><strong>28</strong></td>
+      <td style="color:var(--green)">16</td>
+      <td style="color:var(--red)">12</td>
+      <td style="color:var(--muted)"><strong>0</strong></td>
+      <td style="font-size:11px">2025-07-29</td>
+      <td style="font-size:11px">2026-01-08</td>
+      <td style="font-size:11px;max-width:200px">Windows Sign In, OneDrive, Auth Broker, GSA Client, Office</td>
+      <td><code style="font-size:10px">lydiab-pc</code></td>
+      <td><span class="badge badge-green">Legitimate</span></td>
+    </tr>    <tr >
+      <td><code>128.94.2.x</code></td>
+      <td>US</td>
+      <td>Boydton, VA</td>
+      <td><strong>8</strong></td>
+      <td style="color:var(--green)">8</td>
+      <td style="color:var(--muted)">0</td>
+      <td style="color:var(--muted)"><strong>0</strong></td>
+      <td style="font-size:11px">2025-08-27</td>
+      <td style="font-size:11px">2025-08-27</td>
+      <td style="font-size:11px;max-width:200px">Outlook, Teams, Support</td>
+      <td><code style="font-size:10px">lydiab-pc</code></td>
+      <td><span class="badge badge-green">Legitimate</span></td>
+    </tr>    <tr style="background:rgba(210,153,34,.05)" style="background:rgba(251,133,0,.04)">
+      <td><code>185.220.100.251</code></td>
+      <td>DE</td>
+      <td>Erlangen/Hassfurt</td>
+      <td><strong>63</strong></td>
+      <td style="color:var(--green)">61</td>
+      <td style="color:var(--red)">2</td>
+      <td style="color:var(--muted)"><strong>0</strong></td>
+      <td style="font-size:11px">2025-08-27</td>
+      <td style="font-size:11px">2025-08-27</td>
+      <td style="font-size:11px;max-width:200px">Azure Portal, PIMCommon, ADIbizaUX, RegisteredApps</td>
+      <td><code style="font-size:10px">none</code></td>
+      <td><span class="badge badge-medium">Tor Exit Node</span> <span class="badge badge-medium">Suspicious</span></td>
+    </tr>    <tr style="background:rgba(251,133,0,.04)">
+      <td><code>185.56.83.83</code></td>
+      <td>CH</td>
+      <td>Zurich</td>
+      <td><strong>24</strong></td>
+      <td style="color:var(--green)">24</td>
+      <td style="color:var(--muted)">0</td>
+      <td style="color:var(--muted)"><strong>0</strong></td>
+      <td style="font-size:11px">2025-08-28</td>
+      <td style="font-size:11px">2025-08-28</td>
+      <td style="font-size:11px;max-width:200px">Azure Portal, ADIbizaUX, RegisteredApps</td>
+      <td><code style="font-size:10px">none</code></td>
+      <td><span class="badge badge-medium">Suspicious</span></td>
+    </tr>    <tr style="background:rgba(251,133,0,.04)">
+      <td><code>45.84.107.55</code></td>
+      <td>DE</td>
+      <td>Stuttgart</td>
+      <td><strong>8</strong></td>
+      <td style="color:var(--green)">3</td>
+      <td style="color:var(--red)">5</td>
+      <td style="color:var(--muted)"><strong>0</strong></td>
+      <td style="font-size:11px">2025-08-27</td>
+      <td style="font-size:11px">2025-08-27</td>
+      <td style="font-size:11px;max-width:200px">Azure Portal</td>
+      <td><code style="font-size:10px">none</code></td>
+      <td><span class="badge badge-medium">Suspicious</span></td>
+    </tr>    <tr style="background:rgba(251,133,0,.04)">
+      <td><code>195.47.238.93</code></td>
+      <td>SE</td>
+      <td>Partille</td>
+      <td><strong>6</strong></td>
+      <td style="color:var(--green)">6</td>
+      <td style="color:var(--muted)">0</td>
+      <td style="color:var(--muted)"><strong>0</strong></td>
+      <td style="font-size:11px">2025-08-28</td>
+      <td style="font-size:11px">2025-08-28</td>
+      <td style="font-size:11px;max-width:200px">Azure Portal</td>
+      <td><code style="font-size:10px">none</code></td>
+      <td><span class="badge badge-medium">Suspicious</span></td>
+    </tr>    <tr style="background:rgba(251,133,0,.04)">
+      <td><code>45.66.35.35</code></td>
+      <td>SC</td>
+      <td>Seychelles</td>
+      <td><strong>2</strong></td>
+      <td style="color:var(--green)">2</td>
+      <td style="color:var(--muted)">0</td>
+      <td style="color:var(--muted)"><strong>0</strong></td>
+      <td style="font-size:11px">2025-08-27</td>
+      <td style="font-size:11px">2025-08-27</td>
+      <td style="font-size:11px;max-width:200px">Azure Portal</td>
+      <td><code style="font-size:10px">none</code></td>
+      <td><span class="badge badge-medium">Unusual Jurisdiction</span> <span class="badge badge-medium">Suspicious</span></td>
+    </tr>    <tr style="background:rgba(251,133,0,.04)">
+      <td><code>192.42.116.194</code></td>
+      <td>NL</td>
+      <td>Nieuwegein</td>
+      <td><strong>8</strong></td>
+      <td style="color:var(--green)">4</td>
+      <td style="color:var(--red)">4</td>
+      <td style="color:var(--muted)"><strong>0</strong></td>
+      <td style="font-size:11px">2025-08-27</td>
+      <td style="font-size:11px">2025-08-31</td>
+      <td style="font-size:11px;max-width:200px">ZavaBot</td>
+      <td><code style="font-size:10px">none</code></td>
+      <td><span class="badge badge-medium">Suspicious</span></td>
+    </tr>    <tr style="background:rgba(248,81,73,.05)">
+      <td><code>109.70.100.68</code></td>
+      <td>AT</td>
+      <td>Wien (Wieden)</td>
+      <td><strong>19</strong></td>
+      <td style="color:var(--green)">12</td>
+      <td style="color:var(--red)">7</td>
+      <td style="color:var(--red)"><strong>9</strong></td>
+      <td style="font-size:11px">2025-08-28</td>
+      <td style="font-size:11px">2025-09-02</td>
+      <td style="font-size:11px;max-width:200px">ZavaBot, Azure Portal</td>
+      <td><code style="font-size:10px">none</code></td>
+      <td><span class="badge badge-high">ATTACKER</span></td>
+    </tr>    <tr style="background:rgba(248,81,73,.05)">
+      <td><code>192.159.99.162</code></td>
+      <td>US</td>
+      <td>Hamburg, MI</td>
+      <td><strong>8</strong></td>
+      <td style="color:var(--green)">1</td>
+      <td style="color:var(--red)">7</td>
+      <td style="color:var(--red)"><strong>8</strong></td>
+      <td style="font-size:11px">2026-01-08</td>
+      <td style="font-size:11px">2026-01-08</td>
+      <td style="font-size:11px;max-width:200px">ZavaBot only</td>
+      <td><code style="font-size:10px">none</code></td>
+      <td><span class="badge badge-high">ATTACKER</span></td>
+    </tr>    <tr style="background:rgba(248,81,73,.08)" style="background:rgba(248,81,73,.05)">
+      <td><code>185.156.72.7</code></td>
+      <td>UA</td>
+      <td>Kyiv</td>
+      <td><strong>14</strong></td>
+      <td style="color:var(--green)">6</td>
+      <td style="color:var(--red)">8</td>
+      <td style="color:var(--red)"><strong>13</strong></td>
+      <td style="font-size:11px">2026-01-08</td>
+      <td style="font-size:11px">2026-01-12</td>
+      <td style="font-size:11px;max-width:200px">ZavaBot only</td>
+      <td><code style="font-size:10px">none</code></td>
+      <td><span class="badge badge-critical">ATTACKER PRIMARY</span> <span class="badge badge-high">ATTACKER</span></td>
+    </tr>  </tbody>
+</table>
+</div>
+
+<!-- ===== SECTION 4 -- AUDIT LOG EVIDENCE ===== -->
+<h2>4. AuditLog Evidence</h2>
+<div class="card">
+<div class="highlight-box">
+  <strong>Critical Finding:</strong> AuditLogs reveal the attacker added lydiab to the <strong>MFA_Demo_Exclusion</strong> group at 08:49 and again at 12:08 on Jan 8, 2026 -- directly enabling MFA bypass for the successful compromise at 13:09. The actor performing these group changes had no UPN logged (service account or privileged access), hindering attribution. An admin manually re-enabled the account at 10:04 after automated protection disabled it at 09:11, providing the attacker a second attack window.
+</div>
+<table>
+  <thead><tr><th>Time (UTC)</th><th>Operation</th><th>Target</th><th>Initiated By</th><th>Result</th><th>Significance</th></tr></thead>
+  <tbody><tr style="background:rgba(248,81,73,.06)"><td style='font-family:monospace;font-size:11px'>2026-01-08T08:49Z</td><td>Add member to group</td><td><code style='font-size:11px'>MFA_Demo_Exclusion (x3)</code></td><td style='font-size:11px'>Unknown (no UPN)</td><td><span class='badge badge-green'>success</span></td><td style='font-size:11px'><span class="badge badge-critical">ATTACKER ACTION</span> ATTACKER -- MFA bypass activation</td></tr>
+<tr style="background:rgba(63,185,80,.04)"><td style='font-family:monospace;font-size:11px'>2026-01-08T09:09Z</td><td>Update StsRefreshTokenValidFrom</td><td><code style='font-size:11px'>lydiab@zava-corp.com</code></td><td style='font-size:11px'>SP: 60ca1954</td><td><span class='badge badge-green'>success</span></td><td style='font-size:11px'><span class="badge badge-green">AUTO-IR</span> Auto-remediation -- token invalidation</td></tr>
+<tr style="background:rgba(63,185,80,.04)"><td style='font-family:monospace;font-size:11px'>2026-01-08T09:11Z</td><td>Disable account</td><td><code style='font-size:11px'>lydiab@zava-corp.com</code></td><td style='font-size:11px'>SP: 60ca1954</td><td><span class='badge badge-green'>success</span></td><td style='font-size:11px'><span class="badge badge-green">AUTO-IR</span> Auto-remediation -- account disabled</td></tr>
+<tr style="background:rgba(248,81,73,.06)"><td style='font-family:monospace;font-size:11px'>2026-01-08T10:04Z</td><td>Enable account</td><td><code style='font-size:11px'>lydiab@zava-corp.com</code></td><td style='font-size:11px'>u101@a.alpineskihouse.co (172.211.115.89)</td><td><span class='badge badge-green'>success</span></td><td style='font-size:11px'><span class="badge badge-high">ADMIN ERROR</span> ADMIN ERROR -- account re-enabled, attack resumes</td></tr>
+<tr style="background:rgba(63,185,80,.04)"><td style='font-family:monospace;font-size:11px'>2026-01-08T11:54Z</td><td>Remove member from group</td><td><code style='font-size:11px'>MFA_Demo_Exclusion</code></td><td style='font-size:11px'>Unknown</td><td><span class='badge badge-green'>success</span></td><td style='font-size:11px'>Partial remediation of MFA bypass</td></tr>
+<tr style="background:rgba(248,81,73,.06)"><td style='font-family:monospace;font-size:11px'>2026-01-08T12:08Z</td><td>Add member to group</td><td><code style='font-size:11px'>MFA_Demo_Exclusion</code></td><td style='font-size:11px'>Unknown (no UPN)</td><td><span class='badge badge-green'>success</span></td><td style='font-size:11px'><span class="badge badge-critical">ATTACKER ACTION</span> ATTACKER -- MFA bypass re-applied. Enables 13:09 compromise.</td></tr>
+<tr style="background:rgba(63,185,80,.04)"><td style='font-family:monospace;font-size:11px'>2026-01-08T15:19Z</td><td>Remove member from group</td><td><code style='font-size:11px'>MFA_Demo_Exclusion (x2)</code></td><td style='font-size:11px'>Unknown</td><td><span class='badge badge-green'>success</span></td><td style='font-size:11px'>Final MFA bypass remediation</td></tr>
+<tr ><td style='font-family:monospace;font-size:11px'>2026-01-22T17:12Z</td><td>Change user password + StsRefreshToken update</td><td><code style='font-size:11px'>lydiab@zava-corp.com</code></td><td style='font-size:11px'>DirectorySync</td><td><span class='badge badge-green'>success</span></td><td style='font-size:11px'>Post-incident password reset #1</td></tr>
+<tr ><td style='font-family:monospace;font-size:11px'>2026-01-23T07:43Z</td><td>Change user password x3 + StsRefreshToken update x3 + PasswordProfile update x3</td><td><code style='font-size:11px'>lydiab@zava-corp.com</code></td><td style='font-size:11px'>DirectorySync</td><td><span class='badge badge-green'>success</span></td><td style='font-size:11px'>Full post-incident credential reset #2</td></tr>
+<tr style="background:rgba(63,185,80,.04)"><td style='font-family:monospace;font-size:11px'>2026-02-10T12:20Z</td><td>Disable account (final)</td><td><code style='font-size:11px'>lydiab@zava-corp.com</code></td><td style='font-size:11px'>DirectorySync</td><td><span class='badge badge-green'>success</span></td><td style='font-size:11px'>Final account deprovisioning -- incident closed</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ===== SECTION 5 -- SECURITY ALERTS ===== -->
+<h2>5. Security Alert Summary</h2>
+<div class="card">
+<table>
+  <thead><tr><th>Time</th><th>Alert</th><th>Severity</th><th>Tactic</th><th>Techniques</th><th>Incident</th><th>Source</th><th>Classification</th></tr></thead>
+  <tbody><tr><td style='font-size:11px;font-family:monospace'>2026-03-11T15:29</td><td><strong>Possible ransomware activity (LockBit extension)</strong></td><td><span class="badge badge-high">High</span></td><td style='font-size:11px'>LateralMovement, Collection, Impact</td><td style='font-size:11px;font-family:monospace'>T1021, T1039, T1486</td><td><span class='badge badge-blue'>&#35;36193</span></td><td>MDE</td><td style='font-size:11px'>TruePositive/MultiStagedAttack</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T15:29</td><td><strong>File backups were deleted (vssadmin delete shadows /all)</strong></td><td><span class="badge badge-high">High</span></td><td style='font-size:11px'>Impact</td><td style='font-size:11px;font-family:monospace'>T1490</td><td><span class='badge badge-blue'>&#35;36193</span></td><td>MDE</td><td style='font-size:11px'>TruePositive/MultiStagedAttack</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T15:29</td><td><strong>System recovery setting tampering (bcdedit)</strong></td><td><span class="badge badge-high">High</span></td><td style='font-size:11px'>Impact</td><td style='font-size:11px;font-family:monospace'>T1490</td><td><span class='badge badge-blue'>&#35;36193</span></td><td>MDE</td><td style='font-size:11px'>TruePositive/MultiStagedAttack</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T15:29</td><td><strong>Suspicious WMI process creation (wmiprvse.exe)</strong></td><td><span class="badge badge-medium">Medium</span></td><td style='font-size:11px'>DefenseEvasion, Discovery, Execution</td><td style='font-size:11px;font-family:monospace'>T1047, T1497</td><td><span class='badge badge-blue'>&#35;36193</span></td><td>MDE</td><td style='font-size:11px'>TruePositive/MultiStagedAttack</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T15:29</td><td><strong>Suspicious remote activity (WMI lateral movement)</strong></td><td><span class="badge badge-medium">Medium</span></td><td style='font-size:11px'>LateralMovement, Execution, C2</td><td style='font-size:11px;font-family:monospace'>T1021, T1047, T1105, T1569</td><td><span class='badge badge-blue'>&#35;36193</span></td><td>MDE</td><td style='font-size:11px'>TruePositive/MultiStagedAttack</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T15:29</td><td><strong>Hands-on-keyboard attack involving multiple devices</strong></td><td><span class="badge badge-high">High</span></td><td style='font-size:11px'>LateralMovement, Impact</td><td style='font-size:11px;font-family:monospace'>T1021, T1490</td><td><span class='badge badge-blue'>&#35;36193</span></td><td>MDE</td><td style='font-size:11px'>TruePositive/MultiStagedAttack</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T15:29</td><td><strong>Potentially compromised assets exhibiting ransomware behavior (x2)</strong></td><td><span class="badge badge-high">High</span></td><td style='font-size:11px'>LateralMovement, Collection</td><td style='font-size:11px;font-family:monospace'>T1021, T1039</td><td><span class='badge badge-blue'>&#35;36193</span></td><td>MDE</td><td style='font-size:11px'>TruePositive/MultiStagedAttack</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T15:29</td><td><strong>Possible compromised user delivering ransomware files (johniemcc)</strong></td><td><span class="badge badge-high">High</span></td><td style='font-size:11px'>LateralMovement, Collection, Impact</td><td style='font-size:11px;font-family:monospace'>T1021, T1039, T1486, T1570</td><td><span class='badge badge-blue'>&#35;36193</span></td><td>MDE</td><td style='font-size:11px'>TruePositive/MultiStagedAttack</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T15:29</td><td><strong>Potential human-operated malicious activity</strong></td><td><span class="badge badge-high">High</span></td><td style='font-size:11px'>Unknown</td><td style='font-size:11px;font-family:monospace'></td><td><span class='badge badge-blue'>&#35;36193</span></td><td>MDE</td><td style='font-size:11px'>TruePositive/MultiStagedAttack</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T15:29</td><td><strong>Risk of tampering using Safe Mode reboot (ransomware disruption)</strong></td><td><span class="badge badge-high">High</span></td><td style='font-size:11px'>DefenseEvasion, LateralMovement, Collection</td><td style='font-size:11px;font-family:monospace'>T1021, T1039, T1562.009</td><td><span class='badge badge-blue'>&#35;36193</span></td><td>MDE</td><td style='font-size:11px'>TruePositive/MultiStagedAttack</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T18:17</td><td><strong>Compromised user account in a recognized attack pattern (lydiab)</strong></td><td><span class="badge badge-high">High</span></td><td style='font-size:11px'>CredentialAccess, Collection</td><td style='font-size:11px;font-family:monospace'>T1557, T1110, T1212, T1539</td><td><span class='badge badge-blue'>&#35;40597</span></td><td>M365D</td><td style='font-size:11px'>TruePositive/Phishing</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T18:17</td><td><strong>Email reported by user as malware/phish (received Jan 6)</strong></td><td><span class="badge badge-low">Low</span></td><td style='font-size:11px'>InitialAccess, Probing</td><td style='font-size:11px;font-family:monospace'>T1566</td><td><span class='badge badge-blue'>&#35;40597</span></td><td>OATP</td><td style='font-size:11px'>TruePositive/Phishing</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T18:17</td><td><strong>Email messages containing malicious URL removed after delivery</strong></td><td><span class="badge badge-info">Info</span></td><td style='font-size:11px'>InitialAccess, Probing</td><td style='font-size:11px;font-family:monospace'>T1566</td><td><span class='badge badge-blue'>&#35;40597</span></td><td>OATP</td><td style='font-size:11px'>TruePositive/Phishing</td></tr>
+<tr><td style='font-size:11px;font-family:monospace'>2026-03-11T18:19</td><td><strong>Suspicious URL clicked (lydiab-pc -- phishing link)</strong></td><td><span class="badge badge-high">High</span></td><td style='font-size:11px'>InitialAccess</td><td style='font-size:11px;font-family:monospace'>T1566.002</td><td><span class='badge badge-blue'>&#35;40597</span></td><td>MDATP</td><td style='font-size:11px'>TruePositive/Phishing</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ===== SECTION 6 -- EVENT TIMELINE ===== -->
+<h2>6. Full Event Timeline (Chronological)</h2>
+<div class="card">
+<div style="margin-bottom:1rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center">
+  <span style="font-size:11px;color:var(--muted)">Phase Legend:</span>
+  <span class='badge' style='background:transparent;border:1px solid #00bcd4;color:#00bcd4'>&#9632; Detection</span> <span class='badge' style='background:transparent;border:1px solid #d29922;color:#d29922'>&#9632; Reconnaissance</span> <span class='badge' style='background:transparent;border:1px solid #bc8cff;color:#bc8cff'>&#9632; BlastRadius</span> <span class='badge' style='background:transparent;border:1px solid #c62828;color:#c62828'>&#9632; Compromise</span> <span class='badge' style='background:transparent;border:1px solid #fb8500;color:#fb8500'>&#9632; Phishing</span> <span class='badge' style='background:transparent;border:1px solid #58a6ff;color:#58a6ff'>&#9632; Remediation</span> <span class='badge' style='background:transparent;border:1px solid #f85149;color:#f85149'>&#9632; Ransomware</span> <span class='badge' style='background:transparent;border:1px solid #3fb950;color:#3fb950'>&#9632; Response</span>
+</div>
+<div class="timeline">
+<div class="tl-item">
+  <div class="tl-dot tl-medium"></div>
+  <div class="tl-content">
+    <span class="tl-date">2025-07-29</span><span class="tl-phase tl-phase-recon">&#9654; Recon</span>
+    <div class="tl-event">Earliest recorded sign-in from corporate device lydiab-pc (4.152.23.243). Baseline established.</div>
+    <div class='tl-ip'>IP: 4.152.23.243</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2025-08-27</span><span class="tl-phase tl-phase-recon">&#9654; Recon</span>
+    <div class="tl-event">63 sign-ins in a single day from Tor exit node 185.220.100.251 (DE). Accessed Azure Portal, PIM, Privileged Identity Management (PIMCommon), RegisteredApps. Likely privilege enumeration.</div>
+    <div class='tl-ip'>IP: 185.220.100.251</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-medium"></div>
+  <div class="tl-content">
+    <span class="tl-date">2025-08-27</span><span class="tl-phase tl-phase-recon">&#9654; Recon</span>
+    <div class="tl-event">Sign-ins from Stuttgart (45.84.107.55, DE), Seychelles (45.66.35.35) and Netherlands (192.42.116.194). Multiple Azure admin portals accessed.</div>
+    <div class='tl-ip'>IP: 45.84.107.55 / 45.66.35.35 / 192.42.116.194</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2025-08-28</span><span class="tl-phase tl-phase-recon">&#9654; Recon</span>
+    <div class="tl-event">19 sign-ins from Vienna proxy 109.70.100.68 (AT). Used ZavaBot and Azure Portal. 9 high-risk events flagged. anonymizedIPAddress risk tag. Attacker probing ZavaBot service.</div>
+    <div class='tl-ip'>IP: 109.70.100.68</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-medium"></div>
+  <div class="tl-content">
+    <span class="tl-date">2025-08-28</span><span class="tl-phase tl-phase-recon">&#9654; Recon</span>
+    <div class="tl-event">Sign-ins from Zurich (CH) and Partille (SE) accessing Azure Portal and admin portals. Part of reconnaissance sweep.</div>
+    <div class='tl-ip'>IP: 185.56.83.83 / 195.47.238.93</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-critical"></div>
+  <div class="tl-content">
+    <span class="tl-date">2025-12-02</span><span class="tl-phase tl-phase-ransomware">&#9654; Ransomware</span>
+    <div class="tl-event">LockBit ransomware kernel process (ntoskrnl via PID 4) executes on lydiab-pc. Orchestrated by user johniemcc via lateral movement from internal IP 10.2.0.8 using WMI.</div>
+    <div class='tl-ip'>IP: 10.2.0.8 (internal)</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-critical"></div>
+  <div class="tl-content">
+    <span class="tl-date">2025-12-02</span><span class="tl-phase tl-phase-ransomware">&#9654; Ransomware</span>
+    <div class="tl-event">wmiprvse.exe (WMI Provider Host) spawned by svchost.exe. Used as execution vehicle by johniemcc to run ransomware preparation commands on lydiab-pc.</div>
+    <div class='tl-ip'>IP: 10.2.0.8 (internal)</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-critical"></div>
+  <div class="tl-content">
+    <span class="tl-date">2025-12-02</span><span class="tl-phase tl-phase-ransomware">&#9654; Ransomware</span>
+    <div class="tl-event">bcdedit /set recoveryenabled no executed via WMI. Boot recovery disabled to prevent ransomware recovery. MITRE T1490.</div>
+    <div class='tl-ip'>IP: 10.2.0.8 (internal)</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-critical"></div>
+  <div class="tl-content">
+    <span class="tl-date">2025-12-02</span><span class="tl-phase tl-phase-ransomware">&#9654; Ransomware</span>
+    <div class="tl-event">vssadmin.exe delete shadows /all executed x2. ALL volume shadow copies deleted. Files in C:\Users\lydiab\OneDrive - Zava\Documents\Projets encrypted with .lockbit extension. MITRE T1486.</div>
+    <div class='tl-ip'>IP: 10.2.0.8 (internal)</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-critical"></div>
+  <div class="tl-content">
+    <span class="tl-date">2025-12-02</span><span class="tl-phase tl-phase-ransomware">&#9654; Ransomware</span>
+    <div class="tl-event">Second wave: bcdedit /set recoveryenabled no x2 + vssadmin delete shadows from additional attack vector. User aaronb@zava-corp.com also implicated. MITRE T1021.002 lateral spreading.</div>
+    <div class='tl-ip'>IP: 10.2.0.8 (internal)</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-06</span><span class="tl-phase tl-phase-phishing">&#9654; Phishing</span>
+    <div class="tl-event">Lydia Bauer receives phishing email &#39;New design spec Process | SpecDis-2404&#39; to lydiab@zava-corp.com. Email contains malicious URL: http://rk064621124.calmbeach-7b8d6466.centralus.azurecontainerapps.io/</div>
+    <div class='tl-ip'>IP: 20.190.151.38 (sender)</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-info"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">Normal start of day: lydiab-pc logs in from Boydton VA (4.152.23.243) via Windows Sign In. Legitimate device activity observed.</div>
+    <div class='tl-ip'>IP: 4.152.23.243</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">COMPROMISED EMAIL USED: Phishing email sent FROM lydiab@zava-corp.com to msftadmin@valleenevado.onmicrosoft.com. Contains same malicious URL. Attacker using compromised account for phishing distribution. Classified as HighConfPhish.</div>
+    <div class='tl-ip'>IP: 128.94.2.172</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-medium"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">lydiab reports phishing email to security (may be unaware her account is being used to spread it). Email marked Malicious by Defender for Office 365.</div>
+    
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-critical"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">CRITICAL -- MFA BYPASS: lydiab added to group &#39;MFA_Demo_Exclusion&#39; x3 (GroupID: 71b9455a-3054-4ef8-970b-598d42dc6a34). Unknown actor bypasses MFA requirement for lydiab. CorrelationId: 6ded9848.</div>
+    
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">Attacker begins credential probing from US proxy 192.159.99.162 (Hamburg, MI). ZavaBot application used. 8 sign-in attempts. anonymizedIPAddress risk flag. 7 failures.</div>
+    <div class='tl-ip'>IP: 192.159.99.162</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-medium"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-response">&#9654; Response</span>
+    <div class="tl-event">Automated IR: StsRefreshTokensValidFrom timestamp updated -- all existing refresh tokens for lydiab invalidated. Executed by Service Principal 60ca1954.</div>
+    
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-medium"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-response">&#9654; Response</span>
+    <div class="tl-event">Automated IR: lydiab account DISABLED by Service Principal 60ca1954 via kiota-dotnet. Automated Identity Protection response.</div>
+    
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-critical"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-response">&#9654; Response</span>
+    <div class="tl-event">CRITICAL ERROR -- ADMIN RE-ENABLES ACCOUNT: u101@a.alpineskihouse.co from 172.211.115.89 re-enables lydiab account (AccountEnabled: false-&gt;true). This allows the attack to resume.</div>
+    <div class='tl-ip'>IP: 172.211.115.89</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-medium"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-response">&#9654; Response</span>
+    <div class="tl-event">Admin removes lydiab from MFA_Demo_Exclusion group. First successful MFA remediation.</div>
+    
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-critical"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">ATTACKER RE-ADDS MFA BYPASS: lydiab added back to MFA_Demo_Exclusion group. Attacker has persistent access to group management. MFA now bypassed again.</div>
+    
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">Attacker switches to Kyiv IP 185.156.72.7 (UA). Brute force begins. ResultType 50140 (KMSI interrupt) used to probe session state. anonymizedIPAddress risk.</div>
+    <div class='tl-ip'>IP: 185.156.72.7</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">ResultType 50126 (bad password) from Kyiv. Password attempt recorded. ZavaBot application.</div>
+    <div class='tl-ip'>IP: 185.156.72.7</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-critical"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">ACCOUNT COMPROMISED: Successful authentication (ResultType 0) from Kyiv (185.156.72.7). MFA bypassed due to MFA_Demo_Exclusion group. AADRiskyUsers state upgraded to confirmedCompromised at HIGH risk. m365DAdminDismissedDetection.</div>
+    <div class='tl-ip'>IP: 185.156.72.7</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">Concurrent session: lydiab-pc (4.152.23.243) still authenticated at same time as Kyiv attacker. Possible session hijacking or parallel active sessions.</div>
+    <div class='tl-ip'>IP: 4.152.23.243</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">Continued attacker access from Kyiv (185.156.72.7). ZavaBot accessed multiple times.</div>
+    <div class='tl-ip'>IP: 185.156.72.7</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-medium"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-08</span><span class="tl-phase tl-phase-response">&#9654; Response</span>
+    <div class="tl-event">Admin removes lydiab from MFA_Demo_Exclusion group x2. Second MFA remediation. But attacker may have already established persistence.</div>
+    
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-12</span><span class="tl-phase tl-phase-compromise">&#9654; Compromise</span>
+    <div class="tl-event">Post-compromise persistent access from Kyiv (185.156.72.7). ResultType 50140 + successes. ZavaBot used. 4 days after initial compromise, attacker still active.</div>
+    <div class='tl-ip'>IP: 185.156.72.7</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-medium"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-22</span><span class="tl-phase tl-phase-remediation">&#9654; Remediation</span>
+    <div class="tl-event">Password reset via DirectorySync. StsRefreshToken updated. First full password change after compromise.</div>
+    
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-medium"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-01-23</span><span class="tl-phase tl-phase-remediation">&#9654; Remediation</span>
+    <div class="tl-event">Password changed x3 + StsRefreshTokensValidFrom updated x3 via DirectorySync. Tokens fully invalidated. CorrelationId: c443363b.</div>
+    
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-02-02</span><span class="tl-phase tl-phase-blastradius">&#9654; BlastRadius</span>
+    <div class="tl-event">BLAST RADIUS: elviaa@zava-corp.com signs in 185 times from attacker IP 192.159.99.162 (Hamburg, MI). Accesses Azure Portal, AAD admin portals (RegisteredApps, AAD_ERM, AAD_UsersAndTenants). Possible second compromise.</div>
+    <div class='tl-ip'>IP: 192.159.99.162</div>
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-info"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-02-10</span><span class="tl-phase tl-phase-remediation">&#9654; Remediation</span>
+    <div class="tl-event">lydiab account DISABLED via DirectorySync (AccountEnabled-&gt;false). Final account closure after full incident investigation resolved.</div>
+    
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-critical"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-03-11</span><span class="tl-phase tl-phase-detection">&#9654; Detection</span>
+    <div class="tl-event">Microsoft Defender for Endpoint generates Incident #36193: Ransomware cluster alert. 9 High-severity alerts for LockBit activity on lydiab-pc. Operators: johniemcc, aaronb. Multi-staged attack confirmed. All alerts: TruePositive/MultiStagedAttack.</div>
+    
+  </div>
+</div>
+<div class="tl-item">
+  <div class="tl-dot tl-high"></div>
+  <div class="tl-content">
+    <span class="tl-date">2026-03-11</span><span class="tl-phase tl-phase-detection">&#9654; Detection</span>
+    <div class="tl-event">Microsoft 365 Defender generates Incident #40597: Account compromise + phishing cluster. 3 alerts -- Compromised user (T1557/T1110/T1539), Phishing email sent from lydiab, and User-reported phishing. All TruePositive/Phishing.</div>
+    
+  </div>
+</div>
+</div>
+
+</div>
+
+<!-- ===== SECTION 7 -- ATTACK RELATIONSHIP GRAPH ===== -->
+<h2>7. Organizational &amp; Attack Relationship Graph</h2>
+<div class="graph-container">
+<svg width="1100" height="620" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <marker id="arrowR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#f85149"/>
+  </marker>
+  <marker id="arrowO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#fb8500"/>
+  </marker>
+  <marker id="arrowP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#bc8cff"/>
+  </marker>
+  <marker id="arrowG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#3fb950"/>
+  </marker>
+</defs>
+
+<!-- Legend -->
+<rect x="10" y="10" width="220" height="120" rx="6" fill="#161b22" stroke="#30363d"/>
+<text x="20" y="30" fill="#8b949e" font-size="10" font-family="Segoe UI">LEGEND</text>
+<circle cx="30" cy="50" r="8" fill="#7b0000" stroke="#f85149" stroke-width="1.5"/>
+<text x="45" y="54" fill="#e6edf3" font-size="10" font-family="Segoe UI">Threat Actor / Attacker IP</text>
+<circle cx="30" cy="72" r="8" fill="#1a2f4e" stroke="#58a6ff" stroke-width="1.5"/>
+<text x="45" y="76" fill="#e6edf3" font-size="10" font-family="Segoe UI">Victim User</text>
+<rect x="22" y="86" width="16" height="10" rx="3" fill="#1e3320" stroke="#3fb950" stroke-width="1.5"/>
+<text x="45" y="95" fill="#e6edf3" font-size="10" font-family="Segoe UI">Device</text>
+<circle cx="30" cy="113" r="8" fill="#2d1f47" stroke="#bc8cff" stroke-width="1.5"/>
+<text x="45" y="117" fill="#e6edf3" font-size="10" font-family="Segoe UI">Blast Radius User</text>
+
+<!-- ATTACKER NODES -->
+<!-- Kyiv IP -->
+<circle cx="80" cy="220" r="30" fill="#7b0000" stroke="#f85149" stroke-width="2"/>
+<text x="80" y="215" class="node-label" font-weight="700" font-size="9">185.156.72.7</text>
+<text x="80" y="228" class="node-label" font-size="8">Kyiv, Ukraine</text>
+<text x="80" y="241" class="node-label" font-size="8">PRIMARY</text>
+
+<!-- Hamburg IP -->
+<circle cx="80" cy="340" r="25" fill="#7b0000" stroke="#f85149" stroke-width="1.5"/>
+<text x="80" y="335" class="node-label" font-size="9">192.159.99.162</text>
+<text x="80" y="347" class="node-label" font-size="8">Hamburg, MI</text>
+
+<!-- Vienna IP -->
+<circle cx="80" cy="440" r="22" fill="#7b0000" stroke="#f85149" stroke-width="1.5"/>
+<text x="80" y="435" class="node-label" font-size="9">109.70.100.68</text>
+<text x="80" y="447" class="node-label" font-size="8">Wien, AT</text>
+
+<!-- Tor IP -->
+<circle cx="80" cy="530" r="22" fill="#7b0000" stroke="#f85149" stroke-width="1.5"/>
+<text x="80" y="525" class="node-label" font-size="9">185.220.100.251</text>
+<text x="80" y="537" class="node-label" font-size="8">Germany (Tor)</text>
+
+<!-- VICTIM lydiab -->
+<circle cx="450" cy="220" r="40" fill="#1a2f4e" stroke="#58a6ff" stroke-width="2.5"/>
+<text x="450" y="212" class="node-label" font-weight="700" font-size="10">lydiab</text>
+<text x="450" y="226" class="node-label" font-size="9">Lydia Bauer</text>
+<text x="450" y="239" class="node-label" font-size="8">COMPROMISED</text>
+
+<!-- lydiab-pc -->
+<rect x="600" y="160" width="120" height="50" rx="6" fill="#1e3320" stroke="#3fb950" stroke-width="2"/>
+<text x="660" y="183" class="node-label" font-weight="700" font-size="10">lydiab-pc</text>
+<text x="660" y="197" class="node-label" font-size="9">Win11 / 10.2.0.110</text>
+
+<!-- LockBit malware node -->
+<circle cx="800" cy="185" r="28" fill="#3d1a00" stroke="#fb8500" stroke-width="2"/>
+<text x="800" y="180" class="node-label" font-weight="700" font-size="9">LockBit</text>
+<text x="800" y="193" class="node-label" font-size="8">Ransomware</text>
+
+<!-- johniemcc -->
+<circle cx="800" cy="310" r="28" fill="#2d1f47" stroke="#bc8cff" stroke-width="1.5"/>
+<text x="800" y="305" class="node-label" font-size="9">johniemcc</text>
+<text x="800" y="318" class="node-label" font-size="8">Ransomware Op</text>
+
+<!-- aaronb -->
+<circle cx="950" cy="310" r="22" fill="#2d1f47" stroke="#bc8cff" stroke-width="1.5"/>
+<text x="950" y="300" class="node-label" font-size="9">aaronb</text>
+<text x="950" y="313" class="node-label" font-size="8">Compromised</text>
+
+<!-- elviaa blast radius -->
+<circle cx="300" cy="470" r="28" fill="#2d1f47" stroke="#bc8cff" stroke-width="2"/>
+<text x="300" y="465" class="node-label" font-size="9">elviaa</text>
+<text x="300" y="478" class="node-label" font-size="8">Blast Radius</text>
+
+<!-- MFA_Demo_Exclusion group -->
+<ellipse cx="450" cy="420" rx="70" ry="22" fill="#4a0000" stroke="#f85149" stroke-width="1.5" stroke-dasharray="4,2"/>
+<text x="450" y="415" class="node-label" font-size="9">MFA_Demo_Exclusion</text>
+<text x="450" y="428" class="node-label" font-size="8">MFA Bypass Group</text>
+
+<!-- ZavaBot app -->
+<ellipse cx="300" cy="220" rx="50" ry="22" fill="#0d2137" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="3,2"/>
+<text x="300" y="215" class="node-label" font-size="9">ZavaBot</text>
+<text x="300" y="228" class="node-label" font-size="8">Target App</text>
+
+<!-- EDGES -- Attacks to lydiab -->
+<line x1="110" y1="210" x2="260" y2="220" class="edge-attack" marker-end="url(#arrowR)"/>
+<text x="180" y="205" fill="#f85149" font-size="9" font-family="Segoe UI">Bruteforce 01/08</text>
+
+<line x1="105" y1="330" x2="260" y2="228" class="edge-attack" marker-end="url(#arrowR)"/>
+<text x="160" y="280" fill="#f85149" font-size="9" font-family="Segoe UI">Probe 01/08</text>
+
+<line x1="100" y1="435" x2="260" y2="235" class="edge-attack" marker-end="url(#arrowR)"/>
+<text x="150" y="360" fill="#f85149" font-size="9" font-family="Segoe UI">Probe 08/2025</text>
+
+<line x1="100" y1="522" x2="260" y2="240" class="edge-attack" marker-end="url(#arrowR)"/>
+<text x="125" y="450" fill="#d29922" font-size="9" font-family="Segoe UI">Recon 08/2025</text>
+
+<!-- lydiab -> ZavaBot -->
+<line x1="410" y1="220" x2="350" y2="220" class="edge" stroke="#58a6ff" marker-end="url(#arrowG)"/>
+
+<!-- lydiab -> MFA bypass -->
+<line x1="445" y1="258" x2="445" y2="398" class="edge-attack" stroke-dasharray="5,3" marker-end="url(#arrowR)"/>
+<text x="455" y="340" fill="#f85149" font-size="9">MFA group</text>
+<text x="455" y="352" fill="#f85149" font-size="9">manipulated</text>
+
+<!-- lydiab -> lydiab-pc -->
+<line x1="490" y1="215" x2="600" y2="190" class="edge" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrowG)"/>
+<text x="535" y="195" fill="#3fb950" font-size="9">Active session</text>
+
+<!-- lydiab-pc -> LockBit -->
+<line x1="720" y1="180" x2="772" y2="182" class="edge" stroke="#fb8500" stroke-width="2" marker-end="url(#arrowO)"/>
+<text x="730" y="170" fill="#fb8500" font-size="9">Encrypted</text>
+
+<!-- johniemcc -> lydiab-pc (lateral WMI) -->
+<line x1="775" y1="295" x2="720" y2="210" class="edge-lateral" stroke="#bc8cff" marker-end="url(#arrowP)"/>
+<text x="750" y="260" fill="#bc8cff" font-size="9">WMI lateral</text>
+<text x="750" y="272" fill="#bc8cff" font-size="9">10.2.0.8</text>
+
+<!-- johniemcc -> aaronb -->
+<line x1="828" y1="310" x2="928" y2="310" class="edge-lateral" stroke="#bc8cff" stroke-width="1.5" marker-end="url(#arrowP)"/>
+<text x="865" y="305" fill="#bc8cff" font-size="9">Lateral</text>
+
+<!-- 192.159.99.162 -> elviaa blast -->
+<line x1="100" y1="355" x2="272" y2="460" class="edge" stroke="#bc8cff" stroke-dasharray="3,3" marker-end="url(#arrowP)"/>
+<text x="140" y="425" fill="#bc8cff" font-size="9">Blast radius</text>
+<text x="140" y="437" fill="#bc8cff" font-size="9">02/02/2026</text>
+
+</svg>
+<div style="font-size:11px;color:var(--muted);margin-top:.75rem">
+  <strong>Graph Notes:</strong> 
+  <span class="badge badge-critical">Red</span> Attack paths &nbsp;
+  <span class="badge" style="background:#bc8cff">Purple</span> Lateral movement / blast radius &nbsp;
+  <span class="badge" style="background:#fb8500">Orange</span> Ransomware execution &nbsp;
+  <span class="badge badge-green">Green</span> Legitimate access &nbsp;
+  Dashed lines indicate indirect or inferred relationships.
+</div>
+</div>
+
+<!-- ===== SECTION 8 -- MITRE ATT&CK ===== -->
+<h2>8. MITRE ATT&amp;CK -- Confirmed Techniques</h2>
+<div class="mitre-grid"><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1590</span>
+    <span class="mitre-phase" style="color:#d29922">Reconnaissance</span>
+  </div>
+  <div class="mitre-name">Gather Victim Network Info</div>
+  <div class="mitre-evidence">Tor exit node enumerated PIM, RegisteredApps, Entra admin Aug 2025</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1566.002</span>
+    <span class="mitre-phase" style="color:#fb8500">Initial Access</span>
+  </div>
+  <div class="mitre-name">Spearphishing Link</div>
+  <div class="mitre-evidence">Phishing email with malicious Azure ContainerApps URL received Jan 6, 2026; URL clicked Jan 8</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1534</span>
+    <span class="mitre-phase" style="color:#fb8500">Initial Access</span>
+  </div>
+  <div class="mitre-name">Internal Spearphishing</div>
+  <div class="mitre-evidence">Compromised lydiab account sent phishing to msftadmin@valleenevado.com Jan 8, 2026</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1110.001</span>
+    <span class="mitre-phase" style="color:#f85149">Credential Access</span>
+  </div>
+  <div class="mitre-name">Brute Force: Password Guessing</div>
+  <div class="mitre-evidence">192.159.99.162 probe; 185.156.72.7 Kyiv attack -- ResultType 50126 recorded</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1557</span>
+    <span class="mitre-phase" style="color:#f85149">Credential Access</span>
+  </div>
+  <div class="mitre-name">Adversary-in-the-Middle</div>
+  <div class="mitre-evidence">Detected by M365D in &#39;Compromised user account in a recognized attack pattern&#39;</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1539</span>
+    <span class="mitre-phase" style="color:#f85149">Credential Access</span>
+  </div>
+  <div class="mitre-name">Steal Web Session Cookie</div>
+  <div class="mitre-evidence">Detected by M365D -- session hijack component of compromise pattern</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1078</span>
+    <span class="mitre-phase" style="color:#ba68c8">Defense Evasion</span>
+  </div>
+  <div class="mitre-name">Valid Accounts</div>
+  <div class="mitre-evidence">Attacker used lydiab&#39;s credentials post-compromise for ZavaBot, Azure Portal access</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1090</span>
+    <span class="mitre-phase" style="color:#ba68c8">Defense Evasion</span>
+  </div>
+  <div class="mitre-name">Proxy</div>
+  <div class="mitre-evidence">anonymizedIPAddress risk on 3 IPs; Tor exit node; Vienna proxy; Hamburg MI proxy</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1098</span>
+    <span class="mitre-phase" style="color:#ef5350">Persistence</span>
+  </div>
+  <div class="mitre-name">Account Manipulation</div>
+  <div class="mitre-evidence">MFA_Demo_Exclusion group added/removed/re-added on Jan 8 to maintain MFA bypass</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1556</span>
+    <span class="mitre-phase" style="color:#ef5350">Persistence</span>
+  </div>
+  <div class="mitre-name">Modify Authentication Process</div>
+  <div class="mitre-evidence">Targeted MFA exclusion group manipulation to bypass Conditional Access / MFA</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1021.002</span>
+    <span class="mitre-phase" style="color:#bc8cff">Lateral Movement</span>
+  </div>
+  <div class="mitre-name">Remote Services: SMB/Windows Admin Shares</div>
+  <div class="mitre-evidence">johniemcc-&gt;lydiab-pc via internal IP 10.2.0.8; WMI used for remote execution</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1047</span>
+    <span class="mitre-phase" style="color:#bc8cff">Lateral Movement</span>
+  </div>
+  <div class="mitre-name">Windows Management Instrumentation</div>
+  <div class="mitre-evidence">wmiprvse.exe remote spawning bcdedit/vssadmin on lydiab-pc Dec 2, 2025</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1569.002</span>
+    <span class="mitre-phase" style="color:#e65100">Execution</span>
+  </div>
+  <div class="mitre-name">Service Execution</div>
+  <div class="mitre-evidence">Services used to execute ransomware payload on remote device</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1105</span>
+    <span class="mitre-phase" style="color:#e65100">Execution</span>
+  </div>
+  <div class="mitre-name">Ingress Tool Transfer</div>
+  <div class="mitre-evidence">Ransomware payload transferred to lydiab-pc via lateral movement</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1039</span>
+    <span class="mitre-phase" style="color:#29b6f6">Collection</span>
+  </div>
+  <div class="mitre-name">Data from Network Shared Drive</div>
+  <div class="mitre-evidence">Files in lydiab&#39;s OneDrive\\Documents\\Projets encrypted</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1486</span>
+    <span class="mitre-phase" style="color:#7b0000">Impact</span>
+  </div>
+  <div class="mitre-name">Data Encrypted for Impact (LockBit)</div>
+  <div class="mitre-evidence">Files: cfd.lob.lockbit, gameless.zip.lockbit, lainer.pdf.lockbit, peptonisation.doc.lockbit</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1490</span>
+    <span class="mitre-phase" style="color:#7b0000">Impact</span>
+  </div>
+  <div class="mitre-name">Inhibit System Recovery</div>
+  <div class="mitre-evidence">vssadmin delete shadows /all (x2); bcdedit /set recoveryenabled no on lydiab-pc</div>
+</div><div class="mitre-card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <span class="mitre-tid">T1562.009</span>
+    <span class="mitre-phase" style="color:#7b0000">Impact</span>
+  </div>
+  <div class="mitre-name">Impair Defenses: Safe Mode Boot</div>
+  <div class="mitre-evidence">bcdedit /set bootstatuspolicy ignoreallfailures; safe mode tampering alert</div>
+</div></div>
+
+<!-- ===== SECTION 9 -- IOC CHECK ===== -->
+<h2>9. IOC Check Against ThreatIntelIndicators</h2>
+<div class="card">
+<div class="highlight-blue">
+  <strong>Finding:</strong> All investigated IPs were checked against the active ThreatIntelIndicators table (240,659 records). <strong>Zero matches found</strong> -- indicating the threat actor uses infrastructure that is not yet publicly catalogued. Recommend submitting these IOCs to MSTIC and external TI feeds immediately.
+</div>
+<table>
+  <thead><tr><th>IOC</th><th>Type</th><th>Location</th><th>TI Hits</th><th>Notes</th></tr></thead>
+  <tbody><tr><td><code>185.156.72.7</code></td><td>IP</td><td>Kyiv, Ukraine</td><td style='color:var(--green);font-weight:700'>0</td><td style='font-size:11px'>Primary attack IP. Not in ThreatIntelIndicators. Novel threat actor.</td></tr>
+<tr><td><code>192.159.99.162</code></td><td>IP</td><td>Hamburg, MI, US</td><td style='color:var(--green);font-weight:700'>0</td><td style='font-size:11px'>Proxy/relay used pre-compromise and by elviaa. Not in TI.</td></tr>
+<tr><td><code>109.70.100.68</code></td><td>IP</td><td>Wien, AT</td><td style='color:var(--green);font-weight:700'>0</td><td style='font-size:11px'>Aug/Sep 2025 probe IP. Not in TI.</td></tr>
+<tr><td><code>4.152.23.243</code></td><td>IP</td><td>Boydton, VA</td><td style='color:var(--green);font-weight:700'>0</td><td style='font-size:11px'>Corporate egress (lydiab-pc). Not a threat IP.</td></tr>
+<tr><td><code>185.220.100.251</code></td><td>IP</td><td>Germany (Tor)</td><td style='color:var(--green);font-weight:700'>0</td><td style='font-size:11px'>Tor exit node. Mass Azure admin access Aug 2025.</td></tr>
+<tr><td><code>http://rk064621124.calmbeach-7b8d6466.centralus.azurecontainerapps.io/</code></td><td>URL</td><td>Azure ContainerApps CentralUS</td><td style='color:var(--red);font-weight:700'>N/A</td><td style='font-size:11px'>Phishing URL. Detected by MDE/OATP. HighConfPhish verdict.</td></tr>
+  </tbody>
+</table>
+
+<h3 style="margin-top:1rem">LockBit File Artifacts (Hash Evidence)</h3>
+<table>
+  <thead><tr><th>File Path</th><th>Name</th></tr></thead>
+  <tbody>
+    <tr><td><code>\\Device\HarddiskVolume4\Users\lydiab\OneDrive - Zava\Documents\Projets</code></td><td><code>cfd.lob.lockbit</code></td></tr>
+    <tr><td><code>\\Device\HarddiskVolume4\Users\lydiab\OneDrive - Zava\Documents\Projets</code></td><td><code>cfd.lob.lockbit.lockbit</code></td></tr>
+    <tr><td><code>\\Device\HarddiskVolume4\Users\lydiab\OneDrive - Zava\Documents\Projets</code></td><td><code>gameless.zip.lockbit</code></td></tr>
+    <tr><td><code>\\Device\HarddiskVolume4\Users\lydiab\OneDrive - Zava\Documents\Projets</code></td><td><code>lainer.pdf.lockbit</code></td></tr>
+    <tr><td><code>\\Device\HarddiskVolume4\Users\lydiab\OneDrive - Zava\Documents\Projets</code></td><td><code>peptonisation.doc.lockbit</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ===== SECTION 10 -- BLAST RADIUS ===== -->
+<h2>10. Blast Radius Analysis</h2>
+<div class="card">
+<div class="criticality-banner" style="background:linear-gradient(90deg,#2d1f47,#3d2a5a);margin-bottom:1rem">
+  <span class="icon">&#x26A1;</span>
+  <div>
+    <div class="title">elviaa@zava-corp.com -- HIGH PRIORITY INVESTIGATION REQUIRED</div>
+    <div class="sub">185 sign-ins from known attacker IP 192.159.99.162. Accessing AAD admin portals. Sign-in date: 2026-02-02 (25 days after lydiab compromise).</div>
+  </div>
+</div>
+<table>
+  <thead><tr><th>User</th><th>Attacker IP</th><th>Sign-Ins</th><th>Date</th><th>Applications Accessed</th><th>Risk Level</th></tr></thead>
+  <tbody><tr><td><strong>elviaa@zava-corp.com</strong></td><td><code>192.159.99.162 (Hamburg, MI)</code></td><td><strong>185</strong></td><td>2026-02-02</td><td style='font-size:11px'>Azure Portal, AAD_ERM, AAD_UsersAndTenants, RegisteredApps</td><td><span class="badge badge-high">HIGH</span> HIGH -- admin portal access from known attacker IP</td></tr>
+<tr><td><strong>Anonymous GUID user</strong></td><td><code>109.70.100.68 (Wien, AT)</code></td><td><strong>1</strong></td><td>2025-08-28</td><td style='font-size:11px'>Azure Portal</td><td><span class="badge badge-low">LOW</span> LOW -- single sign-in, MFA required (50074), blocked</td></tr>
+  </tbody>
+</table>
+<div style="margin-top:1rem;font-size:12px;color:var(--muted)">
+  <strong>Note:</strong> Anonymous GUID user from 109.70.100.68 encountered MFA challenge (ResultType 50074) and was blocked. No successful auth. elviaa is the primary blast radius concern.
+</div>
+</div>
+
+<!-- ===== SECTION 11 -- RISK EVENTS ===== -->
+<h2>11. AAD Identity Protection -- Risk Events</h2>
+<div class="card">
+<table>
+  <thead><tr><th>Time (UTC)</th><th>Risk Level</th><th>Risk State</th><th>Detail</th></tr></thead>
+  <tbody><tr><td style='font-family:monospace;font-size:11px'>2026-01-08T08:57:42Z</td><td><span class="badge badge-medium">Medium</span></td><td><span class="badge badge-medium">atRisk</span></td><td style='font-size:11px'>none</td></tr>
+<tr><td style='font-family:monospace;font-size:11px'>2026-01-08T10:09:57Z</td><td><span class="badge badge-low">Low</span></td><td><span class="badge badge-medium">atRisk</span></td><td style='font-size:11px'>none</td></tr>
+<tr><td style='font-family:monospace;font-size:11px'>2026-01-08T12:20:29Z</td><td><span class="badge badge-high">High</span></td><td><span class="badge badge-medium">atRisk</span></td><td style='font-size:11px'>none</td></tr>
+<tr><td style='font-family:monospace;font-size:11px'>2026-01-08T13:09:08Z</td><td><span class="badge badge-high">High</span></td><td><span class="badge badge-critical">confirmedCompromised</span></td><td style='font-size:11px'>m365DAdminDismissedDetection (CRITICAL)</td></tr>
+  </tbody>
+</table>
+<p style="margin-top:.75rem;font-size:12px;color:var(--muted)">Timeline: 08:57 medium -> 10:09 low -> 12:20 high -> <strong>13:09 confirmedCompromised</strong>. The risk level oscillated as automated systems and the attacker ran concurrently, with the final HIGH/confirmedCompromised state coinciding with the successful Kyiv sign-in.</p>
+</div>
+
+<!-- ===== SECTION 12 -- RECOMMENDATIONS ===== -->
+<h2>12. Recommendations</h2>
+<div style="display:flex;flex-wrap:wrap;gap:.75rem;margin-bottom:1rem">
+  <span style="font-size:11px;color:var(--muted)">Priority:</span>
+  <span class="badge badge-critical">P0 Immediate (within hours)</span>
+  <span class="badge badge-high">P1 High (within 24h)</span>
+  <span class="badge badge-medium">P2 Medium (this week)</span>
+  <span class="badge badge-low">P3 Low (this month)</span>
+</div><div class="card rec-p0" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-critical">P0</span><div class="rec-area" style="margin-top:4px">Identity</div></div>
+  <div class="rec-text">Ensure lydiab account remains permanently disabled. Review account for re-enablement. Verify no service accounts or OAuth apps run under this identity.</div>
+</div><div class="card rec-p0" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-critical">P0</span><div class="rec-area" style="margin-top:4px">Blast Radius</div></div>
+  <div class="rec-text">Immediately investigate elviaa@zava-corp.com -- 185 sign-ins from attack IP 192.159.99.162 on Feb 2, 2026. Treat as confirmed secondary compromise. Disable, reset, force re-authentication.</div>
+</div><div class="card rec-p0" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-critical">P0</span><div class="rec-area" style="margin-top:4px">MFA Group Controls</div></div>
+  <div class="rec-text">Audit all members of MFA_Demo_Exclusion, MFA exclusion eligibility, and similar bypass groups. Remove unnecessary members. Implement Privileged Identity Management (PIM) approval workflow for group membership changes. Alert on any modification.</div>
+</div><div class="card rec-p0" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-critical">P0</span><div class="rec-area" style="margin-top:4px">Admin Re-enablement</div></div>
+  <div class="rec-text">Investigate why u101@a.alpineskihouse.co re-enabled lydiab account at 10:04 on Jan 8 after automated disable. Define strict SOC procedures: never re-enable a risk-disabled account without full investigation and CISO approval.</div>
+</div><div class="card rec-p1" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-high">P1</span><div class="rec-area" style="margin-top:4px">LockBit Scope</div></div>
+  <div class="rec-text">Conduct full forensic imaging of lydiab-pc. Enumerate all files with .lockbit extension. Identify all devices reached by johniemcc lateral movement from 10.2.0.8. Rebuild lydiab-pc from scratch after imaging.</div>
+</div><div class="card rec-p1" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-high">P1</span><div class="rec-area" style="margin-top:4px">johniemcc Account</div></div>
+  <div class="rec-text">Investigate johniemcc@zava-corp.com fully. This account conducted WMI-based ransomware deployment. Determine if johniemcc is also compromised or if this is an insider threat. Disable and reset immediately.</div>
+</div><div class="card rec-p1" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-high">P1</span><div class="rec-area" style="margin-top:4px">aaronb Account</div></div>
+  <div class="rec-text">Investigate aaronb@zava-corp.com -- implicated in hands-on-keyboard ransomware incident (Incident 36193). Treat as potentially compromised.</div>
+</div><div class="card rec-p1" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-high">P1</span><div class="rec-area" style="margin-top:4px">ZavaBot Application</div></div>
+  <div class="rec-text">Audit ZavaBot service principal permissions, API access, and OAuth consent grants. Attacker exclusively used ZavaBot for post-compromise access. Review all ZavaBot activity logs for lydiab, elviaa, and other users.</div>
+</div><div class="card rec-p1" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-high">P1</span><div class="rec-area" style="margin-top:4px">Conditional Access</div></div>
+  <div class="rec-text">Implement Named Location policies to block sign-ins from Ukraine, Seychelles, and anonymized/Tor IP ranges. Require Compliant Device for all privileged access. Remove all MFA bypass groups.</div>
+</div><div class="card rec-p2" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-medium">P2</span><div class="rec-area" style="margin-top:4px">Phishing URL</div></div>
+  <div class="rec-text">Permanently block http://rk064621124.calmbeach-7b8d6466.centralus.azurecontainerapps.io/ across all security layers. Check if any other users clicked this URL. Report to Microsoft MSRC.</div>
+</div><div class="card rec-p2" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-medium">P2</span><div class="rec-area" style="margin-top:4px">Token Management</div></div>
+  <div class="rec-text">Implement Continuous Access Evaluation (CAE) to immediately revoke sessions when risk signals are detected, preventing the 13-hour gap between first indicators (08:49) and full detection.</div>
+</div><div class="card rec-p2" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-medium">P2</span><div class="rec-area" style="margin-top:4px">Threat Intelligence</div></div>
+  <div class="rec-text">Submit 185.156.72.7, 192.159.99.162, 109.70.100.68 to threat intelligence feeds. Create custom TI indicators in Sentinel ThreatIntelIndicators table. Add to network block lists.</div>
+</div><div class="card rec-p2" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-medium">P2</span><div class="rec-area" style="margin-top:4px">Alert Tuning</div></div>
+  <div class="rec-text">Enable Sentinel analytic rules 21-SIGNIN-ConditionalAccessBypass and 16-SIGNIN-ConcurrentMultiCountrySessions from this repository. These would have fired on Jan 8 attack patterns.</div>
+</div><div class="card rec-p3" style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:.75rem">
+  <div style="min-width:60px;text-align:center"><span class="badge badge-low">P3</span><div class="rec-area" style="margin-top:4px">Audit Logging</div></div>
+  <div class="rec-text">Ensure InitiatedByUPN is captured for all AuditLog GroupManagement events. Most critical MFA_Demo_Exclusion events show empty InitiatedByUPN, preventing attacker attribution.</div>
+</div>
+<!-- ===== FOOTER ===== -->
+<hr class="section-divider" style="margin-top:3rem">
+<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:1rem;font-size:11px;color:var(--muted);padding:1rem 0 2rem">
+  <div>
+    <strong style="color:var(--text)">Microsoft Sentinel -- CyberSOC</strong><br>
+    Workspace ID: e34d562e-ef12-4c4e-9bc0-7c6ae357c015<br>
+    Investigation Period: 365 Days ending 2026-03-11
+  </div>
+  <div style="text-align:right">
+    Generated: 2026-03-11<br>
+    Subject: lydiab@zava-corp.com &nbsp;|&nbsp; lydiab-pc<br>
+    Classification: <strong style="color:var(--red)">CONFIDENTIAL -- RESTRICTED</strong>
+  </div>
+</div>
+
+</div><!-- end .page -->
+</body>
+</html>
