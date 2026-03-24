@@ -1,0 +1,66 @@
+id: c5d6e7f8-a9b0-4c1d-2e3f-4a5b6c7d8e9f
+name: ADFS ROPC or Device Code Flow Authentication Detected
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects ADFS authentication flows using Resource Owner Password Credentials (ROPC) or
+  Device Code flow. ROPC passes credentials directly in OAuth requests, bypassing interactive
+  authentication and Conditional Access claims checks. Device Code flow is actively abused in
+  phishing campaigns where victims are tricked into entering codes on legitimate-looking pages.
+  Both flows can bypass ADFS-layer MFA requirements depending on federation configuration.
+  MITRE ATT&CK: T1078 (Valid Accounts), T1566 (Phishing)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+queryFrequency: 30m
+queryPeriod: 4h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078
+  - T1566
+query: |
+  ADFSSignInLogs
+  | where TimeGenerated > ago(4h)
+  | where AuthenticationProcessingDetails has_any ("ROPC", "ropc", "DeviceCode", "device_code", "deviceCode")
+     or   UserAgent has_any ("ROPC", "device_code", "devicecode", "PublicClientApp")
+  | summarize
+      Count     = count(),
+      IPs       = make_set(IPAddress),
+      Countries = make_set(Location),
+      Apps      = make_set(AppDisplayName),
+      Errors    = make_set(ResultType),
+      Reqs      = make_set(AuthenticationRequirement),
+      FirstSeen = min(TimeGenerated),
+      LastSeen  = max(TimeGenerated)
+    by UserPrincipalName
+  | order by Count desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  SignInCount: Count
+  Countries: Countries
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS ROPC/DeviceCode Flow - {{UserPrincipalName}} - {{Count}} events"
+  alertDescriptionFormat: "User {{UserPrincipalName}} was detected using ROPC or Device Code auth flow via ADFS ({{Count}} events). These flows bypass MFA and are abused in phishing attacks."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

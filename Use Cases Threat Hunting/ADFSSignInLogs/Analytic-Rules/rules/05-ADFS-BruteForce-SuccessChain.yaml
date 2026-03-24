@@ -1,0 +1,87 @@
+id: e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8a9b
+name: ADFS Brute Force to Successful Sign-In Chain
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects the "attacker guessed the password" pattern: the same user account accumulates
+  more than 5 brute-force credential failures in ADFS, followed by a successful sign-in
+  where the success occurs AFTER the last failure. This sequence is a strong indicator of
+  a successful credential compromise via brute force against the ADFS federation endpoint.
+  The SuccessIP vs FailIPs comparison helps identify whether the attacker IP changed after
+  the compromise.
+  MITRE ATT&CK: T1110 (Brute Force), T1078 (Valid Accounts)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+queryFrequency: 1h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - InitialAccess
+relevantTechniques:
+  - T1110
+  - T1078
+query: |
+  let BruteForceErrors = dynamic(["50126", "50055", "50056", "50064",
+                                    "50053", "50034", "50057", "396083"]);
+  let Failures =
+      ADFSSignInLogs
+      | where TimeGenerated > ago(1d)
+      | extend ErrorCode = tostring(ResultType)
+      | where ErrorCode in (BruteForceErrors)
+      | summarize
+          FailCount = count(),
+          LastFail  = max(TimeGenerated),
+          FailIPs   = make_set(IPAddress)
+        by UserPrincipalName;
+  ADFSSignInLogs
+  | where TimeGenerated > ago(1d)
+  | where ResultType == 0
+  | summarize
+      FirstSuccess = min(TimeGenerated),
+      SuccessIP    = tostring(make_set(IPAddress)[0])
+    by UserPrincipalName
+  | join kind=inner Failures on UserPrincipalName
+  | where FailCount > 5
+     and  FirstSuccess > LastFail
+  | project
+      UserPrincipalName,
+      FailCount,
+      LastFail,
+      FirstSuccess,
+      TimeDiff  = FirstSuccess - LastFail,
+      FailIPs,
+      SuccessIP
+  | order by FailCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SuccessIP
+customDetails:
+  FailCount: FailCount
+  SuccessIP: SuccessIP
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS Brute Force Success - {{UserPrincipalName}} compromised after {{FailCount}} failures"
+  alertDescriptionFormat: "User {{UserPrincipalName}} had {{FailCount}} ADFS failures followed by a successful login from {{SuccessIP}}. Account may be compromised."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

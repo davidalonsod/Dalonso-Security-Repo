@@ -1,0 +1,66 @@
+id: a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d
+name: ADFS Extranet Lockout - Sustained Brute Force (Error 396083)
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects users triggering multiple ADFS extranet lockout events (error code 396083)
+  within a 24-hour window. Error 396083 is raised when the ADFS extranet lockout policy
+  is activated, indicating a sustained brute force or credential stuffing attack that has
+  reached the perimeter threshold. Multiple lockouts for the same user suggest an attacker
+  is bypassing perimeter controls through distributed IP rotation.
+  MITRE ATT&CK: T1110 (Brute Force), T1078 (Valid Accounts)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+queryFrequency: 4h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - InitialAccess
+relevantTechniques:
+  - T1110
+  - T1078
+query: |
+  ADFSSignInLogs
+  | where TimeGenerated > ago(1d)
+  | where ResultType == 396083
+  | summarize
+      LockoutCount = count(),
+      UniqueIPs    = dcount(IPAddress),
+      IPs          = make_set(IPAddress, 20),
+      Countries    = make_set(Location),
+      Apps         = make_set(AppDisplayName),
+      FirstSeen    = min(TimeGenerated),
+      LastSeen     = max(TimeGenerated)
+    by UserPrincipalName
+  | where LockoutCount >= 3
+  | order by LockoutCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  LockoutCount: LockoutCount
+  UniqueIPs: UniqueIPs
+  Countries: Countries
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS Extranet Lockout - {{UserPrincipalName}} triggered {{LockoutCount}} lockouts"
+  alertDescriptionFormat: "User {{UserPrincipalName}} has triggered ADFS extranet lockout (396083) {{LockoutCount}} times from {{UniqueIPs}} unique IPs. Possible brute force attack."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
