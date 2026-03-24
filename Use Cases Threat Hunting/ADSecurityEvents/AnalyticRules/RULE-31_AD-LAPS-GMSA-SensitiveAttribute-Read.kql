@@ -1,0 +1,110 @@
+// =========================================================
+// RULE-31 | AD-LAPS-GMSA-SensitiveAttribute-Read
+// Description : Detects unauthorized reads of LAPS local
+//               admin passwords (ms-Mcs-AdmPwd / 4662) and
+//               Group Managed Service Account passwords
+//               (msDS-ManagedPassword / 4662). Attackers
+//               use LAPSToolkit and GMSAPasswordReader to
+//               harvest these credentials for lateral
+//               movement without touching LSASS.
+// Severity    : High
+// Tactic      : CredentialAccess (T1552.004, T1555)
+// Tables      : SecurityEvent
+// Frequency   : PT15M / PT15M
+// Suppress    : PT4H
+// =========================================================
+
+let LookbackPeriod  = 15m;
+
+// Privileged accounts with legitimate LAPS/GMSA read access
+// (Adjust per environment — accounts like SCCM clients, Intune,
+//  monitoring tools are expected to read LAPS)
+let LegitimateReaders = dynamic([
+    "sccm-client", "intune", "laps-service",
+    "azureaddevicesync", "msol_", "adsync"
+]);
+
+// Sensitive attribute GUIDs
+// ms-Mcs-AdmPwd        : {43F8B798-..} — LAPS plaintext password
+// ms-Mcs-AdmPwdExpirationTime : LAPS expiry
+// msDS-ManagedPassword : GMSA password blob
+// msDS-ManagedPasswordId: GMSA key ID
+// msDS-ManagedPasswordInterval: GMSA rotation interval
+let SensitiveAttrGUIDs = dynamic([
+    "ms-Mcs-AdmPwd",
+    "ms-Mcs-AdmPwdExpirationTime",
+    "msDS-ManagedPassword",
+    "msDS-ManagedPasswordId",
+    "msDS-ManagedPasswordInterval"
+]);
+
+// EventID 4662: An operation was performed on an object
+// ObjectType = attributeSchema access (read of specific attribute)
+SecurityEvent
+| where TimeGenerated > ago(LookbackPeriod)
+| where EventID == 4662
+| where AccessMask == "0x10"           // Read Property
+    or AccessMask == "0x100"           // Control Access (extended rights)
+// Match on LAPS/GMSA specific property GUIDs or names
+| where Properties has_any (
+    "ms-Mcs-AdmPwd",
+    "msDS-ManagedPassword",
+    "2d1b333d-222b-14d0-ada8-00aa00c149d8",    // ms-Mcs-AdmPwd GUID
+    "0e10c968-78fb-11d2-90d4-00c04f79dc55",    // Extended Rights — Certificate Enrollment
+    "bf967a86-0de6-11d0-a285-00aa003049e2",    // ms-Mcs-AdmPwd property set GUID
+    "e362ed86-b728-0842-b27d-2dea7a9df218"     // msDS-ManagedPassword
+)
+| extend
+    Actor           = tolower(SubjectUserName),
+    ActorDomain     = SubjectDomainName,
+    TargetObject    = ObjectName,
+    ActorNorm       = tolower(SubjectUserName),
+    IsLAPSRead      = Properties has "ms-Mcs-AdmPwd",
+    IsGMSARead      = Properties has "msDS-ManagedPassword",
+    AttributeType   = case(
+        Properties has "ms-Mcs-AdmPwd",            "LAPS_PlaintextPassword",
+        Properties has "msDS-ManagedPassword",     "GMSA_ManagedPassword",
+        Properties has "ms-Mcs-AdmPwdExpiration",  "LAPS_ExpirationTime",
+        "SensitiveAttribute"
+    )
+| where not(ActorNorm has_any (LegitimateReaders))
+// Exclude machine accounts doing self-read (expected during policy application)
+| where not(ActorNorm endswith "$" and TargetObject has ActorNorm)
+| summarize
+    ReadCount       = count(),
+    LAPSReads       = countif(IsLAPSRead),
+    GMSAReads       = countif(IsGMSARead),
+    TargetObjects   = make_set(TargetObject, 20),
+    AttributeTypes  = make_set(AttributeType, 5),
+    DCs             = make_set(Computer, 5),
+    FirstRead       = min(TimeGenerated),
+    LastRead        = max(TimeGenerated)
+  by Actor, ActorDomain
+| extend
+    AccountFull = strcat(ActorDomain, "\\", Actor),
+    RiskScore = (LAPSReads * 30)
+              + (GMSAReads * 30)
+              + (array_length(TargetObjects) * 5),
+    Severity = case(
+        array_length(TargetObjects) >= 5, "High - Mass_LAPS_GMSA_Harvest",
+        LAPSReads >= 1 and GMSAReads >= 1,  "High - Both_LAPS_And_GMSA_Read",
+        LAPSReads >= 1,                     "High - LAPS_Password_Read",
+        GMSAReads >= 1,                     "High - GMSA_Password_Read",
+        "Medium"
+    )
+| where ReadCount >= 1
+| project
+    TimeGenerated   = LastRead,
+    AccountFull,
+    Actor,
+    ActorDomain,
+    Severity,
+    RiskScore,
+    LAPSReads,
+    GMSAReads,
+    ReadCount,
+    TargetObjects,
+    AttributeTypes,
+    DCs,
+    FirstRead
+| order by RiskScore desc

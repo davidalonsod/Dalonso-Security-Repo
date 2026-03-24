@@ -1,0 +1,83 @@
+// =========================================================
+// RULE-04 | AD-GoldenTicket-Orphaned-Logon
+// Description : Golden Ticket detection — Event 4624 (network
+//               logon Type 3) with Event 4672 (Special Privileges:
+//               SeDebugPrivilege or Domain Admin–level groups)
+//               but WITHOUT a corresponding Event 4768 (TGT
+//               request) from the same account within the
+//               previous 4 hours on any DC.
+//               A forged (Golden) TGT never passes through
+//               the KDC AS-REQ/AS-REP exchange, so 4768
+//               will be absent.
+// Severity    : High (orphaned logon) → Critical (new host +
+//               DA privileges, or ticket lifetime > 10h)
+// Frequency   : Every 1 hour, look-back 1 hour
+// MITRE       : T1558.001 — Golden Ticket
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack          = 1h;
+let TGTLookBackWindow = 4h;    // 4-hour TGT validity window
+
+// Accounts we have recently seen a proper TGT request for
+let AccountsWithTGT = SecurityEvent
+    | where TimeGenerated > ago(LookBack + TGTLookBackWindow)
+    | where EventID == 4768
+    | where TargetUserName !endswith "$"
+    | summarize by TGTAccount = tolower(TargetUserName), TGTDomain = tolower(TargetDomainName);
+
+// Privileged network logons (Type 3 or Type 10) in the last hour
+let PrivilegedLogons = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4624
+    | where LogonType in (3, 10)
+    | where AuthenticationPackageName =~ "Kerberos"
+    | where TargetUserName !endswith "$"
+    | where TargetUserName !in~ ("ANONYMOUS LOGON", "-")
+    | join kind=inner (
+        SecurityEvent
+        | where TimeGenerated > ago(LookBack)
+        | where EventID == 4672
+        | where PrivilegeList has_any (
+            "SeTcbPrivilege", "SeDebugPrivilege",
+            "SeTakeOwnershipPrivilege", "SeBackupPrivilege",
+            "SeRestorePrivilege", "SeLoadDriverPrivilege"
+          )
+        | project PrivTime = TimeGenerated,
+                  PrivUser = SubjectUserName,
+                  PrivDomain = SubjectDomainName,
+                  PrivilegeList,
+                  PrivHost = Computer
+    ) on $left.TargetUserName == $right.PrivUser,
+         $left.TargetDomainName == $right.PrivDomain
+    | extend
+        NormAccount = tolower(TargetUserName),
+        NormDomain  = tolower(TargetDomainName);
+
+// Keep only logons that have NO corresponding TGT
+PrivilegedLogons
+| join kind=leftanti (AccountsWithTGT) on
+    $left.NormAccount == $right.TGTAccount,
+    $left.NormDomain  == $right.TGTDomain
+| extend
+    TicketLifetime_hours = datetime_diff("hour", TimeGenerated, TimeGenerated),
+    Severity = case(
+        PrivilegeList has "SeTcbPrivilege", "Critical",
+        "High"
+    ),
+    WhySuspicious = strcat(
+        "PrivLogon_No_TGT_Request; ",
+        "Privileges: ", PrivilegeList, "; ",
+        "LogonType: ", tostring(LogonType)
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    TargetUserName,
+    TargetDomainName,
+    Computer,
+    IpAddress,
+    LogonType,
+    PrivilegeList
+| order by TimeGenerated desc

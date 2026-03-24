@@ -1,0 +1,87 @@
+// =========================================================
+// RULE-01 | AD-Kerberoasting-RC4-Bulk
+// Description : Bulk RC4-encrypted TGS requests from a single
+//               user — the Kerberoasting signature.  Any
+//               domain user can request a TGS for any SPN;
+//               RC4 (0x17) is preferred by attackers because
+//               it yields mode-13100 hashcat hashes.
+// Severity    : High  → Critical when ≥10 SPNs or DA-member
+// Frequency   : Every 30 minutes, look-back 30 minutes
+// MITRE       : T1558.003 — Kerberoasting
+// Tables      : SecurityEvent, SigninLogs (optional enrichment)
+// NOT duplicated: No Sentinel built-in covers RC4 TGS bulk
+//                 requests. Built-ins cover brute force (4625),
+//                 not Kerberoast (4769).
+// =========================================================
+
+let LookBack         = 30m;
+let MinSPNsThreshold = 5;      // ≥5 different service accounts = alert
+
+// --- Build a DC list dynamically from known KDC issuers ---
+let KnownDCs = SecurityEvent
+    | where TimeGenerated > ago(7d)
+    | where EventID == 4768                        // AS-REQ: only DCs issue these
+    | summarize by Computer
+    | project Computer = toupper(Computer);
+
+// --- Main query ---
+let KerberoastCandidates = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4769                        // TGS-REP
+    | where TicketEncryptionType == "0x17"         // RC4-HMAC — Kerberoastable
+    | where ServiceName !endswith "$"              // Exclude machine accounts
+    | where ServiceName !in ("krbtgt", "kadmin/changepw")
+    | where TargetUserName !endswith "$"           // Exclude computer requesters
+    | extend
+        RequestingUser    = tolower(TargetUserName),
+        RequestingDomain  = tolower(TargetDomainName),
+        ServiceSPN        = ServiceName,
+        SourceIP          = IpAddress
+    | summarize
+        SPNsRequested       = dcount(ServiceSPN),
+        SPNList             = make_set(ServiceSPN, 30),
+        TotalRequests       = count(),
+        SourceIPs           = make_set(IpAddress, 5),
+        EarliestRequest     = min(TimeGenerated),
+        LatestRequest       = max(TimeGenerated)
+        by RequestingUser, RequestingDomain, Computer
+    | where SPNsRequested >= MinSPNsThreshold;
+
+// --- Enrich with SigninLogs risky sign-in context (join on user UPN) ---
+let RiskySignIns = SigninLogs
+    | where TimeGenerated > ago(1h)
+    | where RiskLevelDuringSignIn in ("medium", "high")
+        or RiskState == "confirmedCompromised"
+    | summarize RiskySignIn = any(1) by UserPrincipalName = tolower(UserPrincipalName);
+
+KerberoastCandidates
+| extend UserUPN = strcat(RequestingUser, "@", RequestingDomain)
+| join kind=leftouter (RiskySignIns) on $left.UserUPN == $right.UserPrincipalName
+| extend
+    Severity = case(
+        SPNsRequested >= 10 or RiskySignIn == 1, "Critical",
+        SPNsRequested >= 5,                       "High",
+        "Medium"
+    ),
+    AttackWindow_sec = datetime_diff("second", LatestRequest, EarliestRequest),
+    RequestsPerMin   = round(todouble(TotalRequests) / max_of(1.0, todouble(datetime_diff("minute", LatestRequest, EarliestRequest))), 1)
+| extend WhySuspicious = strcat(
+    iff(SPNsRequested >= 10,    "BulkRC4_>=10SPNs; ", ""),
+    iff(SPNsRequested >= 5,     "BulkRC4_>=5SPNs; ",  ""),
+    iff(RiskySignIn == 1,       "RiskySignIn_Correlated; ", ""),
+    iff(RequestsPerMin > 5.0,   "HighRate_", ""), iff(RequestsPerMin > 5.0, tostring(RequestsPerMin), ""), iff(RequestsPerMin > 5.0, "req/min; ", "")
+)
+| project
+    TimeGenerated         = LatestRequest,
+    Severity,
+    WhySuspicious,
+    RequestingUser,
+    RequestingDomain,
+    Computer,
+    SPNsRequested,
+    TotalRequests,
+    RequestsPerMin,
+    AttackWindow_sec,
+    SPNList,
+    SourceIPs
+| order by SPNsRequested desc

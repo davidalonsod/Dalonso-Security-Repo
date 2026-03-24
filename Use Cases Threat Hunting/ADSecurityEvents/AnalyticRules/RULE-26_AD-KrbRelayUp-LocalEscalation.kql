@@ -1,0 +1,79 @@
+// =========================================================
+// RULE-26 | AD-KrbRelayUp-LocalEscalation
+// Description : KrbRelayUp local privilege escalation
+//               detection — machine account creation (5137)
+//               on a specific workstation by a low-privilege
+//               user, followed within 10 minutes by LDAP
+//               attribute modification (4742 or 5136) on
+//               that SAME workstation's computer object.
+//               KrbRelayUp coerces the local SYSTEM to
+//               authenticate via Kerberos, relays to LDAP,
+//               and sets RBCD or shadow credentials on the
+//               local computer object — enabling S4U2Self
+//               impersonation of Domain Admins locally.
+// Severity    : High → Critical (on DC or Tier-0 host)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1548 — Abuse Elevation Control Mechanism
+//               T1134 — Access Token Manipulation
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack       = 15m;
+let SequenceWindow = 10m;      // Both steps within 10 min on same host
+
+// Step 1: Machine account creation by a low-priv user
+let MachineCreation = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 5137
+    | where ObjectClass =~ "computer"
+    | where not(SubjectUserName has_any ("admin", "Admin", "SYSTEM", "$"))
+    | extend
+        Creator      = strcat(SubjectDomainName, "\\", SubjectUserName),
+        NewMachine   = ObjectDN,
+        CreateTime   = TimeGenerated,
+        CreationHost = Computer;
+
+// Step 2: AD attribute modification on the workstation itself
+// (RBCD or shadow credentials set)
+let LocalAttrMod = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID in (4742, 5136)
+    | where AttributeLDAPDisplayName in~ (
+        "msDS-AllowedToActOnBehalfOfOtherIdentity",
+        "msDS-KeyCredentialLink"
+      )
+    | project
+        ModTime       = TimeGenerated,
+        ModActor      = strcat(SubjectDomainName, "\\", SubjectUserName),
+        ModHost       = Computer,
+        ModAttr       = AttributeLDAPDisplayName;
+
+// Correlate by same originating host within window
+MachineCreation
+| join kind=inner (LocalAttrMod) on $left.CreationHost == $right.ModHost
+| where ModTime between (CreateTime .. CreateTime + SequenceWindow)
+| extend
+    Sequence_sec  = datetime_diff("second", ModTime, CreateTime),
+    IsOnDC        = CreationHost has_any ("DC", "ADDC"),
+    Severity = case(
+        CreationHost has_any ("DC", "ADDC"), "Critical",
+        "High"
+    ),
+    WhySuspicious = strcat(
+        "KrbRelayUp_Local_Escalation_Pattern; ",
+        "Step1_MachineAccount_Created: ", NewMachine, "; ",
+        "Step2_AD_Attr_Modified: ", ModAttr, " in ", tostring(Sequence_sec), "s; ",
+        "Creator: ", Creator, "; ",
+        "Host: ", CreationHost
+    )
+| project
+    TimeGenerated    = CreateTime,
+    Severity,
+    WhySuspicious,
+    Creator,
+    NewMachine,
+    ModAttr,
+    ModActor,
+    Sequence_sec,
+    CreationHost
+| order by TimeGenerated desc

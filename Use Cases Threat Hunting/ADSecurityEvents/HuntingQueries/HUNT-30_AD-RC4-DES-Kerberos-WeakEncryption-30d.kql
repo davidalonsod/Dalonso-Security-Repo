@@ -1,0 +1,250 @@
+// ============================================================
+// HUNT-30 | AD Hunting: RC4 and DES Kerberos Weak Encryption
+// ============================================================
+// Description:
+//   Hunts for Kerberos tickets using weak or deprecated encryption algorithms.
+//   Modern hardened domains should exclusively use AES-256 (0x12) or AES-128 (0x11).
+//   Presence of RC4 or DES is either a misconfiguration, legacy client, or
+//   an active attack leveraging downgrade to enable offline hash cracking.
+//
+//   Encryption type reference:
+//     0x1  → DES-CBC-CRC        (prehistoric — should never appear)
+//     0x3  → DES-CBC-MD5        (prehistoric — should never appear)
+//     0x10 → Triple-DES 3DES    (deprecated)
+//     0x17 → RC4-HMAC           (enabled by default; main Kerberoasting target)
+//     0x18 → RC4-HMAC-EXP       (weak export RC4 variant)
+//     0x11 → AES-128-CTS-HMAC-SHA1  (acceptable)
+//     0x12 → AES-256-CTS-HMAC-SHA1  (recommended — gold standard)
+//
+//   Attack techniques enabled by weak Kerberos encryption:
+//     - Kerberoasting:  Request TGS (4769) for SPN with RC4 → crack offline
+//     - AS-REP Roasting: Request TGT (4768) with no pre-auth + RC4 → crack offline
+//     - Golden Ticket:   krbtgt RC4 hash → forge TGTs for any account
+//     - Silver Ticket:   Service RC4 hash → forge TGS without KDC involvement
+//     - DES downgrade:   Active MITM forcing DES → trivially crackable
+//
+//   Key AD attribute to check on flagged accounts:
+//     msDS-SupportedEncryptionTypes — bitmask controlling allowed enc types
+//     Value 0 (or missing) = defaults to RC4 + DES → HIGH RISK
+//
+// Mitre ATT&CK:
+//   - T1558.003: Steal or Forge Kerberos Tickets — Kerberoasting
+//   - T1558.004: Steal or Forge Kerberos Tickets — AS-REP Roasting
+//   - T1558.001: Steal or Forge Kerberos Tickets — Golden Ticket
+//   - T1558.002: Steal or Forge Kerberos Tickets — Silver Ticket
+//   - T1557:     Adversary-in-the-Middle (forced downgrade)
+//
+// Data Sources: SecurityEvent (EventID 4768, 4769, 4770, 4771)
+// Query Period: 30 days
+// Hunting Focus: RC4/DES ticket discovery, Kerberoastable accounts,
+//               per-account encryption posture, daily weak-enc trend
+// ============================================================
+
+let LookbackPeriod = 30d;
+let RC4EncTypes    = dynamic(["0x17", "0x18"]);
+let DESEncTypes    = dynamic(["0x1", "0x3", "0x10"]);
+let WeakEncTypes   = dynamic(["0x1", "0x3", "0x10", "0x17", "0x18"]);
+let StrongEncTypes = dynamic(["0x11", "0x12"]);          // AES-128 and AES-256
+
+// ──────────────────────────────────────────────────────────────
+// PART 1 — All Kerberos events with encryption type annotation
+// ──────────────────────────────────────────────────────────────
+let KerberosTickets = SecurityEvent
+    | where TimeGenerated >= ago(LookbackPeriod)
+    | where EventID in (4768, 4769, 4770, 4771)
+    | extend
+        EncType     = tostring(column_ifexists("TicketEncryptionType", "")),
+        PreAuth     = tostring(column_ifexists("PreAuthType", "")),
+        ServiceName = tostring(extract(@"<Data Name='ServiceName'>([^<]+)</Data>", 1, EventData)),
+        ClientAddr  = tostring(extract(@"<Data Name='IpAddress'>([^<]+)</Data>", 1, EventData)),
+        FailCode    = tostring(extract(@"<Data Name='Status'>([^<]+)</Data>", 1, EventData))
+    | where isnotempty(EncType) and EncType != "0"     // 0 = no encryption field logged
+    | extend
+        EncClass = case(
+            EncType == "0x12", "AES256",
+            EncType == "0x11", "AES128",
+            EncType == "0x17", "RC4-HMAC",
+            EncType == "0x18", "RC4-HMAC-EXP",
+            EncType == "0x1",  "DES-CBC-CRC",
+            EncType == "0x3",  "DES-CBC-MD5",
+            EncType == "0x10", "3DES",
+            strcat("Unknown-", EncType)),
+        IsWeak     = EncType in (WeakEncTypes),
+        IsRC4      = EncType in (RC4EncTypes),
+        IsDES      = EncType in (DESEncTypes),
+        EventDesc  = case(
+            EventID == 4768, "TGT-Request",
+            EventID == 4769, "TGS-Request",
+            EventID == 4770, "TGT-Renewal",
+            EventID == 4771, "PreAuth-Failure",
+            "Unknown"),
+        IsKerberoastTarget = (EventID == 4769
+            and EncType in (RC4EncTypes)
+            and ServiceName !endswith "$"
+            and ServiceName !in ("krbtgt", "kadmin", "kadmin/changepw")),
+        IsASREPTarget      = (EventID == 4768
+            and EncType in (WeakEncTypes)
+            and PreAuth == "0"),
+        IsMachineAccount   = (TargetUserName endswith "$");
+
+// ──────────────────────────────────────────────────────────────
+// PART 2 — Kerberoastable Service Accounts (RC4 TGS requests)
+//   Priority hunting target: each RC4 TGS represents an offline-crackable hash
+// ──────────────────────────────────────────────────────────────
+let KerberoastCandidates = KerberosTickets
+    | where IsKerberoastTarget
+    | summarize
+        FirstSeen           = min(TimeGenerated),
+        LastSeen            = max(TimeGenerated),
+        RC4TGSCount         = count(),
+        UniqueRequestors    = dcount(TargetUserName),
+        Requestors          = make_set(TargetUserName, 10),
+        SourceIPs           = make_set(ClientAddr, 10),
+        EncTypes            = make_set(EncClass)
+        by ServiceName, Computer
+    | extend
+        RiskLevel = case(
+            RC4TGSCount >= 50,    "Critical — High-volume RC4 TGS (mass Kerberoasting)",
+            RC4TGSCount >= 10,    "Critical — Repeated RC4 TGS requests for this SPN",
+            UniqueRequestors >= 5,"High — Multiple accounts requesting RC4 tickets for this SPN",
+            RC4TGSCount >= 3,     "High — Recurring RC4 TGS requests",
+                                  "Medium — Single RC4 TGS (Kerberoastable SPN confirmed)"
+        ),
+        Recommendation = strcat(
+            "1. Verify msDS-SupportedEncryptionTypes on service account for SPN '", ServiceName,
+            "'; 2. Set to 0x18 (AES128+AES256) or 0x8 (AES256 only); ",
+            "3. Rotate service account password immediately if RC4TGSCount > 1")
+    | project-reorder
+        FirstSeen, LastSeen, RiskLevel,
+        ServiceName, Computer,
+        RC4TGSCount, UniqueRequestors, Requestors,
+        SourceIPs, EncTypes, Recommendation;
+
+// ──────────────────────────────────────────────────────────────
+// PART 3 — DES Kerberos Events (always critical — should be 0 in modern AD)
+// ──────────────────────────────────────────────────────────────
+let DESEvents = KerberosTickets
+    | where IsDES
+    | summarize
+        FirstSeen       = min(TimeGenerated),
+        LastSeen        = max(TimeGenerated),
+        TotalDESTickets = count(),
+        TGTRequests     = countif(EventID == 4768),
+        TGSRequests     = countif(EventID == 4769),
+        TGTRenewals     = countif(EventID == 4770),
+        PreAuthFails    = countif(EventID == 4771),
+        Services        = make_set(ServiceName, 15),
+        SourceIPs       = make_set(ClientAddr, 10),
+        EncTypes        = make_set(EncClass),
+        HasCRCVariant   = max(toint(EncType == "0x1"))  // Absolute weakest
+        by TargetUserName, TargetDomainName, Computer
+    | extend
+        RiskLevel = case(
+            HasCRCVariant == 1,    "Critical — DES-CBC-CRC detected (weakest possible Kerberos)",
+            TGSRequests >= 5,      "Critical — DES TGS requests (offline-crackable service tickets)",
+            TotalDESTickets >= 10, "High    — High-volume DES Kerberos (possible DES-only account)",
+                                   "High    — DES Kerberos ticket detected"
+        ),
+        InvestigationNote = strcat(
+            "Run: Get-ADUser ", TargetUserName,
+            " -Properties msDS-SupportedEncryptionTypes,UseDESKeyOnly | Select Name,msDS*,UseDES*  ",
+            "— If UseDESKeyOnly=True, remove this attribute immediately. ",
+            "Set msDS-SupportedEncryptionTypes = 24 (AES128+AES256)")
+    | project-reorder
+        FirstSeen, LastSeen, RiskLevel,
+        TargetUserName, TargetDomainName, Computer,
+        TotalDESTickets, TGTRequests, TGSRequests, TGTRenewals, PreAuthFails,
+        Services, SourceIPs, EncTypes, HasCRCVariant, InvestigationNote;
+
+// ──────────────────────────────────────────────────────────────
+// PART 4 — Per-Account Encryption Posture (remediation priority list)
+//   Shows every account's AES vs RC4 vs DES ticket ratio
+//   Feed this into a remediation tracker
+// ──────────────────────────────────────────────────────────────
+let AccountEncPosture = KerberosTickets
+    | where EventID in (4768, 4769)      // TGT and TGS only
+    | summarize
+        TotalTickets     = count(),
+        AES256Tickets    = countif(EncType == "0x12"),
+        AES128Tickets    = countif(EncType == "0x11"),
+        RC4Tickets       = countif(IsRC4),
+        DESTickets       = countif(IsDES),
+        WeakTickets      = countif(IsWeak),
+        UniqueServices   = dcount(ServiceName),
+        Services         = make_set(ServiceName, 15),
+        SourceIPs        = make_set(ClientAddr, 10),
+        EncTypes         = make_set(EncClass),
+        FirstSeen        = min(TimeGenerated),
+        LastSeen         = max(TimeGenerated)
+        by TargetUserName, TargetDomainName
+    | where WeakTickets > 0
+    | extend
+        WeakPercent   = round(toreal(WeakTickets) / toreal(TotalTickets) * 100, 1)
+    | extend
+        EncProfile    = strcat(
+            iff(AES256Tickets > 0, strcat("AES256:", tostring(AES256Tickets), " "), ""),
+            iff(AES128Tickets > 0, strcat("AES128:", tostring(AES128Tickets), " "), ""),
+            iff(RC4Tickets > 0,    strcat("RC4:",    tostring(RC4Tickets),    " "), ""),
+            iff(DESTickets > 0,    strcat("DES:",    tostring(DESTickets),    " "), "")
+        ),
+        RemPriority   = case(
+            DESTickets > 0 and RC4Tickets > 0,    "P1 — DES + RC4 both active",
+            DESTickets > 0,                        "P1 — DES encryption in active use",
+            WeakPercent == 100.0,                  "P2 — 100% RC4, no AES at all",
+            WeakPercent >= 75,                     "P2 — Predominantly RC4 (>75% of tickets)",
+            WeakPercent >= 50,                     "P2 — Majority RC4",
+            AES256Tickets == 0 and AES128Tickets == 0,
+                                                   "P2 — No AES tickets observed",
+                                                   "P3 — Mixed AES+RC4, investigate client"
+        )
+    | project-reorder
+        TargetUserName, TargetDomainName, RemPriority, WeakPercent, EncProfile,
+        TotalTickets, AES256Tickets, AES128Tickets, RC4Tickets, DESTickets,
+        UniqueServices, Services, SourceIPs, FirstSeen, LastSeen
+    | order by RemPriority asc, WeakPercent desc;
+
+// ──────────────────────────────────────────────────────────────
+// PART 5 — Daily Weak Encryption Trend (remediation progress tracking)
+// ──────────────────────────────────────────────────────────────
+let DailyWeakEncTrend = KerberosTickets
+    | where IsWeak
+    | summarize
+        WeakTickets     = count(),
+        RC4Count        = countif(IsRC4),
+        DESCount        = countif(IsDES),
+        UniqueAccounts  = dcount(TargetUserName),
+        UniqueServices  = dcount(ServiceName)
+        by Day = bin(TimeGenerated, 1d), EncClass
+    | order by Day desc, EncClass asc;
+
+// ──────────────────────────────────────────────────────────────
+// PRIMARY OUTPUT — Kerberoastable SPNs (most actionable signal)
+// Comment out and uncomment alternate views below as needed
+// ──────────────────────────────────────────────────────────────
+KerberoastCandidates
+| order by RiskLevel asc, RC4TGSCount desc
+
+// ── Alternate views (comment primary above, uncomment one below) ──
+
+// --- DES encryption events (always critical) ---
+// DESEvents
+// | order by RiskLevel asc, TotalDESTickets desc
+
+// --- Per-account encryption posture for remediation ---
+// AccountEncPosture
+
+// --- Daily weak encryption trend ---
+// DailyWeakEncTrend
+
+// --- AS-REP Roasting candidates (RC4/DES + no pre-auth) ---
+// KerberosTickets
+// | where IsASREPTarget
+// | summarize
+//     ASREPCount   = count(),
+//     EncTypes     = make_set(EncClass),
+//     SourceIPs    = make_set(ClientAddr, 10),
+//     FirstSeen    = min(TimeGenerated),
+//     LastSeen     = max(TimeGenerated)
+//     by TargetUserName, TargetDomainName, Computer
+// | extend RiskLevel = "Critical — AS-REP Roastable account (no pre-auth + weak encryption)"
+// | order by ASREPCount desc

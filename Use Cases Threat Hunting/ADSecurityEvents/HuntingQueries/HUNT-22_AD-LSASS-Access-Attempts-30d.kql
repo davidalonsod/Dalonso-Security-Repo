@@ -1,0 +1,112 @@
+// =========================================================
+// HUNT-22 | AD-LSASS-Access-Attempts-30d
+// Description : Hunts for process-level and handle-level
+//               access to lsass.exe using SecurityEvent
+//               (4656 sensitive handle request, 4663 object
+//               access on process objects) and DeviceEvents
+//               (MDE LSASS access telemetry). Surfaces
+//               non-standard processes accessing LSASS that
+//               are indicative of Mimikatz, LSASS memory
+//               dumping, or in-memory injection attacks.
+// Period      : 30 days
+// Use Case    : Credential dumping detection, Mimikatz
+//               derivative hunting, LSASS injection
+// Tables      : SecurityEvent, DeviceEvents (MDE if available)
+// =========================================================
+
+let Period = 30d;
+
+// Known legitimate LSASS accessors (reduce noise)
+let LegitLSASSAccessors = dynamic([
+    "\\windows\\system32\\svchost.exe",
+    "\\windows\\system32\\taskmgr.exe",
+    "\\windows\\system32\\wininit.exe",
+    "\\windows\\system32\\csrss.exe",
+    "\\windows\\system32\\ntoskrnl.exe",
+    "\\windows\\system32\\services.exe",
+    "\\windows\\system32\\smss.exe",
+    "\\windows\\system32\\lsm.exe",
+    "\\windows\\system32\\winlogon.exe",
+    "\\windows\\system32\\logonui.exe",
+    "\\windows\\system32\\dwm.exe",
+    "\\windows\\system32\\msiexec.exe",
+    "\\windows\\system32\\spoolsv.exe",
+    "\\windows\\system32\\msdtc.exe",
+    "\\windows\\ccm\\ccmexec.exe",
+    "\\program files\\microsoft monitoring agent"
+]);
+
+// SecurityEvent: Sensitive handle to LSASS (4656) and object access (4663)
+let LSASSHandles = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID in (4656, 4663)
+    | where ObjectType == "Process"
+    | where ObjectName has "lsass"
+    | where not(ProcessName has_any (LegitLSASSAccessors))
+    | extend
+        AccessingProcess = tolower(ProcessName),
+        Actor            = strcat(SubjectDomainName, "\\", SubjectUserName),
+        AccessTypes      = AccessMask,
+        EventSource      = "SecurityEvent_Handle";
+
+// DeviceEvents: MDE LSASS access (if MDE is deployed)
+let LSASSEventsMDE = union isfuzzy=true (DeviceEvents
+    | where TimeGenerated > ago(Period)
+    | where ActionType in ("LsassProcessAccess", "CreateRemoteThread",
+                            "NtAllocateVirtualMemory", "QueueUserAPC")
+    | where FileName =~ "lsass.exe" or InitiatingProcessFileName =~ "lsass.exe"
+    | where not(tolower(InitiatingProcessFolderPath) has_any (LegitLSASSAccessors))
+    | extend
+        AccessingProcess = tolower(InitiatingProcessFileName),
+        Actor            = InitiatingProcessAccountName,
+        AccessTypes      = ActionType,
+        Computer         = DeviceName,
+        EventSource      = "MDE_DeviceEvent"),
+    (print _placeholder = "" | where 1==0);
+
+// Combine both sources
+LSASSHandles
+| project TimeGenerated, AccessingProcess, Actor, AccessTypes, Computer, EventSource
+| union (LSASSEventsMDE
+    | project TimeGenerated, AccessingProcess, Actor, AccessTypes, Computer, EventSource)
+| summarize
+    TotalAccessEvents  = count(),
+    AccessMethods      = make_set(AccessTypes, 10),
+    AccessingProcesses = make_set(AccessingProcess, 10),
+    Actors             = make_set(Actor, 10),
+    EventSources       = make_set(EventSource, 3),
+    FirstAccess        = min(TimeGenerated),
+    LastAccess         = max(TimeGenerated)
+  by Computer
+| extend
+    HasMDECorroboration = EventSources has "MDE_DeviceEvent",
+    KnownDumpTool = AccessingProcesses has_any (
+        "procdump", "sqldumper", "rundll32",
+        "powershell", "cmd", "wmic",
+        "task manager", "procmon", "comsvcs"
+    )
+| extend
+    RiskScore = (TotalAccessEvents * 10)
+              + iff(HasMDECorroboration, 30, 0)
+              + iff(KnownDumpTool, 40, 0),
+    RiskLevel = case(
+        HasMDECorroboration and KnownDumpTool, "Critical - LSASS_Dump_Confirmed",
+        KnownDumpTool,                         "High - Known_Dump_Tool_Accessed_LSASS",
+        HasMDECorroboration,                   "High - MDE_LSASS_Access_Alerted",
+        TotalAccessEvents >= 3,                "Medium - Repeated_LSASS_Handle_Access",
+        "Medium - Single_LSASS_Handle_Access"
+    )
+| project
+    Computer,
+    RiskLevel,
+    RiskScore,
+    HasMDECorroboration,
+    KnownDumpTool,
+    TotalAccessEvents,
+    AccessingProcesses,
+    Actors,
+    AccessMethods,
+    EventSources,
+    FirstAccess,
+    LastAccess
+| order by RiskScore desc

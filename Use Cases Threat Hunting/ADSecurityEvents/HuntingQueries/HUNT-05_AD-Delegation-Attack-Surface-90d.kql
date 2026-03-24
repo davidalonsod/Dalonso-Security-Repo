@@ -1,0 +1,109 @@
+// =========================================================
+// HUNT-05 | AD-Delegation-Attack-Surface-90d
+// Description : Complete delegation attack surface map —
+//               Unconstrained, Constrained, and RBCD
+//               configurations with recent authentication
+//               activity correlation.
+//               Flags non-DC unconstrained hosts and
+//               recently modified RBCD configurations.
+// Period      : 90 days
+// Use Case    : Delegation attack surface reduction,
+//               pre-engagement risk assessment
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 90d;
+
+// Known DCs
+let KnownDCNames = SecurityEvent
+    | where TimeGenerated > ago(7d)
+    | where EventID == 4768
+    | summarize by DC = toupper(Computer);
+
+// === UNCONSTRAINED DELEGATION ===
+// Identified via 4742 Computer Account Changed with TRUSTED_FOR_DELEGATION flag
+let UnconstrainedHosts = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4742
+    | where EventData has "TRUSTED_FOR_DELEGATION"
+       or EventData has "0x80000"
+    | extend
+        Host             = toupper(TargetUserName),
+        SetBy            = SubjectUserName,
+        SetAt            = TimeGenerated,
+        DelegType        = "Unconstrained"
+    | project Host, SetBy, SetAt, DelegType, Computer;
+
+// === RBCD ===
+let RBCDHosts = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID in (4742, 5136)
+    | where tostring(column_ifexists("AttributeLDAPDisplayName", "")) =~ "msDS-AllowedToActOnBehalfOfOtherIdentity"
+        or EventData has "msDS-AllowedToActOnBehalfOfOtherIdentity"
+    | extend
+        Host      = toupper(TargetUserName),
+        SetBy     = SubjectUserName,
+        SetAt     = TimeGenerated,
+        DelegType = "RBCD"
+    | project Host, SetBy, SetAt, DelegType, Computer;
+
+// === CONSTRAINED DELEGATION ===
+let ConstrainedHosts = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4742
+    | where EventData has "msDS-AllowedToDelegateTo"
+        or tostring(column_ifexists("AllowedToDelegateTo", "")) != ""
+    | extend
+        Host      = toupper(TargetUserName),
+        SetBy     = SubjectUserName,
+        SetAt     = TimeGenerated,
+        DelegType = "Constrained"
+    | project Host, SetBy, SetAt, DelegType, Computer;
+
+// === MERGE AND ENRICH ===
+let AllDelegation = union UnconstrainedHosts, RBCDHosts, ConstrainedHosts;
+
+// Recent auth TO each delegating host (last 30 days)
+let RecentAuthTargets = SecurityEvent
+    | where TimeGenerated > ago(30d)
+    | where EventID == 4624
+    | where LogonType in (3, 10)
+    | summarize
+        RecentLogonCount = count(),
+        UniqueLogonsFrom = dcount(IpAddress)
+        by TargetHost = toupper(Computer);
+
+AllDelegation
+| join kind=leftouter (RecentAuthTargets) on $left.Host == $right.TargetHost
+| join kind=leftouter (KnownDCNames) on $left.Host == $right.DC
+| extend
+    IsNonDC             = isnull(DC),
+    IsRecentChange      = SetAt > ago(7d)
+ | extend    RiskLevel = case(
+        DelegType == "Unconstrained" and IsNonDC,          "Critical",
+        DelegType == "RBCD"          and IsRecentChange,   "Critical",
+        DelegType == "Unconstrained",                      "High",
+        DelegType == "RBCD",                               "High",
+        "Medium"
+    ),
+    AttackNarrative = case(
+        DelegType == "Unconstrained" and IsNonDC,
+            "Non-DC with unconstrained delegation: coerce DC to auth here → steal DC TGT → DCSync",
+        DelegType == "RBCD" and IsRecentChange,
+            "RBCD recently set: attacker may have written S4U delegation config for impersonation",
+        DelegType == "Constrained",
+            "Constrained delegation: S4U2Self+S4U2Proxy, SPN swap for alternate services",
+        "Review delegation configuration"
+    )
+| project
+    Host,
+    DelegType,
+    RiskLevel,
+    AttackNarrative,
+    IsNonDC,
+    IsRecentChange,
+    SetBy,
+    SetAt,
+    RecentLogonCount,
+    UniqueLogonsFrom
+| order by RiskLevel asc, SetAt desc

@@ -1,0 +1,102 @@
+// =========================================================
+// HUNT-08 | AD-SIDHistory-Enabled-Accounts-Audit-90d
+// Description : Identifies all accounts with a non-empty
+//               sIDHistory attribute (4765 / 5136),
+//               correlating with privileged group membership
+//               to surface SID History injection paths and
+//               inter-forest privilege escalation risks.
+// Period      : 90 days
+// Use Case    : SID History hygiene, privilege escalation
+//               path discovery, forest trust abuse
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 90d;
+
+// Privileged group membership baseline
+let PrivGroupMembers = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID in (4728, 4732, 4756)
+    | where TargetUserName has_any ("Domain Admins", "Enterprise Admins",
+                                    "Schema Admins", "Administrators",
+                                    "Group Policy Creator Owners",
+                                    "Account Operators", "Backup Operators",
+                                    "Server Operators", "DnsAdmins")
+    | summarize PrivGroups = make_set(TargetUserName) by SubjectNorm = tolower(tostring(column_ifexists("MemberName", "")));
+
+// SID History attribute write events
+let SIDHistoryWrites = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 5136
+    | where tostring(column_ifexists("AttributeLDAPDisplayName", "")) =~ "sIDHistory"
+    | extend
+        TargetDN    = ObjectName,
+        GrantedBy   = strcat(SubjectDomainName, "\\", SubjectUserName),
+        GrantedAt   = TimeGenerated,
+        IsWrite     = OperationType == "%%14675",  // Value Added
+        IsDelete    = OperationType == "%%14676";  // Value Deleted
+
+// Account migration events (SID history during account migration)
+let SIDHistoryMigration = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4765
+    | extend
+        TargetDN    = TargetAccount,
+        ChangedBy   = strcat(SubjectDomainName, "\\", SubjectUserName),
+        OldSID      = tostring(column_ifexists("OldTargetUserName", "")),
+        NewSID      = tostring(column_ifexists("NewTargetUserName", "")),
+        EventType   = "SIDHistoryMigration";
+
+// Combined SID history events
+let Combined = SIDHistoryWrites
+    | project
+        EventTime   = GrantedAt,
+        TargetDN,
+        Actor       = GrantedBy,
+        EventType   = iff(IsWrite, "SIDHistoryAdded", "SIDHistoryRemoved"),
+        Computer,
+        IsWrite
+    | union (SIDHistoryMigration
+        | project
+            EventTime  = TimeGenerated,
+            TargetDN,
+            Actor      = ChangedBy,
+            EventType,
+            Computer,
+            IsWrite    = true);
+
+Combined
+| where IsWrite  // focus on additions
+| extend AccountNorm = tolower(extract(@"CN=([^,]+)", 1, TargetDN))
+| join kind=leftouter (PrivGroupMembers) on $left.AccountNorm == $right.SubjectNorm
+| summarize
+    SIDHistoryEvents   = count(),
+    LastWriteTime      = max(EventTime),
+    FirstWriteTime     = min(EventTime),
+    WritingActors      = make_set(Actor, 10),
+    DCs                = make_set(Computer, 10),
+    PrivGroupMemberhip = make_set(PrivGroups, 10)
+    by TargetDN, AccountNorm
+| extend
+    HasPrivGroup        = array_length(PrivGroupMemberhip) > 0
+    //  SID History + privileged group = high privilege escalation risk
+| extend
+    EscalationRisk = case(
+        array_length(PrivGroupMemberhip) > 0, "Critical - Privileged_Account_With_SIDHistory",
+        SIDHistoryEvents >= 3,               "High - Multiple_SID_History_Writes",
+        SIDHistoryEvents >= 1,               "Medium - SID_History_Present",
+        "Low"
+    ),
+    RiskScore = (SIDHistoryEvents * 10)
+              + iff(HasPrivGroup, 50, 0)
+| project
+    TargetDN,
+    EscalationRisk,
+    RiskScore,
+    SIDHistoryEvents,
+    HasPrivGroup,
+    PrivGroupMemberhip,
+    FirstWriteTime,
+    LastWriteTime,
+    WritingActors
+| order by RiskScore desc

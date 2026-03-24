@@ -1,0 +1,86 @@
+// =========================================================
+// RULE-15 | AD-SIDHistory-Injection
+// Description : SID History injection detection — Event 4765
+//               (SID History Added) or Event 5136 (DS Object
+//               Modified) modifying the sIDHistory attribute.
+//               SID History allows an account to carry
+//               additional SIDs in its Kerberos PAC.
+//               Injecting an Enterprise Admins SID (RID-519)
+//               or Domain Admins SID (RID-512) into any user
+//               gives that user EA/DA privileges transparently.
+//               This is the persistence mechanism used in
+//               cross-forest attacks and post-DCSync
+//               persistence.
+// Severity    : Critical (EA/DA/BA SID injected)
+//               High     (any cross-domain SID injected)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1134.005 — Token Impersonation/Theft:
+//               SID-History Injection
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+// High-value SID patterns
+let SensitiveSIDPatterns = dynamic([
+    "-512",   // Domain Admins
+    "-519",   // Enterprise Admins
+    "-518",   // Schema Admins
+    "-500",   // Built-in Administrator
+    "-544",   // Local Administrators
+    "S-1-5-32-544"
+]);
+
+// Signal 1: Event 4765 — SID History Added (explicit event)
+let Via4765 = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4765
+    | extend
+        Source          = "Event4765_SIDHistoryAdded",
+        ActorAccount    = strcat(SubjectDomainName, "\\", SubjectUserName),
+        TargetAccount   = strcat(TargetDomainName,  "\\", TargetUserName),
+        InjectedSIDs    = SidHistory
+    | extend
+        HasSensitiveSID = InjectedSIDs has_any (SensitiveSIDPatterns)
+    | project TimeGenerated, Source, ActorAccount, TargetAccount,
+              InjectedSIDs, HasSensitiveSID, Computer;
+
+// Signal 2: Event 5136 — Direct attribute write to sIDHistory
+let Via5136 = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 5136
+    | where AttributeLDAPDisplayName =~ "sIDHistory"
+    | extend
+        Source          = "Event5136_sIDHistory_Write",
+        ActorAccount    = strcat(SubjectDomainName, "\\", SubjectUserName),
+        TargetAccount   = ObjectDN,
+        InjectedSIDs    = AttributeValue
+    | extend
+        HasSensitiveSID = InjectedSIDs has_any (SensitiveSIDPatterns)
+    | project TimeGenerated, Source, ActorAccount, TargetAccount,
+              InjectedSIDs, HasSensitiveSID, Computer;
+
+union Via4765, Via5136
+| extend
+    Severity = case(
+        HasSensitiveSID, "Critical",
+        "High"
+    ),
+    WhySuspicious = strcat(
+        "SIDHistory_Injected; ",
+        iff(HasSensitiveSID, "Sensitive_SID_EA_DA_or_RID500; ", ""),
+        "Target: ", TargetAccount, "; ",
+        "Actor: ", ActorAccount, "; ",
+        "SIDs: ", InjectedSIDs
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    ActorAccount,
+    TargetAccount,
+    InjectedSIDs,
+    HasSensitiveSID,
+    Source,
+    Computer
+| order by Severity asc, TimeGenerated desc

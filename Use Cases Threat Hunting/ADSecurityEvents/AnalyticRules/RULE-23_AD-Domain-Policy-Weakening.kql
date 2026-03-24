@@ -1,0 +1,75 @@
+// =========================================================
+// RULE-23 | AD-Domain-Policy-Weakening
+// Description : Domain Security Policy intentional weakening —
+//               Event 4739 (Domain Policy Changed) or
+//               Event 4713 (Kerberos Policy Changed) with
+//               values that lower security barriers:
+//               - MinPasswordLength reduced
+//               - LockoutThreshold set to 0 (no lockout)
+//               - Password complexity disabled
+//               - NoPreAuth enabled globally
+//               - Kerberos max age increased
+//               - Kerberos supported encryption set to
+//                 include RC4/DES
+//               These changes are deliberate attacker
+//               preparation steps to enable:
+//               password spray without lockout,
+//               faster offline cracking of stolen hashes,
+//               or AS-REP roasting at scale.
+// Severity    : High → Critical (lockout disabled or
+//               RC4/DES re-enabled on Kerberos policy)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1484 — Domain Policy Modification
+//               T1562.001 — Disable or Modify Tools
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID in (4739, 4713)
+| extend
+    PolicyType    = case(EventID == 4739, "Domain Policy",
+                         EventID == 4713, "Kerberos Policy", "Unknown"),
+    ActorAccount  = strcat(SubjectDomainName, "\\", SubjectUserName),
+    RawEventData  = EventData
+// Flag specific weakening indicators
+| extend
+    LockoutDisabled        = EventData has "LockoutBadCount = 0"
+                              or EventData has "LockoutThreshold = 0",
+    MinPwdLenReduced       = EventData has "MinPasswordLength"
+                              and (EventData has " = 0" or EventData has " = 1"
+                                   or EventData has " = 2" or EventData has " = 3"),
+    ComplexityDisabled     = EventData has "PasswordComplexity = 0",
+    KerberosRC4Enabled     = EventData has_any ("RC4", "des-cbc-crc", "AES off"),
+    MaxTicketLifeIncreased = EventData has "MaxTicketAge"
+                              and EventData has_any ("24", "168", "720", "9999")
+| extend
+    AnyWeakening = LockoutDisabled or MinPwdLenReduced or ComplexityDisabled
+                   or KerberosRC4Enabled or MaxTicketLifeIncreased
+| where AnyWeakening
+| extend
+    Severity = case(
+        LockoutDisabled or KerberosRC4Enabled, "Critical",
+        "High"
+    ),
+    WhySuspicious = strcat(
+        iff(LockoutDisabled,        "Lockout_Disabled_SprayRisk; ", ""),
+        iff(MinPwdLenReduced,       "MinPwdLen_Reduced; ", ""),
+        iff(ComplexityDisabled,     "Complexity_Disabled; ", ""),
+        iff(KerberosRC4Enabled,     "Kerberos_RC4_or_DES_Enabled; ", ""),
+        iff(MaxTicketLifeIncreased, "Kerberos_MaxTicketAge_Increased; ", ""),
+        "Actor: ", ActorAccount
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    PolicyType,
+    ActorAccount,
+    Computer,
+    LockoutDisabled,
+    KerberosRC4Enabled,
+    ComplexityDisabled
+| order by TimeGenerated desc

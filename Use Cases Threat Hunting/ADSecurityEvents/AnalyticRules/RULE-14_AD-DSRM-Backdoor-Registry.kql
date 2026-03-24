@@ -1,0 +1,57 @@
+// =========================================================
+// RULE-14 | AD-DSRM-Backdoor-Registry
+// Description : DSRM (Directory Services Restore Mode) admin
+//               backdoor activation — Event 4657 (Registry
+//               Value Modified) setting
+//               HKLM\SYSTEM\CurrentControlSet\Control\Lsa\
+//               DsrmAdminLogonBehavior to 2.
+//               The DSRM account is a local administrator on
+//               every DC with its own password (set at
+//               dcpromo time).  By default it only works in
+//               restore mode.  Setting this registry value
+//               to 2 allows the DSRM account to authenticate
+//               over the network to the DC —providing a
+//               persistent backdoor that survives domain admin
+//               password resets and krbtgt rotations.
+// Severity    : Critical (any change to this key on a DC)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1003.004 — LSA Secrets
+//               T1098      — Account Manipulation
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID == 4657                          // Registry Value Modified
+| where ObjectName has @"Control\Lsa"
+    and ObjectValueName =~ "DsrmAdminLogonBehavior"
+// Value 2 = allow network logon
+| where NewValue in ("2", "0x00000002")
+| extend
+    ActorAccount  = strcat(SubjectDomainName, "\\", SubjectUserName),
+    RegPath       = ObjectName,
+    PreviousValue = OldValue,
+    NewRegValue   = NewValue
+| extend
+    Severity = "Critical",
+    WhySuspicious = strcat(
+        "DSRM_Backdoor_Enabled_DsrmAdminLogonBehavior=2; ",
+        "DC_local_admin_can_now_auth_over_network; ",
+        "Survives_krbtgt_rotation; ",
+        "Actor: ", SubjectUserName, "; ",
+        "RegPath: ", RegPath
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    ActorAccount,
+    Computer,
+    RegPath,
+    PreviousValue,
+    NewRegValue,
+    SubjectUserName,
+    SubjectDomainName
+| order by TimeGenerated desc

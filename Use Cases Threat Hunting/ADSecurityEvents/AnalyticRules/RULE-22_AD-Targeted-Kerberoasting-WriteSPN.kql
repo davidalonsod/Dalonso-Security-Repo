@@ -1,0 +1,73 @@
+// =========================================================
+// RULE-22 | AD-Targeted-Kerberoasting-WriteSPN
+// Description : Targeted Kerberoasting via WriteSPN —
+//               Event 5136 (DS Object Modified) setting the
+//               servicePrincipalName attribute on a USER
+//               account (not COMPUTER$), followed within
+//               5 minutes by a 4769 (TGS-REP) for that
+//               newly set SPN.
+//               This is the targetedKerberoast.py pattern:
+//               set SPN → request TGS (offline crack) →
+//               remove SPN to avoid detection.
+//               Any user with WriteProperty on the
+//               servicePrincipalName attribute of another
+//               user can make that user kerberoastable.
+// Severity    : High (SPN+TGS sequence found)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1558.003 — Kerberoasting
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack       = 15m;
+let SequenceWindow = 5m;
+
+// Step 1: New SPN set on a user account
+let SPNWrites = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 5136
+    | where AttributeLDAPDisplayName =~ "servicePrincipalName"
+    | where OperationType == "%%14674"                 // Value Added
+    // Only target USER objects, not computer accounts
+    | where not(ObjectDN has "CN=Computers")
+    | extend
+        WriterAccount   = strcat(SubjectDomainName, "\\", SubjectUserName),
+        TargetUser_DN   = ObjectDN,
+        NewSPN          = AttributeValue,
+        SPNWriteTime    = TimeGenerated;
+
+// Step 2: TGS request for the newly created SPN
+let TGSRequests = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4769
+    | where TicketEncryptionType == "0x17"             // RC4 — crackable
+    | extend
+        Requester    = TargetUserName,
+        RequestedSPN = ServiceName,
+        TGSTime      = TimeGenerated;
+
+// Correlate: SPN write → TGS within sequence window
+SPNWrites
+| join kind=inner (TGSRequests) on $left.NewSPN == $right.RequestedSPN
+| where TGSTime between (SPNWriteTime .. SPNWriteTime + SequenceWindow)
+| extend
+    SequenceDuration_sec = datetime_diff("second", TGSTime, SPNWriteTime),
+    Severity = "High",
+    WhySuspicious = strcat(
+        "Targeted_Kerberoast_WriteSPN_Then_TGS; ",
+        "SPN_Set: ", NewSPN, "; ",
+        "TGS_Requester: ", Requester, "; ",
+        "Target_User: ", TargetUser_DN, "; ",
+        "Time_Between_sec: ", tostring(SequenceDuration_sec)
+    )
+| project
+    TimeGenerated     = SPNWriteTime,
+    Severity,
+    WhySuspicious,
+    WriterAccount,
+    TargetUser_DN,
+    NewSPN,
+    Requester,
+    TGSTime,
+    SequenceDuration_sec,
+    Computer
+| order by TimeGenerated desc

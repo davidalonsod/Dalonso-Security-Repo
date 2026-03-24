@@ -1,0 +1,138 @@
+// =========================================================
+// HUNT-24 | AD-ServiceCreation-Modification-Audit-30d
+// Description : Audits all service creation (7045 via
+//               WindowsEvent) and modification (4657 registry
+//               changes on HKLM\SYSTEM\CurrentControlSet\
+//               Services) events. Surfaces suspicious
+//               service binary paths, DLL service installs,
+//               services created by non-admin users, and
+//               services running from temp/user-writable
+//               directories — all common persistence and
+//               privilege escalation mechanisms.
+// Period      : 30 days
+// Use Case    : Service-based persistence, DLL hijacking,
+//               privilege escalation (T1543.003)
+// Tables      : SecurityEvent, WindowsEvent
+// =========================================================
+
+let Period = 30d;
+
+// High-value service paths that indicate potential compromise
+let SuspiciousServicePaths = dynamic([
+    "\\temp\\", "\\tmp\\", "\\appdata\\",
+    "\\programdata\\", "\\users\\public\\",
+    "\\downloads\\", "\\desktop\\",
+    "cmd /c ", "powershell ", "-enc ", "base64",
+    "mshta", "cscript", "wscript", "rundll32",
+    "regsvr32", ".js", ".vbs", ".bat", ".cmd",
+    "net user", "net localgroup"
+]);
+
+// SecurityEvent 4697: Service installed (security log version)
+let SecSvcInstall = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4697
+    | extend
+        ServiceName    = ServiceName,
+        ServicePath    = tolower(ServiceFileName),
+        ServiceType    = tostring(column_ifexists("ServiceType", "")),
+        ServiceAccount = ServiceAccount,
+        InstallActor   = strcat(SubjectDomainName, "\\", SubjectUserName);
+
+// Registry changes on Services key (4657)
+let ServiceRegChanges = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4657
+    | where ObjectName has "\\Services\\"
+    | extend
+        ServiceName  = extract(@"\\Services\\([^\\]+)", 1, ObjectName),
+        RegValue     = ObjectValueName,
+        NewValue     = NewValue,
+        Actor        = strcat(SubjectDomainName, "\\", SubjectUserName),
+        IsImagePath  = ObjectValueName =~ "ImagePath",
+        IsDLLPath    = ObjectValueName =~ "ServiceDll";
+
+// Combine service creation sources — WindowsEvent (7045) is optional; SecurityEvent (4697) is always present
+let AllNewServices = union isfuzzy=true
+    (WindowsEvent
+        | where TimeGenerated > ago(Period)
+        | where EventID == 7045
+        | extend
+            ServiceName   = tostring(EventData.ServiceName),
+            ServicePath   = tolower(tostring(EventData.ImagePath)),
+            ServiceType   = tostring(EventData.ServiceType),
+            ServiceAccount= tostring(EventData.AccountName),
+            InstallActor  = tostring(EventData.SubjectUserName)
+        | project TimeGenerated, ServiceName, ServicePath, ServiceType, ServiceAccount, Actor = InstallActor, Computer, Source = "System_7045"),
+    (SecSvcInstall
+        | project TimeGenerated, ServiceName, ServicePath, ServiceType, ServiceAccount, Actor = InstallActor, Computer, Source = "Security_4697");
+
+// Flag suspicious services
+AllNewServices
+| extend
+    HasSuspiciousPath = ServicePath has_any (SuspiciousServicePaths),
+    IsWeakAccount     = ServiceAccount in~ ("LocalSystem", "NT AUTHORITY\\SYSTEM",
+                                             ".\\LocalSystem", "LocalService",
+                                             "NetworkService"),
+    IsUserWritablePath = ServicePath has_any ("\\users\\", "\\temp", "\\tmp",
+                                              "\\appdata", "\\programdata"),
+    IsDLLSurrogate    = ServicePath has_any ("rundll32", "svchost -k", "regsvr32"),
+    IsOffHours        = hourofday(TimeGenerated) < 7 or hourofday(TimeGenerated) >= 20
+| summarize
+    NewServiceInstalls = count(),
+    SuspiciousInstalls = countif(HasSuspiciousPath),
+    UserWritable       = countif(IsUserWritablePath),
+    DLLSurrogates      = countif(IsDLLSurrogate),
+    OffHoursInstalls   = countif(IsOffHours),
+    Actors             = make_set(Actor, 10),
+    ServiceNames       = make_set(ServiceName, 20),
+    SuspiciousPaths    = make_set_if(ServicePath, HasSuspiciousPath, 10),
+    FirstSeen          = min(TimeGenerated),
+    LastSeen           = max(TimeGenerated)
+  by Computer
+| union (
+    // Also include registry DLL path changes for existing services
+    ServiceRegChanges
+    | where IsDLLPath or IsImagePath
+    | extend HasSuspValue = NewValue has_any (SuspiciousServicePaths)
+    | where HasSuspValue
+    | summarize
+        NewServiceInstalls = 0,
+        SuspiciousInstalls = count(),
+        UserWritable       = countif(tolower(NewValue) has_any ("\\users\\","\\temp","\\tmp","\\appdata")),
+        DLLSurrogates      = countif(tolower(NewValue) has "rundll32"),
+        OffHoursInstalls   = 0,
+        Actors             = make_set(Actor, 10),
+        ServiceNames       = make_set(ServiceName, 20),
+        SuspiciousPaths    = make_set(NewValue, 10),
+        FirstSeen          = min(TimeGenerated),
+        LastSeen           = max(TimeGenerated)
+      by Computer
+)
+| extend
+    RiskScore = (SuspiciousInstalls * 30)
+              + (UserWritable * 25)
+              + (DLLSurrogates * 20)
+              + (OffHoursInstalls * 10),
+    RiskLevel = case(
+        SuspiciousInstalls >= 1 and UserWritable >= 1, "Critical",
+        DLLSurrogates >= 1,                            "Critical",
+        SuspiciousInstalls >= 1,                       "High",
+        OffHoursInstalls >= 2,                         "Medium",
+        "Low"
+    )
+| project
+    Computer,
+    RiskLevel,
+    RiskScore,
+    NewServiceInstalls,
+    SuspiciousInstalls,
+    UserWritable,
+    DLLSurrogates,
+    OffHoursInstalls,
+    Actors,
+    ServiceNames,
+    SuspiciousPaths,
+    FirstSeen,
+    LastSeen
+| order by RiskScore desc

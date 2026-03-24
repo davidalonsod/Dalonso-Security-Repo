@@ -1,0 +1,68 @@
+// =========================================================
+// RULE-25 | AD-Certifried-DNSHostname-Manipulation
+// Description : Certifried (CVE-2022-26923) attack detection
+//               — Event 4742 (Computer Account Changed)
+//               where the dNSHostName attribute of a machine
+//               account is changed to match the DNS name of
+//               an existing Domain Controller.
+//               Machine accounts use their dNSHostName for
+//               certificate authentication. By setting a
+//               machine account's dNSHostName to
+//               DC01.corp.local and requesting a Machine
+//               certificate, the CA issues a cert identifying
+//               as the real DC. PKINIT with that cert → DC
+//               TGT → DCSync → domain compromise.
+// Severity    : Critical (any DC FQDN match)
+//               High     (any dNSHostName change to unusual value)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1098.001 — Account Manipulation: Additional
+//               Cloud Credentials
+//               T1649     — Steal or Forge Auth Certs
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+// Known DC FQDNs (derived from Kerberos history)
+let KnownDCFQDNs = SecurityEvent
+    | where TimeGenerated > ago(3d)
+    | where EventID == 4768
+    | summarize by DCFQDNLower = tolower(Computer);
+
+// Computer account changes that touch dNSHostName
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID == 4742
+| where EventData has "dNSHostName"
+| extend
+    ActorAccount    = strcat(SubjectDomainName, "\\", SubjectUserName),
+    TargetMachine   = strcat(TargetDomainName, "\\", TargetUserName),
+    NewDNSHostName  = extract(@"(?i)dnsHostName\s*=\s*([^\s;,]+)", 1, EventData)
+| extend
+    NewDNSNorm      = tolower(NewDNSHostName),
+    IsDCNameMatch   = tolower(NewDNSHostName) in~ (KnownDCFQDNs)
+| where isnotempty(NewDNSHostName)
+| extend
+    Severity = case(
+        IsDCNameMatch, "Critical",
+        "High"
+    ),
+    WhySuspicious = strcat(
+        "dNSHostName_Changed; ",
+        iff(IsDCNameMatch, "New_FQDN_Matches_DC_Certifried_CVE-2022-26923; ", ""),
+        "NewDNSHostName: ", NewDNSHostName, "; ",
+        "TargetMachine: ", TargetMachine, "; ",
+        "Actor: ", ActorAccount
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    ActorAccount,
+    TargetMachine,
+    NewDNSHostName,
+    IsDCNameMatch,
+    Computer,
+    SubjectUserName,
+    SubjectDomainName
+| order by Severity asc, TimeGenerated desc

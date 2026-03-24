@@ -1,0 +1,63 @@
+// =========================================================
+// RULE-16 | AD-DCShadow-Rogue-DC-Object
+// Description : DCShadow rogue Domain Controller detection —
+//               Event 5137 (Directory Service Object Created)
+//               showing creation of an nTDSDSA object (the
+//               class that identifies a Domain Controller) in
+//               the Configuration Naming Context
+//               (CN=Sites,CN=Configuration,DC=...) from a
+//               machine that is NOT an existing DC.
+//               DCShadow registers a temporary rogue DC to
+//               push arbitrary AD replication updates
+//               (modify ACLs, group memberships, SID History)
+//               without leaving standard LDAP audit trails.
+// Severity    : Critical (any nTDSDSA creation by non-DC)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1207 — Rogue Domain Controller
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+// Known legitimate DCs
+let KnownDCNames = SecurityEvent
+    | where TimeGenerated > ago(3d)
+    | where EventID == 4768
+    | summarize by DC = toupper(Computer);
+
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID == 5137                        // DS Object Created
+| where ObjectClass =~ "nTDSDSA"
+    or (ObjectClass =~ "server"
+        and ObjectDN has "CN=Sites")
+    or ObjectDN has "nTDSDSA"
+| extend
+    CreatorAccount    = strcat(SubjectDomainName, "\\", SubjectUserName),
+    NewObject         = ObjectDN,
+    IsFromKnownDC     = (toupper(Computer) in~ (KnownDCNames))
+// Legitimate DC promotion writes come from the new DC itself
+// or from existing DCs — flag anything else
+| where not(IsFromKnownDC)
+    or not(SubjectUserName endswith "$")        // Machine account = suspicious
+| extend
+    Severity = "Critical",
+    WhySuspicious = strcat(
+        "DCShadow_Rogue_nTDSDSA_Object_Created; ",
+        iff(not(IsFromKnownDC), "NotFromKnownDC; ", "UnexpectedMachineAccount; "),
+        "NewObject: ", NewObject, "; ",
+        "Creator: ", CreatorAccount, "; ",
+        "Host: ", Computer
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    CreatorAccount,
+    NewObject,
+    ObjectClass,
+    Computer,
+    IsFromKnownDC,
+    SubjectUserName,
+    SubjectDomainName
+| order by TimeGenerated desc

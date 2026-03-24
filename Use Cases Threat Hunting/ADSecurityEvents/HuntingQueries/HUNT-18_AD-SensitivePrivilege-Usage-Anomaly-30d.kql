@@ -1,0 +1,116 @@
+// =========================================================
+// HUNT-18 | AD-SensitivePrivilege-Usage-Anomaly-30d
+// Description : Profiles usage of Windows sensitive
+//               privileges (SeDebugPrivilege, SeTakeOwnership
+//               SeBackupPrivilege, SeRestorePrivilege,
+//               SeImpersonatePrivilege, SeTcbPrivilege,
+//               SeLoadDriverPrivilege) from EventID 4673
+//               and 4672. Flags accounts using sensitive
+//               privileges from unusual hosts or off-hours
+//               that deviate from a 14-day baseline.
+// Period      : 30 days
+// Use Case    : Privilege abuse hunting, lateral movement
+//               post-compromise, LSASS and SAM access paths
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period      = 30d;
+let BaselineDays = 21d;
+let HuntDays     = 7d;
+
+// Map privilege names to readable labels and MITRE techniques
+let SensitivePrivs = datatable(PrivCode:string, PrivName:string, MITRETechnique:string)[
+    "SeDebugPrivilege",       "Debug_Programs",           "T1055/T1134",
+    "SeTakeOwnershipPrivilege","TakeOwnership",            "T1222",
+    "SeBackupPrivilege",       "Backup_Files",             "T1003.003",
+    "SeRestorePrivilege",      "Restore_Files",            "T1078",
+    "SeImpersonatePrivilege",  "Impersonate_Client",       "T1134.001",
+    "SeTcbPrivilege",          "Act_As_OS",                "T1134",
+    "SeLoadDriverPrivilege",   "Load_Unload_Driver",       "T1014",
+    "SeCreateTokenPrivilege",  "Create_Token",             "T1134.002",
+    "SeAssignPrimaryToken",    "Replace_Process_Token",    "T1134.001",
+    "SeEnableDelegation",      "Enable_Delegation",        "T1558.001",
+    "SeSyncAgent",             "Sync_Directory_Service",   "T1003.006"
+];
+
+// EventID 4673: sensitive privilege use
+let PrivUse = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4673
+    | where SubjectUserName !endswith "$"
+    | where SubjectLogonId !in ("0x3e7", "0x3e4", "0x3e5")
+    | extend
+        AccountNorm  = tolower(SubjectUserName),
+        PrivUsed     = tostring(column_ifexists("PrivilegeList", "")),
+        IsBaseline   = TimeGenerated < ago(HuntDays),
+        IsHunt       = TimeGenerated >= ago(HuntDays),
+        IsOffHours   = hourofday(TimeGenerated) < 7 or hourofday(TimeGenerated) >= 20;
+
+// EventID 4672: special logon privilege assignment
+let SpecialLogon = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4672
+    | where SubjectUserName !endswith "$"
+    | where SubjectLogonId !in ("0x3e7", "0x3e4", "0x3e5")
+    | extend AccountNorm = tolower(SubjectUserName);
+
+// Baseline of normal privilege use (processes, hosts)
+let PrivBaseline = PrivUse
+    | where IsBaseline
+    | summarize
+        BaselineProcesses = make_set(ProcessName, 30),
+        BaselineHosts     = make_set(Computer, 30),
+        BaselineCount     = count()
+      by AccountNorm, PrivUsed;
+
+// Hunt window usage
+let PrivHunt = PrivUse
+    | where IsHunt
+    | summarize
+        HuntProcesses  = make_set(ProcessName, 30),
+        HuntHosts      = make_set(Computer, 30),
+        HuntCount      = count(),
+        OffHoursCount  = countif(IsOffHours)
+      by AccountNorm, PrivUsed;
+
+// Join and find anomalies
+PrivHunt
+| join kind=leftouter (PrivBaseline) on AccountNorm, PrivUsed
+| extend
+    NewHosts     = set_difference(HuntHosts, BaselineHosts),
+    NewProcesses = set_difference(HuntProcesses, BaselineProcesses),
+    IsNew        = isnull(BaselineCount) or BaselineCount == 0
+// Keep only meaningful anomalies
+| where array_length(NewHosts) > 0
+     or array_length(NewProcesses) > 0
+     or IsNew
+     or OffHoursCount > 3
+| join kind=leftouter (SensitivePrivs) on $left.PrivUsed == $right.PrivCode
+| extend
+    RiskScore = (array_length(NewHosts) * 20)
+              + (array_length(NewProcesses) * 15)
+              + iff(IsNew, 30, 0)
+              + (OffHoursCount * 5),
+    RiskLevel = case(
+        PrivUsed in ("SeDebugPrivilege","SeTcbPrivilege","SeCreateTokenPrivilege")
+            and IsNew, "Critical",
+        IsNew and OffHoursCount > 0, "High",
+        array_length(NewHosts) >= 2,  "High",
+        IsNew,                        "Medium",
+        "Low"
+    )
+| project
+    AccountNorm,
+    PrivUsed,
+    PrivName,
+    MITRETechnique,
+    RiskLevel,
+    RiskScore,
+    HuntCount,
+    OffHoursCount,
+    IsNew,
+    NewHosts,
+    NewProcesses,
+    HuntHosts,
+    BaselineHosts
+| order by RiskScore desc

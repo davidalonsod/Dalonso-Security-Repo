@@ -1,0 +1,113 @@
+// =========================================================
+// HUNT-10 | AD-Privileged-Account-Logon-Source-Profiling-30d
+// Description : Builds a per-privileged-account logon
+//               source baseline, then surfaces any anomalous
+//               logon sources (new workstations, off-hours,
+//               unusual logon types) to detect credential
+//               compromise, pass-the-hash, and pass-the-ticket.
+// Period      : 30 days
+// Use Case    : Privileged account behavioural baselining,
+//               lateral movement, credential theft hunting
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period       = 30d;
+let BaselinePeriod = 14d;      // first 14 days = baseline
+let HuntPeriod   = 7d;         // last 7 days = hunt window
+
+// Privileged group members
+let PrivMembers = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID in (4728, 4732, 4756)
+    | where TargetUserName has_any ("Domain Admins", "Enterprise Admins",
+                                    "Schema Admins", "Administrators",
+                                    "Account Operators", "Backup Operators",
+                                    "Server Operators", "DnsAdmins",
+                                    "Group Policy Creator Owners",
+                                    "Protected Users")
+    | summarize PrivGroups = make_set(TargetUserName) by AccountNorm = tolower(tostring(column_ifexists("MemberName", "")));
+
+// Successful logons (EventID 4624) — exclude service/batch accounts
+let Logons = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4624
+    | where LogonType in (2, 3, 10)           // interactive, network, remote-interactive
+    | where TargetUserName !endswith "$"      // exclude machine accounts
+    | extend
+        AccountNorm = tolower(TargetUserName),
+        IsBaseline  = TimeGenerated < ago(HuntPeriod),
+        IsHunt      = TimeGenerated >= ago(HuntPeriod),
+        IsOffHours  = hourofday(TimeGenerated) < 7 or hourofday(TimeGenerated) >= 20,
+        IsWeekend   = dayofweek(TimeGenerated) in (0d, 6d),
+        LogonAuth   = AuthenticationPackageName;
+
+// Baseline: unique source workstations per privileged account
+let Baseline = Logons
+    | where IsBaseline
+    | join kind=inner (PrivMembers) on AccountNorm
+    | summarize BaselineHosts = make_set(WorkstationName, 50),
+                BaselineSourceIPs = make_set(IpAddress, 50),
+                PrivGroups = take_any(PrivGroups)
+              by AccountNorm;
+
+// Hunt window: logons for same accounts
+let HuntWindow = Logons
+    | where IsHunt
+    | join kind=inner (PrivMembers) on AccountNorm
+    | summarize
+        HuntHosts        = make_set(WorkstationName, 50),
+        HuntSourceIPs    = make_set(IpAddress, 50),
+        TotalHuntLogons  = count(),
+        OffHoursLogons   = countif(IsOffHours),
+        WeekendLogons    = countif(IsWeekend),
+        NTLMLogons       = countif(LogonAuth == "NTLM"),
+        KerberosLogons   = countif(LogonAuth == "Kerberos"),
+        Type3Logons      = countif(LogonType == 3),
+        PrivGroups       = take_any(PrivGroups)
+      by AccountNorm;
+
+// Join baseline to hunt and find new sources
+HuntWindow
+| join kind=leftouter (Baseline) on AccountNorm
+| extend
+    NewHosts    = set_difference(HuntHosts, BaselineHosts),
+    NewSourceIPs = set_difference(HuntSourceIPs, BaselineSourceIPs),
+    NTLMRatio   = round(todouble(NTLMLogons) / todouble(TotalHuntLogons), 2)
+| where array_length(NewHosts) > 0
+       or array_length(NewSourceIPs) > 0
+       or (NTLMRatio > 0.5 and TotalHuntLogons > 2)
+       or OffHoursLogons > 2
+| extend
+    RiskScore = (array_length(NewHosts) * 20)
+              + (array_length(NewSourceIPs) * 15)
+              + (OffHoursLogons * 5)
+              + (NTLMLogons * 10)
+              + (WeekendLogons * 5),
+    RiskLevel = case(
+        array_length(NewHosts) >= 3 or NTLMRatio > 0.7, "Critical",
+        array_length(NewHosts) >= 2 or NTLMRatio > 0.5, "High",
+        array_length(NewHosts) >= 1 or OffHoursLogons > 3, "Medium",
+        "Low"
+    ),
+    AnomalyType = case(
+        NTLMRatio > 0.7 and array_length(NewHosts) > 0, "PossiblePassTheHash_NewSources",
+        NTLMRatio > 0.5,                                 "ElevatedNTLM_PossiblePTH",
+        array_length(NewHosts) > 2,                      "MultipleNewSourceHosts",
+        OffHoursLogons > 3,                              "SuspiciousOffHoursActivity",
+        "NewSourceHost"
+    )
+| project
+    AccountNorm,
+    PrivGroups,
+    RiskLevel,
+    RiskScore,
+    AnomalyType,
+    TotalHuntLogons,
+    NewHosts,
+    NewSourceIPs,
+    NTLMLogons,
+    NTLMRatio,
+    OffHoursLogons,
+    WeekendLogons,
+    BaselineHosts
+| order by RiskScore desc

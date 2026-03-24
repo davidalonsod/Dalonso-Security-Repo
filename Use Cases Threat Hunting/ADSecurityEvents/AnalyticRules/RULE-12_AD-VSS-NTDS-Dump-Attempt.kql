@@ -1,0 +1,100 @@
+// =========================================================
+// RULE-12 | AD-VSS-NTDS-Dump-Attempt
+// Description : NTDS.dit extraction via VSS or direct tooling.
+//               Detects Event 4688 CommandLine patterns for:
+//               - vssadmin create shadow (VSS snapshot of C:)
+//               - ntdsutil (IFM media / snapshot)
+//               - diskshadow (scripted VSS)
+//               - esentutl /p or /y against ntds.dit / SYSTEM
+//               - secretsdump / impacket targeting DC
+//               Once an attacker has NTDS.dit + SYSTEM hive
+//               they can extract every domain hash offline.
+// Severity    : Critical (any match on a DC)
+//               High     (match on non-DC — staging/extraction)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1003.003 — NTDS
+// Tables      : SecurityEvent, DeviceProcessEvents (optional)
+// =========================================================
+
+let LookBack = 15m;
+
+let NTDSPatterns = dynamic([
+    "vssadmin", "create shadow",
+    "ntdsutil", "activate instance ntds",
+    "ifm", "diskshadow",
+    "esentutl",
+    "ntds.dit", "ntds\\ntds.dit",
+    "copy .*ntds", "robocopy.*ntds",
+    "secretsdump", "impacket",
+    "reg save.*SYSTEM", "reg save.*SAM",
+    "reg save.*SECURITY"
+]);
+
+// Known DCs (from 3-day TGT history)
+let KnownDCNames = SecurityEvent
+    | where TimeGenerated > ago(3d)
+    | where EventID == 4768
+    | summarize by DC = toupper(Computer);
+
+// SecurityEvent 4688 detection
+let SE_NTDSDump = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4688
+    | where isnotempty(CommandLine)
+    | where CommandLine has_any (NTDSPatterns)
+    | extend
+        Source      = "SecurityEvent_4688",
+        Actor       = SubjectUserName,
+        ActorDomain = SubjectDomainName,
+        Process     = NewProcessName,
+        CmdLine     = CommandLine,
+        Host        = Computer,
+        IsOnDC      = (toupper(Computer) in~ (KnownDCNames));
+
+// MDE DeviceProcessEvents
+let MDE_NTDSDump = DeviceProcessEvents
+    | where TimeGenerated > ago(LookBack)
+    | where ProcessCommandLine has_any (NTDSPatterns)
+        or FileName in~ ("vssadmin.exe", "ntdsutil.exe",
+                          "diskshadow.exe", "esentutl.exe")
+    | extend
+        Source      = "MDE_DeviceProcessEvents",
+        Actor       = InitiatingProcessAccountName,
+        ActorDomain = InitiatingProcessAccountDomain,
+        Process     = FileName,
+        CmdLine     = ProcessCommandLine,
+        Host        = DeviceName,
+        IsOnDC      = false;  // MDE join to DC could be added
+
+union SE_NTDSDump, MDE_NTDSDump
+| extend
+    Technique = case(
+        CmdLine has "vssadmin",       "VSS_Shadow_Create",
+        CmdLine has "ntdsutil",       "NTDSUtil_IFM",
+        CmdLine has "diskshadow",     "DiskShadow_VSS",
+        CmdLine has "esentutl",       "Esentutl_DB_Offline_Copy",
+        CmdLine has "secretsdump",    "Impacket_secretsdump",
+        CmdLine has "reg save",       "Registry_Hive_Backup",
+        "Generic_NTDS_Access"
+    )
+| extend
+    Severity = case(IsOnDC, "Critical", "High"),
+    WhySuspicious = strcat(
+        "NTDS_Dump_Technique: ", Technique, "; ",
+        "Actor: ", Actor, "; ",
+        iff(IsOnDC, "Executed_On_DC; ", "NonDC_Host; "),
+        "CmdLine: ", CmdLine
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    Actor,
+    ActorDomain,
+    Process,
+    Technique,
+    CmdLine,
+    Host,
+    IsOnDC,
+    Source
+| order by Severity asc, TimeGenerated desc

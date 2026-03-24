@@ -1,0 +1,81 @@
+// =========================================================
+// RULE-19 | AD-PassTheHash-NTLM-Type3
+// Description : Pass-the-Hash detection — Event 4624
+//               (Successful Logon) with LogonType=3 (Network)
+//               using NTLM authentication, from a source IP
+//               that has NOT performed an interactive (Type 2)
+//               or local (Type 10) logon on the target host
+//               in the last 30 days.
+//               PtH attacks reuse an NT hash directly for
+//               NTLM authentication — the source machine
+//               "never logged in locally" to the target but
+//               can authenticate over the network with the
+//               stolen hash.
+//               Escalates to Critical when the source is a
+//               Tier-0 or privileged host, or when it
+//               subsequently accesses a DC.
+// Severity    : High → Critical (DC target or DA source)
+// Frequency   : Every 30 minutes, look-back 30 minutes
+// MITRE       : T1550.002 — Pass the Hash
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack          = 30m;
+let BaselinePeriod    = 30d;
+
+// Baseline: accounts + IPs that have had interactive logons to each computer
+let InteractiveBaseline = SecurityEvent
+    | where TimeGenerated > ago(BaselinePeriod)
+    | where EventID == 4624
+    | where LogonType in (2, 10, 11)        // Interactive, Remote Interactive, Cached
+    | summarize by BaselineKey = strcat(tolower(TargetUserName), "|",
+                                        IpAddress, "|",
+                                        toupper(Computer));
+
+// Known DCs
+let KnownDCNames = SecurityEvent
+    | where TimeGenerated > ago(3d)
+    | where EventID == 4768
+    | summarize by DC = toupper(Computer);
+
+// Network NTLM logons in detection window
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID == 4624
+| where LogonType == 3
+| where AuthenticationPackageName =~ "NTLM"
+    or LogonProcessName =~ "NtLmSsp"
+| where not(TargetUserName endswith "$")              // Exclude machine accounts
+| where not(TargetUserName =~ "ANONYMOUS LOGON")
+| where isnotempty(IpAddress) and IpAddress != "-"
+    and IpAddress != "127.0.0.1" and IpAddress != "::1"
+| extend
+    LookupKey       = strcat(tolower(TargetUserName), "|",
+                             IpAddress, "|",
+                             toupper(Computer)),
+    TargetIsDC      = (toupper(Computer) in~ (KnownDCNames))
+// Keep only logons where (user + IP + computer) combination was NEVER seen interactively
+| join kind=leftanti (InteractiveBaseline) on $left.LookupKey == $right.BaselineKey
+| extend
+    Severity = case(
+        TargetIsDC,          "Critical",
+        "High"
+    ),
+    WhySuspicious = strcat(
+        "PassTheHash_NTLM_Type3_No_Interactive_Baseline; ",
+        iff(TargetIsDC, "Target_Is_DC_Critical; ", ""),
+        "Src: ", IpAddress, " → ", Computer, "; ",
+        "Account: ", TargetDomainName, "\\", TargetUserName
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    TargetUserName,
+    TargetDomainName,
+    IpAddress,
+    Computer,
+    TargetIsDC,
+    LogonType,
+    AuthenticationPackageName
+| order by Severity asc, TimeGenerated desc

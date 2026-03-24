@@ -1,0 +1,93 @@
+// =========================================================
+// RULE-17 | AD-NoPac-SAMAccountName-Spoof
+// Description : NoPac / SAMAccountName Spoofing attack
+//               detection (CVE-2021-42278 + CVE-2021-42287).
+//               Detects the three-step sequence within a
+//               5-minute window on the same host:
+//               1. Event 4781 — Account name changed
+//                  (machine account renamed to DC hostname)
+//               2. Event 4768 — TGT requested for the
+//                  renamed account
+//               3. Event 4781 — Account name changed back
+//               The attack tricks the KDC into issuing a TGS
+//               as DC$ when requesting a service ticket for
+//               a non-existent account (the $ appended
+//               fallback behaviour).
+// Severity    : Critical (sequence detected)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1554  — Compromise Client Software Binary
+//               T1078.002 — Domain Accounts
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack      = 15m;
+let SequenceWindow = 5m;         // All 3 steps must occur within 5 min
+
+// Known DC names (for rename-to-DC detection)
+let KnownDCNames = SecurityEvent
+    | where TimeGenerated > ago(3d)
+    | where EventID == 4768
+    | summarize by DCName = toupper(trimend(Computer, "$"));
+
+// Step 1 + Step 3: Account renames
+let AccountRenames = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4781                    // Account name changed
+    | where TargetUserName endswith "$"        // Machine account
+    | extend
+        RenameTime   = TimeGenerated,
+        OldName      = OldTargetUserName,
+        NewName      = TargetUserName,
+        Actor        = SubjectUserName,
+        ActorDomain  = SubjectDomainName,
+        Host         = Computer;
+
+// Step 2: TGT requests for machine accounts in a name-change window
+let TGTRequests = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4768
+    | where TargetUserName !endswith "$"        // No trailing $ = post-rename
+    | extend
+        TGTTime    = TimeGenerated,
+        TGTAccount = toupper(TargetUserName),
+        TGTHost    = Computer;
+
+// Correlate: rename → TGT → rename back (same actor, same machine account)
+AccountRenames
+| where toupper(NewName) in~ (KnownDCNames)        // Renamed TO a DC name
+| join kind=inner (
+    AccountRenames
+    | where toupper(OldName) in~ (KnownDCNames)    // Then renamed BACK from DC name
+    | project RenameBackTime = RenameTime,
+              RestoredName   = NewName,
+              BackActor      = Actor,
+              BackHost       = Host
+) on $left.Actor == $right.BackActor,
+   $left.Host   == $right.BackHost
+| where RenameBackTime > RenameTime
+    and RenameBackTime <= RenameTime + SequenceWindow
+| join kind=inner (TGTRequests) on $left.Host == $right.TGTHost
+| where TGTTime > RenameTime and TGTTime < RenameBackTime
+| extend
+    Severity = "Critical",
+    AttackDuration_sec = datetime_diff("second", RenameBackTime, RenameTime),
+    WhySuspicious = strcat(
+        "NoPac_SAMAccountName_Spoof_CVE-2021-42278_42287; ",
+        "Rename_to_DC: ", NewName, "; ",
+        "TGT_Requested: ", TGTAccount, "; ",
+        "Rename_Back_at: ", tostring(RenameBackTime), "; ",
+        "Actor: ", Actor, "@", ActorDomain
+    )
+| project
+    TimeGenerated    = RenameTime,
+    Severity,
+    WhySuspicious,
+    Actor,
+    ActorDomain,
+    OldName,
+    NewName,
+    TGTAccount,
+    RenameBackTime,
+    AttackDuration_sec,
+    Host
+| order by TimeGenerated desc

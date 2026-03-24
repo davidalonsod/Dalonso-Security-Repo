@@ -1,0 +1,103 @@
+// =========================================================
+// HUNT-21 | AD-Coercion-Attack-Indicators-30d
+// Description : Hunts for signals that coercion attacks
+//               (PrinterBug/MS-RPRN, PetitPotam/MS-EFSR,
+//               DFSCoerce/MS-DFSNM, ShadowCoerce/MS-FSRVP)
+//               were attempted. Looks for DC machine account
+//               authentications (4624 Type3 Kerberos) to
+//               non-DC hosts — the tell-tale sign that a
+//               DC was coerced to authenticate outbound.
+//               Also surfaces NTLM relay indicators such
+//               as rapid machine account logons to multiple
+//               distinct targets within 1-minute windows.
+// Period      : 30 days
+// Use Case    : Coercion attack detection, NTLM relay
+//               chain hunting, Unconstrained Delegation
+//               abuse confirmation
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 30d;
+
+// Build DC list
+let DCHostSet = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4768   // DCs issue TGTs
+    | summarize by DCName = toupper(Computer);
+
+// Machine accounts with Unconstrained Delegation flag (proxy from 4742)
+// Unconstrained delegation enabled = TrustedForDelegation set
+let UnconstDelegHosts = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID in (4742, 4741)
+    | where NewUacValue has "TRUSTED_FOR_DELEGATION"
+    or OldUacValue !has "TRUSTED_FOR_DELEGATION" and NewUacValue has "TRUSTED_FOR_DELEGATION"
+    | summarize by UnconstHost = toupper(TargetUserName);
+
+// DC machine account logons to non-DC hosts (the coercion outcome)
+let CoercedLogons = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4624
+    | where LogonType == 3                    // network logon
+    | where TargetUserName endswith "$"       // machine account
+    | extend
+        MachineNorm  = toupper(trim_end("$", TargetUserName)),
+        TargetHost   = toupper(Computer),
+        SourceIP     = IpAddress,
+        AuthPackage  = AuthenticationPackageName
+    // Filter to DC machine accounts only
+    | join kind=inner (DCHostSet) on $left.MachineNorm == $right.DCName
+    // Exclude DC-to-DC logons
+    | join kind=leftanti (DCHostSet) on $left.TargetHost == $right.DCName;
+
+// Correlate with unconstrained delegation hosts as coercion targets
+CoercedLogons
+| join kind=leftouter (UnconstDelegHosts)
+    on $left.TargetHost == $right.UnconstHost
+| extend IsCoercingToUnconstrained = isnotempty(UnconstHost)
+| summarize
+    CoercedLogonCount     = count(),
+    UniqueCoercingDCs     = dcount(MachineNorm),
+    UniqueTargetHosts     = dcount(TargetHost),
+    CoercingDCs           = make_set(MachineNorm, 20),
+    TargetHosts           = make_set(TargetHost, 20),
+    TargetsWithUnconst    = make_set_if(TargetHost, IsCoercingToUnconstrained, 10),
+    SourceIPs             = make_set(SourceIP, 20),
+    AuthPackages          = make_set(AuthPackage, 5),
+    FirstCoercion         = min(TimeGenerated),
+    LastCoercion          = max(TimeGenerated)
+  by bin(TimeGenerated, 1h)
+| extend
+    RiskScore = (CoercedLogonCount * 10)
+              + (array_length(TargetsWithUnconst) * 50)
+              + (UniqueCoercingDCs * 20),
+    RiskLevel = case(
+        array_length(TargetsWithUnconst) >= 1,
+            "Critical - DC_Coerced_To_Unconstrained_Delegation_Host",
+        UniqueCoercingDCs >= 2,
+            "High - Multiple_DCs_Coerced",
+        CoercedLogonCount >= 3,
+            "High - Repeated_DC_Outbound_Auth",
+        CoercedLogonCount >= 1,
+            "Medium - DC_Outbound_Auth_To_NonDC",
+        "Low"
+    ),
+    CoercionProtocol = case(
+        // Heuristic: cannot determine protocol from SecurityEvent alone
+        // Flag for manual investigation
+        array_length(TargetsWithUnconst) >= 1, "Likely_PrinterBug_Or_PetitPotam_To_UnconstDC",
+        "Possible_Coercion_Via_MS-RPRN_MS-EFSR_MS-DFSNM"
+    )
+| project
+    TimeWindow      = TimeGenerated,
+    RiskLevel,
+    RiskScore,
+    CoercionProtocol,
+    CoercedLogonCount,
+    UniqueCoercingDCs,
+    CoercingDCs,
+    UniqueTargetHosts,
+    TargetHosts,
+    TargetsWithUnconst,
+    SourceIPs
+| order by RiskScore desc

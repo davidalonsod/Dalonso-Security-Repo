@@ -1,0 +1,124 @@
+// =========================================================
+// HUNT-20 | AD-Certificate-Enrollment-Anomaly-30d
+// Description : Full audit of all certificate requests
+//               (EventID 4886 - request received, 4887 -
+//               issued, 4888 - denied) from the CA audit
+//               log. Surfaces accounts enrolling from
+//               unexpected hosts, high-volume enrollments,
+//               certificates with alternate SANs (ESC1),
+//               enrollment agent requests (ESC3), and DC
+//               certificate requests by non-DCs (ESC8).
+// Period      : 30 days
+// Use Case    : ADCS abuse, ESC1-ESC8 pattern hunting,
+//               certificate theft post-mortem
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 30d;
+
+// Build DC list
+let DCList = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4768
+    | summarize DCs = make_set(toupper(Computer));
+
+// Certificate requests (4886) and issuances (4887)
+let CertRequests = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID in (4886, 4887, 4888)
+    | extend RequesterName = tostring(column_ifexists("RequesterName", ""))
+    | extend
+        RequesterNorm   = tolower(RequesterName),
+        CAHost          = Computer,
+        Template        = tostring(column_ifexists("CertificateTemplateName", "")),
+        EventType       = case(
+            EventID == 4886, "Requested",
+            EventID == 4887, "Issued",
+            "Denied"
+        )
+    | extend
+        // Detect SAN/requester mismatch (ESC1 indicator)
+        HasSANOverride  = tostring(column_ifexists("SubjectAlternativeNames", "")) has "@"
+                           or tostring(column_ifexists("SubjectAlternativeNames", "")) !has toupper(RequesterName),
+        // Detect enrollment agent usage (ESC3)
+        IsEnrollAgent   = RequesterName endswith "EA"
+                           or Template =~ "Enrollment Agent"
+                           or Template =~ "CEP Encryption",
+        // Detect DC certificate by non-DC requester (ESC8)
+        IsDCTemplate    = Template has_any ("DomainController", "KerberosAuthentication",
+                                             "DirectoryEmailReplication", "DC_Auth"),
+        IsOffHours      = hourofday(TimeGenerated) < 7 or hourofday(TimeGenerated) >= 20;
+
+// Enrollment baseline per account → template pairing
+let EnrollBaseline = CertRequests
+    | where TimeGenerated < ago(7d)
+    | summarize
+        BaselineTemplates = make_set(Template, 20),
+        BaselineHosts     = make_set(CAHost, 10)
+      by RequesterNorm;
+
+// Hunt window
+CertRequests
+| join kind=leftouter (EnrollBaseline) on RequesterNorm
+| extend
+    IsNewTemplate = not(BaselineTemplates has Template),
+    IsNewCAHost   = not(BaselineHosts has CAHost)
+// Determine if the requester is expected to request DC certs
+| extend Ctx = toscalar(DCList | project DCs)
+| extend IsDCRequester = set_has_element(Ctx, toupper(Computer))
+| extend
+    ESC1Risk = HasSANOverride and EventType == "Issued",
+    ESC3Risk = IsEnrollAgent  and EventType == "Issued",
+    ESC8Risk = IsDCTemplate   and not(IsDCRequester) and EventType == "Issued"
+| summarize
+    TotalRequests    = count(),
+    Issued           = countif(EventType == "Issued"),
+    Denied           = countif(EventType == "Denied"),
+    ESC1Events       = countif(ESC1Risk),
+    ESC3Events       = countif(ESC3Risk),
+    ESC8Events       = countif(ESC8Risk),
+    OffHoursRequests = countif(IsOffHours),
+    NewTemplates     = make_set_if(Template, IsNewTemplate, 10),
+    AllTemplates     = make_set(Template, 20),
+    CAHosts          = make_set(CAHost, 10),
+    LastRequest      = max(TimeGenerated),
+    FirstRequest     = min(TimeGenerated)
+  by RequesterNorm
+| extend
+    RiskScore = (ESC1Events * 50)
+              + (ESC3Events * 40)
+              + (ESC8Events * 60)
+              + (array_length(NewTemplates) * 15)
+              + (OffHoursRequests * 5),
+    RiskLevel = case(
+        ESC8Events >= 1, "Critical - ESC8_DC_Cert_Non-DC_Requester",
+        ESC1Events >= 1, "Critical - ESC1_SAN_Mismatch_Issued",
+        ESC3Events >= 1, "High - ESC3_EnrollAgent_Certificate",
+        array_length(NewTemplates) >= 2, "High - Multiple_New_Templates",
+        array_length(NewTemplates) >= 1, "Medium - New_Template_Enrollment",
+        OffHoursRequests > 3, "Medium - OffHours_Cert_Requests",
+        "Low"
+    ),
+    ExposedESC = case(
+        ESC8Events >= 1, "ESC8",
+        ESC1Events >= 1, "ESC1",
+        ESC3Events >= 1, "ESC3",
+        "None_Confirmed"
+    )
+| project
+    RequesterNorm,
+    RiskLevel,
+    RiskScore,
+    ExposedESC,
+    TotalRequests,
+    Issued,
+    ESC1Events,
+    ESC3Events,
+    ESC8Events,
+    OffHoursRequests,
+    NewTemplates,
+    AllTemplates,
+    CAHosts,
+    FirstRequest,
+    LastRequest
+| order by RiskScore desc

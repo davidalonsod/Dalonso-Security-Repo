@@ -1,0 +1,76 @@
+// =========================================================
+// RULE-24 | AD-Disabled-Account-Reactivated
+// Description : "Walking Dead" — Disabled privileged account
+//               re-enabled. Event 4722 (User Account Enabled)
+//               for an account that previously held membership
+//               in a high-privilege group (Domain Admins,
+//               Enterprise Admins, Backup Operators, etc.)
+//               within the last 30 days.
+//               Disabled accounts retain all their group
+//               memberships, ACLs, SPNs, and attributes.
+//               Re-enabling them instantly restores all
+//               accumulated privileges — making them a stealthy
+//               persistence and escalation vector.
+// Severity    : High → Critical (DA/EA account re-enabled)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1098 — Account Manipulation
+//               T1078  — Valid Accounts
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+// Groups that make an account "privileged"
+let PrivilegedGroups = dynamic([
+    "Domain Admins", "Enterprise Admins", "Schema Admins",
+    "Administrators", "Backup Operators", "Server Operators",
+    "Account Operators", "DnsAdmins", "Group Policy Creator Owners",
+    "Remote Desktop Users", "Network Configuration Operators",
+    "Cert Publishers"
+]);
+
+// Recent membership in privileged groups (last 30 days)
+let RecentPrivilegedMembers = SecurityEvent
+    | where TimeGenerated > ago(30d)
+    | where EventID in (4728, 4732, 4756)
+    | where TargetUserName has_any (PrivilegedGroups)
+    | summarize
+        GroupMemberships = make_set(TargetUserName, 10),
+        IsTierZero = anyif(true,
+            TargetUserName has_any ("Domain Admins", "Enterprise Admins",
+                                    "Schema Admins", "Administrators"))
+        by PrivMember = tolower(MemberName);
+
+// Accounts re-enabled in the detection window
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID == 4722                         // User Account Enabled
+| extend
+    ReenabledAccount = tolower(TargetUserName),
+    ReenabledBy      = strcat(SubjectDomainName, "\\", SubjectUserName)
+| join kind=inner (RecentPrivilegedMembers)
+    on $left.ReenabledAccount == $right.PrivMember
+| extend
+    Severity = case(
+        IsTierZero, "Critical",
+        "High"
+    ),
+    WhySuspicious = strcat(
+        "Disabled_Privileged_Account_Reenabled; ",
+        iff(IsTierZero, "WAS_DA_EA_SA_Critical; ", ""),
+        "Account: ", TargetUserName, "; ",
+        "PreviousGroups: ", strcat_array(GroupMemberships, ", "), "; ",
+        "ReenabledBy: ", ReenabledBy
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    ReenabledAccount = TargetUserName,
+    ReenabledBy,
+    GroupMemberships,
+    IsTierZero,
+    Computer,
+    SubjectUserName,
+    SubjectDomainName
+| order by Severity asc, TimeGenerated desc

@@ -1,0 +1,91 @@
+// =========================================================
+// HUNT-07 | AD-Machine-Account-Creation-Audit-90d
+// Description : Full audit of all computer object creations
+//               (5137) over 90 days. Identifies creator
+//               role (admin vs. non-admin), creation rate,
+//               timing patterns, and flags accounts likely
+//               created for RBCD, noPac, or KrbRelayUp.
+// Period      : 90 days
+// Use Case    : RBCD/noPac exposure assessment,
+//               MachineAccountQuota hygiene
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 90d;
+
+// Admin accounts
+let AdminMembers = SecurityEvent
+    | where TimeGenerated > ago(90d)
+    | where EventID in (4728, 4732, 4756)
+    | where TargetUserName has_any ("Domain Admins", "Enterprise Admins",
+                                    "Administrators", "Account Operators")
+    | summarize by AdminMember = tolower(tostring(column_ifexists("MemberName", "")));
+
+// Machine account creations
+let Creations = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 5137
+    | where tostring(column_ifexists("ObjectClass", "")) =~ "computer"
+    | extend
+        CreatorNorm     = tolower(SubjectUserName),
+        CreatorAccount  = strcat(SubjectDomainName, "\\", SubjectUserName),
+        OUPath          = ObjectName,
+        NewMachineName  = extract(@"CN=([^,]+)", 1, ObjectName),
+        IsOffHours      = hourofday(TimeGenerated) < 7 or hourofday(TimeGenerated) >= 20;
+
+Creations
+| join kind=leftouter (AdminMembers)
+    on $left.CreatorNorm == $right.AdminMember
+| extend IsAdminCreator = isnotempty(AdminMember)
+// Flag suspicious patterns
+| extend
+    IsDefaultComputerOU = OUPath has "CN=Computers,DC=",      // Standard computer OU
+    IsLikelyRBCD        = not(IsAdminCreator)
+                           and not(NewMachineName endswith "$")
+                           and NewMachineName matches regex @"^[a-zA-Z]{4,12}\$$",
+    IsLikelyNoPac       = not(IsAdminCreator)
+                           and NewMachineName !has "."
+                           and NewMachineName !endswith "$"
+| summarize
+    TotalCreations      = count(),
+    AdminCreations      = countif(IsAdminCreator),
+    NonAdminCreations   = countif(not(IsAdminCreator)),
+    OffHoursCreations   = countif(IsOffHours),
+    DefaultOUCount      = countif(IsDefaultComputerOU),
+    MachineNames        = make_set(NewMachineName, 30),
+    OUPaths             = make_set(OUPath, 30),
+    LastCreation        = max(TimeGenerated),
+    FirstCreation       = min(TimeGenerated),
+    UniqueCreators      = make_set(CreatorAccount, 20)
+    by CreatorNorm
+| extend
+    OffHoursRatio    = round(todouble(OffHoursCreations) / todouble(TotalCreations), 2),
+    NonAdminRatio    = round(todouble(NonAdminCreations) / todouble(TotalCreations), 2),
+    RiskScore = (NonAdminCreations * 10)
+              + (OffHoursCreations * 5)
+              + iff(TotalCreations >= 5, 30, 0),
+    RiskLevel = case(
+        NonAdminCreations >= 5, "Critical",
+        NonAdminCreations >= 3, "High",
+        NonAdminCreations >= 1, "Medium",
+        "Low"
+    ),
+    LikelyPurpose = case(
+        NonAdminCreations >= 3, "Probable_RBCD_KrbRelayUp_noPac_Prep",
+        NonAdminCreations >= 1, "Possible_Attack_Staging",
+        AdminCreations > 0,     "Legitimate_Admin_Activity",
+        "Unknown"
+    )
+| project
+    CreatorNorm,
+    RiskLevel,
+    RiskScore,
+    LikelyPurpose,
+    TotalCreations,
+    NonAdminCreations,
+    OffHoursRatio,
+    FirstCreation,
+    LastCreation,
+    MachineNames,
+    UniqueCreators
+| order by RiskScore desc

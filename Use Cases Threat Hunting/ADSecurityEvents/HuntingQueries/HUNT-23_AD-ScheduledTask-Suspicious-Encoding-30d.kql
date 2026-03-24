@@ -1,0 +1,121 @@
+// =========================================================
+// HUNT-23 | AD-ScheduledTask-Suspicious-Encoding-30d
+// Description : Hunts for scheduled task creations
+//               (EventID 4698) and modifications (4702)
+//               where the task action command contains
+//               encoded payloads (Base64, hex), LOLBAS
+//               binaries (certutil, mshta, regsvr32,
+//               wscript, cscript, rundll32, msiexec),
+//               UNC paths, or download cradles. Also
+//               correlates with 4624 logon events to
+//               identify the remote actor who scheduled
+//               the task over network logon.
+// Period      : 30 days
+// Use Case    : Persistence via scheduled tasks, lateral
+//               movement via SchtasksExec, C2 staging
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 30d;
+
+// Suspicious task content patterns
+let SuspiciousCommands = dynamic([
+    "-enc ", "-EncodedCommand", "frombase64string",
+    "iex(", "invoke-expression", "downloadstring",
+    "downloadfile", "bitsadmin", "certutil -decode",
+    "certutil -urlcache", "mshta http", "mshta vbscript",
+    "regsvr32 /s /n /u /i:http", "regsvr32 /s /u /i:http",
+    "cscript \\\\", "wscript \\\\",
+    "rundll32 javascript:", "shell.application",
+    "schtasks /create", "at \\\\",
+    "cmd /c powershell", "powershell -w hidden",
+    "powershell -nop", "%temp%\\", "%appdata%\\"
+]);
+
+let LOLBASBinaries = dynamic([
+    "certutil", "mshta", "regsvr32", "wscript",
+    "cscript", "rundll32", "msiexec", "wmic", "bitsadmin",
+    "forfiles", "pcalua", "eventvwr", "sdclt", "fodhelper"
+]);
+
+// Scheduled task creation and modification events
+let SchedTasks = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID in (4698, 4702)    // 4698=created, 4702=modified
+    | extend
+        TaskName      = tostring(column_ifexists("TaskName", "")),
+        TaskContent   = tostring(column_ifexists("TaskContent", "")),
+        Actor         = strcat(SubjectDomainName, "\\", SubjectUserName),
+        ActorNorm     = tolower(SubjectUserName),
+        EventType     = iff(EventID == 4698, "TaskCreated", "TaskModified"),
+        ContentLower  = tolower(tostring(column_ifexists("TaskContent", ""))),
+        IsOffHours    = hourofday(TimeGenerated) < 7 or hourofday(TimeGenerated) >= 20,
+        IsNetwork     = SubjectLogonId !in ("0x3e7", "0x3e4", "0x3e5");
+
+// Flag suspicious patterns
+SchedTasks
+| extend
+    HasEncodedPayload = ContentLower has_any ("-enc ", "-encodedcommand",
+                                              "frombase64string", "base64"),
+    HasDownloadCradle = ContentLower has_any ("downloadstring", "downloadfile",
+                                              "certutil -urlcache", "bitsadmin /transfer",
+                                              "invoke-webrequest", "wget ", "curl "),
+    HasLOLBAS         = ContentLower has_any (LOLBASBinaries),
+    HasUNCPath        = ContentLower matches regex @"\\\\[a-z0-9\-\.]+\\[a-z]",
+    HasSuspiciousCmd  = ContentLower has_any (SuspiciousCommands),
+    SuspiciousCount   = countof(ContentLower, "-enc ")
+                      + countof(ContentLower, "base64")
+                      + countof(ContentLower, "downloadstring")
+| where HasEncodedPayload or HasDownloadCradle or HasLOLBAS or HasUNCPath or HasSuspiciousCmd
+| summarize
+    TaskEventCount    = count(),
+    CreatedTasks      = countif(EventType == "TaskCreated"),
+    ModifiedTasks     = countif(EventType == "TaskModified"),
+    EncodedPayloads   = countif(HasEncodedPayload),
+    DownloadCradles   = countif(HasDownloadCradle),
+    LOLBASUsage       = countif(HasLOLBAS),
+    UNCPaths          = countif(HasUNCPath),
+    OffHoursCount     = countif(IsOffHours),
+    NetworkActors     = countif(IsNetwork),
+    Actors            = make_set(Actor, 10),
+    TaskNames         = make_set(tostring(column_ifexists("TaskName", "")), 20),
+    SampleContent     = take_any(tostring(column_ifexists("TaskContent", ""))),
+    FirstSeen         = min(TimeGenerated),
+    LastSeen          = max(TimeGenerated)
+  by Computer
+| extend
+    RiskScore = (EncodedPayloads * 40)
+              + (DownloadCradles * 35)
+              + (LOLBASUsage * 20)
+              + (UNCPaths * 25)
+              + (OffHoursCount * 10)
+              + (NetworkActors * 15),
+    RiskLevel = case(
+        EncodedPayloads >= 1 and DownloadCradles >= 1,
+            "Critical - Encoded_Payload_With_DownloadCradle",
+        EncodedPayloads >= 1,
+            "High - Encoded_Payload_In_Task",
+        DownloadCradles >= 1,
+            "High - DownloadCradle_In_Task",
+        LOLBASUsage >= 2,
+            "High - Multiple_LOLBAS_In_Task",
+        LOLBASUsage >= 1 and OffHoursCount >= 1,
+            "Medium - LOLBAS_OffHours_Task",
+        "Medium - Suspicious_Task_Pattern"
+    )
+| project
+    Computer,
+    RiskLevel,
+    RiskScore,
+    EncodedPayloads,
+    DownloadCradles,
+    LOLBASUsage,
+    UNCPaths,
+    OffHoursCount,
+    NetworkActors,
+    Actors,
+    TaskNames,
+    SampleContent,
+    FirstSeen,
+    LastSeen
+| order by RiskScore desc

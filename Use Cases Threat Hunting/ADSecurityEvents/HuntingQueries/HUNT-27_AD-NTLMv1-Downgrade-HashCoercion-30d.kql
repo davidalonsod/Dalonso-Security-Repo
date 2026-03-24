@@ -1,0 +1,190 @@
+// ============================================================
+// HUNT-27 | AD Hunting: NTLMv1 Downgrade and Hash Coercion Indicators
+// ============================================================
+// Description:
+//   Hunts for NTLMv1 authentication events, which indicate either:
+//     (a) Legacy clients or servers with LAN Manager compatibility level < 3 (misconfiguration)
+//     (b) Deliberate NTLMv1 downgrade attacks using tools such as:
+//         - NetNTLMtoSilverTicket (force NTLMv1 → crack → Silver Ticket)
+//         - ntlm_theft / Bad-Pdf (document-based UNC path NTLM capture)
+//         - Responder with NTLMv1 challenge forcing
+//         - InternalMonologue (NTLMSSP without LSASS access)
+//
+//   NTLMv1 hashes can be cracked in seconds using rainbow tables or ASIC hardware.
+//   A cracked NTLMv1 hash gives the attacker the NT hash, which enables:
+//     - Pass-the-Hash (PTH) attacks
+//     - Silver Ticket creation for specific services (no KDC needed)
+//     - DCSYNC if the hash belongs to a domain controller machine account
+//
+//   Discovery of NTLMv1 use in a modern domain is itself an IOC — most
+//   organizations should have NTLMv1 fully disabled via GPO.
+//
+// Mitre ATT&CK:
+//   - T1557.001: Adversary-in-the-Middle — LLMNR/NBT-NS Poisoning
+//   - T1550.002: Use Alternate Authentication Material — Pass-the-Hash
+//   - T1212:     Exploitation for Credential Access
+//   - T1171:     Network Share Discovery (via forced auth to attacker share)
+//
+// Data Sources: SecurityEvent (EventID 4624, 4776)
+// Query Period: 30 days
+// Hunting Focus: NTLMv1 auth events, client concentration, privileged accounts
+// ============================================================
+
+// ──────────────────────────────────────────────────────────────
+// PART 1 — NTLMv1 Logon Events (EventID 4624, AuthProcess = NTLM, Package = NTLM V1)
+//   EventID 4624: An account was successfully logged on
+//   LmPackageName = "NTLM V1" confirms NTLMv1 was used (not NTLMv2)
+//   Logon Type 3 = Network logon (most common for NTLM relay)
+// ──────────────────────────────────────────────────────────────
+let LookbackPeriod = 30d;
+let PrivilegedGroups = dynamic(["Domain Admins", "Enterprise Admins", "Schema Admins", "Administrators"]);
+let ExpectedNTLMv1Hosts = dynamic([
+    // Add known legacy hosts that legitimately use NTLMv1 if any:
+    // "legacy-server01", "oldprint-server"
+    ""
+]);
+// --- EventID 4624 NTLMv1 logons ---
+let NTLMv1Logons = SecurityEvent
+| where TimeGenerated >= ago(LookbackPeriod)
+| where EventID == 4624
+| where AuthenticationPackageName =~ "NTLM"
+| where LmPackageName =~ "NTLM V1" or LmPackageName =~ "NTLM V1 with Client Challenge"
+| where LogonType in (3, 9, 10)  // Network, NewCredentials, RemoteInteractive
+| where AccountName !endswith "$"  // Exclude machine account self-auth for now (see Part 2)
+| where not(WorkstationName in~ (ExpectedNTLMv1Hosts))
+| extend
+    Actor              = tolower(strcat(TargetDomainName, "\\", TargetUserName)),
+    AuthenticatedTo    = Computer,
+    SourceDevice       = WorkstationName,
+    SourceIP           = IpAddress,
+    AuthPackage        = LmPackageName,
+    LogonTypeName      = case(
+        LogonType == 3,  "Network",
+        LogonType == 9,  "NewCredentials",
+        LogonType == 10, "RemoteInteractive",
+        tostring(LogonType)
+    ),
+    IsPrivilegedAccount = AccountName in~ (PrivilegedGroups),  // Approximate; refine with identity data
+    MITRE_Technique     = "T1557.001 + T1550.002"
+| project
+    TimeGenerated, Actor, AuthenticatedTo, SourceDevice, SourceIP,
+    AuthPackage, LogonTypeName, LogonType,
+    IsPrivilegedAccount, MITRE_Technique;
+// --- EventID 4776 NTLM Credential Validation (for DC-side visibility) ---
+let NTLMv1Validation = SecurityEvent
+| where TimeGenerated >= ago(LookbackPeriod)
+| where EventID == 4776
+| extend
+    Actor           = tolower(strcat(SubjectDomainName, "\\", TargetUserName)),
+    AuthenticatedTo = Computer,  // This fires on the DC
+    SourceDevice    = WorkstationName,
+    SourceIP        = "",         // 4776 does not include IP (use 4624 for IP data)
+    AuthPackage     = "NTLM-Validation-DC",
+    LogonTypeName   = "DCValidation",
+    IsPrivilegedAccount = false,
+    MITRE_Technique = "T1557.001"
+// Note: 4776 does not expose LmPackageName; filter by known NTLMv1 source via join
+| project
+    TimeGenerated, Actor, AuthenticatedTo, SourceDevice, SourceIP,
+    AuthPackage, LogonTypeName, LogonType = int(0),
+    IsPrivilegedAccount, MITRE_Technique;
+// ──────────────────────────────────────────────────────────────
+// PART 2 — Machine Account NTLMv1 (higher risk: enables Silver Ticket to service)
+// ──────────────────────────────────────────────────────────────
+let NTLMv1MachineAccounts = SecurityEvent
+| where TimeGenerated >= ago(LookbackPeriod)
+| where EventID == 4624
+| where AuthenticationPackageName =~ "NTLM"
+| where LmPackageName =~ "NTLM V1" or LmPackageName =~ "NTLM V1 with Client Challenge"
+| where LogonType in (3, 9)
+| where AccountName endswith "$"
+| extend
+    Actor              = tolower(strcat(TargetDomainName, "\\", TargetUserName)),
+    AuthenticatedTo    = Computer,
+    SourceDevice       = WorkstationName,
+    SourceIP           = IpAddress,
+    AuthPackage        = LmPackageName,
+    LogonTypeName      = "Network_MachineAcct",
+    IsPrivilegedAccount = true,   // Machine accounts with NTLMv1 = potential Silver Ticket
+    MITRE_Technique    = "T1212 + T1550.002"
+| project
+    TimeGenerated, Actor, AuthenticatedTo, SourceDevice, SourceIP,
+    AuthPackage, LogonTypeName, LogonType,
+    IsPrivilegedAccount, MITRE_Technique;
+// ──────────────────────────────────────────────────────────────
+// PART 3 — Document-based NTLM Capture Signal (UNC path auto-auth)
+//   Detects when Office/PDF process (winword, excel, acrobat, etc.) triggers
+//   an outbound NTLM auth — typical of ntlm_theft / Bad-Pdf document tricks
+// ──────────────────────────────────────────────────────────────
+let DocumentNTLMCapture = union isfuzzy=true (DeviceNetworkEvents
+| where TimeGenerated >= ago(LookbackPeriod)
+| where InitiatingProcessFileName in~ (
+    "WINWORD.EXE", "EXCEL.XL", "POWERPNT.EXE",
+    "Acrobat.exe", "AcroRd32.exe", "FoxitPDFReader.exe",
+    "msedge.exe", "chrome.exe", "firefox.exe",  // For WPAD / UNC in browser
+    "outlook.exe"
+)
+| where RemotePort == 445 or RemotePort == 139  // SMB for NTLM capture
+| where RemoteIPType != "Loopback"
+| where ActionType =~ "ConnectionSuccess"
+| extend
+    Actor              = tolower(strcat(InitiatingProcessAccountDomain, "\\", InitiatingProcessAccountName)),
+    AuthenticatedTo    = DeviceName,
+    SourceDevice       = DeviceName,
+    SourceIP           = LocalIP,
+    AuthPackage        = "SMB-NTLM-via-Document",
+    LogonTypeName      = "DocumentTriggered",
+    LogonType          = int(-1),
+    IsPrivilegedAccount = false,
+    MITRE_Technique    = "T1171 + T1557.001",
+    RemoteTarget       = strcat(RemoteIP, ":", RemotePort),
+    TriggerProcess     = InitiatingProcessFileName
+| project
+    TimeGenerated, Actor, AuthenticatedTo = RemoteTarget, SourceDevice, SourceIP,
+    AuthPackage, LogonTypeName, LogonType,
+    IsPrivilegedAccount, MITRE_Technique),
+    (print _placeholder = "" | where 1==0);
+// ──────────────────────────────────────────────────────────────
+// UNION and summarize — hunting view
+// ──────────────────────────────────────────────────────────────
+union NTLMv1Logons, NTLMv1MachineAccounts, DocumentNTLMCapture
+| summarize
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated),
+    TotalEvents      = count(),
+    UniqueTargets    = dcount(AuthenticatedTo),
+    UniqueSourceIPs  = dcount(SourceIP),
+    Targets          = make_set(AuthenticatedTo, 20),
+    SourceIPs        = make_set(SourceIP, 10),
+    AuthPackages     = make_set(AuthPackage),
+    LogonTypes       = make_set(LogonTypeName),
+    IsPrivileged     = max(IsPrivilegedAccount)
+    by Actor, SourceDevice, MITRE_Technique
+| extend
+    RiskScore = case(
+        IsPrivileged == true,                     "Critical",  // Privileged/machine NTLMv1 → Silver Ticket risk
+        UniqueTargets > 5,                        "High",      // Broad NTLMv1 from one source
+        AuthPackages has "DocumentTriggered",     "High",      // Document-triggered capture
+        "Medium"
+    ),
+    AttackSurface = strcat(
+        "Actor: ", Actor, " | Sources: ", tostring(UniqueSourceIPs),
+        " | Targets: ", tostring(UniqueTargets)
+    )
+| project-reorder
+    FirstSeen, LastSeen, RiskScore,
+    Actor, SourceDevice, SourceIPs,
+    Targets, UniqueTargets,
+    AuthPackages, LogonTypes,
+    TotalEvents, IsPrivileged, AttackSurface, MITRE_Technique
+| sort by RiskScore asc, TotalEvents desc   // Critical/High first, then by volume
+// ──────────────────────────────────────────────────────────────
+// ANALYST NOTES:
+// - Any NTLMv1 event in a modern AD domain warrants investigation.
+//   Hardened domains running LAN Manager Authentication Level = 5 (Send NTLMv2 only,
+//   refuse LM & NTLM) should see zero 4624 events with LmPackageName = "NTLM V1".
+// - Key remediation: Set GPO: Computer Configuration > Windows Settings > Security
+//   Settings > Local Policies > Security Options > Network security: LAN Manager
+//   authentication level = "Send NTLMv2 response only. Refuse LM & NTLM"
+// - Document-triggered SMB connections to external IPs are IOC regardless of NTLMv1.
+// ──────────────────────────────────────────────────────────────

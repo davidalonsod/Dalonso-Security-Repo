@@ -1,0 +1,124 @@
+// =========================================================
+// HUNT-19 | AD-PreWin2000-MachineAccount-Risk-Audit-90d
+// Description : Pre-Windows-2000 compatible access machine
+//               accounts have their password hash set to
+//               the machine name in lower-case (predictable)
+//               and are often left enabled for decades.
+//               This query identifies: (1) machine accounts
+//               whose TGT was requested with RC4 using a
+//               predictable password pattern, (2) machine
+//               accounts in the Pre-Windows 2000 Compatible
+//               Access group, (3) machine accounts with
+//               PasswordLastSet matching creation date.
+// Period      : 90 days
+// Use Case    : Pre-Win2000 password exploitation,
+//               legacy auth risk assessment
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 90d;
+
+// Machine account TGT requests with RC4 (pre-win2000 uses RC4 by default)
+let MachineRC4TGT = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4768
+    | where TargetUserName endswith "$"       // machine accounts
+    | where tostring(column_ifexists("TicketEncryptionType", "")) == "0x17"    // RC4
+    | extend
+        MachineNorm   = tolower(TargetUserName),
+        MachineName   = trim_end("$", TargetUserName),
+        ClientIP      = ClientAddress,
+        Domain        = TargetDomainName;
+
+// Pre-Windows 2000 Compatible Access group membership events
+let PreWin2000Members = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID in (4728, 4732)   // member added to security group
+    | where TargetUserName =~ "Pre-Windows 2000 Compatible Access"
+    | extend
+        MemberAdded = tostring(column_ifexists("MemberName", "")),
+        AddedBy     = strcat(SubjectDomainName, "\\", SubjectUserName),
+        AddedAt     = TimeGenerated;
+
+// Machine account password-related events (4723/4724 on machine accounts)
+let MachinePasswordEvents = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID in (4723, 4724)
+    | where TargetUserName endswith "$"
+    | extend MachineNorm = tolower(TargetUserName);
+
+// New machine account creation (to compare with password set timing)
+let MachineCreations = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 5137
+    | where tostring(column_ifexists("ObjectClass", "")) =~ "computer"
+    | extend
+        CreatedMachineNorm = tolower(extract(@"CN=([^,]+)\$", 0, ObjectName)),
+        CreationTime       = TimeGenerated,
+        Creator            = strcat(SubjectDomainName, "\\", SubjectUserName);
+
+// RC4 machine TGT summary
+let RC4Summary = MachineRC4TGT
+    | summarize
+        RC4TGTCount     = count(),
+        FirstRC4        = min(TimeGenerated),
+        LastRC4         = max(TimeGenerated),
+        ClientIPs       = make_set(ClientIP, 10),
+        Domains         = make_set(Domain, 5)
+      by MachineNorm, MachineName;
+
+// Join machine creations to RC4 requests
+RC4Summary
+| join kind=leftouter (MachineCreations) on $left.MachineNorm == $right.CreatedMachineNorm
+| extend
+    DaysSinceCreation   = datetime_diff("day", LastRC4, CreationTime),
+    IsFreshlyCreated    = CreationTime > ago(14d),
+    IsLikelyPreWin2000  = MachineName =~ tolower(MachineName),   // password == lowercase machinename
+    IsSuspiciousRC4 = RC4TGTCount >= 1
+| extend
+    RiskScore = (RC4TGTCount * 10)
+              + iff(IsFreshlyCreated, 30, 0)
+              + iff(IsLikelyPreWin2000, 20, 0),
+    RiskLevel = case(
+        IsFreshlyCreated and RC4TGTCount >= 3,
+            "Critical - Fresh_Machine_Account_Repeated_RC4_Auth",
+        IsFreshlyCreated,
+            "High - New_Machine_Account_RC4_TGT",
+        RC4TGTCount >= 10,
+            "High - High_Volume_RC4_Machine_Auth",
+        RC4TGTCount >= 3,
+            "Medium - Repeated_RC4_Machine_Auth",
+        "Low - Single_RC4_Machine_Auth"
+    )
+| union (
+    PreWin2000Members
+    | summarize
+        MembersAdded  = make_set(MemberAdded, 20),
+        AddedByActors = make_set(AddedBy, 10),
+        LastChange    = max(AddedAt)
+      by GroupName = TargetUserName
+    | extend
+        MachineNorm        = "",
+        MachineName        = GroupName,
+        RC4TGTCount        = 0,
+        IsFreshlyCreated   = false,
+        IsLikelyPreWin2000 = true,
+        RiskScore          = array_length(MembersAdded) * 40,
+        RiskLevel          = "High - PreWin2000CompatGroup_Membership_Changed",
+        ClientIPs          = pack_array(""),
+        DaysSinceCreation  = 0
+    | project-away GroupName
+)
+| project
+    MachineName,
+    RiskLevel,
+    RiskScore,
+    IsFreshlyCreated,
+    RC4TGTCount,
+    ClientIPs,
+    DaysSinceCreation,
+    CreationTime,
+    Creator,
+    FirstRC4,
+    LastRC4
+| order by RiskScore desc

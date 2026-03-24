@@ -1,0 +1,106 @@
+// =========================================================
+// HUNT-09 | AD-AdminSDHolder-ACL-Backdoor-History-90d
+// Description : Full audit of attribute changes (5136) to
+//               the AdminSDHolder container and SDProp
+//               propagation (sdPropagationControl), plus
+//               permission grants targeting privileged group
+//               objects. Identifies backdoor ACLs that
+//               SDProp will propagate to protected objects.
+// Period      : 90 days
+// Use Case    : AdminSDHolder persistence detection,
+//               ACL backdoor post-compromise forensics
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 90d;
+
+// All attribute modifications on AdminSDHolder object
+let AdminSDHolderChanges = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 5136
+    | where ObjectName has "CN=AdminSDHolder,CN=System"
+    | extend
+        Actor       = strcat(SubjectDomainName, "\\", SubjectUserName),
+        AttrChanged = tostring(column_ifexists("AttributeLDAPDisplayName", "")),
+        OldValue    = OldValue,
+        NewValue    = tostring(column_ifexists("AttributeValue", "")),
+        OpType      = case(
+            OperationType == "%%14675", "ValueAdded",
+            OperationType == "%%14676", "ValueDeleted",
+            "Unknown"
+        );
+
+// Protected objects where SDProp propagates (AdminCount=1)
+let SDPropObjects = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 5136
+    | where tostring(column_ifexists("AttributeLDAPDisplayName", "")) =~ "adminCount"
+       and tostring(column_ifexists("AttributeValue", "")) == "1"
+    | summarize SDPropAccounts = make_set(ObjectName, 50) by Computer;
+
+// ACL grants on the domain root and privileged groups
+// (nTSecurityDescriptor / nTSD changes)
+let PrivGroupACLChanges = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 5136
+    | where tostring(column_ifexists("AttributeLDAPDisplayName", "")) =~ "nTSecurityDescriptor"
+    | where ObjectName has_any ("CN=Domain Admins,", "CN=Enterprise Admins,",
+                               "CN=Schema Admins,", "CN=Administrators,",
+                               "CN=Group Policy Creator Owners,",
+                               "CN=Account Operators,", "CN=Backup Operators,",
+                               "CN=Server Operators,", "CN=DnsAdmins,")
+    | extend
+        Actor       = strcat(SubjectDomainName, "\\", SubjectUserName),
+        AffectedDN  = ObjectName;
+
+// Combine and tag
+AdminSDHolderChanges
+| summarize
+    Changes         = count(),
+    LastChange      = max(TimeGenerated),
+    FirstChange     = min(TimeGenerated),
+    Actors          = make_set(Actor, 10),
+    Changes_nTSD    = countif(AttrChanged =~ "nTSecurityDescriptor"),
+    Changes_Other   = countif(AttrChanged !~ "nTSecurityDescriptor"),
+    ChangedAttrs    = make_set(AttrChanged, 20),
+    DCs             = make_set(Computer, 10)
+    by ObjectName = "CN=AdminSDHolder"
+| extend
+    RiskLevel = case(
+        Changes_nTSD >= 1, "Critical - SecurityDescriptor_Modified",
+        Changes >= 3,      "High - Multiple_Changes",
+        "Medium"
+    ),
+    RiskScore = (Changes_nTSD * 50) + (Changes * 5),
+    Technique = "T1546.007 - AdminSDHolder"
+| union (
+    PrivGroupACLChanges
+    | summarize
+        Changes         = count(),
+        LastChange      = max(TimeGenerated),
+        FirstChange     = min(TimeGenerated),
+        Actors          = make_set(Actor, 10),
+        Changes_nTSD    = count(),
+        Changes_Other   = 0,
+        ChangedAttrs    = pack_array("nTSecurityDescriptor"),
+        DCs             = make_set(Computer, 10)
+        by AffectedDN
+    | extend
+        ObjectName    = AffectedDN,
+        RiskLevel   = "High - PrivGroup_ACL_Modified",
+        RiskScore   = Changes * 30,
+        Technique   = "T1222.001 - File/Directory Permissions"
+    | project-away AffectedDN
+)
+| project
+    ObjectName,
+    RiskLevel,
+    RiskScore,
+    Technique,
+    Changes,
+    Changes_nTSD,
+    FirstChange,
+    LastChange,
+    Actors,
+    ChangedAttrs
+| order by RiskScore desc

@@ -1,0 +1,93 @@
+// =========================================================
+// HUNT-06 | AD-ADCS-Vulnerable-Template-Audit-30d
+// Description : All certificate issuances (4886/4887) over
+//               30 days grouped by template, with SAN
+//               presence, requester vs. subject mismatch
+//               detection, enrollment agent use flags,
+//               and bulk enrollment rate indicators.
+//               Maps to ESC1 (SAN mismatch), ESC3
+//               (enrollment agent), ESC8 (DC cert relay).
+// Period      : 30 days
+// Use Case    : ADCS attack surface review, PKI audit
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 30d;
+
+// Event 4887 — Certificate Issued with detailed fields
+SecurityEvent
+| where TimeGenerated > ago(Period)
+| where EventID in (4886, 4887)
+| extend
+    EventDesc         = case(EventID == 4886, "Certificate Requested",
+                             EventID == 4887, "Certificate Issued", "Other"),
+    RequesterUPN      = SubjectUserName,
+    RequesterDomain   = SubjectDomainName,
+    // Parse template from EventData
+    TemplateName      = extract(@"(?i)<Data Name=.CertificateTemplate.>(.*?)</Data>", 1, EventData),
+    RequestAttr       = extract(@"(?i)<Data Name=.RequestAttributes.>(.*?)</Data>", 1, EventData),
+    SubjectField      = extract(@"(?i)<Data Name=.Subject.>(.*?)</Data>", 1, EventData)
+| extend
+    // SAN present in request attributes (locally computed from RequestAttr)
+    SANValue          = extract(@"(?i)san=([^;,\n]+)", 1, RequestAttr),
+    EnrollmentAgent   = extract(@"(?i)enrollmentagent=([^;,\n]+)", 1, RequestAttr),
+    RequesterNorm     = tolower(RequesterUPN),
+    IsDCTemplate      = TemplateName has_any ("DomainController", "KerberosAuthentication",
+                                               "DirectoryEmailReplication")
+| extend
+    HasSAN            = isnotempty(SANValue),
+    HasEnrollAgent    = isnotempty(EnrollmentAgent),
+    SANNorm           = tolower(SANValue),
+    SANMismatch       = isnotempty(SANValue) and not(tolower(SANValue) contains tolower(RequesterUPN))
+| extend
+    SensitiveSAN      = SANNorm has_any ("administrator", "domain admins", "enterprise admins",
+                                         "krbtgt", "dc$", "dc01", "dc02")
+| summarize
+    TotalIssuances      = count(),
+    SANMismatches       = countif(SANMismatch),
+    SensitiveSANIssuances = countif(SensitiveSAN),
+    EnrollAgentUses     = countif(HasEnrollAgent),
+    DCTemplateCerts     = countif(IsDCTemplate),
+    UniqueRequesters    = dcount(RequesterUPN),
+    Requesters          = make_set(RequesterUPN, 20),
+    SANValues           = make_set(SANValue, 20),
+    IssuanceDays        = dcount(startofday(TimeGenerated)),
+    LastIssuance        = max(TimeGenerated),
+    FirstIssuance       = min(TimeGenerated)
+    by TemplateName
+| extend
+    DailyRateAvg        = round(todouble(TotalIssuances) / todouble(IssuanceDays), 1),
+    RiskScore           = (SANMismatches * 30)
+                        + (SensitiveSANIssuances * 50)
+                        + (EnrollAgentUses * 20)
+                        + (DCTemplateCerts * 15),
+    ESCFlags = strcat(
+        iff(SANMismatches > 0,         "ESC1_SAN_Mismatch; ", ""),
+        iff(EnrollAgentUses > 0,       "ESC3_EnrollAgent; ", ""),
+        iff(DCTemplateCerts > 0,       "ESC8_DCTemplate; ", ""),
+        iff(SensitiveSANIssuances > 0, "Critical_SensitiveSAN; ", "")
+    ),
+    RiskLevel = case(
+        SensitiveSANIssuances > 0, "Critical",
+        SANMismatches > 0,         "High",
+        EnrollAgentUses > 0,       "High",
+        DCTemplateCerts > 5,       "Medium",
+        "Low"
+    )
+| project
+    TemplateName,
+    RiskLevel,
+    RiskScore,
+    ESCFlags,
+    TotalIssuances,
+    DailyRateAvg,
+    SANMismatches,
+    SensitiveSANIssuances,
+    EnrollAgentUses,
+    DCTemplateCerts,
+    UniqueRequesters,
+    FirstIssuance,
+    LastIssuance,
+    SANValues,
+    Requesters
+| order by RiskScore desc

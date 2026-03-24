@@ -1,0 +1,202 @@
+// ============================================================
+// HUNT-29 | AD Hunting: Legacy NTLM Authentication Usage
+// ============================================================
+// Description:
+//   Comprehensive hunt for all legacy NTLM authentication patterns in the
+//   domain over the past 30 days. Covers three related attack surfaces:
+//
+//   1. NTLMv1 logons (EventID 4624 with LmPackageName = "NTLM V1 / LM")
+//      - NTLMv1 hashes are crackable in seconds via rainbow tables or hardware
+//      - Cracked hash → NT hash → Pass-the-Hash, Silver Ticket creation, DCSync
+//      - Expected count in hardened domains: ZERO
+//
+//   2. Pure-NTLM accounts — accounts that only authenticate via NTLM, never Kerberos
+//      - Strong indicator of legacy applications, misconfig, or forced downgrade
+//      - No Kerberos means no SPN enforcement, no ticket lifetime controls
+//
+//   3. NTLM authentication volume trend — for remediation tracking and
+//      detecting sudden spikes that indicate active relay/downgrade attacks
+//
+// Key hardening metric:
+//   GPO: Computer Config > Windows Settings > Security Settings > Local Policies
+//   > Security Options > "Network security: LAN Manager authentication level"
+//   Should be set to: "Send NTLMv2 response only. Refuse LM & NTLM"
+//   (Level 5 — rejects incoming NTLMv1, forces NTLMv2 for outbound)
+//
+// Mitre ATT&CK:
+//   - T1557.001: Adversary-in-the-Middle — LLMNR/NBT-NS Poisoning and SMB Relay
+//   - T1550.002: Use Alternate Authentication Material — Pass-the-Hash
+//   - T1212:     Exploitation for Credential Access (hash cracking to NT hash)
+//   - T1040:     Network Sniffing (NTLMv1 capture via Responder/ntlm_theft)
+//
+// Data Sources: SecurityEvent (EventID 4624, 4776)
+// Query Period: 30 days
+// Hunting Focus: NTLMv1 logons, NTLM-only accounts, protocol downgrade patterns
+// ============================================================
+
+let LookbackPeriod = 30d;
+
+// Accounts/hosts explicitly excluded from alerting (known legacy exceptions)
+let LegacyNTLMExclusions = dynamic([
+    // Add confirmed legacy systems that require NTLMv1 for business reasons:
+    // "legacy-print01", "old-scanner-dev"
+    ""
+]);
+
+// ──────────────────────────────────────────────────────────────
+// PART 1 — NTLMv1 Logon Events
+//   LmPackageName values:
+//     "LM"                          → LAN Manager (prehistoric — NT 3.x era)
+//     "NTLM V1"                     → NTLMv1 (crackable offline in seconds)
+//     "NTLM V1 with Client Challenge"→ NTLMv1 with ESS — still crackable
+//     "NTLM V2"                     → NTLMv2 (acceptable)
+// ──────────────────────────────────────────────────────────────
+let NTLMv1Events = SecurityEvent
+    | where TimeGenerated >= ago(LookbackPeriod)
+    | where EventID == 4624
+    | where AuthenticationPackageName =~ "NTLM"
+    | where LmPackageName in ("LM", "NTLM V1", "NTLM V1 with Client Challenge")
+    | where LogonType in (3, 9, 10)       // Network, NewCredentials, RemoteInteractive
+    | where not(WorkstationName in~ (LegacyNTLMExclusions))
+    | extend
+        Account          = tolower(strcat(TargetDomainName, "\\", TargetUserName)),
+        SourceHost       = WorkstationName,
+        DestHost         = Computer,
+        SourceIP         = IpAddress,
+        NTLMVersion      = LmPackageName,
+        IsMachineAccount = TargetUserName endswith "$",
+        LogonTypeName    = case(
+            LogonType == 3,  "Network",
+            LogonType == 9,  "NewCredentials",
+            LogonType == 10, "RemoteInteractive",
+            tostring(LogonType));
+
+// ──────────────────────────────────────────────────────────────
+// PART 2 — Per-Account NTLMv1 Summary with Risk Scoring
+// ──────────────────────────────────────────────────────────────
+let NTLMv1Summary = NTLMv1Events
+    | summarize
+        FirstSeen          = min(TimeGenerated),
+        LastSeen           = max(TimeGenerated),
+        TotalEvents        = count(),
+        UniqueDestHosts    = dcount(DestHost),
+        UniqueSourceIPs    = dcount(SourceIP),
+        DestHosts          = make_set(DestHost, 20),
+        SourceIPs          = make_set(SourceIP, 10),
+        SourceHosts        = make_set(SourceHost, 10),
+        NTLMVersions       = make_set(NTLMVersion),
+        LogonTypes         = make_set(LogonTypeName),
+        IsMachineAccount   = max(toint(IsMachineAccount))
+        by Account
+    | extend
+        RiskScore = (
+            iff(IsMachineAccount == 1,         50, 0) +  // Machine account = Silver Ticket risk
+            iff(UniqueDestHosts >= 5,           30, 0) +  // Spreading across many hosts = lateral movement
+            iff(UniqueSourceIPs >= 3,           20, 0) +  // Multiple sources = relay or broad misconfiguration
+            iff(NTLMVersions has "LM",          20, 0) +  // Pure LM = worst case
+            iff(TotalEvents >= 100,             15, 0)    // High volume
+        ),
+        RiskLevel = case(
+            IsMachineAccount == 1,
+                "Critical — Machine account NTLMv1 enables Silver Ticket without cracking (NT hash exposed)",
+            UniqueDestHosts >= 10,
+                "High — NTLMv1 lateral movement spread across 10+ hosts",
+            UniqueDestHosts >= 3,
+                "High — NTLMv1 spread across multiple hosts",
+            TotalEvents >= 50,
+                "Medium — High-volume NTLMv1 from single source",
+            "Low — NTLMv1 detected, investigate legacy system"
+        );
+
+// ──────────────────────────────────────────────────────────────
+// PART 3 — NTLM-Only Accounts (no Kerberos observed — pure NTLM)
+//   These accounts have either:
+//     - No SPN set (old service accounts)
+//     - msDS-SupportedEncryptionTypes = NTLM only
+//     - Forced NTLM by relay attack (source is attacker's tool)
+// ──────────────────────────────────────────────────────────────
+let KerberosAccounts = SecurityEvent
+    | where TimeGenerated >= ago(LookbackPeriod)
+    | where EventID == 4624
+    | where AuthenticationPackageName =~ "Kerberos"
+    | where LogonType in (3, 9, 10)
+    | summarize KerberosLogons = count() by AccountKey = tolower(TargetUserName);
+
+let AllNTLMAccounts = SecurityEvent
+    | where TimeGenerated >= ago(LookbackPeriod)
+    | where EventID == 4624
+    | where AuthenticationPackageName =~ "NTLM"
+    | where LogonType in (3, 9, 10)
+    | where TargetUserName !in~ ("ANONYMOUS LOGON", "IUSR", "IWAN_")
+    | where not(WorkstationName in~ (LegacyNTLMExclusions))
+    | summarize
+        NTLMLogons       = count(),
+        UniqueTargets    = dcount(Computer),
+        Targets          = make_set(Computer, 15),
+        SourceIPs        = make_set(IpAddress, 10),
+        NTLMPackages     = make_set(LmPackageName),
+        FirstSeen        = min(TimeGenerated),
+        LastSeen         = max(TimeGenerated)
+        by AccountKey = tolower(TargetUserName), Domain = TargetDomainName
+    | join kind=leftouter (KerberosAccounts) on AccountKey
+    | extend
+        KerberosLogons    = coalesce(KerberosLogons, 0),
+        TotalAuth         = NTLMLogons + coalesce(KerberosLogons, 0)
+    | extend
+        NTLMPercent       = round(toreal(NTLMLogons) / toreal(NTLMLogons + max_of(KerberosLogons,1)) * 100, 1),
+        AuthProfile       = case(
+            KerberosLogons == 0,               "NTLM-Only (no Kerberos ever observed)",
+            NTLMLogons > KerberosLogons * 3,   "Predominantly NTLM (>75%)",
+            NTLMLogons > KerberosLogons,        "Majority NTLM",
+                                               "Mixed NTLM+Kerberos"
+        )
+    | where NTLMLogons > 5
+    | extend
+        DowngradeRisk = case(
+            KerberosLogons == 0 and NTLMLogons > 20,
+                "High — Pure NTLM account, no Kerberos baseline established",
+            NTLMPackages has "NTLM V1",
+                "High — NTLMv1 detected within NTLM traffic",
+            NTLMPercent >= 80,
+                "Medium — Predominantly NTLM, possible downgrade or legacy config",
+            "Low — Occasional NTLM alongside Kerberos"
+        );
+
+// ──────────────────────────────────────────────────────────────
+// PART 4 — Daily NTLMv1 Trend (for remediation tracking)
+// ──────────────────────────────────────────────────────────────
+let DailyTrend = NTLMv1Events
+    | summarize
+        NTLMv1Count     = count(),
+        UniqueAccounts  = dcount(Account),
+        UniqueHosts     = dcount(DestHost),
+        LMCount         = countif(NTLMVersion == "LM"),
+        NTLMv1Count_ESS = countif(NTLMVersion has "Client Challenge")
+        by Day = bin(TimeGenerated, 1d)
+    | order by Day desc;
+
+// ──────────────────────────────────────────────────────────────
+// PRIMARY OUTPUT — NTLMv1 accounts sorted by risk
+// Comment/uncomment the sub-query at the bottom to switch views
+// ──────────────────────────────────────────────────────────────
+NTLMv1Summary
+| project-reorder
+    RiskLevel, Account,
+    FirstSeen, LastSeen,
+    TotalEvents, UniqueDestHosts, UniqueSourceIPs,
+    DestHosts, SourceIPs, SourceHosts,
+    NTLMVersions, LogonTypes, IsMachineAccount, RiskScore
+| order by RiskScore desc, TotalEvents desc
+
+// ── Alternate views (comment out primary output above and run one of these) ──
+// --- NTLM-Only account profile ---
+// AllNTLMAccounts
+// | project-reorder
+//     AccountKey, Domain, DowngradeRisk, AuthProfile,
+//     NTLMLogons, KerberosLogons, NTLMPercent,
+//     UniqueTargets, Targets, SourceIPs, NTLMPackages,
+//     FirstSeen, LastSeen
+// | order by NTLMLogons desc
+
+// --- Daily trend for exec reporting ---
+// DailyTrend
