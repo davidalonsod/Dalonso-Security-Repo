@@ -1,0 +1,74 @@
+id: a1b2c3d4-0015-4a5b-8c9d-dns015subenum
+name: Subdomain Enumeration Burst — DNS Brute-Force Reconnaissance
+description: |
+  Detects rapid DNS subdomain brute-force enumeration — a common reconnaissance
+  technique where attackers resolve thousands of potential subdomains of a target
+  domain to discover hosts, services, and attack surface.
+  Tools that generate this pattern: dnsniper, sublist3r, amass, massdns, dnsrecon,
+  gobuster dns mode, ffuf with DNS mode.
+  A single client resolving 30+ unique subdomains of the same base domain
+  within 1 hour is a strong indicator of automated enumeration.
+  This differs from DGA detection (Q04/Rule12) in targeting a specific base domain
+  rather than random FQDNs.
+  MITRE T1590.002, T1046
+severity: Medium
+requiredDataConnectors:
+  - connectorId: WindowsDnsAma
+    dataTypes:
+      - ASimDnsActivityLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - Reconnaissance
+  - Discovery
+relevantTechniques:
+  - T1590.002
+  - T1046
+tags:
+  - Subdomain Enumeration
+  - DNS Brute Force
+  - dnsniper
+  - sublist3r
+  - amass
+  - massdns
+query: |
+  ASimDnsActivityLogs
+  | where TimeGenerated > ago(1h)
+  | extend BaseDomain = strcat(
+        tostring(split(DnsQuery, ".")[-2]), ".",
+        tostring(split(DnsQuery, ".")[-1])
+      )
+  | where isnotempty(BaseDomain) and BaseDomain !~ "."
+  | summarize
+      SubdomainCount   = dcount(DnsQuery),
+      TotalQueries     = count(),
+      NxdomainCount    = countif(DnsResponseCodeName =~ "NXDOMAIN" or DnsResponseCode == 3),
+      SampleSubs       = make_set(DnsQuery, 15),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+    by SrcIpAddr, SrcHostname, BaseDomain
+  | where SubdomainCount > 30
+  | extend NxdomainRate = round(todouble(NxdomainCount) / todouble(TotalQueries) * 100.0, 1)
+entityMappings:
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: SrcHostname
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SrcIpAddr
+  - entityType: DNS
+    fieldMappings:
+      - identifier: DomainName
+        columnName: BaseDomain
+alertDetailsOverride:
+  alertDisplayNameFormat: "DNS Subdomain Enum — {{SrcHostname}} brute-forced {{SubdomainCount}} subdomains of {{BaseDomain}}"
+  alertDescriptionFormat: "{{SrcHostname}} ({{SrcIpAddr}}) resolved {{SubdomainCount}} unique subdomains of {{BaseDomain}} in 1 hour (NXDOMAIN rate: {{NxdomainRate}}%). This indicates automated DNS enumeration. Sample: {{SampleSubs}}"
+customDetails:
+  SubdomainCount: SubdomainCount
+  BaseDomain: BaseDomain
+  NxdomainRate: NxdomainRate
