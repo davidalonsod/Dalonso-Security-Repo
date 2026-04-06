@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TI Mindmap HUB — Financial Sector Threat Dashboard</title>
+<style>
+  :root{--bg:#0a0e17;--panel:#111827;--border:#1e293b;--accent:#3b82f6;--critical:#ef4444;--high:#f97316;--elevated:#eab308;--low:#22c55e;--text:#e2e8f0;--muted:#94a3b8;--glow-red:rgba(239,68,68,.35);--glow-blue:rgba(59,130,246,.25)}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;line-height:1.5;overflow-x:hidden}
+  .scanline{pointer-events:none;position:fixed;inset:0;z-index:9999;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.03) 2px,rgba(0,0,0,.03) 4px)}
+  header{background:linear-gradient(135deg,#0f172a 0%,#172554 100%);border-bottom:1px solid var(--border);padding:1.5rem 2rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem}
+  header .brand{display:flex;align-items:center;gap:.75rem}
+  header .brand h1{font-size:1.3rem;font-weight:700;background:linear-gradient(90deg,#60a5fa,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  header .meta{display:flex;gap:1.5rem;flex-wrap:wrap}
+  header .meta span{font-size:.8rem;color:var(--muted)}
+  header .meta span b{color:var(--text)}
+  .threat-badge{display:inline-flex;align-items:center;gap:.35rem;padding:.25rem .65rem;border-radius:6px;font-size:.75rem;font-weight:700;letter-spacing:.04em;animation:pulse-badge 2s ease-in-out infinite}
+  .threat-badge.critical{background:rgba(239,68,68,.15);color:#fca5a5;border:1px solid rgba(239,68,68,.4)}
+  @keyframes pulse-badge{0%,100%{box-shadow:0 0 6px var(--glow-red)}50%{box-shadow:0 0 18px var(--glow-red)}}
+  main{max-width:1440px;margin:0 auto;padding:1.5rem;display:flex;flex-direction:column;gap:1.5rem}
+  .row{display:grid;gap:1.5rem}.row-2{grid-template-columns:1fr 1fr}.row-3{grid-template-columns:1fr 1fr 1fr}
+  @media(max-width:960px){.row-2,.row-3{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:border-color .25s}
+  .card:hover{border-color:#334155}
+  .card-header{padding:.85rem 1.15rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+  .card-header h2{font-size:.9rem;font-weight:600;display:flex;align-items:center;gap:.45rem}
+  .pill{font-size:.65rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;letter-spacing:.04em}
+  .pill-critical{background:rgba(239,68,68,.15);color:#fca5a5}
+  .pill-high{background:rgba(249,115,22,.15);color:#fdba74}
+  .pill-info{background:rgba(59,130,246,.15);color:#93c5fd}
+  .card-body{padding:1.15rem}
+  .stat-row{display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:1.25rem}
+  .stat{flex:1;min-width:110px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:.75rem .9rem;text-align:center}
+  .stat .val{font-size:1.5rem;font-weight:800;line-height:1.1}.stat .label{font-size:.65rem;color:var(--muted);margin-top:.25rem;text-transform:uppercase;letter-spacing:.06em}
+  .stat.red .val{color:#f87171}.stat.orange .val{color:#fb923c}.stat.yellow .val{color:#facc15}.stat.blue .val{color:#60a5fa}.stat.green .val{color:#4ade80}
+  .tbl{width:100%;border-collapse:collapse;font-size:.78rem}
+  .tbl th{text-align:left;padding:.55rem .65rem;background:rgba(255,255,255,.03);color:var(--muted);font-weight:600;font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)}
+  .tbl td{padding:.5rem .65rem;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:top}
+  .tbl tr:hover td{background:rgba(59,130,246,.04)}
+  .mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:.72rem;word-break:break-all}
+  .ioc-chip{display:inline-block;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);color:#fca5a5;padding:.2rem .5rem;border-radius:5px;font-family:'Cascadia Code','Fira Code',monospace;font-size:.68rem;margin:.15rem .2rem}
+  .ioc-chip.domain{background:rgba(249,115,22,.08);border-color:rgba(249,115,22,.2);color:#fdba74}
+  .ioc-chip.hash{background:rgba(168,85,247,.08);border-color:rgba(168,85,247,.2);color:#c4b5fd}
+  .ioc-chip.pkg{background:rgba(234,179,8,.08);border-color:rgba(234,179,8,.2);color:#fde047}
+  .timeline{position:relative;padding-left:1.5rem}.timeline::before{content:'';position:absolute;left:.45rem;top:0;bottom:0;width:2px;background:linear-gradient(180deg,var(--critical),var(--accent),var(--critical));border-radius:2px}
+  .tl-item{position:relative;padding-bottom:1rem}.tl-item:last-child{padding-bottom:0}
+  .tl-dot{position:absolute;left:-1.5rem;top:.2rem;width:12px;height:12px;border-radius:50%;border:2px solid var(--critical);background:var(--bg)}
+  .tl-item.blue .tl-dot{border-color:var(--accent)}.tl-item.orange .tl-dot{border-color:var(--high)}
+  .tl-date{font-size:.68rem;color:var(--muted);font-weight:600}.tl-text{font-size:.78rem;margin-top:.1rem}
+  .sector-bar{margin-bottom:.65rem}
+  .sector-bar .bar-label{display:flex;justify-content:space-between;font-size:.72rem;margin-bottom:.25rem}
+  .sector-bar .bar-track{height:8px;background:rgba(255,255,255,.06);border-radius:4px;overflow:hidden}
+  .sector-bar .bar-fill{height:100%;border-radius:4px;transition:width .8s ease}
+  .mitre-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:.4rem}
+  .mitre-cell{padding:.45rem .55rem;border-radius:6px;font-size:.65rem;text-align:center;border:1px solid transparent;transition:transform .15s}
+  .mitre-cell:hover{transform:scale(1.06)}
+  .mitre-cell .tid{font-weight:700;display:block;margin-bottom:.1rem}
+  .mitre-cell .tname{color:var(--muted);font-size:.6rem;display:block}
+  .mc-crit{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3)}
+  .mc-high{background:rgba(249,115,22,.1);border-color:rgba(249,115,22,.25)}
+  .mc-med{background:rgba(234,179,8,.08);border-color:rgba(234,179,8,.2)}
+  @keyframes map-pulse{0%{r:4;opacity:1}100%{r:14;opacity:0}}
+  .marker-ping{animation:map-pulse 2s ease-out infinite}
+  .map-wrap{position:relative;background:linear-gradient(180deg,rgba(15,23,42,.6),rgba(15,23,42,.9));border-radius:10px;overflow:hidden}
+  .map-wrap svg{display:block;width:100%;height:auto}
+  .map-legend{position:absolute;bottom:1rem;right:1rem;background:rgba(17,24,39,.85);border:1px solid var(--border);border-radius:8px;padding:.6rem .85rem;font-size:.7rem;display:flex;flex-direction:column;gap:.3rem}
+  .map-legend .le{display:flex;align-items:center;gap:.4rem}
+  .map-legend .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+  .flow-box{background:rgba(0,0,0,.25);border:1px solid var(--border);border-radius:8px;padding:.85rem;margin-bottom:1rem}
+  footer{text-align:center;padding:2rem 1rem;color:var(--muted);font-size:.72rem;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+  ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+
+<header>
+  <div class="brand">
+    <svg width="36" height="36" viewBox="0 0 36 36" fill="none"><circle cx="18" cy="18" r="17" stroke="#22c55e" stroke-width="2"/><path d="M18 6v24M6 18h24" stroke="#22c55e" stroke-width="1.2" opacity=".3"/><circle cx="18" cy="18" r="8" stroke="#4ade80" stroke-width="1.5" stroke-dasharray="3 2"/><circle cx="18" cy="18" r="3" fill="#22c55e"/></svg>
+    <div>
+      <h1>🏦 Financial Sector — Threat Intelligence Dashboard</h1>
+      <span style="font-size:.72rem;color:var(--muted);">30-Day Assessment | TI Mindmap HUB</span>
+    </div>
+  </div>
+  <div class="meta">
+    <span><b>Period:</b> 2026-03-07 → 2026-04-06</span>
+    <span><b>Classification:</b> TLP:WHITE</span>
+    <span class="threat-badge critical">⬤ CRITICAL</span>
+  </div>
+</header>
+
+<main>
+
+<!-- TOP STATS -->
+<div class="stat-row">
+  <div class="stat red"><div class="val">$280M</div><div class="label">DPRK Drift Heist</div></div>
+  <div class="stat orange"><div class="val">169m</div><div class="label">Axios Exposure Window</div></div>
+  <div class="stat yellow"><div class="val">37×</div><div class="label">Phishing Surge</div></div>
+  <div class="stat blue"><div class="val">1,600</div><div class="label">Dutch Institutions Hit</div></div>
+  <div class="stat red"><div class="val">5</div><div class="label">Active CVEs Exploited</div></div>
+  <div class="stat green"><div class="val">300K+</div><div class="label">RaaS Operators</div></div>
+</div>
+
+<!-- SUPPLY CHAIN ATTACK MAP -->
+<div class="card">
+  <div class="card-header">
+    <h2>🌐 Financial Sector Attack Surface — Supply Chain &amp; Geolocation</h2>
+    <span class="pill pill-critical">LIVE THREAT MAP</span>
+  </div>
+  <div class="card-body" style="padding:0">
+    <div class="map-wrap">
+      <svg viewBox="0 0 1000 500" xmlns="http://www.w3.org/2000/svg">
+        <rect width="1000" height="500" fill="#0c1221"/>
+        <g fill="#1a2744" stroke="#263a5e" stroke-width=".5">
+          <path d="M60 60 L170 55 L230 80 L250 120 L270 155 L250 175 L220 200 L195 230 L175 260 L160 240 L140 220 L100 190 L80 170 L60 130 Z"/>
+          <path d="M220 295 L260 290 L290 310 L310 340 L315 380 L300 420 L270 450 L240 440 L220 400 L210 360 L200 330 L205 310 Z"/>
+          <path d="M430 60 L470 55 L500 60 L520 75 L540 80 L530 100 L520 120 L500 130 L480 135 L460 130 L440 120 L430 100 Z"/>
+          <path d="M420 70 L430 65 L435 80 L425 85 Z"/>
+          <path d="M440 155 L490 150 L530 160 L560 180 L570 220 L565 270 L550 310 L520 350 L500 370 L470 360 L450 330 L440 290 L435 250 L430 210 L435 175 Z"/>
+          <path d="M540 120 L580 110 L620 120 L640 140 L630 165 L600 175 L570 170 L545 155 L535 135 Z"/>
+          <path d="M520 40 L600 30 L700 35 L780 45 L820 55 L800 80 L750 90 L700 85 L650 90 L600 95 L560 85 L530 70 Z"/>
+          <path d="M640 160 L680 150 L710 170 L700 210 L680 240 L660 230 L645 200 L640 175 Z"/>
+          <path d="M750 90 L790 85 L820 100 L830 130 L810 150 L790 145 L770 130 L760 110 Z"/>
+          <path d="M810 100 L820 95 L825 115 L815 120 Z"/>
+          <path d="M835 95 L845 90 L850 110 L845 130 L835 125 L833 108 Z"/>
+          <path d="M770 330 L830 310 L870 330 L880 370 L860 400 L820 410 L780 390 L770 360 Z"/>
+          <path d="M430 120 L455 115 L465 130 L460 145 L438 148 L425 140 L428 128 Z"/>
+        </g>
+        <g stroke="#1a2744" stroke-width=".3" opacity=".5">
+          <line x1="0" y1="250" x2="1000" y2="250"/><line x1="500" y1="0" x2="500" y2="500"/>
+          <line x1="0" y1="125" x2="1000" y2="125"/><line x1="0" y1="375" x2="1000" y2="375"/>
+          <line x1="250" y1="0" x2="250" y2="500"/><line x1="750" y1="0" x2="750" y2="500"/>
+        </g>
+        <!-- DPRK Origin -->
+        <circle cx="815" cy="108" r="4" fill="#ef4444"/>
+        <circle cx="815" cy="108" r="4" fill="#ef4444" opacity=".4" class="marker-ping"/>
+        <text x="783" y="100" fill="#fca5a5" font-size="8" font-weight="700">DPRK</text>
+        <text x="786" y="108" fill="#fca5a5" font-size="6" opacity=".7">UNC1069 — $280M + Axios</text>
+        <!-- TeamPCP Global -->
+        <circle cx="195" cy="195" r="3" fill="#a855f7"/>
+        <circle cx="195" cy="195" r="3" fill="#a855f7" opacity=".4" class="marker-ping"/>
+        <text x="140" y="192" fill="#c4b5fd" font-size="7" font-weight="600">TeamPCP</text>
+        <text x="140" y="200" fill="#c4b5fd" font-size="5.5" opacity=".7">LiteLLM + Vect RaaS</text>
+        <!-- US Financial Targets -->
+        <circle cx="170" cy="130" r="5" fill="#3b82f6"/>
+        <circle cx="170" cy="130" r="5" fill="#3b82f6" opacity=".3" class="marker-ping" style="animation-delay:.4s"/>
+        <text x="115" y="150" fill="#93c5fd" font-size="7" font-weight="600">🎯 US Financial</text>
+        <text x="115" y="158" fill="#93c5fd" font-size="5.5" opacity=".7">Drift Protocol, SWIFT, Treasury</text>
+        <!-- Netherlands (Dutch Finance breach) -->
+        <circle cx="475" cy="80" r="4" fill="#f97316"/>
+        <circle cx="475" cy="80" r="4" fill="#f97316" opacity=".4" class="marker-ping" style="animation-delay:.3s"/>
+        <text x="485" y="78" fill="#fdba74" font-size="7" font-weight="600">Netherlands</text>
+        <text x="485" y="86" fill="#fdba74" font-size="5.5" opacity=".7">Finance Ministry — 1,600 inst.</text>
+        <!-- EU Brussels -->
+        <circle cx="468" cy="88" r="3" fill="#3b82f6"/>
+        <text x="478" y="96" fill="#93c5fd" font-size="5.5">EU 30 entities</text>
+        <!-- C2 Seattle -->
+        <rect x="98" y="113" width="5" height="5" transform="rotate(45 101 116)" fill="#ef4444" opacity=".7"/>
+        <text x="68" y="112" fill="#fca5a5" font-size="5.5">C2 142.11.206.73</text>
+        <!-- Attack arcs -->
+        <path d="M810 110 Q600 200 175 135" fill="none" stroke="#ef4444" stroke-width="1" stroke-dasharray="4 3" opacity=".4"/>
+        <path d="M200 195 Q330 130 468 90" fill="none" stroke="#a855f7" stroke-width=".8" stroke-dasharray="3 3" opacity=".3"/>
+        <path d="M810 112 Q700 150 475 82" fill="none" stroke="#f97316" stroke-width=".8" stroke-dasharray="4 3" opacity=".3"/>
+        <!-- EvilTokens Global -->
+        <text x="350" y="200" fill="#fde047" font-size="6" font-weight="600" opacity=".6">EvilTokens PhaaS — Global Phishing</text>
+        <text x="350" y="208" fill="#fde047" font-size="5" opacity=".4">US, CA, FR, AU, IN, CH, UAE</text>
+      </svg>
+      <div class="map-legend">
+        <div class="le"><div class="dot" style="background:#ef4444;box-shadow:0 0 6px #ef4444"></div> Threat Actor Origin</div>
+        <div class="le"><div class="dot" style="background:#3b82f6;box-shadow:0 0 6px #3b82f6"></div> Financial Target</div>
+        <div class="le"><div class="dot" style="background:#f97316;box-shadow:0 0 6px #f97316"></div> Government Finance Breach</div>
+        <div class="le"><div class="dot" style="background:#a855f7;box-shadow:0 0 6px #a855f7"></div> Cybercrime (Global)</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- THREAT VECTORS & CVE TABLE (2-col) -->
+<div class="row row-2">
+  <div class="card">
+    <div class="card-header"><h2>⚡ Top Financial Threat Vectors</h2><span class="pill pill-critical">CRITICAL</span></div>
+    <div class="card-body">
+      <div class="sector-bar">
+        <div class="bar-label"><span><strong>Supply Chain (Axios/LiteLLM)</strong></span><span style="color:#ef4444;font-weight:700">CRITICAL</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:95%;background:linear-gradient(90deg,#ef4444,#dc2626)"></div></div>
+      </div>
+      <div class="sector-bar">
+        <div class="bar-label"><span><strong>Identity Attacks (37× phishing surge)</strong></span><span style="color:#ef4444;font-weight:700">CRITICAL</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:92%;background:linear-gradient(90deg,#ef4444,#f97316)"></div></div>
+      </div>
+      <div class="sector-bar">
+        <div class="bar-label"><span><strong>DPRK Financial Theft ($280M Drift)</strong></span><span style="color:#ef4444;font-weight:700">CRITICAL</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:90%;background:linear-gradient(90deg,#ef4444,#f97316)"></div></div>
+      </div>
+      <div class="sector-bar">
+        <div class="bar-label"><span><strong>Vulnerability Exploitation (5 CVEs)</strong></span><span style="color:#ef4444;font-weight:700">CRITICAL</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:88%;background:linear-gradient(90deg,#f97316,#ea580c)"></div></div>
+      </div>
+      <div class="sector-bar">
+        <div class="bar-label"><span><strong>Ransomware (Vect + TeamPCP creds)</strong></span><span style="color:#f97316;font-weight:700">HIGH</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:75%;background:linear-gradient(90deg,#f97316,#ea580c)"></div></div>
+      </div>
+      <div class="sector-bar">
+        <div class="bar-label"><span><strong>Iran Threat Actors (APT33/34)</strong></span><span style="color:#f97316;font-weight:700">HIGH</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:70%;background:linear-gradient(90deg,#f97316,#eab308)"></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>🔓 Critical CVEs — Financial Infrastructure</h2><span class="pill pill-critical">ACTIVE EXPLOITATION</span></div>
+    <div class="card-body">
+      <table class="tbl">
+        <tr><th>CVE</th><th>Product</th><th>EPSS</th><th>Financial Context</th></tr>
+        <tr><td class="mono">CVE-2026-35616</td><td>FortiClient EMS</td><td><span style="color:#f87171;font-weight:700">0.92</span></td><td>Trading desk endpoints</td></tr>
+        <tr><td class="mono">CVE-2026-1731</td><td>BeyondTrust PRA/RS</td><td><span style="color:#f87171;font-weight:700">0.87</span></td><td>SWIFT terminal PAM</td></tr>
+        <tr><td class="mono">CVE-2026-1281</td><td>BeyondTrust PRA/RS</td><td><span style="color:#fb923c;font-weight:700">0.81</span></td><td>PAM chained exploit</td></tr>
+        <tr><td class="mono">CVE-2026-1340</td><td>Citrix NetScaler</td><td><span style="color:#fb923c;font-weight:700">0.78</span></td><td>Remote financial workers</td></tr>
+        <tr><td class="mono">CVE-2025-55182</td><td>Next.js React2Shell</td><td><span style="color:#facc15;font-weight:700">0.73</span></td><td>Fintech web frontends</td></tr>
+        <tr><td class="mono">ShareFile</td><td>Progress ShareFile</td><td><span style="color:#facc15;font-weight:700">0.65</span></td><td>Document exchange</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- SUPPLY CHAIN FLOW DIAGRAM -->
+<div class="card">
+  <div class="card-header"><h2>🔗 Supply Chain Attack Flow — Financial Sector Impact</h2><span class="pill pill-critical">TWO CAMPAIGNS</span></div>
+  <div class="card-body">
+    <svg viewBox="0 0 900 220" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+      <rect width="900" height="220" fill="transparent"/>
+      <!-- UNC1069 Chain -->
+      <text x="20" y="20" fill="#fca5a5" font-size="10" font-weight="700">UNC1069 / DPRK — Axios Supply Chain</text>
+      <rect x="20" y="30" width="120" height="50" rx="8" fill="rgba(239,68,68,.1)" stroke="#ef4444" stroke-width="1"/>
+      <text x="80" y="52" text-anchor="middle" fill="#fca5a5" font-size="8" font-weight="600">npm Token Theft</text>
+      <text x="80" y="63" text-anchor="middle" fill="#94a3b8" font-size="6">ifstap@proton.me</text>
+      <line x1="140" y1="55" x2="170" y2="55" stroke="#ef4444" stroke-width="1" stroke-dasharray="3 2"/>
+      <rect x="170" y="30" width="120" height="50" rx="8" fill="rgba(239,68,68,.1)" stroke="#ef4444" stroke-width="1"/>
+      <text x="230" y="52" text-anchor="middle" fill="#fca5a5" font-size="8" font-weight="600">axios@1.14.1</text>
+      <text x="230" y="63" text-anchor="middle" fill="#94a3b8" font-size="6">100M+ weekly DLs</text>
+      <line x1="290" y1="55" x2="320" y2="55" stroke="#ef4444" stroke-width="1" stroke-dasharray="3 2"/>
+      <rect x="320" y="30" width="120" height="50" rx="8" fill="rgba(239,68,68,.1)" stroke="#ef4444" stroke-width="1"/>
+      <text x="380" y="52" text-anchor="middle" fill="#fca5a5" font-size="8" font-weight="600">WAVESHAPER.V2</text>
+      <text x="380" y="63" text-anchor="middle" fill="#94a3b8" font-size="6">Cross-platform RAT</text>
+      <line x1="440" y1="55" x2="470" y2="55" stroke="#ef4444" stroke-width="1" stroke-dasharray="3 2"/>
+      <rect x="470" y="30" width="140" height="50" rx="8" fill="rgba(239,68,68,.15)" stroke="#ef4444" stroke-width="1.5"/>
+      <text x="540" y="48" text-anchor="middle" fill="#fca5a5" font-size="8" font-weight="700">💰 FINANCIAL IMPACT</text>
+      <text x="540" y="59" text-anchor="middle" fill="#fca5a5" font-size="6">.env sweep: SWIFT keys,</text>
+      <text x="540" y="68" text-anchor="middle" fill="#fca5a5" font-size="6">payment API tokens, PII</text>
+      <!-- TeamPCP Chain -->
+      <text x="20" y="110" fill="#c4b5fd" font-size="10" font-weight="700">TeamPCP — Multi-Stage Campaign</text>
+      <rect x="20" y="120" width="100" height="50" rx="8" fill="rgba(168,85,247,.1)" stroke="#a855f7" stroke-width="1"/>
+      <text x="70" y="142" text-anchor="middle" fill="#c4b5fd" font-size="8" font-weight="600">Trivy CI Token</text>
+      <text x="70" y="153" text-anchor="middle" fill="#94a3b8" font-size="6">Wave 1</text>
+      <line x1="120" y1="145" x2="140" y2="145" stroke="#a855f7" stroke-width="1" stroke-dasharray="3 2"/>
+      <rect x="140" y="120" width="100" height="50" rx="8" fill="rgba(168,85,247,.1)" stroke="#a855f7" stroke-width="1"/>
+      <text x="190" y="142" text-anchor="middle" fill="#c4b5fd" font-size="8" font-weight="600">LiteLLM PyPI</text>
+      <text x="190" y="153" text-anchor="middle" fill="#94a3b8" font-size="6">Wave 3 — .pth persist</text>
+      <line x1="240" y1="145" x2="260" y2="145" stroke="#a855f7" stroke-width="1" stroke-dasharray="3 2"/>
+      <rect x="260" y="120" width="100" height="50" rx="8" fill="rgba(168,85,247,.1)" stroke="#a855f7" stroke-width="1"/>
+      <text x="310" y="142" text-anchor="middle" fill="#c4b5fd" font-size="8" font-weight="600">300+ GB Creds</text>
+      <text x="310" y="153" text-anchor="middle" fill="#94a3b8" font-size="6">500K+ machines</text>
+      <line x1="360" y1="145" x2="380" y2="145" stroke="#a855f7" stroke-width="1" stroke-dasharray="3 2"/>
+      <rect x="380" y="120" width="110" height="50" rx="8" fill="rgba(168,85,247,.1)" stroke="#a855f7" stroke-width="1"/>
+      <text x="435" y="142" text-anchor="middle" fill="#c4b5fd" font-size="8" font-weight="600">Vect RaaS</text>
+      <text x="435" y="153" text-anchor="middle" fill="#94a3b8" font-size="6">300K+ operators</text>
+      <line x1="490" y1="145" x2="510" y2="145" stroke="#a855f7" stroke-width="1" stroke-dasharray="3 2"/>
+      <rect x="510" y="120" width="160" height="50" rx="8" fill="rgba(168,85,247,.15)" stroke="#a855f7" stroke-width="1.5"/>
+      <text x="590" y="142" text-anchor="middle" fill="#c4b5fd" font-size="8" font-weight="700">💰 Mass Ransomware</text>
+      <text x="590" y="153" text-anchor="middle" fill="#c4b5fd" font-size="6">Financial sector credentials</text>
+      <!-- Drift Heist -->
+      <rect x="700" y="30" width="170" height="80" rx="8" fill="rgba(239,68,68,.08)" stroke="#ef4444" stroke-width="1"/>
+      <text x="785" y="52" text-anchor="middle" fill="#fca5a5" font-size="10" font-weight="800">$280M</text>
+      <text x="785" y="65" text-anchor="middle" fill="#fca5a5" font-size="8">Drift Protocol Theft</text>
+      <text x="785" y="78" text-anchor="middle" fill="#94a3b8" font-size="7">DPRK — April 2, 2026</text>
+      <text x="785" y="100" text-anchor="middle" fill="#94a3b8" font-size="6">Cryptocurrency exchange</text>
+    </svg>
+  </div>
+</div>
+
+<!-- THREAT ACTORS & IOCs (2-col) -->
+<div class="row row-2">
+  <div class="card">
+    <div class="card-header"><h2>🎯 Threat Actors — Financial Targeting</h2></div>
+    <div class="card-body">
+      <table class="tbl">
+        <tr><th>Actor</th><th>Nexus</th><th>Financial Risk</th></tr>
+        <tr><td><strong>UNC1069</strong></td><td><span style="color:#ef4444">DPRK</span></td><td>Axios RAT → payment credential theft</td></tr>
+        <tr><td><strong>Lazarus / APT38</strong></td><td><span style="color:#ef4444">DPRK</span></td><td>$280M Drift theft; SWIFT targeting</td></tr>
+        <tr><td><strong>TeamPCP</strong></td><td><span style="color:#a855f7">Crime</span></td><td>LiteLLM → cloud/API credential harvest</td></tr>
+        <tr><td><strong>Scattered Spider</strong></td><td><span style="color:#a855f7">Crime</span></td><td>Financial call center deepfakes, BEC</td></tr>
+        <tr><td><strong>EvilTokens ops</strong></td><td><span style="color:#a855f7">Crime</span></td><td>Device code phishing → M365 → Treasury</td></tr>
+        <tr><td><strong>APT33</strong></td><td><span style="color:#f97316">Iran</span></td><td>Credential spraying vs financial services</td></tr>
+        <tr><td><strong>APT34 / OilRig</strong></td><td><span style="color:#f97316">Iran</span></td><td>Financial services espionage</td></tr>
+        <tr><td><strong>Handala</strong></td><td><span style="color:#f97316">Iran</span></td><td>Organizations with Israeli banking ties</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>🔍 Key IOCs — Financial Sector</h2><span class="pill pill-info">BLOCK IMMEDIATELY</span></div>
+    <div class="card-body">
+      <p style="font-size:.72rem;color:var(--muted);margin-bottom:.5rem;font-weight:600">C2 DOMAINS</p>
+      <div><span class="ioc-chip domain">sfrclak[.]com</span><span class="ioc-chip domain">models.litellm[.]cloud</span><span class="ioc-chip domain">scan.aquasecurtiy[.]org</span><span class="ioc-chip domain">checkmarx[.]zone</span></div>
+      <p style="font-size:.72rem;color:var(--muted);margin:.6rem 0 .5rem;font-weight:600">C2 IPs</p>
+      <div><span class="ioc-chip">142.11.206[.]73</span><span class="ioc-chip">23.254.167[.]216</span><span class="ioc-chip">23.142.184[.]129</span><span class="ioc-chip">45.148.10[.]212</span><span class="ioc-chip">83.142.209[.]11</span><span class="ioc-chip">195.5.171[.]242</span></div>
+      <p style="font-size:.72rem;color:var(--muted);margin:.6rem 0 .5rem;font-weight:600">COMPROMISED PACKAGES</p>
+      <div><span class="ioc-chip pkg">axios@1.14.1</span><span class="ioc-chip pkg">axios@0.30.4</span><span class="ioc-chip pkg">plain-crypto-js@4.2.1</span><span class="ioc-chip pkg">litellm==1.82.7</span><span class="ioc-chip pkg">litellm==1.82.8</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- MITRE ATT&CK -->
+<div class="card">
+  <div class="card-header"><h2>🗺️ MITRE ATT&CK — Financial Sector Techniques</h2></div>
+  <div class="card-body">
+    <div class="mitre-grid">
+      <div class="mitre-cell mc-crit"><span class="tid">T1195.002</span><span class="tname">Supply Chain: Dependencies</span></div>
+      <div class="mitre-cell mc-crit"><span class="tid">T1078.004</span><span class="tname">Cloud Accounts</span></div>
+      <div class="mitre-cell mc-crit"><span class="tid">T1566</span><span class="tname">Phishing</span></div>
+      <div class="mitre-cell mc-crit"><span class="tid">T1657</span><span class="tname">Financial Theft</span></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1552.001</span><span class="tname">Credentials in Files</span></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1552.005</span><span class="tname">Cloud Metadata API</span></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1110</span><span class="tname">Brute Force</span></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1055.002</span><span class="tname">PE Injection</span></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1486</span><span class="tname">Ransomware</span></div>
+      <div class="mitre-cell mc-med"><span class="tid">T1547.001</span><span class="tname">Autostart Execution</span></div>
+      <div class="mitre-cell mc-med"><span class="tid">T1105</span><span class="tname">Ingress Tool Transfer</span></div>
+      <div class="mitre-cell mc-med"><span class="tid">T1204.002</span><span class="tname">Malicious File Exec</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- TIMELINE -->
+<div class="card">
+  <div class="card-header"><h2>📅 30-Day Event Timeline</h2></div>
+  <div class="card-body">
+    <div class="timeline">
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Mar 11</div><div class="tl-text"><strong>Stryker wiper</strong> — 80K devices, 79 countries, stock -4.5%, financial market impact</div></div>
+      <div class="tl-item orange"><div class="tl-dot"></div><div class="tl-date">Mar 19</div><div class="tl-text"><strong>Dutch Ministry of Finance breach</strong> — 1,600 public treasury institutions affected</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Mar 23</div><div class="tl-text"><strong>TeamPCP Wave 1</strong> — Trivy compromise begins credential cascade</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Mar 24</div><div class="tl-text"><strong>LiteLLM compromised</strong> (PyPI) — AI financial analysis platforms exposed</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Mar 26</div><div class="tl-text"><strong>Vect RaaS partnership</strong> — 300K+ operators gain financial creds</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Mar 31</div><div class="tl-text"><strong>★ Axios npm compromise</strong> — DPRK UNC1069, 169-min window, payment APIs exposed</div></div>
+      <div class="tl-item orange"><div class="tl-dot"></div><div class="tl-date">Apr 1</div><div class="tl-text"><strong>EvilTokens PhaaS</strong> — Device code phishing targeting finance/HR/sales roles</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Apr 2</div><div class="tl-text"><strong>$280M Drift Protocol theft</strong> — DPRK cryptocurrency heist</div></div>
+      <div class="tl-item blue"><div class="tl-dot"></div><div class="tl-date">Apr 3</div><div class="tl-text"><strong>EU Commission breach</strong> — TeamPCP, 30 entities; financial regulatory data</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Apr 4</div><div class="tl-text"><strong>Device code phishing 37×</strong> surge — financial M365 tenants targeted</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Apr 5</div><div class="tl-text"><strong>FortiClient EMS emergency patch</strong> — EPSS 0.92, critical for financial endpoints</div></div>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<footer>
+  <p>TI Mindmap HUB — Financial Sector Threat Dashboard | TLP:WHITE | Generated 2026-04-06</p>
+  <p>OSINT-derived intelligence. Not operational guidance. Verify through primary sources.</p>
+  <p style="margin-top:.5rem"><a href="https://ti-mindmap-hub.com">ti-mindmap-hub.com</a></p>
+</footer>
+</body>
+</html>

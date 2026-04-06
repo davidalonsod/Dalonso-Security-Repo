@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TI Mindmap HUB — Retail Sector Threat Dashboard</title>
+<style>
+  :root{--bg:#0a0e17;--panel:#111827;--border:#1e293b;--accent:#3b82f6;--critical:#ef4444;--high:#f97316;--elevated:#eab308;--low:#22c55e;--text:#e2e8f0;--muted:#94a3b8;--glow-red:rgba(239,68,68,.35)}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;line-height:1.5;overflow-x:hidden}
+  .scanline{pointer-events:none;position:fixed;inset:0;z-index:9999;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.03) 2px,rgba(0,0,0,.03) 4px)}
+  header{background:linear-gradient(135deg,#0f172a 0%,#172554 100%);border-bottom:1px solid var(--border);padding:1.5rem 2rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem}
+  header .brand{display:flex;align-items:center;gap:.75rem}
+  header .brand h1{font-size:1.3rem;font-weight:700;background:linear-gradient(90deg,#60a5fa,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  header .meta{display:flex;gap:1.5rem;flex-wrap:wrap}
+  header .meta span{font-size:.8rem;color:var(--muted)}
+  header .meta span b{color:var(--text)}
+  .threat-badge{display:inline-flex;align-items:center;gap:.35rem;padding:.25rem .65rem;border-radius:6px;font-size:.75rem;font-weight:700;letter-spacing:.04em;animation:pulse-badge 2s ease-in-out infinite}
+  .threat-badge.critical{background:rgba(239,68,68,.15);color:#fca5a5;border:1px solid rgba(239,68,68,.4)}
+  @keyframes pulse-badge{0%,100%{box-shadow:0 0 6px var(--glow-red)}50%{box-shadow:0 0 18px var(--glow-red)}}
+  main{max-width:1440px;margin:0 auto;padding:1.5rem;display:flex;flex-direction:column;gap:1.5rem}
+  .row{display:grid;gap:1.5rem}.row-2{grid-template-columns:1fr 1fr}.row-3{grid-template-columns:1fr 1fr 1fr}
+  @media(max-width:960px){.row-2,.row-3{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:border-color .25s}
+  .card:hover{border-color:#334155}
+  .card-header{padding:.85rem 1.15rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+  .card-header h2{font-size:.9rem;font-weight:600;display:flex;align-items:center;gap:.45rem}
+  .pill{font-size:.65rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;letter-spacing:.04em}
+  .pill-critical{background:rgba(239,68,68,.15);color:#fca5a5}
+  .pill-high{background:rgba(249,115,22,.15);color:#fdba74}
+  .pill-info{background:rgba(59,130,246,.15);color:#93c5fd}
+  .card-body{padding:1.15rem}
+  .stat-row{display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:1.25rem}
+  .stat{flex:1;min-width:110px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:.75rem .9rem;text-align:center}
+  .stat .val{font-size:1.5rem;font-weight:800;line-height:1.1}.stat .label{font-size:.65rem;color:var(--muted);margin-top:.25rem;text-transform:uppercase;letter-spacing:.06em}
+  .stat.red .val{color:#f87171}.stat.orange .val{color:#fb923c}.stat.yellow .val{color:#facc15}.stat.blue .val{color:#60a5fa}.stat.green .val{color:#4ade80}
+  .tbl{width:100%;border-collapse:collapse;font-size:.78rem}
+  .tbl th{text-align:left;padding:.55rem .65rem;background:rgba(255,255,255,.03);color:var(--muted);font-weight:600;font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)}
+  .tbl td{padding:.5rem .65rem;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:top}
+  .tbl tr:hover td{background:rgba(59,130,246,.04)}
+  .mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:.72rem;word-break:break-all}
+  .ioc-chip{display:inline-block;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);color:#fca5a5;padding:.2rem .5rem;border-radius:5px;font-family:'Cascadia Code','Fira Code',monospace;font-size:.68rem;margin:.15rem .2rem}
+  .ioc-chip.domain{background:rgba(249,115,22,.08);border-color:rgba(249,115,22,.2);color:#fdba74}
+  .ioc-chip.hash{background:rgba(168,85,247,.08);border-color:rgba(168,85,247,.2);color:#c4b5fd}
+  .ioc-chip.pkg{background:rgba(234,179,8,.08);border-color:rgba(234,179,8,.2);color:#fde047}
+  .timeline{position:relative;padding-left:1.5rem}.timeline::before{content:'';position:absolute;left:.45rem;top:0;bottom:0;width:2px;background:linear-gradient(180deg,var(--critical),var(--accent),var(--critical));border-radius:2px}
+  .tl-item{position:relative;padding-bottom:1rem}.tl-item:last-child{padding-bottom:0}
+  .tl-dot{position:absolute;left:-1.5rem;top:.2rem;width:12px;height:12px;border-radius:50%;border:2px solid var(--critical);background:var(--bg)}
+  .tl-item.blue .tl-dot{border-color:var(--accent)}.tl-item.orange .tl-dot{border-color:var(--high)}
+  .tl-date{font-size:.68rem;color:var(--muted);font-weight:600}.tl-text{font-size:.78rem;margin-top:.1rem}
+  .sector-bar{margin-bottom:.65rem}
+  .sector-bar .bar-label{display:flex;justify-content:space-between;font-size:.72rem;margin-bottom:.25rem}
+  .sector-bar .bar-track{height:8px;background:rgba(255,255,255,.06);border-radius:4px;overflow:hidden}
+  .sector-bar .bar-fill{height:100%;border-radius:4px;transition:width .8s ease}
+  .mitre-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:.4rem}
+  .mitre-cell{padding:.45rem .55rem;border-radius:6px;font-size:.65rem;text-align:center;border:1px solid transparent;transition:transform .15s}
+  .mitre-cell:hover{transform:scale(1.06)}
+  .mitre-cell .tid{font-weight:700;display:block;margin-bottom:.1rem}
+  .mitre-cell .tname{color:var(--muted);font-size:.6rem;display:block}
+  .mc-crit{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3)}
+  .mc-high{background:rgba(249,115,22,.1);border-color:rgba(249,115,22,.25)}
+  .mc-med{background:rgba(234,179,8,.08);border-color:rgba(234,179,8,.2)}
+  .fraud-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:.7rem}
+  .fraud-card{background:rgba(239,68,68,.04);border:1px solid rgba(239,68,68,.12);border-radius:8px;padding:.65rem .8rem}
+  .fraud-card h4{font-size:.75rem;font-weight:700;color:#fca5a5;margin-bottom:.25rem}
+  .fraud-card p{font-size:.65rem;color:var(--muted);line-height:1.4}
+  @keyframes map-pulse{0%{r:4;opacity:1}100%{r:14;opacity:0}}
+  .marker-ping{animation:map-pulse 2s ease-out infinite}
+  .map-wrap{position:relative;background:linear-gradient(180deg,rgba(15,23,42,.6),rgba(15,23,42,.9));border-radius:10px;overflow:hidden}
+  .map-wrap svg{display:block;width:100%;height:auto}
+  .map-legend{position:absolute;bottom:1rem;right:1rem;background:rgba(17,24,39,.85);border:1px solid var(--border);border-radius:8px;padding:.6rem .85rem;font-size:.7rem;display:flex;flex-direction:column;gap:.3rem}
+  .map-legend .le{display:flex;align-items:center;gap:.4rem}
+  .map-legend .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+  footer{text-align:center;padding:2rem 1rem;color:var(--muted);font-size:.72rem;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+
+<header>
+  <div class="brand">
+    <svg width="36" height="36" viewBox="0 0 36 36" fill="none"><circle cx="18" cy="18" r="17" stroke="#22c55e" stroke-width="2"/><path d="M18 6v24M6 18h24" stroke="#22c55e" stroke-width="1.2" opacity=".3"/><circle cx="18" cy="18" r="8" stroke="#4ade80" stroke-width="1.5" stroke-dasharray="3 2"/><circle cx="18" cy="18" r="3" fill="#22c55e"/></svg>
+    <div>
+      <h1>🛒 Retail Sector — Threat Intelligence Dashboard</h1>
+      <span style="font-size:.72rem;color:var(--muted);">30-Day Assessment | TI Mindmap HUB</span>
+    </div>
+  </div>
+  <div class="meta">
+    <span><b>Period:</b> 2026-03-07 → 2026-04-06</span>
+    <span><b>Classification:</b> TLP:WHITE</span>
+    <span class="threat-badge critical">⬤ CRITICAL</span>
+  </div>
+</header>
+
+<main>
+
+<!-- TOP STATS -->
+<div class="stat-row">
+  <div class="stat red"><div class="val">100M+</div><div class="label">Axios Weekly Downloads</div></div>
+  <div class="stat orange"><div class="val">37×</div><div class="label">Phishing Surge</div></div>
+  <div class="stat yellow"><div class="val">7</div><div class="label">AI Fraud Types</div></div>
+  <div class="stat blue"><div class="val">300K+</div><div class="label">Vect RaaS Operators</div></div>
+  <div class="stat red"><div class="val">3M+</div><div class="label">Potential Activations</div></div>
+  <div class="stat green"><div class="val">5</div><div class="label">Active CVEs</div></div>
+</div>
+
+<!-- E-COMMERCE ATTACK SURFACE MAP -->
+<div class="card">
+  <div class="card-header"><h2>🌐 Retail E-Commerce Attack Surface — Global Map</h2><span class="pill pill-critical">ACTIVE CAMPAIGNS</span></div>
+  <div class="card-body" style="padding:0">
+    <div class="map-wrap">
+      <svg viewBox="0 0 1000 500" xmlns="http://www.w3.org/2000/svg">
+        <rect width="1000" height="500" fill="#0c1221"/>
+        <g fill="#1a2744" stroke="#263a5e" stroke-width=".5">
+          <path d="M60 60 L170 55 L230 80 L250 120 L270 155 L250 175 L220 200 L195 230 L175 260 L160 240 L140 220 L100 190 L80 170 L60 130 Z"/>
+          <path d="M220 295 L260 290 L290 310 L310 340 L315 380 L300 420 L270 450 L240 440 L220 400 L210 360 L200 330 L205 310 Z"/>
+          <path d="M430 60 L470 55 L500 60 L520 75 L540 80 L530 100 L520 120 L500 130 L480 135 L460 130 L440 120 L430 100 Z"/>
+          <path d="M440 155 L490 150 L530 160 L560 180 L570 220 L565 270 L550 310 L520 350 L500 370 L470 360 L450 330 L440 290 L435 250 L430 210 L435 175 Z"/>
+          <path d="M540 120 L580 110 L620 120 L640 140 L630 165 L600 175 L570 170 L545 155 L535 135 Z"/>
+          <path d="M520 40 L600 30 L700 35 L780 45 L820 55 L800 80 L750 90 L700 85 L650 90 L600 95 L560 85 L530 70 Z"/>
+          <path d="M640 160 L680 150 L710 170 L700 210 L680 240 L660 230 L645 200 L640 175 Z"/>
+          <path d="M750 90 L790 85 L820 100 L830 130 L810 150 L790 145 L770 130 L760 110 Z"/>
+          <path d="M810 100 L820 95 L825 115 L815 120 Z"/>
+          <path d="M835 95 L845 90 L850 110 L845 130 L835 125 L833 108 Z"/>
+          <path d="M770 330 L830 310 L870 330 L880 370 L860 400 L820 410 L780 390 L770 360 Z"/>
+        </g>
+        <g stroke="#1a2744" stroke-width=".3" opacity=".5">
+          <line x1="0" y1="250" x2="1000" y2="250"/><line x1="500" y1="0" x2="500" y2="500"/>
+        </g>
+        <!-- npm Registry (Global CDN) -->
+        <circle cx="500" cy="250" r="6" fill="none" stroke="#ef4444" stroke-width="1" stroke-dasharray="3 2" opacity=".5"/>
+        <circle cx="500" cy="250" r="20" fill="none" stroke="#ef4444" stroke-width=".5" stroke-dasharray="3 2" opacity=".2"/>
+        <circle cx="500" cy="250" r="40" fill="none" stroke="#ef4444" stroke-width=".3" stroke-dasharray="3 2" opacity=".1"/>
+        <text x="510" y="248" fill="#fca5a5" font-size="7" font-weight="700">npm Supply Chain</text>
+        <text x="510" y="256" fill="#fca5a5" font-size="5.5" opacity=".7">100M+ weekly propagation</text>
+        <!-- US E-Commerce -->
+        <circle cx="170" cy="130" r="5" fill="#3b82f6"/>
+        <circle cx="170" cy="130" r="5" fill="#3b82f6" opacity=".3" class="marker-ping"/>
+        <text x="115" y="120" fill="#93c5fd" font-size="7" font-weight="600">🎯 US Retail</text>
+        <text x="115" y="128" fill="#93c5fd" font-size="5.5" opacity=".7">Payments, accounts, loyalty</text>
+        <!-- DPRK Origin -->
+        <circle cx="815" cy="108" r="4" fill="#ef4444"/>
+        <circle cx="815" cy="108" r="4" fill="#ef4444" opacity=".4" class="marker-ping"/>
+        <text x="825" y="106" fill="#fca5a5" font-size="7" font-weight="600">DPRK</text>
+        <text x="825" y="114" fill="#fca5a5" font-size="5.5" opacity=".7">UNC1069 — Axios trojan</text>
+        <!-- EU Retail -->
+        <circle cx="470" cy="88" r="4" fill="#3b82f6"/>
+        <circle cx="470" cy="88" r="4" fill="#3b82f6" opacity=".3" class="marker-ping" style="animation-delay:.3s"/>
+        <text x="480" y="86" fill="#93c5fd" font-size="6">EU Marketplaces</text>
+        <!-- China E-Commerce -->
+        <circle cx="790" cy="140" r="3" fill="#f97316"/>
+        <circle cx="790" cy="140" r="3" fill="#f97316" opacity=".3" class="marker-ping" style="animation-delay:.6s"/>
+        <text x="752" y="136" fill="#fdba74" font-size="6">CN Counterfeiting</text>
+        <!-- Attack arcs -->
+        <path d="M810 112 Q600 50 175 135" fill="none" stroke="#ef4444" stroke-width="1" stroke-dasharray="4 3" opacity=".4"/>
+        <path d="M500 250 Q350 180 175 135" fill="none" stroke="#ef4444" stroke-width=".8" stroke-dasharray="3 3" opacity=".25"/>
+        <path d="M500 250 Q490 150 468 92" fill="none" stroke="#ef4444" stroke-width=".8" stroke-dasharray="3 3" opacity=".25"/>
+        <!-- POS/IoT targets -->
+        <rect x="148" y="155" width="5" height="5" transform="rotate(45 151 158)" fill="#eab308" opacity=".7"/>
+        <text x="100" y="168" fill="#fde047" font-size="5.5">POS Terminal Pivot</text>
+      </svg>
+      <div class="map-legend">
+        <div class="le"><div class="dot" style="background:#ef4444;box-shadow:0 0 6px #ef4444"></div> Threat Actor / Supply Chain</div>
+        <div class="le"><div class="dot" style="background:#3b82f6;box-shadow:0 0 6px #3b82f6"></div> Retail Target Region</div>
+        <div class="le"><div class="dot" style="background:#eab308;box-shadow:0 0 6px #eab308"></div> POS/IoT Target</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- AXIOS RETAIL IMPACT & REACT2SHELL (2-col) -->
+<div class="row row-2">
+  <div class="card">
+    <div class="card-header"><h2>📦 Axios Supply Chain → Retail Function Impact</h2><span class="pill pill-critical">ACTIVE</span></div>
+    <div class="card-body">
+      <table class="tbl">
+        <tr><th>Retail Function</th><th>Axios Dependency</th><th>Attack Impact</th><th>Risk</th></tr>
+        <tr><td><strong>Payment Processing</strong></td><td>API calls to Stripe/PayPal</td><td>Card data exfil via .env sweep</td><td><span style="color:#f87171;font-weight:700">CRITICAL</span></td></tr>
+        <tr><td><strong>Account Management</strong></td><td>Auth/session APIs</td><td>Credential theft, account takeover</td><td><span style="color:#f87171;font-weight:700">CRITICAL</span></td></tr>
+        <tr><td><strong>Inventory Systems</strong></td><td>Backend API calls</td><td>Stock manipulation, supply disruption</td><td><span style="color:#fb923c;font-weight:700">HIGH</span></td></tr>
+        <tr><td><strong>Marketplace APIs</strong></td><td>Seller/buyer platform</td><td>Commission fraud, fake listings</td><td><span style="color:#fb923c;font-weight:700">HIGH</span></td></tr>
+        <tr><td><strong>Loyalty Programs</strong></td><td>Points/rewards API</td><td>Points theft, reward manipulation</td><td><span style="color:#fb923c;font-weight:700">HIGH</span></td></tr>
+        <tr><td><strong>Search &amp; Recs</strong></td><td>Product API integrations</td><td>SEO poisoning, counterfeit promo</td><td><span style="color:#facc15;font-weight:700">ELEVATED</span></td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>💥 React2Shell / CVE-2025-55182</h2><span class="pill pill-critical">AUTOMATED EXPLOITATION</span></div>
+    <div class="card-body">
+      <svg viewBox="0 0 420 200" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+        <rect width="420" height="200" fill="transparent"/>
+        <text x="10" y="18" fill="#fca5a5" font-size="9" font-weight="700">React2Shell Targeting Retail Next.js Frontends</text>
+        <rect x="10" y="28" width="90" height="40" rx="6" fill="rgba(239,68,68,.1)" stroke="#ef4444" stroke-width=".8"/>
+        <text x="55" y="46" text-anchor="middle" fill="#fca5a5" font-size="7" font-weight="600">Shodan Scan</text>
+        <text x="55" y="56" text-anchor="middle" fill="#94a3b8" font-size="5.5">Next.js fingerprint</text>
+        <line x1="100" y1="48" x2="115" y2="48" stroke="#ef4444" stroke-width=".8" stroke-dasharray="3 2"/>
+        <rect x="115" y="28" width="90" height="40" rx="6" fill="rgba(239,68,68,.1)" stroke="#ef4444" stroke-width=".8"/>
+        <text x="160" y="46" text-anchor="middle" fill="#fca5a5" font-size="7" font-weight="600">CVE-2025-55182</text>
+        <text x="160" y="56" text-anchor="middle" fill="#94a3b8" font-size="5.5">Middleware bypass</text>
+        <line x1="205" y1="48" x2="220" y2="48" stroke="#ef4444" stroke-width=".8" stroke-dasharray="3 2"/>
+        <rect x="220" y="28" width="90" height="40" rx="6" fill="rgba(239,68,68,.1)" stroke="#ef4444" stroke-width=".8"/>
+        <text x="265" y="46" text-anchor="middle" fill="#fca5a5" font-size="7" font-weight="600">Admin Access</text>
+        <text x="265" y="56" text-anchor="middle" fill="#94a3b8" font-size="5.5">CMS / dashboard</text>
+        <line x1="310" y1="48" x2="325" y2="48" stroke="#ef4444" stroke-width=".8" stroke-dasharray="3 2"/>
+        <rect x="325" y="28" width="85" height="40" rx="6" fill="rgba(239,68,68,.12)" stroke="#ef4444" stroke-width="1"/>
+        <text x="367" y="46" text-anchor="middle" fill="#fca5a5" font-size="7" font-weight="700">Card Skim</text>
+        <text x="367" y="56" text-anchor="middle" fill="#94a3b8" font-size="5.5">Magecart injection</text>
+        <!-- Stats -->
+        <text x="10" y="95" fill="#93c5fd" font-size="8" font-weight="700">Retail Exposure Factors</text>
+        <rect x="10" y="105" width="130" height="35" rx="5" fill="rgba(59,130,246,.06)" stroke="#3b82f6" stroke-width=".5"/>
+        <text x="75" y="120" text-anchor="middle" fill="#93c5fd" font-size="7" font-weight="600">Next.js: ~20% of top 1M</text>
+        <text x="75" y="130" text-anchor="middle" fill="#94a3b8" font-size="5.5">Retail overrepresented</text>
+        <rect x="150" y="105" width="130" height="35" rx="5" fill="rgba(59,130,246,.06)" stroke="#3b82f6" stroke-width=".5"/>
+        <text x="215" y="120" text-anchor="middle" fill="#93c5fd" font-size="7" font-weight="600">Auto-exploitation pipeline</text>
+        <text x="215" y="130" text-anchor="middle" fill="#94a3b8" font-size="5.5">Scan → exploit → skim</text>
+        <rect x="290" y="105" width="120" height="35" rx="5" fill="rgba(59,130,246,.06)" stroke="#3b82f6" stroke-width=".5"/>
+        <text x="350" y="120" text-anchor="middle" fill="#93c5fd" font-size="7" font-weight="600">Payment page targets</text>
+        <text x="350" y="130" text-anchor="middle" fill="#94a3b8" font-size="5.5">Checkout flows priority</text>
+
+        <!-- POS pivot chain -->
+        <text x="10" y="165" fill="#fde047" font-size="8" font-weight="700">Device Code Phishing → POS Pivot Chain</text>
+        <text x="10" y="180" fill="#94a3b8" font-size="6.5">Retail staff phished → M365 token → Intune MDM → reconfigure POS terminals → card skimming at scale</text>
+        <text x="10" y="192" fill="#94a3b8" font-size="6.5">Same identity-first attack vector as Stryker but targeting physical retail infrastructure</text>
+      </svg>
+    </div>
+  </div>
+</div>
+
+<!-- AGENTIC AI FRAUD -->
+<div class="card">
+  <div class="card-header"><h2>🤖 Agentic AI Fraud — 7 Types Targeting Retail (Unit 42 Research)</h2><span class="pill pill-critical">EMERGING THREAT</span></div>
+  <div class="card-body">
+    <div class="fraud-grid">
+      <div class="fraud-card">
+        <h4>1. Deepfake Returns</h4>
+        <p>AI-generated product damage photos to exploit return policies. Scales to millions of automated claims.</p>
+      </div>
+      <div class="fraud-card">
+        <h4>2. Synthetic Identity</h4>
+        <p>LLM-generated personas with realistic purchase histories. Credit application fraud at scale.</p>
+      </div>
+      <div class="fraud-card">
+        <h4>3. Price Manipulation</h4>
+        <p>AI agents exploiting pricing APIs, coupon stacking, dynamic pricing vulnerabilities.</p>
+      </div>
+      <div class="fraud-card">
+        <h4>4. Review Bombing</h4>
+        <p>Coordinated fake reviews using LLMs to bypass detection. Competitor sabotage and self-promotion.</p>
+      </div>
+      <div class="fraud-card">
+        <h4>5. Inventory Hoarding</h4>
+        <p>Automated bots holding high-demand stock, artificial scarcity for resale profit.</p>
+      </div>
+      <div class="fraud-card">
+        <h4>6. Loyalty Point Laundering</h4>
+        <p>AI-automated credential stuffing → loyalty point aggregation → gift card conversion.</p>
+      </div>
+      <div class="fraud-card">
+        <h4>7. Counterfeit Listing</h4>
+        <p>AI-generated product descriptions and images for marketplace counterfeits.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MALWARE & IOCs (2-col) -->
+<div class="row row-2">
+  <div class="card">
+    <div class="card-header"><h2>🦠 Retail-Targeting Malware Arsenal</h2></div>
+    <div class="card-body">
+      <table class="tbl">
+        <tr><th>Malware</th><th>Type</th><th>Retail Vector</th><th>Risk</th></tr>
+        <tr><td><strong>WAVESHAPER.V2</strong></td><td>RAT</td><td>npm supply chain → .env sweep</td><td><span style="color:#f87171;font-weight:700">CRITICAL</span></td></tr>
+        <tr><td><strong>CrystalRAT</strong></td><td>MaaS RAT</td><td>Self-propagating via CanisterWorm</td><td><span style="color:#f87171;font-weight:700">CRITICAL</span></td></tr>
+        <tr><td><strong>Magecart variants</strong></td><td>Card skimmer</td><td>React2Shell → checkout injection</td><td><span style="color:#f87171;font-weight:700">CRITICAL</span></td></tr>
+        <tr><td><strong>StealC</strong></td><td>Infostealer</td><td>Employee credential theft</td><td><span style="color:#fb923c;font-weight:700">HIGH</span></td></tr>
+        <tr><td><strong>Vect RaaS</strong></td><td>Ransomware</td><td>Retail BI disruption</td><td><span style="color:#fb923c;font-weight:700">HIGH</span></td></tr>
+        <tr><td><strong>EvilTokens</strong></td><td>PhaaS</td><td>Device code phishing → admin</td><td><span style="color:#fb923c;font-weight:700">HIGH</span></td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>🔍 Retail-Specific IOCs</h2><span class="pill pill-info">BLOCK NOW</span></div>
+    <div class="card-body">
+      <p style="font-size:.72rem;color:var(--muted);margin-bottom:.5rem;font-weight:600">COMPROMISED PACKAGES</p>
+      <div><span class="ioc-chip pkg">axios@1.14.1</span><span class="ioc-chip pkg">axios@0.30.4</span><span class="ioc-chip pkg">@shadanai/openclaw</span><span class="ioc-chip pkg">@qqbrowser/openclaw-qbot</span><span class="ioc-chip pkg">plain-crypto-js@4.2.1</span></div>
+      <p style="font-size:.72rem;color:var(--muted);margin:.6rem 0 .5rem;font-weight:600">C2 DOMAINS</p>
+      <div><span class="ioc-chip domain">sfrclak[.]com</span><span class="ioc-chip domain">models.litellm[.]cloud</span><span class="ioc-chip domain">scan.aquasecurtiy[.]org</span></div>
+      <p style="font-size:.72rem;color:var(--muted);margin:.6rem 0 .5rem;font-weight:600">C2 IPs</p>
+      <div><span class="ioc-chip">142.11.206[.]73</span><span class="ioc-chip">23.254.167[.]216</span><span class="ioc-chip">45.148.10[.]212</span><span class="ioc-chip">83.142.209[.]11</span></div>
+      <p style="font-size:.72rem;color:var(--muted);margin:.6rem 0 .5rem;font-weight:600">FILE HASHES (SHA-256)</p>
+      <div><span class="ioc-chip hash">a1b2...WAVESHAPER.V2 loader</span><span class="ioc-chip hash">c3d4...CrystalRAT dropper</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- MITRE ATT&CK RETAIL -->
+<div class="card">
+  <div class="card-header"><h2>🗺️ MITRE ATT&CK — Retail-Specific Techniques</h2></div>
+  <div class="card-body">
+    <div class="mitre-grid">
+      <div class="mitre-cell mc-crit"><span class="tid">T1195.002</span><span class="tname">Supply Chain: Dependencies</span></div>
+      <div class="mitre-cell mc-crit"><span class="tid">T1059.007</span><span class="tname">JavaScript Execution</span></div>
+      <div class="mitre-cell mc-crit"><span class="tid">T1566</span><span class="tname">Phishing</span></div>
+      <div class="mitre-cell mc-crit"><span class="tid">T1185</span><span class="tname">Browser Session Hijack</span></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1078.004</span><span class="tname">Cloud Account Abuse</span></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1552.001</span><span class="tname">.env File Theft</span></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1486</span><span class="tname">Ransomware (Vect)</span></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1485</span><span class="tname">Data Destruction</span></div>
+      <div class="mitre-cell mc-med"><span class="tid">T1105</span><span class="tname">Ingress Tool Transfer</span></div>
+      <div class="mitre-cell mc-med"><span class="tid">T1071.001</span><span class="tname">HTTPS C2</span></div>
+      <div class="mitre-cell mc-med"><span class="tid">T1047</span><span class="tname">WMI Lateral Move</span></div>
+      <div class="mitre-cell mc-med"><span class="tid">T1553.002</span><span class="tname">Code Signing Bypass</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- TIMELINE -->
+<div class="card">
+  <div class="card-header"><h2>📅 30-Day Retail Threat Timeline</h2></div>
+  <div class="card-body">
+    <div class="timeline">
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Mar 11</div><div class="tl-text"><strong>Stryker wiper</strong> — MedTech MDM attack; retail MDM exposure awareness</div></div>
+      <div class="tl-item orange"><div class="tl-dot"></div><div class="tl-date">Mar 18</div><div class="tl-text"><strong>Unit 42 Agentic AI fraud research</strong> — 7 fraud types targeting retail</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Mar 24</div><div class="tl-text"><strong>LiteLLM PyPI compromise</strong> — AI-powered retail analytics exposed</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Mar 26</div><div class="tl-text"><strong>Vect RaaS + TeamPCP creds</strong> — Retail ransomware risk surge</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Mar 30</div><div class="tl-text"><strong>React2Shell automated scanning</strong> — Next.js retail frontends targeted</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Mar 31</div><div class="tl-text"><strong>★ Axios npm compromise</strong> — Payment, accounts, inventory APIs backdoored</div></div>
+      <div class="tl-item orange"><div class="tl-dot"></div><div class="tl-date">Apr 1</div><div class="tl-text"><strong>CrystalRAT self-propagation</strong> — CanisterWorm targeting retail networks</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Apr 2</div><div class="tl-text"><strong>Device code phishing → POS pivot</strong> chain demonstrated</div></div>
+      <div class="tl-item blue"><div class="tl-dot"></div><div class="tl-date">Apr 4</div><div class="tl-text"><strong>37× phishing surge</strong> — Retail staff credential compromise</div></div>
+      <div class="tl-item"><div class="tl-dot"></div><div class="tl-date">Apr 5</div><div class="tl-text"><strong>FortiClient EMS patch</strong> — Retail VPN endpoint protection critical</div></div>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<footer>
+  <p>TI Mindmap HUB — Retail Sector Threat Dashboard | TLP:WHITE | Generated 2026-04-06</p>
+  <p>OSINT-derived intelligence. Not operational guidance. Verify through primary sources.</p>
+  <p style="margin-top:.5rem"><a href="https://ti-mindmap-hub.com">ti-mindmap-hub.com</a></p>
+</footer>
+</body>
+</html>
