@@ -1,0 +1,54 @@
+// =========================================================================
+// HQ-008: Delegated Permission Grant Including Sensitive API Scopes
+// =========================================================================
+// Description : Consent events that include high-privilege delegated scopes
+//               (Mail.Read, Directory.ReadWrite.All, offline_access, etc.)
+//               are a primary indicator of OAuth phishing attacks (Device
+//               Code flow abuse via TokenTactics, consent-phishing via
+//               AADInternals). The offline_access scope is especially
+//               dangerous as it allows long-lived refresh tokens.
+// MITRE ATT&CK: TA0006 Credential Access
+//               T1528 – Steal Application Access Token
+// Tools       : TokenTactics, ROADtools, AADInternals (Device Code flow)
+// Severity    : High
+// Data Source : AuditLogs (Azure Active Directory)
+// =========================================================================
+
+let SensitiveScopes = dynamic([
+    "Mail.Read", "Mail.ReadWrite", "Mail.Send",
+    "Files.ReadWrite.All", "Directory.ReadWrite.All",
+    "User.ReadWrite.All", "RoleManagement.ReadWrite.Directory",
+    "Application.ReadWrite.All", "Sites.FullControl.All",
+    "EWS.AccessAsUser.All", "IMAP.AccessAsUser.All",
+    "POP.AccessAsUser.All", "SMTP.Send",
+    "ChannelMessage.Read.All", "TeamSettings.ReadWrite.All",
+    "offline_access"
+]);
+
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where ActivityDisplayName in (
+    "Add delegated permission grant",
+    "Consent to application")
+| extend InitiatedByUPN  = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatedByApp  = tostring(InitiatedBy.app.displayName)
+| extend Actor           = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)
+| extend TargetApp       = tostring(TargetResources[0].displayName)
+| extend TargetAppId     = tostring(TargetResources[0].id)
+| extend PermDetailRaw   = tostring(AdditionalDetails)
+// Match any sensitive scope in the AdditionalDetails blob
+| where PermDetailRaw has_any (SensitiveScopes)
+| extend MatchedScopes = extract_all(
+    @"(Mail\.[^\s,""]+|Directory\.[^\s,""]+|offline_access|Application\.[^\s,""]+|Files\.[^\s,""]+|User\.ReadWrite\.All|RoleManagement\.[^\s,""]+|Sites\.[^\s,""]+|EWS\.[^\s,""]+|IMAP\.[^\s,""]+|SMTP\.[^\s,""]+|Channel[^\s,""]+|Team[^\s,""]+)",
+    PermDetailRaw)
+| project
+    TimeGenerated,
+    Actor,
+    TargetApp,
+    TargetAppId,
+    MatchedScopes,
+    ActivityDisplayName,
+    LoggedByService,
+    Result,
+    CorrelationId
+| order by TimeGenerated desc

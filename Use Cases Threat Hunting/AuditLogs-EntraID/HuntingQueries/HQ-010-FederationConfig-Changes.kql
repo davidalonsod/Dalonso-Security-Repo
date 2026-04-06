@@ -1,0 +1,50 @@
+// =========================================================================
+// HQ-010: Domain Federation / Authentication Configuration Changes
+// =========================================================================
+// Description : Modifying a domain's authentication type (Managed → 
+//               Federated) is the cornerstone of the "Golden SAML" and
+//               AADInternals federation abuse attacks. Attackers with 
+//               Global Admin privilege can federate a domain with a rogue
+//               IDP and forge SAML tokens for any user without knowing
+//               their passwords. Any change here is extremely high-fidelity.
+// MITRE ATT&CK: TA0003 Persistence
+//               T1484.002 – Domain Trust Modification
+//               TA0005 Defense Evasion
+//               T1606.002 – Forge Web Credentials: SAML Token
+// Tools       : AADInternals (ConvertTo-AADIntBackdoor), manual attacker
+// Severity    : Critical
+// Data Source : AuditLogs (Azure Active Directory)
+// =========================================================================
+
+AuditLogs
+| where TimeGenerated > ago(90d)
+| where ActivityDisplayName in (
+    "Set domain authentication",
+    "Set federation settings on domain",
+    "Set DirSyncEnabled flag",
+    "Set Company Information",
+    "Set federation settings",
+    "Update domain",
+    "Verify domain")
+| extend InitiatedByUPN  = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatedByApp  = tostring(InitiatedBy.app.displayName)
+| extend Actor           = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)
+| extend TargetDomain    = tostring(TargetResources[0].displayName)
+| extend TargetId        = tostring(TargetResources[0].id)
+| mv-expand Prop = TargetResources[0].modifiedProperties
+| extend PropName        = tostring(Prop.displayName)
+| extend OldValue        = tostring(Prop.oldValue)
+| extend NewValue        = tostring(Prop.newValue)
+| where Result == "success"
+| project
+    TimeGenerated,
+    Actor,
+    ActivityDisplayName,
+    TargetDomain,
+    TargetId,
+    PropName,
+    OldValue,
+    NewValue,
+    LoggedByService,
+    CorrelationId
+| order by TimeGenerated desc

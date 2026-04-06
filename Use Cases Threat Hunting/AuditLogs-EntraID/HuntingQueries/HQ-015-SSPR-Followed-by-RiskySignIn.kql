@@ -1,0 +1,80 @@
+// HQ-015 — Identity SSPR Followed by Risky Sign-In
+// Purpose  : Detect cases where a user resets their own password via SSPR and then
+//            performs a risky sign-in within 24 hours.
+//            This sequence may indicate an attacker who obtained enough identity
+//            signals (email / phone) to pass SSPR verification but whose sign-in
+//            still triggers Entra ID risk detection (unfamiliar IP, impossible travel, etc.).
+// Tables   : AuditLogs, SigninLogs
+// MITRE    : TA0006 Credential Access — T1110.004 Password Spraying (post-reset attempt)
+//            TA0001 Initial Access — T1078 Valid Accounts
+// Author   : Custom
+// ---------------------------------------------------------------------------
+
+let LookbackDays        = 14d;
+let RiskySigninWindow   = 24h;    // Max time after SSPR for risky sign-in to count
+let SSPRActivities = dynamic([
+    "Reset password (self-service)",
+    "Self-service password reset flow activity progress",
+    "User registered for self-service password reset",
+    "Reset password",
+    "User completed security info registration",
+    "User started security info registration"
+]);
+// ── Step 1: SSPR events ────────────────────────────────────────────────────
+let SSPREvents = AuditLogs
+| where TimeGenerated > ago(LookbackDays)
+| where ActivityDisplayName in~ (SSPRActivities)
+// Accept any logging service — SSPR can appear under Core Directory or Self-service
+| extend SSPRUserUPN = tolower(coalesce(
+    tostring(TargetResources[0].userPrincipalName),
+    tostring(InitiatedBy.user.userPrincipalName)
+))
+| where isnotempty(SSPRUserUPN)
+| project
+    SSPRTime         = TimeGenerated,
+    SSPRUserUPN,
+    SSPRActivity     = ActivityDisplayName,
+    SSPRResult       = Result,
+    LoggedByService;
+// ── Step 2: Risky sign-ins ─────────────────────────────────────────────────
+let RiskySignIns = SigninLogs
+| where TimeGenerated > ago(LookbackDays)
+| where RiskLevelDuringSignIn in ("high", "medium")
+    or RiskState    == "atRisk"
+    or IsRisky      == true
+| project
+    SigninTime       = TimeGenerated,
+    SigninUPN        = tolower(UserPrincipalName),
+    RiskLevel        = RiskLevelDuringSignIn,
+    RiskState,
+    RiskDetail,
+    RiskEventTypes   = tostring(RiskEventTypes_V2),
+    IPAddress,
+    AppDisplayName,
+    LocationDetails,
+    ConditionalAccessStatus,
+    SigninCorrelationId = CorrelationId;
+// ── Step 3: Correlate — risky sign-in within window AFTER SSPR ────────────
+SSPREvents
+| join kind=inner (RiskySignIns)
+    on $left.SSPRUserUPN == $right.SigninUPN
+| where SigninTime  >  SSPRTime
+    and SigninTime  <= (SSPRTime + RiskySigninWindow)
+| extend TimeFromSSPRToRiskySignin = SigninTime - SSPRTime
+| project
+    SSPRTime,
+    SSPRUserUPN,
+    SSPRActivity,
+    SSPRResult,
+    SigninTime,
+    RiskLevel,
+    RiskState,
+    RiskDetail,
+    RiskEventTypes,
+    IPAddress,
+    AppDisplayName,
+    LocationDetails,
+    ConditionalAccessStatus,
+    TimeFromSSPRToRiskySignin,
+    SigninCorrelationId
+| sort by SSPRTime desc

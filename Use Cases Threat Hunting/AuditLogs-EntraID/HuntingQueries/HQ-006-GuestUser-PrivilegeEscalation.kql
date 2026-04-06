@@ -1,0 +1,43 @@
+// =========================================================================
+// HQ-006: External / Guest User Receiving Group or Role Membership
+// =========================================================================
+// Description : Entra ID guests (UPN contains #EXT#) should rarely receive
+//               sensitive group or role memberships. Post-compromise actors
+//               and insider threats escalate privileges by adding external
+//               accounts to high-privilege groups. This query hunts for
+//               such assignments to facilitate triage.
+// MITRE ATT&CK: TA0004 Privilege Escalation
+//               T1078.004 – Valid Accounts: Cloud Accounts
+// Tools       : Manual attacker action, AADInternals, MicroBurst
+// Severity    : High
+// Data Source : AuditLogs (Azure Active Directory)
+// =========================================================================
+
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where ActivityDisplayName in (
+    "Add member to group",
+    "Add member to role",
+    "Add eligible member to role",
+    "Add app role assignment grant to user")
+| extend TargetUserDisplayName = tostring(TargetResources[0].displayName)
+| extend TargetUserUPN         = tostring(TargetResources[0].userPrincipalName)
+| extend TargetUserId          = tostring(TargetResources[0].id)
+| extend GroupOrRole           = tostring(TargetResources[1].displayName)
+| extend InitiatedByUPN        = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatedByApp        = tostring(InitiatedBy.app.displayName)
+| extend Actor                 = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)
+// Guest accounts use the #EXT# convention in their UPN
+| where TargetUserUPN has "#EXT#"
+    or TargetUserDisplayName has "(Guest)"
+| where Result == "success"
+| project
+    TimeGenerated,
+    Actor,
+    TargetUserDisplayName,
+    TargetUserUPN,
+    GroupOrRole,
+    ActivityDisplayName,
+    LoggedByService,
+    CorrelationId
+| order by TimeGenerated desc

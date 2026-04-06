@@ -1,0 +1,40 @@
+// =========================================================================
+// HQ-003: OAuth Consent Grants – Actors with Multiple App Consents
+// =========================================================================
+// Description : Surfaces users or service principals that consented to,
+//               or granted delegated permissions for, multiple applications
+//               within the last 7 days. Token-abuse tools (TokenTactics,
+//               ROADtools) often consent to custom apps to obtain broad
+//               delegated tokens. Also covers admin-consent phishing.
+// MITRE ATT&CK: TA0006 Credential Access
+//               T1528 – Steal Application Access Token
+// Tools       : TokenTactics, ROADtools, AADInternals
+// Severity    : Medium
+// Data Source : AuditLogs (Azure Active Directory)
+// =========================================================================
+
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where ActivityDisplayName in (
+    "Consent to application",
+    "Add delegated permission grant",
+    "Add app role assignment to service principal")
+| extend InitiatedByUPN  = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatedByUser = tostring(InitiatedBy.user.displayName)
+| extend InitiatedByApp  = tostring(InitiatedBy.app.displayName)
+| extend Actor           = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)
+| extend TargetApp       = tostring(TargetResources[0].displayName)
+| extend TargetAppId     = tostring(TargetResources[0].id)
+| extend PermDetail      = tostring(AdditionalDetails)
+| summarize
+    ConsentCount      = count(),
+    AppsConsented     = make_set(TargetApp, 20),
+    AppIds            = make_set(TargetAppId, 20),
+    Operations        = make_set(ActivityDisplayName),
+    FirstConsent      = min(TimeGenerated),
+    LastConsent       = max(TimeGenerated),
+    CorrelationIds    = make_set(CorrelationId, 5)
+    by Actor
+| where ConsentCount >= 2 or array_length(AppsConsented) >= 2
+| extend DaysBetween = datetime_diff('day', LastConsent, FirstConsent)
+| order by ConsentCount desc

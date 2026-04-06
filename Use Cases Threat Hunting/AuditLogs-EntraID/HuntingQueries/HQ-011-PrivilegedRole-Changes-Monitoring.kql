@@ -1,0 +1,94 @@
+// HQ-011 — Privileged Role Changes Monitoring
+// Purpose  : Monitor all Add / Remove operations targeting high-privilege Entra ID roles.
+//            Covers both PIM-managed and direct (outside-PIM) assignments.
+//            Highlights direct assignments as elevated risk.
+// Tables   : AuditLogs
+// MITRE    : TA0004 Privilege Escalation — T1078.004 Valid Accounts: Cloud Accounts
+//            TA0003 Persistence — T1098.003 Account Manipulation: Additional Cloud Roles
+// Author   : Custom
+// ---------------------------------------------------------------------------
+
+let LookbackDays = 14d;
+let PrivilegedRoles = dynamic([
+    "Global Administrator",
+    "Security Administrator",
+    "Privileged Role Administrator",
+    "User Administrator",
+    "Authentication Administrator",
+    "Privileged Authentication Administrator",
+    "Exchange Administrator",
+    "SharePoint Administrator",
+    "Compliance Administrator",
+    "Conditional Access Administrator",
+    "Application Administrator",
+    "Cloud Application Administrator",
+    "Helpdesk Administrator",
+    "Password Administrator",
+    "Security Operator",
+    "Security Reader"
+]);
+let RoleChangeActivities = dynamic([
+    "Add member to role",
+    "Remove member from role",
+    "Add eligible member to role",
+    "Remove eligible member from role",
+    "Add scoped member to role",
+    "Remove scoped member from role",
+    "Add permanent member to role",
+    "Remove permanent member from role",
+    "Add member to role outside of PIM",
+    "Add eligible member to role (permanent)"
+]);
+// Extract events then expand TargetResources to get both Role and User entries
+AuditLogs
+| where TimeGenerated > ago(LookbackDays)
+| where Category == "RoleManagement"
+| where ActivityDisplayName in~ (RoleChangeActivities)
+| extend InitiatorUPN = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatorApp = tostring(InitiatedBy.app.displayName)
+| extend InitiatorSPId = tostring(InitiatedBy.app.servicePrincipalId)
+| extend InitiatorType = iff(isnotempty(tostring(InitiatedBy.user.userPrincipalName)), "User", "Application")
+// Expand each TargetResource to find role name and target user
+| mv-expand TargetResource = TargetResources
+| extend ResType    = tostring(TargetResource.type)
+| extend ResName    = tostring(TargetResource.displayName)
+| extend ResUserUPN = tostring(TargetResource.userPrincipalName)
+// Reconstruct one row per audit event — pick role name and target user across all typed entries
+| summarize
+    RoleName      = max(iff(ResType == "Role", ResName, "")),
+    TargetUserUPN = tolower(max(iff(isnotempty(ResUserUPN), ResUserUPN, "")))
+    by  TimeGenerated, ActivityDisplayName, LoggedByService, Result,
+        InitiatorUPN, InitiatorApp, InitiatorSPId, InitiatorType, Id, CorrelationId
+// Keep only rows where role is in privileged list
+| where RoleName in (PrivilegedRoles)
+// Annotate
+| extend OperationType  = case(
+    ActivityDisplayName has "Add",    "Role Assigned",
+    ActivityDisplayName has "Remove", "Role Removed",
+    "Other"
+)
+| extend AssignmentSource = case(
+    LoggedByService in ("PIM", "Privileged Identity Management"), "PIM-Managed",
+    ActivityDisplayName has "outside of PIM",                     "DirectAssignment-HighRisk",
+    "DirectAssignment-HighRisk"
+)
+// Flag direct assignments (not via PIM) as high-risk entries
+| extend RiskSignal = iff(AssignmentSource == "DirectAssignment-HighRisk",
+    strcat("ALERT: Privileged role assigned outside PIM by ", coalesce(InitiatorUPN, InitiatorApp)),
+    "INFO: PIM-managed role change"
+)
+| project
+    TimeGenerated,
+    RoleName,
+    TargetUserUPN,
+    OperationType,
+    AssignmentSource,
+    InitiatorType,
+    InitiatorUPN,
+    InitiatorApp,
+    LoggedByService,
+    Result,
+    RiskSignal,
+    ActivityDisplayName,
+    CorrelationId
+| sort by TimeGenerated desc

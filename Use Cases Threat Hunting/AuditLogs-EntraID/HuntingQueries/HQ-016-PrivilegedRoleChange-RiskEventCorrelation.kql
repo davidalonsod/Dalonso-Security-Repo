@@ -1,0 +1,105 @@
+// HQ-016 — Privileged Role Change Correlated with User Risk Events
+// Purpose  : Cross-correlate privileged role assignment / removal events with
+//            AADUserRiskEvents for the same user within a ±2-hour window.
+//            Two attacker scenarios are covered:
+//              A) Risk event detected THEN attacker elevates the compromised account
+//                 (RiskEvent → RoleChange) — confirming post-compromise privilege escalation.
+//              B) Role assignment made THEN Entra ID detects risky behaviour shortly after
+//                 (RoleChange → RiskEvent) — may indicate the newly-elevated account
+//                 performing suspicious actions.
+// Tables   : AuditLogs, AADUserRiskEvents
+// MITRE    : TA0004 Privilege Escalation — T1078.004 Valid Accounts: Cloud Accounts
+//            TA0003 Persistence — T1098.003 Additional Cloud Roles
+// Author   : Custom
+// ---------------------------------------------------------------------------
+
+let LookbackDays       = 14d;
+let CorrelationWindow  = 2h;
+let PrivilegedRoles = dynamic([
+    "Global Administrator",
+    "Security Administrator",
+    "Privileged Role Administrator",
+    "User Administrator",
+    "Authentication Administrator",
+    "Privileged Authentication Administrator",
+    "Exchange Administrator",
+    "SharePoint Administrator",
+    "Compliance Administrator",
+    "Conditional Access Administrator",
+    "Application Administrator",
+    "Cloud Application Administrator",
+    "Helpdesk Administrator",
+    "Password Administrator"
+]);
+let RoleChangeActivities = dynamic([
+    "Add member to role",
+    "Remove member from role",
+    "Add eligible member to role",
+    "Remove eligible member from role",
+    "Add scoped member to role",
+    "Remove scoped member from role",
+    "Add permanent member to role",
+    "Remove permanent member from role",
+    "Add member to role outside of PIM"
+]);
+// ── Step 1: Privileged role assignment / removal events ────────────────────
+let PrivRoleChanges = AuditLogs
+| where TimeGenerated > ago(LookbackDays)
+| where Category == "RoleManagement"
+| where ActivityDisplayName in~ (RoleChangeActivities)
+| extend InitiatorUPN = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatorApp = tostring(InitiatedBy.app.displayName)
+// Expand TargetResources to extract RoleName and TargetUserUPN
+| mv-expand TargetResource = TargetResources
+| extend ResType    = tostring(TargetResource.type)
+| extend ResName    = tostring(TargetResource.displayName)
+| extend ResUserUPN = tostring(TargetResource.userPrincipalName)
+| summarize
+    RoleName      = max(iff(ResType == "Role", ResName, "")),
+    TargetUserUPN = tolower(max(iff(isnotempty(ResUserUPN), ResUserUPN, "")))
+    by  TimeGenerated, ActivityDisplayName, LoggedByService, Result,
+        InitiatorUPN, InitiatorApp, Id
+| where RoleName in (PrivilegedRoles) and isnotempty(TargetUserUPN);
+// ── Step 2: User risk detection events ────────────────────────────────────
+let UserRiskEvents = AADUserRiskEvents
+| where TimeGenerated > ago(LookbackDays)
+| where RiskLevel in ("high", "medium")
+| project
+    RiskTime       = TimeGenerated,
+    RiskyUPN       = tolower(UserPrincipalName),
+    RiskEventType,
+    RiskLevel,
+    RiskState,
+    RiskIpAddress  = IpAddress;
+// ── Step 3: Inner join — same user, events within CorrelationWindow ────────
+PrivRoleChanges
+| join kind=inner (UserRiskEvents)
+    on $left.TargetUserUPN == $right.RiskyUPN
+// Filter to events within the bidirectional correlation window
+| where TimeGenerated between ((RiskTime - CorrelationWindow) .. (RiskTime + CorrelationWindow))
+| extend TimeDiffMinutes = abs(datetime_diff('minute', TimeGenerated, RiskTime))
+// Label the sequence ordering
+| extend EventSequence = case(
+    TimeGenerated < RiskTime,  "RoleChange THEN RiskDetected",
+    TimeGenerated > RiskTime,  "RiskDetected THEN RoleChange",
+    "Simultaneous"
+)
+| extend OperationType = iff(ActivityDisplayName has "Add", "Role Assigned", "Role Removed")
+| project
+    RoleChangeTime   = TimeGenerated,
+    RoleName,
+    TargetUserUPN,
+    OperationType,
+    LoggedByService,
+    InitiatorUPN,
+    InitiatorApp,
+    Result,
+    RiskTime,
+    RiskEventType,
+    RiskLevel,
+    RiskState,
+    RiskIpAddress,
+    EventSequence,
+    TimeDiffMinutes,
+    RoleChangeId     = Id
+| sort by RoleChangeTime desc

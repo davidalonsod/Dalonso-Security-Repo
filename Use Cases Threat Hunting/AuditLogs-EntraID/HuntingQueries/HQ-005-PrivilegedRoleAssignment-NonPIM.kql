@@ -1,0 +1,43 @@
+// =========================================================================
+// HQ-005: Privileged Role Assignment NOT Logged by PIM
+// =========================================================================
+// Description : All legitimate role assignments in a PIM-enabled tenant
+//               should be logged with LoggedByService = "PIM". Direct 
+//               role assignments via the Azure portal, PowerShell, or
+//               attacker tools (AADInternals, MicroBurst) will appear with
+//               LoggedByService = "Core Directory". This query surfaces
+//               those non-PIM assignments.
+// MITRE ATT&CK: TA0004 Privilege Escalation
+//               T1098.003 – Additional Cloud Roles
+// Tools       : AADInternals, MicroBurst, manual attacker
+// Severity    : High
+// Note        : If PIM is not licensed/enabled in your tenant, adjust the
+//               filter or suppress the LoggedByService condition.
+// Data Source : AuditLogs (Azure Active Directory)
+// =========================================================================
+
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where ActivityDisplayName in (
+    "Add member to role",
+    "Add eligible member to role",
+    "Add scoped member to role",
+    "Add permanent member to role")
+| where LoggedByService !in ("PIM", "Privileged Identity Management")
+| extend InitiatedByUPN  = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatedByApp  = tostring(InitiatedBy.app.displayName)
+| extend Actor           = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)
+| extend TargetUser      = tostring(TargetResources[0].displayName)
+| extend TargetUserUPN   = tostring(TargetResources[0].userPrincipalName)
+| extend RoleName        = tostring(TargetResources[1].displayName)
+| where Result == "success"
+| project
+    TimeGenerated,
+    Actor,
+    TargetUser,
+    TargetUserUPN,
+    RoleName,
+    ActivityDisplayName,
+    LoggedByService,
+    CorrelationId
+| order by TimeGenerated desc

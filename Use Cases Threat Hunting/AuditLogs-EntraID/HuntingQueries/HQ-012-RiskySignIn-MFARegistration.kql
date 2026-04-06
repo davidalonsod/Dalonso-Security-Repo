@@ -1,0 +1,81 @@
+// HQ-012 — Risky Sign-In Followed by MFA Registration
+// Purpose  : Detect when a user experiences a risky sign-in and then registers or modifies
+//            an MFA/security-info method within a short window (default 4 hours).
+//            Attackers who obtain credentials may immediately add their own MFA device
+//            to maintain persistent access after a risk-flagged sign-in.
+// Tables   : SigninLogs, AuditLogs
+// MITRE    : TA0003 Persistence — T1098.005 Account Manipulation: Device Registration
+//            TA0005 Defense Evasion — T1556.006 Modify Authentication Process: MFA
+// Author   : Custom
+// ---------------------------------------------------------------------------
+
+let LookbackDays       = 14d;
+let MFAChangeWindow    = 4h;        // Max time AFTER risky sign-in for MFA change to count
+let MFAActivities = dynamic([
+    "User registered security info",
+    "User updated security info",
+    "User deleted security info",
+    "User changed default security info",
+    "Register security info",
+    "Delete security info",
+    "User registered for multi-factor authentication",
+    "User started security info registration",
+    "User completed security info registration",
+    "Admin updated user authentication method",
+    "Update user"    // Covers StrongAuthenticationPhoneAppDetail modifications
+]);
+// ── Step 1: Risky sign-ins ──────────────────────────────────────────────────
+let RiskySignIns = SigninLogs
+| where TimeGenerated > ago(LookbackDays)
+| where RiskLevelDuringSignIn in ("high", "medium")
+    or RiskState    == "atRisk"
+    or IsRisky      == true
+| project
+    SigninTime           = TimeGenerated,
+    UserPrincipalName    = tolower(UserPrincipalName),
+    RiskLevel            = RiskLevelDuringSignIn,
+    RiskState,
+    RiskDetail,
+    RiskEventTypes       = tostring(RiskEventTypes_V2),
+    IPAddress,
+    AppDisplayName,
+    ConditionalAccessStatus,
+    SigninCorrelationId  = CorrelationId;
+// ── Step 2: MFA registration / modification events ─────────────────────────
+let MFARegistrations = AuditLogs
+| where TimeGenerated > ago(LookbackDays)
+| where ActivityDisplayName in~ (MFAActivities)
+    // Narrow "Update user" to only those touching authentication methods
+    or (ActivityDisplayName == "Update user"
+        and tostring(AdditionalDetails) has_any ("StrongAuthentication", "PhoneAppDetail", "AuthenticationPhone"))
+| extend ActorUPN = tolower(tostring(InitiatedBy.user.userPrincipalName))
+| where isnotempty(ActorUPN)
+| project
+    MFATime       = TimeGenerated,
+    ActorUPN,
+    MFAActivity   = ActivityDisplayName,
+    MFAResult     = Result,
+    LoggedByService;
+// ── Step 3: Correlate — MFA change occurring within window AFTER risky signin
+RiskySignIns
+| join kind=inner (MFARegistrations)
+    on $left.UserPrincipalName == $right.ActorUPN
+| where MFATime  >  SigninTime
+    and MFATime  <= (SigninTime + MFAChangeWindow)
+| extend TimeToMFAChange = MFATime - SigninTime
+| project
+    SigninTime,
+    UserPrincipalName,
+    RiskLevel,
+    RiskState,
+    RiskDetail,
+    RiskEventTypes,
+    IPAddress,
+    AppDisplayName,
+    ConditionalAccessStatus,
+    MFATime,
+    MFAActivity,
+    MFAResult,
+    TimeToMFAChange,
+    SigninCorrelationId
+| sort by SigninTime desc

@@ -1,0 +1,88 @@
+// HQ-013 — Audit Admin Actions from Risky Users
+// Purpose  : Surface administrative operations in AuditLogs that were initiated by users
+//            currently flagged as medium or high risk in AADRiskyUsers.
+//            An attacker using a compromised account may perform privilege escalation or
+//            persistence actions while the account is still risk-flagged.
+// Tables   : AuditLogs, AADRiskyUsers
+// MITRE    : TA0004 Privilege Escalation — T1078.004 Valid Accounts: Cloud Accounts
+//            TA0003 Persistence — T1098 Account Manipulation
+// Author   : Custom
+// ---------------------------------------------------------------------------
+
+let LookbackDays = 14d;
+let SensitiveCategories = dynamic([
+    "RoleManagement",
+    "ApplicationManagement",
+    "DirectoryManagement",
+    "UserManagement",
+    "PolicyManagement"
+]);
+let SensitiveActivities = dynamic([
+    "Add member to role",
+    "Remove member from role",
+    "Add eligible member to role",
+    "Add app role assignment to service principal",
+    "Add app role assignment grant to user",
+    "Add application",
+    "Add service principal",
+    "Add owner to application",
+    "Add owner to service principal",
+    "Add credentials to service principal",
+    "Set domain authentication",
+    "Update domain",
+    "Update federation settings on domain",
+    "Add policy",
+    "Update policy",
+    "Delete policy",
+    "Reset password",
+    "Admin reset user password",
+    "Update user",
+    "Add group member"
+]);
+// ── Step 1: Get users currently flagged as at-risk ──────────────────────────
+let RiskyUsers = AADRiskyUsers
+| where TimeGenerated > ago(LookbackDays)
+| where RiskLevel in ("high", "medium") or RiskState == "atRisk"
+| summarize
+    RiskLevel            = take_any(RiskLevel),
+    RiskState            = take_any(RiskState),
+    RiskDetail           = take_any(RiskDetail),
+    RiskLastUpdated      = max(RiskLastUpdatedDateTime)
+    by RiskyUPN = tolower(UserPrincipalName);
+// ── Step 2: Get sensitive admin audit operations initiated by human users ────
+let AdminAuditOps = AuditLogs
+| where TimeGenerated > ago(LookbackDays)
+| where Category in (SensitiveCategories)
+    or  ActivityDisplayName in~ (SensitiveActivities)
+| extend ActorUPN = tolower(tostring(InitiatedBy.user.userPrincipalName))
+| where isnotempty(ActorUPN)
+| extend TargetResource = tostring(TargetResources[0].displayName)
+| extend TargetUserUPN  = tostring(TargetResources[0].userPrincipalName)
+| project
+    AuditTime        = TimeGenerated,
+    ActorUPN,
+    ActivityDisplayName,
+    Category,
+    TargetResource,
+    TargetUserUPN,
+    Result,
+    LoggedByService,
+    CorrelationId;
+// ── Step 3: Inner join — admin operations by currently-risky users ───────────
+AdminAuditOps
+| join kind=inner (RiskyUsers) on $left.ActorUPN == $right.RiskyUPN
+| project
+    AuditTime,
+    ActorUPN,
+    RiskLevel,
+    RiskState,
+    RiskDetail,
+    RiskLastUpdated,
+    ActivityDisplayName,
+    Category,
+    TargetResource,
+    TargetUserUPN,
+    Result,
+    LoggedByService,
+    CorrelationId
+| sort by AuditTime desc

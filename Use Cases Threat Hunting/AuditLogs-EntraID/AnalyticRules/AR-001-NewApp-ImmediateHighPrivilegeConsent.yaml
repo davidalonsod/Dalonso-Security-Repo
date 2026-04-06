@@ -1,0 +1,97 @@
+id: a1b2c3d4-0001-4e5f-8901-aabbccddeeff
+name: New OAuth App Registration with Immediate High-Privilege Consent
+description: |
+  Detects a new application registered in Entra ID followed within 10 minutes
+  by an admin or user consent to that same application. This two-step pattern is
+  characteristic of OAuth phishing infrastructure set up by tools such as
+  TokenTactics, ROADtools, and AADInternals to obtain access tokens with broad
+  delegated permissions.
+  
+  Reference: TokenTactics https://github.com/rvrsh3ll/TokenTactics
+             ROADtools    https://github.com/dirkjanm/ROADtools
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 2h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - Persistence
+  - CredentialAccess
+relevantTechniques:
+  - T1098.001
+  - T1528
+query: |
+  let ConsentWindow = 10m;
+  let AppCreations = AuditLogs
+  | where TimeGenerated > ago(2h)
+  | where ActivityDisplayName in (
+      "Add application",
+      "Create application \u2013 Certificates and secrets management ")
+  | extend AppObjectId  = tostring(TargetResources[0].id)
+  | extend AppName      = tostring(TargetResources[0].displayName)
+  | extend CreatorUPN   = tostring(InitiatedBy.user.userPrincipalName)
+  | extend CreatorApp   = tostring(InitiatedBy.app.displayName)
+  | extend CreatorActor = iff(isnotempty(CreatorUPN), CreatorUPN, CreatorApp)
+  | project CreatedAt = TimeGenerated, AppObjectId, AppName, CreatorActor, CreatorUPN;
+  let ConsentEvents = AuditLogs
+  | where TimeGenerated > ago(2h)
+  | where ActivityDisplayName in (
+      "Consent to application",
+      "Add delegated permission grant",
+      "Add app role assignment to service principal")
+  | extend AppObjectId    = tostring(TargetResources[0].id)
+  | extend ConsentorUPN   = tostring(InitiatedBy.user.userPrincipalName)
+  | extend ConsentorApp   = tostring(InitiatedBy.app.displayName)
+  | extend ConsentorActor = iff(isnotempty(ConsentorUPN), ConsentorUPN, ConsentorApp)
+  | extend PermDetails    = tostring(AdditionalDetails)
+  | project ConsentedAt = TimeGenerated, AppObjectId, ConsentorActor, ConsentorUPN, PermDetails;
+  AppCreations
+  | join kind=inner ConsentEvents on AppObjectId
+  | where ConsentedAt > CreatedAt
+  | where ConsentedAt <= CreatedAt + ConsentWindow
+  | extend MinutesBetween = datetime_diff('minute', ConsentedAt, CreatedAt)
+  | project
+      TimeGenerated    = ConsentedAt,
+      AppName,
+      AppObjectId,
+      CreatedAt,
+      ConsentedAt,
+      MinutesBetween,
+      CreatorActor,
+      CreatorUPN,
+      ConsentorActor,
+      ConsentorUPN,
+      PermDetails
+
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: CreatorUPN
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: ConsentorUPN
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: Name
+        columnName: AppName
+
+customDetails:
+  AppObjectId: AppObjectId
+  MinutesBetweenCreateAndConsent: MinutesBetween
+  PermissionsGranted: PermDetails
+
+alertDetailsOverride:
+  alertDisplayNameFormat: "New OAuth App '{{AppName}}' created and immediately consented to by {{ConsentorActor}}"
+  alertDescriptionFormat: "App '{{AppName}}' ({{AppObjectId}}) was created by {{CreatorActor}} and consented to by {{ConsentorActor}} {{MinutesBetween}} minute(s) later. This may indicate OAuth phishing infrastructure setup."
+
+suppressionDuration: PT1H
+suppressionEnabled: false
+version: 1.0.0
+kind: Scheduled

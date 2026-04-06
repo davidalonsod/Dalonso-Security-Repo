@@ -1,0 +1,37 @@
+// =========================================================================
+// HQ-007: Bulk Refresh Token Revocations (Post-Compromise or Evasion)
+// =========================================================================
+// Description : "Update StsRefreshTokenValidFrom Timestamp" is produced
+//               when a user's refresh tokens are revoked (e.g., via
+//               Revoke-AzureADUserAllRefreshToken, MCAS response, or an
+//               attacker using AADInternals to invalidate sessions after
+//               extracting tokens). Three or more revocations in a day by
+//               the same actor warrants investigation — it may be IR
+//               activity or an attacker covering tracks.
+// MITRE ATT&CK: TA0005 Defense Evasion
+//               T1070 – Indicator Removal
+//               T1531 – Account Access Removal
+// Tools       : AADInternals, MCAS/MDCA automated response, IR scripts
+// Severity    : Medium
+// Data Source : AuditLogs (Azure Active Directory)
+// =========================================================================
+
+AuditLogs
+| where TimeGenerated > ago(1d)
+| where ActivityDisplayName == "Update StsRefreshTokenValidFrom Timestamp"
+| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)
+| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)
+| extend TargetUser     = tostring(TargetResources[0].displayName)
+| extend TargetUPN      = tostring(TargetResources[0].userPrincipalName)
+| summarize
+    RevocationCount = count(),
+    TargetUsers     = make_set(TargetUser, 20),
+    TargetUPNs      = make_set(TargetUPN, 20),
+    FirstEvent      = min(TimeGenerated),
+    LastEvent       = max(TimeGenerated),
+    CorrelationIds  = make_set(CorrelationId, 5)
+    by Actor
+| where RevocationCount >= 3
+| extend DurationMinutes = datetime_diff('minute', LastEvent, FirstEvent)
+| order by RevocationCount desc

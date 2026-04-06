@@ -1,0 +1,34 @@
+// =========================================================================
+// HQ-004: Burst Service Principal Creations in 1-Hour Window
+// =========================================================================
+// Description : Detects three or more service principals created by the
+//               same actor within a one-hour bucket. MicroBurst, ROADtools
+//               and CloudKatana register SPs in bulk when setting up attack
+//               infrastructure. Legitimate admins rarely create more than
+//               one or two SPs in rapid succession.
+// MITRE ATT&CK: TA0003 Persistence
+//               T1136.003 – Create Cloud Account
+// Tools       : ROADtools, MicroBurst, CloudKatana, AADInternals
+// Severity    : Medium
+// Data Source : AuditLogs (Azure Active Directory)
+// =========================================================================
+
+AuditLogs
+| where TimeGenerated > ago(1d)
+| where ActivityDisplayName == "Add service principal"
+| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)
+| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)
+| extend NewSPName      = tostring(TargetResources[0].displayName)
+| extend NewSPId        = tostring(TargetResources[0].id)
+| summarize
+    SPCreatedCount = count(),
+    SPNames        = make_set(NewSPName, 20),
+    SPIds          = make_set(NewSPId, 20),
+    FirstCreation  = min(TimeGenerated),
+    LastCreation   = max(TimeGenerated)
+    by Actor, bin(TimeGenerated, 1h)
+| where SPCreatedCount >= 3
+| extend DurationMinutes = datetime_diff('minute', LastCreation, FirstCreation)
+| extend RatePerMinute   = round(toreal(SPCreatedCount) / iff(DurationMinutes == 0, 1.0, toreal(DurationMinutes)), 2)
+| order by SPCreatedCount desc

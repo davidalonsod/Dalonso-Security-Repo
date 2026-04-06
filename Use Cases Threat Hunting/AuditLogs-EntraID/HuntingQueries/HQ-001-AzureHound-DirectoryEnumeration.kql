@@ -1,0 +1,35 @@
+// =========================================================================
+// HQ-001: AzureHound / BloodHound – Directory Enumeration via Group Policy Reads
+// =========================================================================
+// Description : Detects burst reads of GroupLifecyclePolicies, a low-noise
+//               signal produced by AzureHound and ROADtools when they map 
+//               the tenant's group model. Five or more calls in one hour from
+//               the same actor is abnormal for normal user/admin activity.
+// MITRE ATT&CK: TA0007 Discovery
+//               T1069.003 – Permission Groups Discovery: Cloud Groups
+//               T1087.004 – Account Discovery: Cloud Account
+// Tools       : AzureHound, BloodHoundAD, ROADtools
+// Severity    : Medium
+// Data Source : AuditLogs (Azure Active Directory)
+// =========================================================================
+
+AuditLogs
+| where TimeGenerated > ago(1d)
+| where ActivityDisplayName == "GroupLifecyclePolicies_Get"
+| extend InitiatedByUPN  = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatedByUser = tostring(InitiatedBy.user.displayName)
+| extend InitiatedByApp  = tostring(InitiatedBy.app.displayName)
+| extend InitiatedBySPId = tostring(InitiatedBy.app.servicePrincipalId)
+| extend Actor = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)
+| summarize
+    ActionCount    = count(),
+    FirstSeen      = min(TimeGenerated),
+    LastSeen       = max(TimeGenerated),
+    Services       = make_set(LoggedByService),
+    CorrelationIds = make_set(CorrelationId, 5)
+    by Actor, InitiatedBySPId, AADTenantId, bin(TimeGenerated, 1h)
+| where ActionCount >= 5
+| extend DurationMinutes = datetime_diff('minute', LastSeen, FirstSeen)
+| extend RatePerMinute   = round(toreal(ActionCount) / iff(DurationMinutes == 0, 1.0, toreal(DurationMinutes)), 2)
+| project-reorder TimeGenerated, Actor, ActionCount, RatePerMinute, DurationMinutes, FirstSeen, LastSeen
+| order by ActionCount desc

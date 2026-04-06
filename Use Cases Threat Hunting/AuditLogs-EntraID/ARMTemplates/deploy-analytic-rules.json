@@ -1,0 +1,280 @@
+﻿{
+    "$schema":  "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion":  "1.0.0.0",
+    "parameters":  {
+                       "workspace":  {
+                                         "type":  "string",
+                                         "metadata":  {
+                                                          "description":  "Name of the Log Analytics workspace where Microsoft Sentinel is deployed"
+                                                      }
+                                     }
+                   },
+    "resources":  [
+                      {
+                          "type":  "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+                          "apiVersion":  "2023-02-01-preview",
+                          "name":  "[concat(parameters(\u0027workspace\u0027), \u0027/Microsoft.SecurityInsights/a1b2c3d4-0001-4e5f-8901-aabbccddeeff\u0027)]",
+                          "kind":  "Scheduled",
+                          "properties":  {
+                                             "displayName":  "New OAuth App Registration with Immediate High-Privilege Consent",
+                                             "description":  "Detects a new application registered in Entra ID followed within 10 minutes by an admin or user consent to that same application. This two-step pattern is characteristic of OAuth phishing infrastructure set up by tools such as TokenTactics, ROADtools, and AADInternals to obtain access tokens with broad delegated permissions. Reference: TokenTactics https://github.com/rvrsh3ll/TokenTactics ROADtools    https://github.com/dirkjanm/ROADtools",
+                                             "severity":  "High",
+                                             "enabled":  true,
+                                             "query":  "let ConsentWindow = 10m;\nlet AppCreations = AuditLogs\n| where TimeGenerated \u003e ago(2h)\n| where ActivityDisplayName in (\n    \"Add application\",\n    \"Create application \\u2013 Certificates and secrets management \")\n| extend AppObjectId  = tostring(TargetResources[0].id)\n| extend AppName      = tostring(TargetResources[0].displayName)\n| extend CreatorUPN   = tostring(InitiatedBy.user.userPrincipalName)\n| extend CreatorApp   = tostring(InitiatedBy.app.displayName)\n| extend CreatorActor = iff(isnotempty(CreatorUPN), CreatorUPN, CreatorApp)\n| project CreatedAt = TimeGenerated, AppObjectId, AppName, CreatorActor, CreatorUPN;\nlet ConsentEvents = AuditLogs\n| where TimeGenerated \u003e ago(2h)\n| where ActivityDisplayName in (\n    \"Consent to application\",\n    \"Add delegated permission grant\",\n    \"Add app role assignment to service principal\")\n| extend AppObjectId    = tostring(TargetResources[0].id)\n| extend ConsentorUPN   = tostring(InitiatedBy.user.userPrincipalName)\n| extend ConsentorApp   = tostring(InitiatedBy.app.displayName)\n| extend ConsentorActor = iff(isnotempty(ConsentorUPN), ConsentorUPN, ConsentorApp)\n| extend PermDetails    = tostring(AdditionalDetails)\n| project ConsentedAt = TimeGenerated, AppObjectId, ConsentorActor, ConsentorUPN, PermDetails;\nAppCreations\n| join kind=inner ConsentEvents on AppObjectId\n| where ConsentedAt \u003e CreatedAt\n| where ConsentedAt \u003c= CreatedAt + ConsentWindow\n| extend MinutesBetween = datetime_diff(\u0027minute\u0027, ConsentedAt, CreatedAt)\n| project\n    TimeGenerated    = ConsentedAt,\n    AppName,\n    AppObjectId,\n    CreatedAt,\n    ConsentedAt,\n    MinutesBetween,\n    CreatorActor,\n    CreatorUPN,\n    ConsentorActor,\n    ConsentorUPN,\n    PermDetails",
+                                             "queryFrequency":  "PT1H",
+                                             "queryPeriod":  "PT2H",
+                                             "triggerOperator":  "GreaterThan",
+                                             "triggerThreshold":  0,
+                                             "suppressionDuration":  "PT2H",
+                                             "suppressionEnabled":  false,
+                                             "tactics":  [
+                                                             "Persistence",
+                                                             "CredentialAccess"
+                                                         ],
+                                             "techniques":  [
+                                                                "T1098",
+                                                                "T1528"
+                                                            ],
+                                             "entityMappings":  [
+                                                                    {
+                                                                        "entityType":  "Account",
+                                                                        "fieldMappings":  [
+                                                                                              {
+                                                                                                  "identifier":  "FullName",
+                                                                                                  "columnName":  "CreatorUPN"
+                                                                                              }
+                                                                                          ]
+                                                                    },
+                                                                    {
+                                                                        "entityType":  "Account",
+                                                                        "fieldMappings":  [
+                                                                                              {
+                                                                                                  "identifier":  "FullName",
+                                                                                                  "columnName":  "ConsentorUPN"
+                                                                                              }
+                                                                                          ]
+                                                                    }
+                                                                ],
+                                             "alertRuleTemplateName":  null
+                                         }
+                      },
+                      {
+                          "type":  "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+                          "apiVersion":  "2023-02-01-preview",
+                          "name":  "[concat(parameters(\u0027workspace\u0027), \u0027/Microsoft.SecurityInsights/b2c3d4e5-0002-4f60-9012-bbccddeeff01\u0027)]",
+                          "kind":  "Scheduled",
+                          "properties":  {
+                                             "displayName":  "Privileged Role Assigned by Service Principal Outside PIM",
+                                             "description":  "Detects when a Service Principal (application identity â€” not a human user) directly assigns a privileged Entra ID directory role via \"Core Directory\" without PIM involvement. This is a key post-exploitation step in attacks where an SP has been granted RoleManagement.ReadWrite.Directory and uses it to silently escalate privileges â€” a technique automated by AADInternals, CloudKatana, and  MicroBurst. HOW THIS DIFFERS FROM BUILT-IN \"Privileged Role Assigned Outside PIM\": The two built-in rules (\"Privileged Role Assigned Outside PIM\" and its NRT variant) alert on ALL non-PIM role assignments, including legitimate human admins using the portal/PowerShell before PIM was enforced. This rule narrows the scope to Service Principal actors only, producing higher-fidelity alerts specifically for the automated attack path â€” an SP assigning a role to itself, to another SP, or to a user account without any human involvement. Reference: AADInternals   https://github.com/Gerenios/AADInternals CloudKatana     https://github.com/Azure/CloudKatana MicroBurst      https://github.com/NetSPI/MicroBurst MITRE           T1098.003 â€“ Additional Cloud Roles",
+                                             "severity":  "High",
+                                             "enabled":  true,
+                                             "query":  "AuditLogs\n| where TimeGenerated \u003e ago(1d)\n| where ActivityDisplayName in (\n    \"Add member to role\",\n    \"Add eligible member to role\",\n    \"Add scoped member to role\",\n    \"Add permanent member to role\",\n    \"Add app role assignment to service principal\")\n| where LoggedByService !in (\"PIM\", \"Privileged Identity Management\")\n| where Result == \"success\"\n// Restrict to Service Principal actors â€” the uniquely dangerous attack path\n| where isnotempty(tostring(InitiatedBy.app.servicePrincipalId))\n| where isempty(tostring(InitiatedBy.user.userPrincipalName))\n| extend ActingAppDisplayName     = tostring(InitiatedBy.app.displayName)\n| extend ActingAppServicePrincipalId = tostring(InitiatedBy.app.servicePrincipalId)\n| extend ActingAppId              = tostring(InitiatedBy.app.appId)\n| extend TargetUser               = tostring(TargetResources[0].displayName)\n| extend TargetUserUPN            = tostring(TargetResources[0].userPrincipalName)\n| extend TargetUserId             = tostring(TargetResources[0].id)\n| extend TargetType               = tostring(TargetResources[0].type)\n| extend RoleName                 = tostring(TargetResources[1].displayName)\n| project\n    TimeGenerated,\n    ActingAppDisplayName,\n    ActingAppServicePrincipalId,\n    ActingAppId,\n    TargetUser,\n    TargetUserUPN,\n    TargetUserId,\n    TargetType,\n    RoleName,\n    ActivityDisplayName,\n    LoggedByService,\n    AADOperationType,\n    CorrelationId",
+                                             "queryFrequency":  "PT15M",
+                                             "queryPeriod":  "P1D",
+                                             "triggerOperator":  "GreaterThan",
+                                             "triggerThreshold":  0,
+                                             "suppressionDuration":  "PT1H",
+                                             "suppressionEnabled":  false,
+                                             "tactics":  [
+                                                             "PrivilegeEscalation",
+                                                             "Persistence"
+                                                         ],
+                                             "techniques":  [
+                                                                "T1098",
+                                                                "T1078"
+                                                            ],
+                                             "entityMappings":  [
+                                                                    {
+                                                                        "entityType":  "Account",
+                                                                        "fieldMappings":  [
+                                                                                              {
+                                                                                                  "identifier":  "Name",
+                                                                                                  "columnName":  "ActingAppDisplayName"
+                                                                                              },
+                                                                                              {
+                                                                                                  "identifier":  "AadUserId",
+                                                                                                  "columnName":  "ActingAppServicePrincipalId"
+                                                                                              }
+                                                                                          ]
+                                                                    },
+                                                                    {
+                                                                        "entityType":  "Account",
+                                                                        "fieldMappings":  [
+                                                                                              {
+                                                                                                  "identifier":  "FullName",
+                                                                                                  "columnName":  "TargetUserUPN"
+                                                                                              }
+                                                                                          ]
+                                                                    }
+                                                                ],
+                                             "alertRuleTemplateName":  null
+                                         }
+                      },
+                      {
+                          "type":  "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+                          "apiVersion":  "2023-02-01-preview",
+                          "name":  "[concat(parameters(\u0027workspace\u0027), \u0027/Microsoft.SecurityInsights/c3d4e5f6-0003-4061-a123-ccddeeff0011\u0027)]",
+                          "kind":  "Scheduled",
+                          "properties":  {
+                                             "displayName":  "Credential Added to Application Registration Outside Business Hours",
+                                             "description":  "Detects a new secret or certificate being added to an existing Entra ID application registration between 20:00â€“08:00 local UTC or on weekends. Attackers who have compromised a Global Admin or Application Admin account add credentials to high-value apps to establish persistence that survives password resets. Legitimate DevOps pipelines are expected during working hours; out-of-hours changes are anomalous and require investigation. Adjust the BusinessHoursStart / BusinessHoursEnd variables to match your organization\u0027s working hours. Reference: MicroBurst   https://github.com/NetSPI/MicroBurst AADInternals  https://github.com/Gerenios/AADInternals",
+                                             "severity":  "Medium",
+                                             "enabled":  true,
+                                             "query":  "// --- Configurable thresholds ---\nlet BusinessHoursStart = 8;   // 08:00 UTC\nlet BusinessHoursEnd   = 20;  // 20:00 UTC\n// --------------------------------\nAuditLogs\n| where TimeGenerated \u003e ago(1d)\n| where ActivityDisplayName in (\n    \"Update application \\u2013 Certificates and secrets management \",\n    \"Create application \\u2013 Certificates and secrets management \",\n    \"Add service principal credentials\",\n    \"Update service principal\")\n| mv-expand Prop = TargetResources[0].modifiedProperties\n| where tostring(Prop.displayName) has_any (\n    \"KeyCredentials\",\n    \"PasswordCredentials\",\n    \"Credential\",\n    \"Secret\",\n    \"Certificate\")\n| where Result == \"success\"\n| extend HourOfDay  = toint(format_datetime(TimeGenerated, \"HH\"))\n| extend DayOfWeek  = dayofweek(TimeGenerated) / 1d  // 0=Sun, 6=Sat\n| where HourOfDay \u003c BusinessHoursStart\n     or HourOfDay \u003e= BusinessHoursEnd\n     or DayOfWeek == 0\n     or DayOfWeek == 6\n| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)\n| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetApp      = tostring(TargetResources[0].displayName)\n| extend TargetAppId    = tostring(TargetResources[0].id)\n| extend CredType       = tostring(Prop.displayName)\n| project\n    TimeGenerated,\n    Actor,\n    InitiatedByUPN,\n    TargetApp,\n    TargetAppId,\n    CredType,\n    HourOfDay,\n    DayOfWeek,\n    ActivityDisplayName,\n    LoggedByService,\n    CorrelationId",
+                                             "queryFrequency":  "PT1H",
+                                             "queryPeriod":  "P1D",
+                                             "triggerOperator":  "GreaterThan",
+                                             "triggerThreshold":  0,
+                                             "suppressionDuration":  "PT2H",
+                                             "suppressionEnabled":  false,
+                                             "tactics":  [
+                                                             "Persistence"
+                                                         ],
+                                             "techniques":  [
+                                                                "T1098"
+                                                            ],
+                                             "entityMappings":  [
+                                                                    {
+                                                                        "entityType":  "Account",
+                                                                        "fieldMappings":  [
+                                                                                              {
+                                                                                                  "identifier":  "FullName",
+                                                                                                  "columnName":  "InitiatedByUPN"
+                                                                                              }
+                                                                                          ]
+                                                                    }
+                                                                ],
+                                             "alertRuleTemplateName":  null
+                                         }
+                      },
+                      {
+                          "type":  "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+                          "apiVersion":  "2023-02-01-preview",
+                          "name":  "[concat(parameters(\u0027workspace\u0027), \u0027/Microsoft.SecurityInsights/d4e5f607-0004-4162-b234-ddeeff001122\u0027)]",
+                          "kind":  "Scheduled",
+                          "properties":  {
+                                             "displayName":  "Burst of OAuth Consent Grants by a Single Actor",
+                                             "description":  "Alerts when a single user or application performs five or more OAuth consent or permission-grant operations within a one-hour window. This is characteristic of automated consent-phishing campaigns where a compromised account is used to grant attacker-controlled apps access to mailboxes, files, or directory objects across the organization. It is also a signal from tools such as ROADtools and TokenTactics when they enumerate or abuse delegation chains in bulk. Reference: TokenTactics https://github.com/rvrsh3ll/TokenTactics ROADtools     https://github.com/dirkjanm/ROADtools",
+                                             "severity":  "High",
+                                             "enabled":  true,
+                                             "query":  "// --- Configurable ---\nlet ConsentThreshold = 5;\n// --------------------\nAuditLogs\n| where TimeGenerated \u003e ago(2h)\n| where ActivityDisplayName in (\n    \"Consent to application\",\n    \"Add delegated permission grant\",\n    \"Add app role assignment to service principal\",\n    \"Remove delegated permission grant\")\n| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)\n| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetApp      = tostring(TargetResources[0].displayName)\n| summarize\n    ConsentCount   = count(),\n    AppsActedOn    = make_set(TargetApp, 20),\n    Operations     = make_set(ActivityDisplayName),\n    FirstEvent     = min(TimeGenerated),\n    LastEvent      = max(TimeGenerated),\n    CorrelationIds = make_set(CorrelationId, 5)\n    by Actor, InitiatedByUPN, bin(TimeGenerated, 1h)\n| where ConsentCount \u003e= ConsentThreshold\n| extend DurationMinutes = datetime_diff(\u0027minute\u0027, LastEvent, FirstEvent)\n| extend RatePerMinute   = round(toreal(ConsentCount) / iff(DurationMinutes == 0, 1.0, toreal(DurationMinutes)), 2)",
+                                             "queryFrequency":  "PT1H",
+                                             "queryPeriod":  "PT2H",
+                                             "triggerOperator":  "GreaterThan",
+                                             "triggerThreshold":  0,
+                                             "suppressionDuration":  "PT2H",
+                                             "suppressionEnabled":  false,
+                                             "tactics":  [
+                                                             "CredentialAccess",
+                                                             "Persistence"
+                                                         ],
+                                             "techniques":  [
+                                                                "T1528",
+                                                                "T1098"
+                                                            ],
+                                             "entityMappings":  [
+                                                                    {
+                                                                        "entityType":  "Account",
+                                                                        "fieldMappings":  [
+                                                                                              {
+                                                                                                  "identifier":  "FullName",
+                                                                                                  "columnName":  "InitiatedByUPN"
+                                                                                              }
+                                                                                          ]
+                                                                    }
+                                                                ],
+                                             "alertRuleTemplateName":  null
+                                         }
+                      },
+                      {
+                          "type":  "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+                          "apiVersion":  "2023-02-01-preview",
+                          "name":  "[concat(parameters(\u0027workspace\u0027), \u0027/Microsoft.SecurityInsights/e5f60718-0005-4263-c345-eeff00112233\u0027)]",
+                          "kind":  "Scheduled",
+                          "properties":  {
+                                             "displayName":  "Entra ID Domain Federation Settings Modified",
+                                             "description":  "Detects any modification to a domain\u0027s authentication configuration, including converting a domain from Managed to Federated authentication. This is the primary technique in the \"Golden SAML\" attack and the AADInternals `ConvertTo-AADIntBackdoor` command: by pointing a domain at a rogue Identity Provider, an attacker can forge authentication tokens for any user without knowing their password, fully bypassing MFA. Any occurrence of this event should be treated as Critical until verified with the identity team. There should be extremely few legitimate changes to domain federation settings. Reference: AADInternals https://github.com/Gerenios/AADInternals MITRE T1484.002 â€“ Domain Trust Modification",
+                                             "severity":  "High",
+                                             "enabled":  true,
+                                             "query":  "AuditLogs\n| where TimeGenerated \u003e ago(1d)\n| where ActivityDisplayName in (\n    \"Set domain authentication\",\n    \"Set federation settings on domain\",\n    \"Set federation settings\",\n    \"Set DirSyncEnabled flag\",\n    \"Update domain\")\n| where Result == \"success\"\n| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)\n| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetDomain   = tostring(TargetResources[0].displayName)\n| extend TargetId       = tostring(TargetResources[0].id)\n| mv-expand Prop = TargetResources[0].modifiedProperties\n| extend PropName = tostring(Prop.displayName)\n| extend OldValue = tostring(Prop.oldValue)\n| extend NewValue = tostring(Prop.newValue)\n| project\n    TimeGenerated,\n    Actor,\n    InitiatedByUPN,\n    ActivityDisplayName,\n    TargetDomain,\n    TargetId,\n    PropName,\n    OldValue,\n    NewValue,\n    LoggedByService,\n    CorrelationId",
+                                             "queryFrequency":  "PT15M",
+                                             "queryPeriod":  "P1D",
+                                             "triggerOperator":  "GreaterThan",
+                                             "triggerThreshold":  0,
+                                             "suppressionDuration":  "PT1H",
+                                             "suppressionEnabled":  false,
+                                             "tactics":  [
+                                                             "Persistence",
+                                                             "DefenseEvasion",
+                                                             "CredentialAccess"
+                                                         ],
+                                             "techniques":  [
+                                                                "T1484",
+                                                                "T1606"
+                                                            ],
+                                             "entityMappings":  [
+                                                                    {
+                                                                        "entityType":  "Account",
+                                                                        "fieldMappings":  [
+                                                                                              {
+                                                                                                  "identifier":  "FullName",
+                                                                                                  "columnName":  "InitiatedByUPN"
+                                                                                              }
+                                                                                          ]
+                                                                    },
+                                                                    {
+                                                                        "entityType":  "DNS",
+                                                                        "fieldMappings":  [
+                                                                                              {
+                                                                                                  "identifier":  "DomainName",
+                                                                                                  "columnName":  "TargetDomain"
+                                                                                              }
+                                                                                          ]
+                                                                    }
+                                                                ],
+                                             "alertRuleTemplateName":  null
+                                         }
+                      },
+                      {
+                          "type":  "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+                          "apiVersion":  "2023-02-01-preview",
+                          "name":  "[concat(parameters(\u0027workspace\u0027), \u0027/Microsoft.SecurityInsights/f6071829-0006-4364-d456-ff0011223344\u0027)]",
+                          "kind":  "Scheduled",
+                          "properties":  {
+                                             "displayName":  "Bulk Password Profile Updates Across Multiple Users",
+                                             "description":  "Detects five or more successful \"Update PasswordProfile\" or  \"Update StsRefreshTokenValidFrom Timestamp\" events against different users within a one-hour window from the same actor. This bulk behavior is seen during Azure AD Connect sync exploitation (AADInternals), automated password resets by an attacker pivoting through multiple accounts, or an adversary revoking tokens to prevent defensive response teams from maintaining access. A single user performing multiple password profile updates in rapid succession is anomalous unless they are a privileged service account with a known management profile. Reference: AADInternals https://github.com/Gerenios/AADInternals MITRE T1098 â€“ Account Manipulation",
+                                             "severity":  "High",
+                                             "enabled":  true,
+                                             "query":  "// --- Configurable ---\nlet UpdateThreshold = 5;\n// --------------------\nAuditLogs\n| where TimeGenerated \u003e ago(2h)\n| where ActivityDisplayName in (\n    \"Update PasswordProfile\",\n    \"Update StsRefreshTokenValidFrom Timestamp\",\n    \"Reset user password\",\n    \"Change user password\")\n| where Result == \"success\"\n| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)\n| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetUser     = tostring(TargetResources[0].displayName)\n| extend TargetUserUPN  = tostring(TargetResources[0].userPrincipalName)\n| summarize\n    UpdateCount       = count(),\n    DistinctTargets   = dcount(TargetUserUPN),\n    TargetUsers       = make_set(TargetUserUPN, 20),\n    Operations        = make_set(ActivityDisplayName),\n    FirstEvent        = min(TimeGenerated),\n    LastEvent         = max(TimeGenerated),\n    CorrelationIds    = make_set(CorrelationId, 5)\n    by Actor, InitiatedByUPN, bin(TimeGenerated, 1h)\n| where UpdateCount \u003e= UpdateThreshold and DistinctTargets \u003e= 3\n| extend DurationMinutes = datetime_diff(\u0027minute\u0027, LastEvent, FirstEvent)",
+                                             "queryFrequency":  "PT1H",
+                                             "queryPeriod":  "PT2H",
+                                             "triggerOperator":  "GreaterThan",
+                                             "triggerThreshold":  0,
+                                             "suppressionDuration":  "PT2H",
+                                             "suppressionEnabled":  false,
+                                             "tactics":  [
+                                                             "Persistence",
+                                                             "Impact",
+                                                             "DefenseEvasion"
+                                                         ],
+                                             "techniques":  [
+                                                                "T1098",
+                                                                "T1531",
+                                                                "T1070"
+                                                            ],
+                                             "entityMappings":  [
+                                                                    {
+                                                                        "entityType":  "Account",
+                                                                        "fieldMappings":  [
+                                                                                              {
+                                                                                                  "identifier":  "FullName",
+                                                                                                  "columnName":  "InitiatedByUPN"
+                                                                                              }
+                                                                                          ]
+                                                                    }
+                                                                ],
+                                             "alertRuleTemplateName":  null
+                                         }
+                      }
+                  ]
+}

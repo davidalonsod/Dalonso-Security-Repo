@@ -1,0 +1,87 @@
+id: e5f60718-0005-4263-c345-eeff00112233
+name: Entra ID Domain Federation Settings Modified
+description: |
+  Detects any modification to a domain's authentication configuration, including
+  converting a domain from Managed to Federated authentication. This is the
+  primary technique in the "Golden SAML" attack and the AADInternals
+  `ConvertTo-AADIntBackdoor` command: by pointing a domain at a rogue Identity
+  Provider, an attacker can forge authentication tokens for any user without
+  knowing their password, fully bypassing MFA.
+
+  Any occurrence of this event should be treated as Critical until verified with
+  the identity team. There should be extremely few legitimate changes to domain
+  federation settings.
+
+  Reference: AADInternals https://github.com/Gerenios/AADInternals
+             MITRE T1484.002 – Domain Trust Modification
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 15m
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - Persistence
+  - DefenseEvasion
+relevantTechniques:
+  - T1484.002
+  - T1606.002
+query: |
+  AuditLogs
+  | where TimeGenerated > ago(1d)
+  | where ActivityDisplayName in (
+      "Set domain authentication",
+      "Set federation settings on domain",
+      "Set federation settings",
+      "Set DirSyncEnabled flag",
+      "Update domain")
+  | where Result == "success"
+  | extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)
+  | extend InitiatedByApp = tostring(InitiatedBy.app.displayName)
+  | extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)
+  | extend TargetDomain   = tostring(TargetResources[0].displayName)
+  | extend TargetId       = tostring(TargetResources[0].id)
+  | mv-expand Prop = TargetResources[0].modifiedProperties
+  | extend PropName = tostring(Prop.displayName)
+  | extend OldValue = tostring(Prop.oldValue)
+  | extend NewValue = tostring(Prop.newValue)
+  | project
+      TimeGenerated,
+      Actor,
+      InitiatedByUPN,
+      ActivityDisplayName,
+      TargetDomain,
+      TargetId,
+      PropName,
+      OldValue,
+      NewValue,
+      LoggedByService,
+      CorrelationId
+
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: InitiatedByUPN
+  - entityType: DNS
+    fieldMappings:
+      - identifier: DomainName
+        columnName: TargetDomain
+
+customDetails:
+  ModifiedProperty: PropName
+  OldAuthType: OldValue
+  NewAuthType: NewValue
+
+alertDetailsOverride:
+  alertDisplayNameFormat: "CRITICAL – Domain federation config changed on '{{TargetDomain}}' by {{Actor}}"
+  alertDescriptionFormat: "Actor {{Actor}} modified the domain authentication settings for '{{TargetDomain}}'. Property '{{PropName}}' changed from '{{OldValue}}' to '{{NewValue}}'. If this was not pre-approved, treat as a Golden SAML attack attempt."
+
+suppressionDuration: PT1H
+suppressionEnabled: false
+version: 1.0.0
+kind: Scheduled

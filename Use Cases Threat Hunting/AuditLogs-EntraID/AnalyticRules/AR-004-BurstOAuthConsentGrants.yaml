@@ -1,0 +1,74 @@
+id: d4e5f607-0004-4162-b234-ddeeff001122
+name: Burst of OAuth Consent Grants by a Single Actor
+description: |
+  Alerts when a single user or application performs five or more OAuth consent
+  or permission-grant operations within a one-hour window. This is characteristic
+  of automated consent-phishing campaigns where a compromised account is used to
+  grant attacker-controlled apps access to mailboxes, files, or directory objects
+  across the organization. It is also a signal from tools such as ROADtools and
+  TokenTactics when they enumerate or abuse delegation chains in bulk.
+
+  Reference: TokenTactics https://github.com/rvrsh3ll/TokenTactics
+             ROADtools     https://github.com/dirkjanm/ROADtools
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 2h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - CredentialAccess
+  - Persistence
+relevantTechniques:
+  - T1528
+  - T1098.001
+query: |
+  // --- Configurable ---
+  let ConsentThreshold = 5;
+  // --------------------
+  AuditLogs
+  | where TimeGenerated > ago(2h)
+  | where ActivityDisplayName in (
+      "Consent to application",
+      "Add delegated permission grant",
+      "Add app role assignment to service principal",
+      "Remove delegated permission grant")
+  | extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)
+  | extend InitiatedByApp = tostring(InitiatedBy.app.displayName)
+  | extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)
+  | extend TargetApp      = tostring(TargetResources[0].displayName)
+  | summarize
+      ConsentCount   = count(),
+      AppsActedOn    = make_set(TargetApp, 20),
+      Operations     = make_set(ActivityDisplayName),
+      FirstEvent     = min(TimeGenerated),
+      LastEvent      = max(TimeGenerated),
+      CorrelationIds = make_set(CorrelationId, 5)
+      by Actor, InitiatedByUPN, bin(TimeGenerated, 1h)
+  | where ConsentCount >= ConsentThreshold
+  | extend DurationMinutes = datetime_diff('minute', LastEvent, FirstEvent)
+  | extend RatePerMinute   = round(toreal(ConsentCount) / iff(DurationMinutes == 0, 1.0, toreal(DurationMinutes)), 2)
+
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: InitiatedByUPN
+
+customDetails:
+  ConsentCount: ConsentCount
+  DurationMinutes: DurationMinutes
+  AppsActedOn: AppsActedOn
+
+alertDetailsOverride:
+  alertDisplayNameFormat: "Burst OAuth consent activity: {{ConsentCount}} consent operations by {{Actor}} in 1 hour"
+  alertDescriptionFormat: "Actor {{Actor}} performed {{ConsentCount}} OAuth consent/permission-grant operations in {{DurationMinutes}} minutes, affecting apps: {{AppsActedOn}}. This may indicate automated consent-phishing or token enumeration."
+
+suppressionDuration: PT2H
+suppressionEnabled: false
+version: 1.0.0
+kind: Scheduled
