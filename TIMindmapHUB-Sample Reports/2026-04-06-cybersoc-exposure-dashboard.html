@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TI Mindmap HUB — CyberSOC Exposure Assessment Dashboard</title>
+<style>
+  :root{--bg:#0a0e17;--panel:#111827;--border:#1e293b;--accent:#3b82f6;--critical:#ef4444;--high:#f97316;--elevated:#eab308;--low:#22c55e;--text:#e2e8f0;--muted:#94a3b8;--glow-red:rgba(239,68,68,.35);--glow-blue:rgba(59,130,246,.25)}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;line-height:1.5;overflow-x:hidden}
+  .scanline{pointer-events:none;position:fixed;inset:0;z-index:9999;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.03) 2px,rgba(0,0,0,.03) 4px)}
+  header{background:linear-gradient(135deg,#0f172a 0%,#4c0519 50%,#172554 100%);border-bottom:1px solid var(--border);padding:1.5rem 2rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem}
+  header .brand{display:flex;align-items:center;gap:.75rem}
+  header .brand h1{font-size:1.3rem;font-weight:700;background:linear-gradient(90deg,#f87171,#fbbf24);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  header .meta{display:flex;gap:1.5rem;flex-wrap:wrap}
+  header .meta span{font-size:.8rem;color:var(--muted)}
+  header .meta span b{color:var(--text)}
+  .threat-badge{display:inline-flex;align-items:center;gap:.35rem;padding:.25rem .65rem;border-radius:6px;font-size:.75rem;font-weight:700;letter-spacing:.04em;animation:pulse-badge 2s ease-in-out infinite}
+  .threat-badge.critical{background:rgba(239,68,68,.15);color:#fca5a5;border:1px solid rgba(239,68,68,.4)}
+  @keyframes pulse-badge{0%,100%{box-shadow:0 0 6px var(--glow-red)}50%{box-shadow:0 0 18px var(--glow-red)}}
+  main{max-width:1440px;margin:0 auto;padding:1.5rem;display:flex;flex-direction:column;gap:1.5rem}
+  .row{display:grid;gap:1.5rem}.row-2{grid-template-columns:1fr 1fr}.row-3{grid-template-columns:1fr 1fr 1fr}.row-4{grid-template-columns:1fr 1fr 1fr 1fr}
+  @media(max-width:960px){.row-2,.row-3,.row-4{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:border-color .25s}
+  .card:hover{border-color:#334155}
+  .card-header{padding:.85rem 1.15rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+  .card-header h2{font-size:.9rem;font-weight:600;display:flex;align-items:center;gap:.45rem}
+  .pill{font-size:.65rem;padding:.15rem .5rem;border-radius:999px;font-weight:700;letter-spacing:.04em}
+  .pill-critical{background:rgba(239,68,68,.15);color:#fca5a5}
+  .pill-high{background:rgba(249,115,22,.15);color:#fdba74}
+  .pill-medium{background:rgba(234,179,8,.15);color:#fde047}
+  .pill-info{background:rgba(59,130,246,.15);color:#93c5fd}
+  .pill-clean{background:rgba(34,197,94,.15);color:#86efac}
+  .card-body{padding:1.15rem}
+  .stat-row{display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:1.25rem}
+  .stat{flex:1;min-width:110px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:.75rem .9rem;text-align:center}
+  .stat .val{font-size:1.5rem;font-weight:800;line-height:1.1}.stat .label{font-size:.65rem;color:var(--muted);margin-top:.25rem;text-transform:uppercase;letter-spacing:.06em}
+  .stat.red .val{color:#f87171}.stat.orange .val{color:#fb923c}.stat.yellow .val{color:#facc15}.stat.blue .val{color:#60a5fa}.stat.green .val{color:#4ade80}.stat.purple .val{color:#c084fc}
+  .tbl{width:100%;border-collapse:collapse;font-size:.78rem}
+  .tbl th{text-align:left;padding:.55rem .65rem;background:rgba(255,255,255,.03);color:var(--muted);font-weight:600;font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)}
+  .tbl td{padding:.5rem .65rem;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:top}
+  .tbl tr:hover td{background:rgba(59,130,246,.04)}
+  .mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:.72rem;word-break:break-all}
+  .check-grid{display:grid;grid-template-columns:1fr 1fr;gap:.75rem}
+  @media(max-width:700px){.check-grid{grid-template-columns:1fr}}
+  .check-item{display:flex;align-items:center;gap:.65rem;background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:8px;padding:.65rem .85rem}
+  .check-icon{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0}
+  .check-icon.pass{background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3)}
+  .check-icon.fail{background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.3)}
+  .check-icon.warn{background:rgba(234,179,8,.15);color:#facc15;border:1px solid rgba(234,179,8,.3)}
+  .check-label{font-size:.78rem;font-weight:600}.check-detail{font-size:.68rem;color:var(--muted)}
+  .sector-bar{margin-bottom:.65rem}
+  .sector-bar .bar-label{display:flex;justify-content:space-between;font-size:.72rem;margin-bottom:.25rem}
+  .sector-bar .bar-track{height:8px;background:rgba(255,255,255,.06);border-radius:4px;overflow:hidden}
+  .sector-bar .bar-fill{height:100%;border-radius:4px;transition:width .8s ease}
+  .mitre-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:.4rem}
+  .mitre-cell{padding:.45rem .55rem;border-radius:6px;font-size:.65rem;text-align:center;border:1px solid transparent;transition:transform .15s}
+  .mitre-cell:hover{transform:scale(1.06)}
+  .mitre-cell .tid{font-weight:700;display:block;margin-bottom:.1rem}
+  .mitre-cell .tname{color:var(--muted);font-size:.6rem;display:block}
+  .mc-crit{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3)}
+  .mc-high{background:rgba(249,115,22,.1);border-color:rgba(249,115,22,.25)}
+  .mc-med{background:rgba(234,179,8,.08);border-color:rgba(234,179,8,.2)}
+  .mc-low{background:rgba(59,130,246,.08);border-color:rgba(59,130,246,.2)}
+  .rec-item{display:flex;gap:.65rem;padding:.75rem;border-left:3px solid var(--critical);background:rgba(239,68,68,.04);border-radius:0 8px 8px 0;margin-bottom:.65rem}
+  .rec-item.high-pri{border-left-color:var(--high)}
+  .rec-item.med-pri{border-left-color:var(--elevated)}
+  .rec-item .rec-num{font-size:.75rem;font-weight:800;color:#f87171;flex-shrink:0;width:24px}
+  .rec-item.high-pri .rec-num{color:#fb923c}
+  .rec-item.med-pri .rec-num{color:#facc15}
+  .rec-item .rec-text{font-size:.78rem}
+  .rec-item .rec-text b{color:var(--text)}
+  .device-status{display:inline-flex;align-items:center;gap:.3rem;padding:.15rem .45rem;border-radius:4px;font-size:.65rem;font-weight:600}
+  .device-status.compromised{background:rgba(239,68,68,.12);color:#fca5a5}
+  .device-status.at-risk{background:rgba(249,115,22,.12);color:#fdba74}
+  .device-status.monitoring{background:rgba(234,179,8,.12);color:#fde047}
+  @keyframes map-pulse{0%{r:4;opacity:1}100%{r:14;opacity:0}}
+  .marker-ping{animation:map-pulse 2s ease-out infinite}
+  footer{text-align:center;padding:2rem 1rem;color:var(--muted);font-size:.72rem;border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
+  ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+
+<header>
+  <div class="brand">
+    <svg width="36" height="36" viewBox="0 0 36 36"><circle cx="18" cy="18" r="17" fill="none" stroke="#ef4444" stroke-width="1.5" opacity=".7"/><circle cx="18" cy="18" r="11" fill="none" stroke="#f87171" stroke-width="1" opacity=".5"/><circle cx="18" cy="18" r="5" fill="#ef4444" opacity=".8"><animate attributeName="r" values="5;7;5" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values=".8;.4;.8" dur="2s" repeatCount="indefinite"/></circle><path d="M18 1v10M18 25v10M1 18h10M25 18h10" stroke="#f87171" stroke-width=".5" opacity=".4"/></svg>
+    <div>
+      <h1>CyberSOC Exposure Assessment</h1>
+      <div style="font-size:.7rem;color:var(--muted)">Microsoft Sentinel &mdash; Threat Intelligence Validation</div>
+    </div>
+  </div>
+  <div class="meta">
+    <span>Workspace <b>CyberSOC</b></span>
+    <span>Tenant <b>zava-corp.com</b></span>
+    <span>Period <b>2026-03-07 &rarr; 2026-04-06</b></span>
+    <span class="threat-badge critical">&#9888; CRITICAL EXPOSURE</span>
+  </div>
+</header>
+
+<main>
+
+<!-- ═══════ EXECUTIVE SUMMARY STATS ═══════ -->
+<div class="row row-4" style="grid-template-columns:repeat(6,1fr)">
+  <div class="stat red"><div class="val">30,087</div><div class="label">Total Alerts</div></div>
+  <div class="stat orange"><div class="val">7,876</div><div class="label">High Severity</div></div>
+  <div class="stat yellow"><div class="val">14,811</div><div class="label">Risk Events</div></div>
+  <div class="stat red"><div class="val">28</div><div class="label">Confirmed Compromised</div></div>
+  <div class="stat purple"><div class="val">8</div><div class="label">Affected Devices</div></div>
+  <div class="stat blue"><div class="val">351</div><div class="label">TI IP Matches</div></div>
+</div>
+
+<!-- ═══════ ALERT TREND (30-DAY SVG CHART) ═══════ -->
+<div class="card">
+  <div class="card-header">
+    <h2>&#128200; 30-Day Security Alert Trend</h2>
+    <span class="pill pill-critical">PEAK: 2,180 alerts on Mar 18</span>
+  </div>
+  <div class="card-body" style="padding:.75rem">
+    <svg viewBox="0 0 920 220" style="width:100%;height:auto">
+      <defs>
+        <linearGradient id="gTotal" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#3b82f6" stop-opacity=".3"/><stop offset="100%" stop-color="#3b82f6" stop-opacity=".02"/></linearGradient>
+        <linearGradient id="gHigh" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ef4444" stop-opacity=".4"/><stop offset="100%" stop-color="#ef4444" stop-opacity=".02"/></linearGradient>
+      </defs>
+      <!-- Grid lines -->
+      <line x1="10" y1="10" x2="910" y2="10" stroke="#1e293b" stroke-width=".5" stroke-dasharray="4"/>
+      <line x1="10" y1="55" x2="910" y2="55" stroke="#1e293b" stroke-width=".5" stroke-dasharray="4"/>
+      <line x1="10" y1="100" x2="910" y2="100" stroke="#1e293b" stroke-width=".5" stroke-dasharray="4"/>
+      <line x1="10" y1="145" x2="910" y2="145" stroke="#1e293b" stroke-width=".5" stroke-dasharray="4"/>
+      <line x1="10" y1="195" x2="910" y2="195" stroke="#1e293b" stroke-width=".5"/>
+      <!-- Y-axis labels -->
+      <text x="4" y="14" fill="#64748b" font-size="7" text-anchor="start">2.2K</text>
+      <text x="4" y="59" fill="#64748b" font-size="7" text-anchor="start">1.6K</text>
+      <text x="4" y="104" fill="#64748b" font-size="7" text-anchor="start">1.1K</text>
+      <text x="4" y="149" fill="#64748b" font-size="7" text-anchor="start">500</text>
+      <text x="4" y="199" fill="#64748b" font-size="7" text-anchor="start">0</text>
+      <!-- Total alerts area -->
+      <path d="M10,183 L41,164 L72,161 L103,128 L134,140 L165,151 L196,93 L227,73 L258,48 L289,77 L320,88 L351,10 L382,46 L413,43 L444,35 L475,117 L506,133 L537,117 L568,131 L599,116 L630,93 L661,127 L692,126 L723,31 L754,132 L785,131 L816,72 L847,131 L878,138 L909,182 L909,195 L10,195 Z" fill="url(#gTotal)"/>
+      <path d="M10,183 L41,164 L72,161 L103,128 L134,140 L165,151 L196,93 L227,73 L258,48 L289,77 L320,88 L351,10 L382,46 L413,43 L444,35 L475,117 L506,133 L537,117 L568,131 L599,116 L630,93 L661,127 L692,126 L723,31 L754,132 L785,131 L816,72 L847,131 L878,138 L909,182" fill="none" stroke="#3b82f6" stroke-width="1.5" opacity=".6"/>
+      <!-- HIGH alerts line -->
+      <path d="M10,180 L41,161 L72,159 L103,154 L134,156 L165,161 L196,137 L227,163 L258,112 L289,122 L320,78 L351,30 L382,101 L413,98 L444,10 L475,102 L506,128 L537,114 L568,134 L599,131 L630,138 L661,160 L692,162 L723,66 L754,129 L785,161 L816,78 L847,152 L878,154 L909,188 L909,195 L10,195 Z" fill="url(#gHigh)"/>
+      <path d="M10,180 L41,161 L72,159 L103,154 L134,156 L165,161 L196,137 L227,163 L258,112 L289,122 L320,78 L351,30 L382,101 L413,98 L444,10 L475,102 L506,128 L537,114 L568,134 L599,131 L630,138 L661,160 L692,162 L723,66 L754,129 L785,161 L816,78 L847,152 L878,154 L909,188" fill="none" stroke="#ef4444" stroke-width="2"/>
+      <!-- Peak marker Mar 18 (index 11, total peak) -->
+      <circle cx="351" cy="10" r="4" fill="#3b82f6" stroke="#fff" stroke-width="1"/>
+      <text x="351" y="6" fill="#93c5fd" font-size="7" text-anchor="middle">Mar 18: 2,180</text>
+      <!-- Peak marker Mar 21 (index 14, HIGH peak) -->
+      <circle cx="444" cy="10" r="4" fill="#ef4444" stroke="#fff" stroke-width="1"/>
+      <text x="444" y="6" fill="#fca5a5" font-size="7" text-anchor="middle">Mar 21: 753 HIGH</text>
+      <!-- X-axis dates -->
+      <text x="10" y="210" fill="#64748b" font-size="7" text-anchor="start">Mar 7</text>
+      <text x="196" y="210" fill="#64748b" font-size="7" text-anchor="middle">Mar 13</text>
+      <text x="351" y="210" fill="#64748b" font-size="7" text-anchor="middle">Mar 18</text>
+      <text x="506" y="210" fill="#64748b" font-size="7" text-anchor="middle">Mar 24</text>
+      <text x="661" y="210" fill="#64748b" font-size="7" text-anchor="middle">Mar 29</text>
+      <text x="816" y="210" fill="#64748b" font-size="7" text-anchor="middle">Apr 3</text>
+      <text x="909" y="210" fill="#64748b" font-size="7" text-anchor="end">Apr 5</text>
+      <!-- Legend -->
+      <rect x="700" y="14" width="12" height="3" rx="1" fill="#ef4444"/>
+      <text x="716" y="17" fill="#fca5a5" font-size="7">HIGH Severity</text>
+      <rect x="790" y="14" width="12" height="3" rx="1" fill="#3b82f6" opacity=".6"/>
+      <text x="806" y="17" fill="#93c5fd" font-size="7">Total Alerts</text>
+    </svg>
+  </div>
+</div>
+
+<!-- ═══════ IOC VALIDATION + RISK OVERVIEW ═══════ -->
+<div class="row row-2">
+
+  <!-- IOC Validation -->
+  <div class="card">
+    <div class="card-header">
+      <h2>&#128269; Report IOC Validation</h2>
+      <span class="pill pill-clean">6/8 CLEAN</span>
+    </div>
+    <div class="card-body">
+      <div class="check-grid">
+        <div class="check-item">
+          <div class="check-icon pass">&#10003;</div>
+          <div><div class="check-label">C2 IP Addresses</div><div class="check-detail">6 IPs checked &mdash; 0 matches in DeviceNetworkEvents</div></div>
+        </div>
+        <div class="check-item">
+          <div class="check-icon pass">&#10003;</div>
+          <div><div class="check-label">Malicious Domains</div><div class="check-detail">4 domains checked &mdash; 0 DNS resolutions found</div></div>
+        </div>
+        <div class="check-item">
+          <div class="check-icon pass">&#10003;</div>
+          <div><div class="check-label">Trojanized Packages</div><div class="check-detail">axios/litellm/plain-crypto &mdash; 0 process matches</div></div>
+        </div>
+        <div class="check-item">
+          <div class="check-icon pass">&#10003;</div>
+          <div><div class="check-label">Iran-origin Sign-ins</div><div class="check-detail">0 sign-ins from Iranian IPs detected</div></div>
+        </div>
+        <div class="check-item">
+          <div class="check-icon pass">&#10003;</div>
+          <div><div class="check-label">CVE Software Exposure</div><div class="check-detail">FortiClient / BeyondTrust / Citrix &mdash; not installed</div></div>
+        </div>
+        <div class="check-item">
+          <div class="check-icon pass">&#10003;</div>
+          <div><div class="check-label">TI Feed IOC Match</div><div class="check-detail">Report IOCs not in ThreatIntelligenceIndicator feed</div></div>
+        </div>
+        <div class="check-item">
+          <div class="check-icon fail">&#10007;</div>
+          <div><div class="check-label">TI Map IP &rarr; Network Events</div><div class="check-detail">351 MEDIUM alerts &mdash; other TI IPs matched devices</div></div>
+        </div>
+        <div class="check-item">
+          <div class="check-icon warn">&#9888;</div>
+          <div><div class="check-label">Device Code Phishing</div><div class="check-detail">50 device auth events for u20362@int.zava-corp.com</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Risk Events Breakdown -->
+  <div class="card">
+    <div class="card-header">
+      <h2>&#9888;&#65039; Identity Risk Events</h2>
+      <span class="pill pill-critical">14,811 EVENTS</span>
+    </div>
+    <div class="card-body">
+      <div class="sector-bar"><div class="bar-label"><span>Suspicious Auth App Approval</span><span style="color:#f87171">13,418</span></div><div class="bar-track"><div class="bar-fill" style="width:100%;background:linear-gradient(90deg,#ef4444,#f97316)"></div></div></div>
+      <div class="sector-bar"><div class="bar-label"><span>Anonymized IP Address</span><span style="color:#fb923c">953</span></div><div class="bar-track"><div class="bar-fill" style="width:7.1%;background:linear-gradient(90deg,#f97316,#fb923c)"></div></div></div>
+      <div class="sector-bar"><div class="bar-label"><span>Suspicious API Traffic</span><span style="color:#facc15">142</span></div><div class="bar-track"><div class="bar-fill" style="width:1.1%;background:linear-gradient(90deg,#eab308,#facc15)"></div></div></div>
+      <div class="sector-bar"><div class="bar-label"><span>Unfamiliar Features</span><span style="color:#facc15">136</span></div><div class="bar-track"><div class="bar-fill" style="width:1%;background:linear-gradient(90deg,#eab308,#facc15)"></div></div></div>
+      <div class="sector-bar"><div class="bar-label"><span>AI Compound Account Risk</span><span style="color:#f87171">111</span></div><div class="bar-track"><div class="bar-fill" style="width:.8%;background:linear-gradient(90deg,#ef4444,#f87171)"></div></div></div>
+      <div class="sector-bar"><div class="bar-label"><span>Admin Confirmed Compromised</span><span style="color:#f87171;font-weight:700">28</span></div><div class="bar-track"><div class="bar-fill" style="width:.2%;min-width:8px;background:#ef4444"></div></div></div>
+      <div class="sector-bar"><div class="bar-label"><span>MCAS Impossible Travel</span><span style="color:#94a3b8">12</span></div><div class="bar-track"><div class="bar-fill" style="width:.1%;min-width:6px;background:#64748b"></div></div></div>
+      <div class="sector-bar"><div class="bar-label"><span>Malicious IP Address</span><span style="color:#f87171">4</span></div><div class="bar-track"><div class="bar-fill" style="width:.03%;min-width:4px;background:#ef4444"></div></div></div>
+      <div class="sector-bar"><div class="bar-label"><span>Inbox Manipulation Rules</span><span style="color:#f87171">1</span></div><div class="bar-track"><div class="bar-fill" style="width:.01%;min-width:3px;background:#ef4444"></div></div></div>
+      <div class="sector-bar"><div class="bar-label"><span>Anomalous Token</span><span style="color:#facc15">1</span></div><div class="bar-track"><div class="bar-fill" style="width:.01%;min-width:3px;background:#eab308"></div></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ TOP SECURITY ALERTS ═══════ -->
+<div class="card">
+  <div class="card-header">
+    <h2>&#128680; Top Security Alerts by Category</h2>
+    <span class="pill pill-critical">11,365+ UNIQUE ALERTS</span>
+  </div>
+  <div class="card-body" style="overflow-x:auto">
+    <table class="tbl">
+      <thead><tr><th>Alert Name</th><th>Count</th><th>Severity</th><th>Source</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td><b style="color:#fca5a5">Potential human-operated malicious activity</b></td><td style="color:#f87171;font-weight:700">355</td><td><span class="pill pill-critical">HIGH</span></td><td>MDATP</td><td><span class="device-status compromised">ACTIVE</span></td></tr>
+        <tr><td><b style="color:#fca5a5">Compromised account &mdash; hands-on-keyboard attack</b></td><td style="color:#f87171;font-weight:700">259</td><td><span class="pill pill-critical">HIGH</span></td><td>MDATP</td><td><span class="device-status compromised">ACTIVE</span></td></tr>
+        <tr><td><b style="color:#fca5a5">Hands-on-keyboard involving multiple devices</b></td><td style="color:#f87171;font-weight:700">253</td><td><span class="pill pill-critical">HIGH</span></td><td>MDATP</td><td><span class="device-status compromised">ACTIVE</span></td></tr>
+        <tr><td><b style="color:#fca5a5">Phishing alert</b></td><td style="color:#f87171;font-weight:700">203</td><td><span class="pill pill-critical">HIGH</span></td><td>MTP</td><td><span class="device-status compromised">ACTIVE</span></td></tr>
+        <tr><td><b style="color:#fca5a5">Ransomware-like behavior</b></td><td style="color:#f87171;font-weight:700">121</td><td><span class="pill pill-critical">HIGH</span></td><td>MDATP</td><td><span class="device-status compromised">ACTIVE</span></td></tr>
+        <tr><td><b style="color:#fca5a5">Credential theft tool execution</b></td><td style="color:#f87171;font-weight:700">118</td><td><span class="pill pill-critical">HIGH</span></td><td>MDATP</td><td><span class="device-status compromised">ACTIVE</span></td></tr>
+        <tr><td>DLP policy violations</td><td style="color:#f87171;font-weight:700">607+</td><td><span class="pill pill-critical">HIGH</span></td><td>MDCA</td><td><span class="device-status at-risk">REVIEW</span></td></tr>
+        <tr><td>Anonymous IP address</td><td>850</td><td><span class="pill pill-medium">MEDIUM</span></td><td>IPC</td><td><span class="device-status monitoring">MONITOR</span></td></tr>
+        <tr><td>TI Map IP Entity to DeviceNetworkEvents</td><td style="color:#fb923c;font-weight:700">351</td><td><span class="pill pill-medium">MEDIUM</span></td><td>ASI Scheduled</td><td><span class="device-status at-risk">REVIEW</span></td></tr>
+        <tr><td>CC_Risky behavior in Copilot for M365</td><td>294</td><td><span class="pill pill-medium">MEDIUM</span></td><td>MDA</td><td><span class="device-status monitoring">MONITOR</span></td></tr>
+        <tr><td>CC_Insider risk trigger</td><td>268</td><td><span class="pill pill-medium">MEDIUM</span></td><td>MDA</td><td><span class="device-status monitoring">MONITOR</span></td></tr>
+        <tr><td>Honeytoken authentication activity</td><td>201</td><td><span class="pill pill-medium">MEDIUM</span></td><td>Azure ATP</td><td><span class="device-status at-risk">REVIEW</span></td></tr>
+        <tr><td>CC_Detect Project Obsidian in M365 Copilot</td><td>175</td><td><span class="pill pill-medium">MEDIUM</span></td><td>MDA</td><td><span class="device-status monitoring">MONITOR</span></td></tr>
+        <tr><td>Unix credentials illegitimately accessed</td><td>161</td><td><span class="pill pill-medium">MEDIUM</span></td><td>MDATP</td><td><span class="device-status at-risk">REVIEW</span></td></tr>
+        <tr><td>PowerShell execution detected</td><td>1,539</td><td><span class="pill pill-medium">MEDIUM</span></td><td>MDATP</td><td><span class="device-status monitoring">MONITOR</span></td></tr>
+        <tr><td>Suspicious volume of logins with elevated token</td><td>137</td><td><span class="pill pill-medium">MEDIUM</span></td><td>ASI Scheduled</td><td><span class="device-status at-risk">REVIEW</span></td></tr>
+        <tr><td>Activity from TOR IP address</td><td>177</td><td><span class="pill pill-info">LOW</span></td><td>MCAS</td><td><span class="device-status monitoring">MONITOR</span></td></tr>
+        <tr><td>Email reported as malware/phish</td><td>338</td><td><span class="pill pill-info">LOW</span></td><td>OATP</td><td><span class="device-status monitoring">MONITOR</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══════ COMPROMISED DEVICES + COMPROMISED USERS ═══════ -->
+<div class="row row-2">
+
+  <!-- Compromised Devices -->
+  <div class="card">
+    <div class="card-header">
+      <h2>&#128187; Compromised Devices</h2>
+      <span class="pill pill-critical">8 DEVICES</span>
+    </div>
+    <div class="card-body">
+      <svg viewBox="0 0 500 320" style="width:100%;height:auto">
+        <defs>
+          <linearGradient id="gBar" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#ef4444"/><stop offset="100%" stop-color="#f97316"/></linearGradient>
+        </defs>
+        <!-- laurenceg-pc -->
+        <text x="170" y="22" fill="#e2e8f0" font-size="10" text-anchor="end">laurenceg-pc</text>
+        <rect x="175" y="12" width="280" height="16" rx="3" fill="url(#gBar)" opacity=".85"/>
+        <text x="460" y="24" fill="#fca5a5" font-size="9" font-weight="700">382</text>
+        <text x="180" y="24" fill="#fff" font-size="7">HOK: 192 | Ransomware: 190</text>
+        <!-- lydiab-pc -->
+        <text x="170" y="54" fill="#e2e8f0" font-size="10" text-anchor="end">lydiab-pc</text>
+        <rect x="175" y="44" width="158" height="16" rx="3" fill="url(#gBar)" opacity=".8"/>
+        <text x="338" y="56" fill="#fca5a5" font-size="9" font-weight="700">216</text>
+        <text x="180" y="56" fill="#fff" font-size="7">HOK: 41 | Ransomware: 175</text>
+        <!-- rayt-pc -->
+        <text x="170" y="86" fill="#e2e8f0" font-size="10" text-anchor="end">rayt-pc</text>
+        <rect x="175" y="76" width="154" height="16" rx="3" fill="url(#gBar)" opacity=".75"/>
+        <text x="334" y="88" fill="#fca5a5" font-size="9" font-weight="700">210</text>
+        <text x="180" y="88" fill="#fff" font-size="7">HOK: 66 | CredTheft: 144</text>
+        <!-- jump-srv -->
+        <text x="170" y="118" fill="#e2e8f0" font-size="10" text-anchor="end">jump-srv</text>
+        <rect x="175" y="108" width="106" height="16" rx="3" fill="url(#gBar)" opacity=".7"/>
+        <text x="286" y="120" fill="#fca5a5" font-size="9" font-weight="700">144</text>
+        <text x="180" y="120" fill="#fff" font-size="7">HOK: 123 | Ransomware: 21</text>
+        <!-- aaronb-pc -->
+        <text x="170" y="150" fill="#e2e8f0" font-size="10" text-anchor="end">aaronb-pc</text>
+        <rect x="175" y="140" width="32" height="16" rx="3" fill="#f97316" opacity=".7"/>
+        <text x="212" y="152" fill="#fdba74" font-size="9" font-weight="700">43</text>
+        <text x="217" y="152" fill="#94a3b8" font-size="7">  HOK attacks</text>
+        <!-- davidp-pc -->
+        <text x="170" y="182" fill="#e2e8f0" font-size="10" text-anchor="end">davidp-pc</text>
+        <rect x="175" y="172" width="25" height="16" rx="3" fill="#f97316" opacity=".65"/>
+        <text x="205" y="184" fill="#fdba74" font-size="9" font-weight="700">34</text>
+        <text x="217" y="184" fill="#94a3b8" font-size="7">  HOK attacks</text>
+        <!-- main-dc ⚠️ DOMAIN CONTROLLER -->
+        <text x="170" y="214" fill="#f87171" font-size="10" text-anchor="end" font-weight="700">main-dc &#9888;</text>
+        <rect x="175" y="204" width="8" height="16" rx="3" fill="#ef4444" opacity=".8"/>
+        <text x="188" y="216" fill="#fca5a5" font-size="9" font-weight="700">10</text>
+        <text x="200" y="216" fill="#fca5a5" font-size="7">HOK on DOMAIN CONTROLLER</text>
+        <!-- babaks-pc -->
+        <text x="170" y="246" fill="#e2e8f0" font-size="10" text-anchor="end">babaks-pc</text>
+        <rect x="175" y="236" width="3" height="16" rx="3" fill="#eab308" opacity=".6"/>
+        <text x="183" y="248" fill="#fde047" font-size="9" font-weight="700">3</text>
+        <text x="193" y="248" fill="#94a3b8" font-size="7">  HOK attacks</text>
+        <!-- All domain -->
+        <text x="250" y="280" fill="#64748b" font-size="8" text-anchor="middle">All devices in zava-corp.com domain</text>
+        <text x="250" y="295" fill="#64748b" font-size="7" text-anchor="middle">Active period: 2026-03-11 &rarr; 2026-04-04</text>
+        <!-- Legend -->
+        <rect x="120" y="310" width="10" height="4" rx="1" fill="#ef4444"/>
+        <text x="135" y="314" fill="#94a3b8" font-size="7">Ransomware</text>
+        <rect x="195" y="310" width="10" height="4" rx="1" fill="#f97316"/>
+        <text x="210" y="314" fill="#94a3b8" font-size="7">Hands-on-Keyboard</text>
+        <rect x="305" y="310" width="10" height="4" rx="1" fill="#fbbf24"/>
+        <text x="320" y="314" fill="#94a3b8" font-size="7">Credential Theft</text>
+      </svg>
+    </div>
+  </div>
+
+  <!-- Compromised Users -->
+  <div class="card">
+    <div class="card-header">
+      <h2>&#128100; High-Risk Compromised Users</h2>
+      <span class="pill pill-critical">28 CONFIRMED</span>
+    </div>
+    <div class="card-body" style="overflow-x:auto">
+      <table class="tbl">
+        <thead><tr><th>User</th><th>Risk Type</th><th>Level</th><th>State</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="mono" style="color:#fca5a5;font-weight:700">u2671@int.zava-corp.com</td>
+            <td>Admin Confirmed Compromised</td>
+            <td><span class="pill pill-critical">HIGH</span></td>
+            <td><span class="device-status compromised">COMPROMISED</span></td>
+          </tr>
+          <tr>
+            <td class="mono">u1058@int.zava-corp.com</td>
+            <td>AI Compound Account Risk</td>
+            <td><span class="pill pill-critical">HIGH</span></td>
+            <td><span class="device-status at-risk">AT RISK</span></td>
+          </tr>
+          <tr>
+            <td class="mono">u4209@int.zava-corp.com</td>
+            <td>AI Compound Account Risk</td>
+            <td><span class="pill pill-critical">HIGH</span></td>
+            <td><span class="device-status at-risk">AT RISK</span></td>
+          </tr>
+          <tr>
+            <td class="mono">aaronb@zava-corp.com</td>
+            <td>AI Compound Account Risk</td>
+            <td><span class="pill pill-critical">HIGH</span></td>
+            <td><span class="device-status at-risk">AT RISK</span></td>
+          </tr>
+          <tr>
+            <td class="mono">rayt@zava-corp.com</td>
+            <td>AI Compound Account Risk (x6)</td>
+            <td><span class="pill pill-critical">HIGH</span></td>
+            <td><span class="device-status at-risk">AT RISK</span></td>
+          </tr>
+        </tbody>
+      </table>
+      <div style="margin-top:1rem;padding:.75rem;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.15);border-radius:8px">
+        <div style="font-size:.72rem;color:var(--muted);margin-bottom:.5rem">&#128202; <b style="color:var(--text)">Risk State Breakdown (30d)</b></div>
+        <div class="stat-row" style="margin-bottom:0">
+          <div class="stat red" style="padding:.5rem"><div class="val" style="font-size:1.1rem">28</div><div class="label">Confirmed Compromised</div></div>
+          <div class="stat orange" style="padding:.5rem"><div class="val" style="font-size:1.1rem">13,237</div><div class="label">At Risk</div></div>
+          <div class="stat green" style="padding:.5rem"><div class="val" style="font-size:1.1rem">1,400</div><div class="label">Remediated</div></div>
+          <div class="stat blue" style="padding:.5rem"><div class="val" style="font-size:1.1rem">74</div><div class="label">Dismissed</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ═══════ ALERT SEVERITY DISTRIBUTION (SVG DONUT) + TOR/PHISHING ═══════ -->
+<div class="row row-2">
+
+  <!-- Severity Donut -->
+  <div class="card">
+    <div class="card-header">
+      <h2>&#128200; Alert Severity Distribution</h2>
+      <span class="pill pill-info">30-DAY AGGREGATE</span>
+    </div>
+    <div class="card-body" style="display:flex;align-items:center;gap:2rem;flex-wrap:wrap">
+      <svg viewBox="0 0 200 200" style="width:180px;height:180px;flex-shrink:0">
+        <!-- Donut chart: HIGH=7876 (26.2%), MEDIUM=7660 (25.5%), LOW=10691 (35.5%), INFO=3860 (12.8%) -->
+        <!-- Total circumference = 2*π*70 ≈ 439.8 -->
+        <!-- HIGH: 26.2% → 115.2 -->
+        <circle cx="100" cy="100" r="70" fill="none" stroke="#ef4444" stroke-width="24" stroke-dasharray="115.2 324.6" stroke-dashoffset="110" opacity=".85"/>
+        <!-- MEDIUM: 25.5% → 112.1 -->
+        <circle cx="100" cy="100" r="70" fill="none" stroke="#f97316" stroke-width="24" stroke-dasharray="112.1 327.7" stroke-dashoffset="-5.2" opacity=".75"/>
+        <!-- LOW: 35.5% → 156.1 -->
+        <circle cx="100" cy="100" r="70" fill="none" stroke="#3b82f6" stroke-width="24" stroke-dasharray="156.1 283.7" stroke-dashoffset="-117.3" opacity=".65"/>
+        <!-- INFO: 12.8% → 56.3 -->
+        <circle cx="100" cy="100" r="70" fill="none" stroke="#64748b" stroke-width="24" stroke-dasharray="56.3 383.5" stroke-dashoffset="-273.4" opacity=".5"/>
+        <text x="100" y="95" fill="#e2e8f0" font-size="18" font-weight="800" text-anchor="middle">30,087</text>
+        <text x="100" y="112" fill="#94a3b8" font-size="9" text-anchor="middle">Total Alerts</text>
+      </svg>
+      <div style="flex:1;min-width:150px">
+        <div class="sector-bar"><div class="bar-label"><span>&#128308; HIGH</span><span style="color:#f87171;font-weight:700">7,876 (26.2%)</span></div><div class="bar-track"><div class="bar-fill" style="width:26.2%;background:#ef4444"></div></div></div>
+        <div class="sector-bar"><div class="bar-label"><span>&#128992; MEDIUM</span><span style="color:#fb923c;font-weight:700">7,660 (25.5%)</span></div><div class="bar-track"><div class="bar-fill" style="width:25.5%;background:#f97316"></div></div></div>
+        <div class="sector-bar"><div class="bar-label"><span>&#128309; LOW</span><span style="color:#60a5fa;font-weight:700">10,691 (35.5%)</span></div><div class="bar-track"><div class="bar-fill" style="width:35.5%;background:#3b82f6"></div></div></div>
+        <div class="sector-bar"><div class="bar-label"><span>&#9899; INFORMATIONAL</span><span style="color:#94a3b8;font-weight:700">3,860 (12.8%)</span></div><div class="bar-track"><div class="bar-fill" style="width:12.8%;background:#64748b"></div></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phishing & TOR Activity -->
+  <div class="card">
+    <div class="card-header">
+      <h2>&#127907; Phishing &amp; Anonymization Activity</h2>
+      <span class="pill pill-high">576 PHISHING + 183 TOR</span>
+    </div>
+    <div class="card-body">
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:.75rem;font-weight:600">&#128233; PHISHING ALERTS</div>
+      <table class="tbl" style="margin-bottom:1.25rem">
+        <thead><tr><th>Alert</th><th>Count</th><th>Severity</th></tr></thead>
+        <tbody>
+          <tr><td>Phishing alert (MTP)</td><td style="color:#f87171;font-weight:700">203</td><td><span class="pill pill-critical">HIGH</span></td></tr>
+          <tr><td>Email reported as malware/phish</td><td>338</td><td><span class="pill pill-info">LOW</span></td></tr>
+          <tr><td>Internal phishing campaign</td><td style="color:#f87171;font-weight:700">30</td><td><span class="pill pill-critical">HIGH</span></td></tr>
+          <tr><td>AI agent phishing attempt</td><td style="color:#f87171;font-weight:700">3</td><td><span class="pill pill-critical">HIGH</span></td></tr>
+          <tr><td>Teams phishing &mdash; Defender Experts</td><td>1</td><td><span class="pill pill-critical">HIGH</span></td></tr>
+        </tbody>
+      </table>
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:.75rem;font-weight:600">&#127760; TOR / ANONYMIZATION</div>
+      <table class="tbl">
+        <thead><tr><th>Entity</th><th>Count</th><th>Period</th></tr></thead>
+        <tbody>
+          <tr><td style="color:#94a3b8">(Various users)</td><td>177</td><td>Mar 10 &mdash; Apr 4</td></tr>
+          <tr><td class="mono">ASHDEMOUSERSKV</td><td>5</td><td>Mar 26 &mdash; Mar 30</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- ═══════ MITRE ATT&CK TECHNIQUE MAPPING ═══════ -->
+<div class="card">
+  <div class="card-header">
+    <h2>&#128736; MITRE ATT&amp;CK Technique Coverage — Detected in CyberSOC</h2>
+    <span class="pill pill-critical">13 TECHNIQUES ACTIVE</span>
+  </div>
+  <div class="card-body">
+    <div class="mitre-grid">
+      <div class="mitre-cell mc-crit"><span class="tid">T1486</span><span class="tname">Data Encrypted for Impact</span><div style="margin-top:.2rem;font-size:.58rem;color:#fca5a5">520 alerts</div></div>
+      <div class="mitre-cell mc-crit"><span class="tid">T1003</span><span class="tname">OS Credential Dumping</span><div style="margin-top:.2rem;font-size:.58rem;color:#fca5a5">151 alerts</div></div>
+      <div class="mitre-cell mc-crit"><span class="tid">T1566</span><span class="tname">Phishing</span><div style="margin-top:.2rem;font-size:.58rem;color:#fca5a5">576 alerts</div></div>
+      <div class="mitre-cell mc-crit"><span class="tid">T1078</span><span class="tname">Valid Accounts</span><div style="margin-top:.2rem;font-size:.58rem;color:#fca5a5">13,418 risk events</div></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1059</span><span class="tname">Command &amp; Scripting</span><div style="margin-top:.2rem;font-size:.58rem;color:#fdba74">1,539 alerts</div></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1071</span><span class="tname">Application Layer Protocol</span><div style="margin-top:.2rem;font-size:.58rem;color:#fdba74">351 TI matches</div></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1550</span><span class="tname">Alt. Auth Material</span><div style="margin-top:.2rem;font-size:.58rem;color:#fdba74">137 elevated token</div></div>
+      <div class="mitre-cell mc-high"><span class="tid">T1098</span><span class="tname">Account Manipulation</span><div style="margin-top:.2rem;font-size:.58rem;color:#fdba74">Inbox rules + 28 compromised</div></div>
+      <div class="mitre-cell mc-med"><span class="tid">T1090</span><span class="tname">Proxy (TOR)</span><div style="margin-top:.2rem;font-size:.58rem;color:#fde047">183 alerts</div></div>
+      <div class="mitre-cell mc-med"><span class="tid">T1021</span><span class="tname">Remote Services</span><div style="margin-top:.2rem;font-size:.58rem;color:#fde047">137 alerts</div></div>
+      <div class="mitre-cell mc-med"><span class="tid">T1567</span><span class="tname">Exfil Over Web Service</span><div style="margin-top:.2rem;font-size:.58rem;color:#fde047">607+ DLP violations</div></div>
+      <div class="mitre-cell mc-low"><span class="tid">T1190</span><span class="tname">Exploit Public-Facing App</span><div style="margin-top:.2rem;font-size:.58rem;color:#93c5fd">AI agent phishing</div></div>
+      <div class="mitre-cell mc-low"><span class="tid">T1534</span><span class="tname">Internal Spearphishing</span><div style="margin-top:.2rem;font-size:.58rem;color:#93c5fd">30 internal campaigns</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════ REPORT-TO-ENVIRONMENT CORRELATION MATRIX ═══════ -->
+<div class="card">
+  <div class="card-header">
+    <h2>&#128279; Report &#x2194; CyberSOC Correlation Matrix</h2>
+    <span class="pill pill-info">5 REPORTS ASSESSED</span>
+  </div>
+  <div class="card-body" style="overflow-x:auto">
+    <table class="tbl">
+      <thead><tr><th>Threat Report</th><th>IOC Match</th><th>Technique Overlap</th><th>Env. Exposure</th><th>Risk Rating</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><b>Financial Sector Threats</b><br><span style="font-size:.65rem;color:var(--muted)">APT38, FIN7, Lazarus Group</span></td>
+          <td><span class="device-status" style="background:rgba(34,197,94,.12);color:#86efac">0 IOCs</span></td>
+          <td style="font-size:.72rem">T1566 Phishing &#10003;<br>T1078 Valid Accounts &#10003;<br>T1003 Credential Dumping &#10003;</td>
+          <td style="font-size:.72rem;color:#fb923c">Technique patterns active in environment. No direct IOC overlap.</td>
+          <td><span class="pill pill-high">HIGH</span></td>
+        </tr>
+        <tr>
+          <td><b>Insurance Sector Threats</b><br><span style="font-size:.65rem;color:var(--muted)">Ransomware, BEC, DDoS</span></td>
+          <td><span class="device-status" style="background:rgba(34,197,94,.12);color:#86efac">0 IOCs</span></td>
+          <td style="font-size:.72rem">T1486 Ransomware &#10003;<br>T1566 Phishing &#10003;<br>T1567 Exfiltration &#10003;</td>
+          <td style="font-size:.72rem;color:#f87171">520 ransomware-like alerts + 607 DLP violations active.</td>
+          <td><span class="pill pill-critical">CRITICAL</span></td>
+        </tr>
+        <tr>
+          <td><b>Retail Sector Threats</b><br><span style="font-size:.65rem;color:var(--muted)">Supply chain, Magecart, POS</span></td>
+          <td><span class="device-status" style="background:rgba(34,197,94,.12);color:#86efac">0 IOCs</span></td>
+          <td style="font-size:.72rem">T1059 Scripting &#10003;<br>T1071 App Protocol &#10003;</td>
+          <td style="font-size:.72rem;color:#fb923c">No supply chain packages detected. TI IP matches present.</td>
+          <td><span class="pill pill-medium">MEDIUM</span></td>
+        </tr>
+        <tr>
+          <td><b>Iran Threat Actors</b><br><span style="font-size:.65rem;color:var(--muted)">MuddyWater, APT33, Charming Kitten</span></td>
+          <td><span class="device-status" style="background:rgba(34,197,94,.12);color:#86efac">0 IOCs</span></td>
+          <td style="font-size:.72rem">T1078 Valid Accounts &#10003;<br>T1098 Acct. Manipulation &#10003;</td>
+          <td style="font-size:.72rem;color:#facc15">0 Iran-origin sign-ins. Techniques present but no attribution.</td>
+          <td><span class="pill pill-medium">MEDIUM</span></td>
+        </tr>
+        <tr>
+          <td><b>Spain-Focused Threats</b><br><span style="font-size:.65rem;color:var(--muted)">Banking trojans, phishing, ransomware</span></td>
+          <td><span class="device-status" style="background:rgba(34,197,94,.12);color:#86efac">0 IOCs</span></td>
+          <td style="font-size:.72rem">T1566 Phishing &#10003;<br>T1486 Ransomware &#10003;<br>T1534 Internal Phishing &#10003;</td>
+          <td style="font-size:.72rem;color:#f87171">30 internal phishing campaigns. Technique strongly correlates.</td>
+          <td><span class="pill pill-high">HIGH</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══════ RECOMMENDATIONS ═══════ -->
+<div class="card">
+  <div class="card-header">
+    <h2>&#128220; Priority Recommendations</h2>
+    <span class="pill pill-critical">IMMEDIATE ACTION REQUIRED</span>
+  </div>
+  <div class="card-body">
+    <div class="rec-item"><div class="rec-num">01</div><div class="rec-text"><b>Isolate compromised devices immediately.</b> laurenceg-pc, lydiab-pc, rayt-pc, and jump-srv show persistent hands-on-keyboard + ransomware indicators over a 24-day active period. Perform forensic imaging before remediation.</div></div>
+    <div class="rec-item"><div class="rec-num">02</div><div class="rec-text"><b>Investigate main-dc.zava-corp.com (Domain Controller).</b> 10 hands-on-keyboard attack alerts on the DC indicate potential domain-wide compromise. Check for golden ticket / DCSync activity. Trigger Tier-0 incident response protocol.</div></div>
+    <div class="rec-item"><div class="rec-num">03</div><div class="rec-text"><b>Reset credentials for 28 confirmed compromised accounts.</b> Enforce conditional access policies, revoke all active sessions, and require MFA re-enrollment. Priority: u2671@int.zava-corp.com (admin-confirmed).</div></div>
+    <div class="rec-item high-pri"><div class="rec-num">04</div><div class="rec-text"><b>Investigate 13,418 suspicious OAuth app approvals.</b> This massive volume suggests either a consent phishing campaign or a rogue application with broad permissions. Audit enterprise app registrations and revoke suspicious grants.</div></div>
+    <div class="rec-item high-pri"><div class="rec-num">05</div><div class="rec-text"><b>Triage 351 TI IP matches in DeviceNetworkEvents.</b> These represent confirmed connections to threat intelligence-flagged IP addresses. Extract the matched IPs and correlate with firewall/proxy logs for full scope assessment.</div></div>
+    <div class="rec-item high-pri"><div class="rec-num">06</div><div class="rec-text"><b>Review 607+ DLP policy violations.</b> Combined with the ransomware and credential theft activity, this may indicate active data exfiltration. Assess whether sensitive data was transmitted to external destinations.</div></div>
+    <div class="rec-item med-pri"><div class="rec-num">07</div><div class="rec-text"><b>Audit Copilot for M365 usage.</b> 294 risky behavior + 175 Project Obsidian detections suggest potential misuse of AI tools. Review prompts and data access patterns for sensitive content exposure.</div></div>
+    <div class="rec-item med-pri"><div class="rec-num">08</div><div class="rec-text"><b>Block TOR exit nodes at the network perimeter.</b> 177 TOR-sourced connections were detected. Implement conditional access to block sign-ins from anonymizing services and atypical locations.</div></div>
+    <div class="rec-item med-pri"><div class="rec-num">09</div><div class="rec-text"><b>Deploy report-specific IOCs to TI feed.</b> The 6 C2 IPs and 4 malicious domains from sector reports are not currently in your ThreatIntelligenceIndicator table. Import them for proactive monitoring.</div></div>
+    <div class="rec-item med-pri"><div class="rec-num">10</div><div class="rec-text"><b>Harden device code authentication flow.</b> 50 device code auth events detected. Disable device code flow via Conditional Access where not operationally required to mitigate EvilTokens-style attacks.</div></div>
+  </div>
+</div>
+
+<!-- ═══════ INVESTIGATION QUERIES ═══════ -->
+<div class="card">
+  <div class="card-header">
+    <h2>&#128270; KQL Hunt Queries Used</h2>
+    <span class="pill pill-info">18 QUERIES EXECUTED</span>
+  </div>
+  <div class="card-body" style="font-size:.72rem;color:var(--muted)">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem">
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; C2 IP addresses vs DeviceNetworkEvents</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; Malicious domains vs DeviceNetworkEvents</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; ThreatIntelligenceIndicator IOC search</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; Device code phishing (SigninLogs)</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; AADUserRiskEvents summary (14,811 events)</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; SecurityAlert summary (30,087 alerts)</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; Iran-origin sign-in check</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; High-risk compromised user detail</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; CVE software detection (FortiClient/BeyondTrust/Citrix)</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; Trojanized package process detection</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; TI Map IP &rarr; DeviceNetworkEvents detail</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; Ransomware alerts by compromised device</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; Credential theft by compromised device</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; Hands-on-keyboard by compromised device</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; Phishing alert detail breakdown</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; Daily alert volume by severity (30d trend)</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; TOR/anonymization activity detail</div>
+      <div style="padding:.4rem .6rem;background:rgba(255,255,255,.02);border-radius:4px">&#9989; Sentinel workspace &amp; table discovery (3 calls)</div>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<footer>
+  <b>TI Mindmap HUB</b> &mdash; CyberSOC Exposure Assessment &mdash; Generated 2026-04-06 via Microsoft Sentinel KQL | Workspace: CyberSOC (e34d562e-ef12-4c4e-9bc0-7c6ae357c015)<br>
+  <span style="color:#f87171">&#9888; CLASSIFICATION: CONFIDENTIAL &mdash; INTERNAL USE ONLY</span>
+</footer>
+
+</body>
+</html>
