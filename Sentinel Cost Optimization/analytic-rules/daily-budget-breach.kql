@@ -1,0 +1,29 @@
+let _AuxiliaryTables = dynamic([
+    "OfficeActivity", "AzureActivity", "Heartbeat",
+    "SentinelHealth", "SecurityAlert", "SecurityIncident", "Operation"
+]);
+let _DailyBudgetGB = 15.0;
+let _CostPerGB = 2.76;
+Usage
+| where TimeGenerated > ago(1d)
+| where IsBillable == true
+| where DataType !in (_AuxiliaryTables)
+| summarize TotalMB = sum(Quantity) by DataType
+| extend TotalGB = TotalMB / 1024.0
+| summarize 
+    DailyTotalGB = round(sum(TotalGB), 2),
+    TopTable = arg_max(TotalGB, DataType),
+    TableCount = dcount(DataType)
+| where DailyTotalGB > _DailyBudgetGB
+| extend
+    OverageGB = round(DailyTotalGB - _DailyBudgetGB, 2),
+    OverageCostUSD = round((DailyTotalGB - _DailyBudgetGB) * _CostPerGB, 2),
+    DailyCostUSD = round(DailyTotalGB * _CostPerGB, 2),
+    BudgetUtilizationPct = round(DailyTotalGB / _DailyBudgetGB * 100, 1)
+| project 
+    TimeGenerated = now(),
+    DailyTotalGB, DailyCostUSD,
+    BudgetGB = _DailyBudgetGB,
+    OverageGB, OverageCostUSD, BudgetUtilizationPct,
+    TopContributor = DataType,
+    ActiveTables = TableCount

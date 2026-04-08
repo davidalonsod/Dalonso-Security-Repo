@@ -1,0 +1,80 @@
+// Cross-Table Data Overlap Detection
+// Identifies accounts, IPs, and hosts appearing in MULTIPLE tables.
+// When the same entity is logged in 3+ tables, you may be paying
+// for redundant visibility. Use to decide which tables to keep.
+// =====================================================================
+
+let _Window = 1d;
+// --- Part 1: Account overlap ---
+let _AccountSources =
+    union withsource=SourceTable
+        (SecurityEvent | where TimeGenerated > ago(_Window) | project Account = TargetAccount, SourceTable),
+        (SigninLogs | where TimeGenerated > ago(_Window) | project Account = UserPrincipalName, SourceTable),
+        (AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(_Window) | project Account = UserPrincipalName, SourceTable),
+        (OfficeActivity | where TimeGenerated > ago(_Window) | project Account = UserId, SourceTable),
+        (AuditLogs | where TimeGenerated > ago(_Window) | project Account = tostring(InitiatedBy.user.userPrincipalName), SourceTable),
+        (IdentityLogonEvents | where TimeGenerated > ago(_Window) | project Account = AccountUpn, SourceTable)
+    | where isnotempty(Account)
+    | summarize Tables = make_set(SourceTable), TableCount = dcount(SourceTable), EventCount = count() by Account;
+let _OverlappingAccounts =
+    _AccountSources
+    | where TableCount >= 3
+    | top 20 by EventCount desc
+    | project 
+        EntityType = "Account", Entity = Account, 
+        TablesCount = TableCount, Tables = tostring(Tables), 
+        TotalEvents = EventCount,
+        Recommendation = case(
+            TableCount >= 5, "HIGH OVERLAP: Account in 5+ tables - Review which tables add unique detection value",
+            TableCount >= 3, "OVERLAP: Account in 3+ tables - Evaluate if all sources needed",
+            ""
+        );
+// --- Part 2: IP overlap ---
+let _IPSources =
+    union withsource=SourceTable
+        (SigninLogs | where TimeGenerated > ago(_Window) | project IP = IPAddress, SourceTable),
+        (AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(_Window) | project IP = IPAddress, SourceTable),
+        (CommonSecurityLog | where TimeGenerated > ago(_Window) | project IP = SourceIP, SourceTable),
+        (AzureActivity | where TimeGenerated > ago(_Window) | project IP = CallerIpAddress, SourceTable),
+        (SecurityEvent | where TimeGenerated > ago(_Window) | where isnotempty(IpAddress) | project IP = IpAddress, SourceTable),
+        (OfficeActivity | where TimeGenerated > ago(_Window) | project IP = ClientIP, SourceTable)
+    | where isnotempty(IP) and IP != "-" and IP != "0.0.0.0"
+    | summarize Tables = make_set(SourceTable), TableCount = dcount(SourceTable), EventCount = count() by IP;
+let _OverlappingIPs =
+    _IPSources
+    | where TableCount >= 3
+    | top 20 by EventCount desc
+    | project 
+        EntityType = "IP", Entity = IP,
+        TablesCount = TableCount, Tables = tostring(Tables),
+        TotalEvents = EventCount,
+        Recommendation = case(
+            TableCount >= 4, "HIGH OVERLAP: IP in 4+ tables - Likely internal, check if all sources add value",
+            TableCount >= 3, "OVERLAP: IP in 3+ tables - Common for corp egress IPs",
+            ""
+        );
+// --- Part 3: Hostname overlap ---
+let _HostSources =
+    union withsource=SourceTable
+        (SecurityEvent | where TimeGenerated > ago(_Window) | project Host = Computer, SourceTable),
+        (Syslog | where TimeGenerated > ago(_Window) | project Host = HostName, SourceTable),
+        (Heartbeat | where TimeGenerated > ago(_Window) | project Host = Computer, SourceTable),
+        (CommonSecurityLog | where TimeGenerated > ago(_Window) | project Host = DeviceName, SourceTable),
+        (Event | where TimeGenerated > ago(_Window) | project Host = Computer, SourceTable)
+    | where isnotempty(Host)
+    | summarize Tables = make_set(SourceTable), TableCount = dcount(SourceTable), EventCount = count() by Host;
+let _OverlappingHosts =
+    _HostSources
+    | where TableCount >= 3
+    | top 20 by EventCount desc
+    | project 
+        EntityType = "Host", Entity = Host,
+        TablesCount = TableCount, Tables = tostring(Tables),
+        TotalEvents = EventCount,
+        Recommendation = case(
+            TableCount >= 4, "HIGH OVERLAP: Host in 4+ tables - Likely double-agent or multi-connector",
+            TableCount >= 3, "OVERLAP: Host in 3+ tables - Check for MMA+AMA or redundant forwarding",
+            ""
+        );
+_OverlappingAccounts | union _OverlappingIPs | union _OverlappingHosts
+| order by EntityType asc, TotalEvents desc

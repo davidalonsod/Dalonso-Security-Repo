@@ -1,0 +1,33 @@
+let _AuxiliaryTables = dynamic([
+    "OfficeActivity", "AzureActivity", "Heartbeat",
+    "SentinelHealth", "SecurityAlert", "SecurityIncident", "Operation"
+]);
+let _MinDailyMB = 1;
+let _ActiveTables =
+    Usage
+    | where TimeGenerated between (ago(7d) .. ago(1d))
+    | where IsBillable == true
+    | where DataType !in (_AuxiliaryTables)
+    | summarize DailyMB = sum(Quantity) by Day = bin(TimeGenerated, 1d), DataType
+    | summarize AvgDailyMB = avg(DailyMB), ActiveDays = count() by DataType
+    | where AvgDailyMB > _MinDailyMB and ActiveDays >= 4;
+let _TodayTables =
+    Usage
+    | where TimeGenerated > ago(1d)
+    | where IsBillable == true
+    | summarize TodayMB = sum(Quantity) by DataType
+    | where TodayMB > 0
+    | project DataType;
+_ActiveTables
+| where DataType !in (_TodayTables)
+| extend 
+    AlertSeverity = iff(AvgDailyMB > 100, "High", iff(AvgDailyMB > 10, "Medium", "Low")),
+    EstDailyCostLostUSD = round((AvgDailyMB / 1024.0) * 2.76, 2)
+| project 
+    TimeGenerated = now(),
+    DataType,
+    Status = "SILENT - No ingestion in 24h",
+    AvgDailyMB = round(AvgDailyMB, 1),
+    PreviousActiveDays = ActiveDays,
+    AlertSeverity, EstDailyCostLostUSD
+| order by AvgDailyMB desc

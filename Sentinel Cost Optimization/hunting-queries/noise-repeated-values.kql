@@ -1,0 +1,43 @@
+// Repeated Value Dominance per Column (Any Table)
+// For each column in a table, identifies if a single value accounts
+// for >50% of all rows. Dominant values are prime candidates for
+// DCR where clause filters (e.g., where RenderedDescription != "routine check").
+//
+// HOW TO USE: Replace "SecurityEvent" with your target table.
+// Run against your top 5 ingesting tables for maximum cost savings.
+// =====================================================================
+
+let _TargetTable = SecurityEvent;  // <-- CHANGE THIS
+let _SampleSize = 100000;
+let _MinDominancePct = 30;  // Only show columns where top value is >30% of rows
+_TargetTable
+| where TimeGenerated > ago(1d)
+| take _SampleSize
+| evaluate narrow()
+| where isnotempty(tostring(Value))
+| summarize ValueCount = count() by Column, Value = tostring(Value)
+| as _AllValues
+| join kind=inner (
+    _AllValues
+    | summarize TotalNonNull = sum(ValueCount) by Column
+) on Column
+| extend ValuePct = round(toreal(ValueCount) * 100.0 / TotalNonNull, 1)
+| where ValuePct >= _MinDominancePct
+| summarize 
+    TopValue = arg_max(ValuePct, Value),
+    TopValueCount = max(ValueCount),
+    DistinctValues = dcount(Value),
+    TotalRows = max(TotalNonNull)
+    by Column
+| extend 
+    TopValuePreview = iff(strlen(Value) > 80, strcat(substring(Value, 0, 80), "..."), Value),
+    FilterAction = case(
+        ValuePct > 80, "CRITICAL: >80% same value - Column is nearly constant, project-away or filter",
+        ValuePct > 60, "HIGH: >60% same value - Strong DCR filter candidate",
+        ValuePct > 40, "MODERATE: >40% same value - Review if value adds detection context",
+        "LOW: Common but varied"
+    )
+| project 
+    Column, TopValuePreview, ValuePct, TopValueCount, TotalRows,
+    DistinctValues, FilterAction
+| order by ValuePct desc

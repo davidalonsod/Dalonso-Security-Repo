@@ -1,0 +1,18 @@
+let _RetentionDays = 90;
+let _WarningDays = 7;
+Usage
+| where TimeGenerated > ago(365d)
+| summarize OldestRecord = min(TimeGenerated) by DataType
+| extend 
+    AgeDays = datetime_diff('day', now(), OldestRecord),
+    DaysUntilPurge = _RetentionDays - datetime_diff('day', now(), OldestRecord)
+| where DaysUntilPurge >= 0 and DaysUntilPurge <= _WarningDays
+| extend
+    PurgeDate = OldestRecord + totimespan(strcat(tostring(_RetentionDays), "d")),
+    Urgency = case(
+        DaysUntilPurge <= 1, "IMMINENT - Purge within 24h",
+        DaysUntilPurge <= 3, "URGENT - Purge within 3 days",
+        "WARNING - Purge within 7 days"
+    )
+| project DataType, OldestRecord, PurgeDate, DaysUntilPurge, Urgency
+| order by DaysUntilPurge asc

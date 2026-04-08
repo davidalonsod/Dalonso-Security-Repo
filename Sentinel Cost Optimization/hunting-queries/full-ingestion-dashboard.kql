@@ -1,0 +1,33 @@
+let _AuxiliaryTables = dynamic([
+    "OfficeActivity", "AzureActivity", "Heartbeat",
+    "SentinelHealth", "SecurityAlert", "SecurityIncident", "Operation"
+]);
+let _TotalBillableGB = toscalar(
+    Usage 
+    | where TimeGenerated > ago(30d) 
+    | where IsBillable == true 
+    | where DataType !in (_AuxiliaryTables)
+    | summarize round(sum(Quantity) / 1024.0, 2)
+);
+Usage
+| where TimeGenerated > ago(30d)
+| where IsBillable == true
+| where DataType !in (_AuxiliaryTables)
+| summarize 
+    DailyAvgMB = round(avg(Quantity), 2),
+    TotalMB    = round(sum(Quantity), 2),
+    MaxDayMB   = round(max(Quantity), 2),
+    MinDayMB   = round(min(Quantity), 2),
+    DaysActive = dcount(bin(TimeGenerated, 1d))
+    by DataType, Solution
+| extend 
+    TotalGB        = round(TotalMB / 1024.0, 2),
+    DailyAvgGB     = round(DailyAvgMB / 1024.0, 4),
+    SpikeRatio     = iff(DailyAvgMB > 0, round(MaxDayMB / DailyAvgMB, 1), 0.0),
+    EstMonthlyCost = round((DailyAvgMB / 1024.0) * 30 * 2.76, 2),
+    PctOfTotal     = round(TotalMB / 1024.0 / _TotalBillableGB * 100, 1)
+| project 
+    DataType, Solution, TotalGB, DailyAvgGB,
+    MaxDayMB, SpikeRatio, DaysActive,
+    EstMonthlyCost, PctOfTotal
+| order by TotalGB desc

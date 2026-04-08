@@ -1,0 +1,295 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "CyberSOC Data Ingestion Control - Analytic Rules",
+    "description": "Deploys 5 scheduled analytic rules for data ingestion anomaly detection in Microsoft Sentinel. Excludes Auxiliary/Lake-only tables.",
+    "author": "TI Mindmap HUB",
+    "version": "1.0.0",
+    "source": "https://github.com/ti-mindmap-hub/sentinel-ingestion-control"
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace with Sentinel enabled"
+      }
+    },
+    "workspaceResourceGroup": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().name]",
+      "metadata": {
+        "description": "Resource group of the Log Analytics workspace"
+      }
+    },
+    "dailyBudgetGB": {
+      "type": "int",
+      "defaultValue": 15,
+      "metadata": {
+        "description": "Daily ingestion budget in GB for the budget breach rule"
+      }
+    },
+    "costPerGB": {
+      "type": "string",
+      "defaultValue": "2.76",
+      "metadata": {
+        "description": "Cost per GB for estimation (PAYG default: 2.76)"
+      }
+    }
+  },
+  "variables": {
+    "workspaceId": "[resourceId(parameters('workspaceResourceGroup'), 'Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+    "_solutionId": "cybersoc-ingestion-control-analytic-rules",
+    "analyticRuleIds": {
+      "zscore": "[guid('cybersoc-ingestion-zscore')]",
+      "spike": "[guid('cybersoc-ingestion-spike')]",
+      "silent": "[guid('cybersoc-ingestion-silent')]",
+      "newTable": "[guid('cybersoc-ingestion-newtable')]",
+      "budget": "[guid('cybersoc-ingestion-budget')]"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.SecurityInsights/alertRules",
+      "apiVersion": "2023-02-01",
+      "name": "[variables('analyticRuleIds').zscore]",
+      "scope": "[variables('workspaceId')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Data Ingestion Anomaly Detected (Z-Score)",
+        "description": "Detects tables with statistically anomalous ingestion volumes using Z-score analysis against a 14-day baseline. Z-score threshold > 3.0 indicates a significant deviation. Excludes Auxiliary/Free tables.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "let _AuxiliaryTables = dynamic([\"OfficeActivity\", \"AzureActivity\", \"Heartbeat\", \"SentinelHealth\", \"SecurityAlert\", \"SecurityIncident\", \"Operation\"]);\nlet _LookbackDays = 14d;\nlet _Threshold = 3.0;\nlet _Baseline =\n    Usage\n    | where TimeGenerated > ago(_LookbackDays)\n    | where IsBillable == true\n    | where DataType !in (_AuxiliaryTables)\n    | summarize DailyMB = sum(Quantity) by Day = bin(TimeGenerated, 1d), DataType\n    | summarize \n        AvgDailyMB  = avg(DailyMB),\n        StdDevMB    = stdev(DailyMB),\n        MedianMB    = percentile(DailyMB, 50),\n        P95MB       = percentile(DailyMB, 95)\n        by DataType;\nUsage\n| where TimeGenerated > ago(1d)\n| where IsBillable == true\n| where DataType !in (_AuxiliaryTables)\n| summarize TodayMB = sum(Quantity) by DataType\n| join kind=inner _Baseline on DataType\n| extend \n    ZScore = iff(StdDevMB > 0, round((TodayMB - AvgDailyMB) / StdDevMB, 2), 0.0),\n    DeviationPct = round((TodayMB - AvgDailyMB) / AvgDailyMB * 100, 1)\n| where ZScore > _Threshold or ZScore < -_Threshold\n| extend \n    AnomalyType = iff(ZScore > 0, \"SPIKE\", \"DROP\"),\n    TodayGB = round(TodayMB / 1024.0, 3),\n    AvgGB = round(AvgDailyMB / 1024.0, 3)\n| project \n    TimeGenerated = now(),\n    DataType, AnomalyType, ZScore, DeviationPct,\n    TodayGB, AvgGB, \n    TodayMB = round(TodayMB, 1),\n    AvgDailyMB = round(AvgDailyMB, 1),\n    StdDevMB = round(StdDevMB, 1),\n    P95MB = round(P95MB, 1)\n| order by abs(ZScore) desc",
+        "queryFrequency": "P1D",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Impact"
+        ],
+        "techniques": [
+          "T1565"
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Ingestion Anomaly: {{DataType}} - {{AnomalyType}} (Z={{ZScore}})",
+          "alertDescriptionFormat": "Table {{DataType}} shows a {{AnomalyType}} with Z-score {{ZScore}}. Today: {{TodayGB}} GB vs avg {{AvgGB}} GB ({{DeviationPct}}% deviation)."
+        },
+        "customDetails": {
+          "DataType": "DataType",
+          "AnomalyType": "AnomalyType",
+          "ZScore": "ZScore",
+          "DeviationPct": "DeviationPct",
+          "TodayGB": "TodayGB",
+          "AvgDailyGB": "AvgGB"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "Selected",
+            "groupByCustomDetails": [
+              "DataType"
+            ],
+            "groupByEntities": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.SecurityInsights/alertRules",
+      "apiVersion": "2023-02-01",
+      "name": "[variables('analyticRuleIds').spike]",
+      "scope": "[variables('workspaceId')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Data Ingestion Spike Detected (3x Multiplier)",
+        "description": "Detects when any single table ingests more than 3x its 14-day daily average. Catches sudden bursts from misconfigured connectors, log floods, or attack-generated data. Excludes Auxiliary/Free tables.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let _AuxiliaryTables = dynamic([\"OfficeActivity\", \"AzureActivity\", \"Heartbeat\", \"SentinelHealth\", \"SecurityAlert\", \"SecurityIncident\", \"Operation\"]);\nlet _SpikeMultiplier = 3.0;\nlet _MinDailyMB = 10;\nlet _Baseline =\n    Usage\n    | where TimeGenerated between (ago(15d) .. ago(1d))\n    | where IsBillable == true\n    | where DataType !in (_AuxiliaryTables)\n    | summarize DailyMB = sum(Quantity) by Day = bin(TimeGenerated, 1d), DataType\n    | summarize AvgDailyMB = avg(DailyMB) by DataType\n    | where AvgDailyMB > _MinDailyMB;\nUsage\n| where TimeGenerated > ago(1d)\n| where IsBillable == true\n| where DataType !in (_AuxiliaryTables)\n| summarize TodayMB = sum(Quantity) by DataType\n| join kind=inner _Baseline on DataType\n| where TodayMB > (AvgDailyMB * _SpikeMultiplier)\n| extend \n    SpikeMultiplier = round(TodayMB / AvgDailyMB, 1),\n    ExcessMB = round(TodayMB - AvgDailyMB, 1),\n    ExcessGB = round((TodayMB - AvgDailyMB) / 1024.0, 3),\n    EstExcessCostUSD = round(((TodayMB - AvgDailyMB) / 1024.0) * 2.76, 2)\n| project \n    TimeGenerated = now(),\n    DataType,\n    TodayMB = round(TodayMB, 1),\n    AvgDailyMB = round(AvgDailyMB, 1),\n    SpikeMultiplier, ExcessMB, ExcessGB, EstExcessCostUSD\n| order by SpikeMultiplier desc",
+        "queryFrequency": "P1D",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Impact"
+        ],
+        "techniques": [
+          "T1565"
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Ingestion Spike: {{DataType}} at {{SpikeMultiplier}}x average",
+          "alertDescriptionFormat": "Table {{DataType}} ingested {{ExcessGB}} GB above its daily average ({{SpikeMultiplier}}x multiplier). Estimated excess cost: ${{EstExcessCostUSD}}."
+        },
+        "customDetails": {
+          "DataType": "DataType",
+          "SpikeMultiplier": "SpikeMultiplier",
+          "ExcessGB": "ExcessGB",
+          "EstExcessCost": "EstExcessCostUSD"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "Selected",
+            "groupByCustomDetails": [
+              "DataType"
+            ],
+            "groupByEntities": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.SecurityInsights/alertRules",
+      "apiVersion": "2023-02-01",
+      "name": "[variables('analyticRuleIds').silent]",
+      "scope": "[variables('workspaceId')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Data Ingestion Drop - Silent Table Detected",
+        "description": "Detects tables that were active in the last 7 days but have 0 ingestion in the last 24 hours. Indicates connector failures, disabled data sources, or detection coverage gaps. Excludes Auxiliary/Free tables.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "let _AuxiliaryTables = dynamic([\"OfficeActivity\", \"AzureActivity\", \"Heartbeat\", \"SentinelHealth\", \"SecurityAlert\", \"SecurityIncident\", \"Operation\"]);\nlet _MinDailyMB = 1;\nlet _ActiveTables =\n    Usage\n    | where TimeGenerated between (ago(7d) .. ago(1d))\n    | where IsBillable == true\n    | where DataType !in (_AuxiliaryTables)\n    | summarize DailyMB = sum(Quantity) by Day = bin(TimeGenerated, 1d), DataType\n    | summarize AvgDailyMB = avg(DailyMB), ActiveDays = count() by DataType\n    | where AvgDailyMB > _MinDailyMB and ActiveDays >= 4;\nlet _TodayTables =\n    Usage\n    | where TimeGenerated > ago(1d)\n    | where IsBillable == true\n    | summarize TodayMB = sum(Quantity) by DataType\n    | where TodayMB > 0\n    | project DataType;\n_ActiveTables\n| where DataType !in (_TodayTables)\n| extend \n    AlertSeverity = iff(AvgDailyMB > 100, \"High\", iff(AvgDailyMB > 10, \"Medium\", \"Low\")),\n    EstDailyCostLostUSD = round((AvgDailyMB / 1024.0) * 2.76, 2)\n| project \n    TimeGenerated = now(),\n    DataType,\n    Status = \"SILENT - No ingestion in 24h\",\n    AvgDailyMB = round(AvgDailyMB, 1),\n    PreviousActiveDays = ActiveDays,\n    AlertSeverity, EstDailyCostLostUSD\n| order by AvgDailyMB desc",
+        "queryFrequency": "P1D",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1562"
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Silent Table: {{DataType}} - No ingestion in 24h",
+          "alertDescriptionFormat": "Table {{DataType}} (avg {{AvgDailyMB}} MB/day over {{PreviousActiveDays}} active days) has stopped ingesting. This may indicate a connector failure or disabled data source."
+        },
+        "customDetails": {
+          "DataType": "DataType",
+          "Status": "Status",
+          "AvgDailyMB": "AvgDailyMB",
+          "AlertSeverity": "AlertSeverity"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "Selected",
+            "groupByCustomDetails": [
+              "DataType"
+            ],
+            "groupByEntities": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.SecurityInsights/alertRules",
+      "apiVersion": "2023-02-01",
+      "name": "[variables('analyticRuleIds').newTable]",
+      "scope": "[variables('workspaceId')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "New Data Table Detected in Workspace",
+        "description": "Detects when a new DataType appears in the Usage table that was not seen in the prior 30 days. Useful for tracking new connectors, shadow IT, and unexpected data sources.",
+        "severity": "Informational",
+        "enabled": true,
+        "query": "let _KnownTables =\n    Usage\n    | where TimeGenerated between (ago(31d) .. ago(1d))\n    | distinct DataType;\nUsage\n| where TimeGenerated > ago(1d)\n| where DataType !in (_KnownTables)\n| summarize \n    FirstSeen = min(TimeGenerated),\n    TodayMB = round(sum(Quantity), 2),\n    IsBillable = max(IsBillable)\n    by DataType\n| extend \n    TablePlan = iff(IsBillable == true, \"Analytics (Billable)\", \"Auxiliary/Free\"),\n    EstDailyCostUSD = iff(IsBillable == true, round((TodayMB / 1024.0) * 2.76, 2), 0.0)\n| project TimeGenerated = now(), DataType, FirstSeen, TodayMB, TablePlan, EstDailyCostUSD",
+        "queryFrequency": "P1D",
+        "queryPeriod": "P31D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Collection"
+        ],
+        "techniques": [
+          "T1530"
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "New Table Detected: {{DataType}} ({{TablePlan}})",
+          "alertDescriptionFormat": "A new data table '{{DataType}}' started ingesting data. Plan: {{TablePlan}}, Volume: {{TodayMB}} MB, Est. daily cost: ${{EstDailyCostUSD}}."
+        },
+        "customDetails": {
+          "DataType": "DataType",
+          "TablePlan": "TablePlan",
+          "TodayMB": "TodayMB",
+          "EstDailyCost": "EstDailyCostUSD"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": false,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.SecurityInsights/alertRules",
+      "apiVersion": "2023-02-01",
+      "name": "[variables('analyticRuleIds').budget]",
+      "scope": "[variables('workspaceId')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Daily Ingestion Budget Exceeded",
+        "description": "[concat('Fires when total daily billable ingestion exceeds ', string(parameters('dailyBudgetGB')), ' GB. Adjust the dailyBudgetGB parameter to match your commitment tier or PAYG budget. Excludes Auxiliary/Free tables.')]",
+        "severity": "High",
+        "enabled": true,
+        "query": "[concat('let _AuxiliaryTables = dynamic([\"OfficeActivity\", \"AzureActivity\", \"Heartbeat\", \"SentinelHealth\", \"SecurityAlert\", \"SecurityIncident\", \"Operation\"]);\nlet _DailyBudgetGB = ', string(parameters('dailyBudgetGB')), '.0;\nlet _CostPerGB = ', parameters('costPerGB'), ';\nUsage\n| where TimeGenerated > ago(1d)\n| where IsBillable == true\n| where DataType !in (_AuxiliaryTables)\n| summarize TotalMB = sum(Quantity) by DataType\n| extend TotalGB = TotalMB / 1024.0\n| summarize \n    DailyTotalGB = round(sum(TotalGB), 2),\n    TopTable = arg_max(TotalGB, DataType),\n    TableCount = dcount(DataType)\n| where DailyTotalGB > _DailyBudgetGB\n| extend\n    OverageGB = round(DailyTotalGB - _DailyBudgetGB, 2),\n    OverageCostUSD = round((DailyTotalGB - _DailyBudgetGB) * _CostPerGB, 2),\n    DailyCostUSD = round(DailyTotalGB * _CostPerGB, 2),\n    BudgetUtilizationPct = round(DailyTotalGB / _DailyBudgetGB * 100, 1)\n| project \n    TimeGenerated = now(),\n    DailyTotalGB, DailyCostUSD,\n    BudgetGB = _DailyBudgetGB,\n    OverageGB, OverageCostUSD, BudgetUtilizationPct,\n    TopContributor = DataType,\n    ActiveTables = TableCount')]",
+        "queryFrequency": "P1D",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Impact"
+        ],
+        "techniques": [
+          "T1565"
+        ],
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Budget Exceeded: {{DailyTotalGB}} GB ingested ({{BudgetUtilizationPct}}% of budget)",
+          "alertDescriptionFormat": "Daily ingestion reached {{DailyTotalGB}} GB (budget: {{BudgetGB}} GB). Overage: {{OverageGB}} GB costing ~${{OverageCostUSD}}. Top contributor: {{TopContributor}}."
+        },
+        "customDetails": {
+          "DailyTotalGB": "DailyTotalGB",
+          "OverageGB": "OverageGB",
+          "OverageCostUSD": "OverageCostUSD",
+          "TopContributor": "TopContributor",
+          "BudgetUtilization": "BudgetUtilizationPct"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": []
+          }
+        }
+      }
+    }
+  ]
+}

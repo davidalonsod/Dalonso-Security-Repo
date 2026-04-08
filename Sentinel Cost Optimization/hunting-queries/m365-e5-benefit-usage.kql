@@ -1,0 +1,36 @@
+// M365 E5 Benefit Usage - Daily Benefit Consumption
+// M365 E5/A5/F5/G5 and E5/A5/F5/G5 Security customers get a data grant of up to 5 MB/user/day.
+// Source: Operation table, OperationCategory == "Billing"
+// Ref: https://azure.microsoft.com/en-us/pricing/offers/sentinel-microsoft-365-offer/
+// =====================================================================
+
+let Price = 3.0; // Sentinel + Log Analytics ingestion per GB
+let LicensedUsers = 100; // <-- Set your M365 E5/A5/F5/G5 licensed user count
+let GrantPerUserMB = 5;
+let DailyGrantMB = LicensedUsers * GrantPerUserMB;
+let DailyGrantGB = round(toreal(DailyGrantMB) / 1024.0, 4);
+Operation
+| where TimeGenerated > ago(30d)
+| where OperationCategory == "Billing"
+| where Detail has "Benefit amount used"
+| extend 
+    BenefitGB = todouble(extract(@"Benefit amount used:\s*([\d.]+)\s*GB", 1, Detail)),
+    BenefitType = extract(@"Benefit type used:\s*(\S+)", 1, Detail)
+| where isnotnull(BenefitGB)
+| summarize 
+    ClaimedBenefitGB = round(sum(BenefitGB), 6)
+    by Day = bin(TimeGenerated, 1d)
+| extend 
+    ClaimedBenefitMB = round(ClaimedBenefitGB * 1024, 2),
+    DailyGrantGB = DailyGrantGB,
+    DailyGrantMB = toreal(DailyGrantMB)
+| extend 
+    GrantUsedPct = round(iff(DailyGrantGB > 0, ClaimedBenefitGB / DailyGrantGB * 100, 0.0), 1),
+    OverGrantGB = round(iff(ClaimedBenefitGB > DailyGrantGB, ClaimedBenefitGB - DailyGrantGB, 0.0), 4),
+    SavedCostUSD = round(ClaimedBenefitGB * Price, 2)
+| project 
+    Day, 
+    ClaimedBenefitGB, ClaimedBenefitMB,
+    DailyGrantGB, DailyGrantMB, GrantUsedPct, OverGrantGB,
+    SavedCostUSD
+| order by Day desc

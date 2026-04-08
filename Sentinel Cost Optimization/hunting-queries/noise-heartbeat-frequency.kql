@@ -1,0 +1,37 @@
+// Heartbeat Over-Reporting - Frequency Analysis
+// Default heartbeat interval is 60 seconds. Machines reporting faster
+// or with redundant agents (MMA + AMA) waste ingestion.
+// =====================================================================
+
+let _Window = 1d;
+Heartbeat
+| where TimeGenerated > ago(_Window)
+| summarize 
+    HeartbeatCount = count(),
+    DistinctCategories = dcount(Category),
+    Categories = make_set(Category),
+    AgentVersions = make_set(Version),
+    OSTypes = make_set(OSType)
+    by Computer
+| extend 
+    ExpectedDaily = 1440,  // 60-sec interval = 1440/day
+    ExcessHeartbeats = HeartbeatCount - 1440,
+    OverReportPct = round((toreal(HeartbeatCount) - 1440.0) / 1440.0 * 100, 1)
+| extend
+    Issue = case(
+        array_length(Categories) > 1, strcat("DUPLICATE AGENT: ", tostring(Categories), " - Remove redundant agent"),
+        HeartbeatCount > 2880, "EXCESSIVE: >2x expected - Check heartbeat interval config",
+        HeartbeatCount > 1800, "HIGH: >25% over expected - Review agent config",
+        HeartbeatCount < 1000, "LOW: <70% expected - Agent may be intermittent",
+        "NORMAL"
+    ),
+    WastedBytes = iff(HeartbeatCount > 1440, (HeartbeatCount - 1440) * 600, 0)  // ~600 bytes per heartbeat
+| where Issue != "NORMAL"
+| extend WastedMBDaily = round(toreal(WastedBytes) / 1024.0 / 1024.0, 3)
+| project 
+    Computer, 
+    HeartbeatCount, ExpectedDaily, ExcessHeartbeats, OverReportPct,
+    Categories, AgentVersions, 
+    Issue, WastedMBDaily
+| order by HeartbeatCount desc
+| take 50

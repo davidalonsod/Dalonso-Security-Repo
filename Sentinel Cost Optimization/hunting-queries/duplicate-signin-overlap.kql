@@ -1,0 +1,55 @@
+// SignInLogs vs AADNonInteractiveUserSignInLogs Overlap
+// These two tables often contain the SAME sign-in attempts.
+// Non-interactive is typically 5-20x the volume of interactive.
+// If you use MDE/Defender for Identity, much of this is redundant.
+// =====================================================================
+
+let _Window = 1d;
+// --- Volume comparison ---
+let _Interactive = 
+    SigninLogs
+    | where TimeGenerated > ago(_Window)
+    | summarize 
+        InteractiveCount = count(),
+        InteractiveUsers = dcount(UserPrincipalName),
+        InteractiveApps = dcount(AppDisplayName),
+        InteractiveFailed = countif(ResultType != "0");
+let _NonInteractive =
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated > ago(_Window)
+    | summarize 
+        NonInteractiveCount = count(),
+        NonInteractiveUsers = dcount(UserPrincipalName),
+        NonInteractiveApps = dcount(AppDisplayName),
+        NonInteractiveFailed = countif(ResultType != "0");
+let _VolumeComparison = 
+    _Interactive | extend placeholder = 1
+    | join kind=inner (_NonInteractive | extend placeholder = 1) on placeholder
+    | project 
+        Section = "VOLUME_COMPARISON",
+        InteractiveEvents = InteractiveCount,
+        NonInteractiveEvents = NonInteractiveCount,
+        VolumeRatio = strcat("Non-Interactive is ", tostring(round(toreal(NonInteractiveCount) / toreal(InteractiveCount), 1)), "x Interactive"),
+        InteractiveUsers, NonInteractiveUsers,
+        InteractiveFailed, NonInteractiveFailed,
+        Recommendation = case(
+            NonInteractiveCount > InteractiveCount * 10, "CRITICAL: Non-Interactive >10x volume - Filter successful token refreshes",
+            NonInteractiveCount > InteractiveCount * 5, "HIGH: >5x volume - Filter top apps by AppId in DCR",
+            "NORMAL: Acceptable ratio"
+        );
+// --- User overlap between tables ---
+let _InteractiveUsers = SigninLogs | where TimeGenerated > ago(_Window) | distinct UserPrincipalName;
+let _NonInteractiveUsers = AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(_Window) | distinct UserPrincipalName;
+let _UserOverlap =
+    _InteractiveUsers
+    | join kind=inner _NonInteractiveUsers on UserPrincipalName
+    | summarize OverlappingUsers = dcount(UserPrincipalName);
+// --- App overlap ---
+let _InteractiveApps = SigninLogs | where TimeGenerated > ago(_Window) | distinct AppDisplayName;
+let _NonInteractiveApps = AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(_Window) | distinct AppDisplayName;
+let _AppOverlap =
+    _InteractiveApps
+    | join kind=inner _NonInteractiveApps on AppDisplayName
+    | summarize OverlappingApps = dcount(AppDisplayName);
+// Output
+_VolumeComparison

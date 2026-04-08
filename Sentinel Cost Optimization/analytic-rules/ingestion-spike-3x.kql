@@ -1,0 +1,33 @@
+let _AuxiliaryTables = dynamic([
+    "OfficeActivity", "AzureActivity", "Heartbeat",
+    "SentinelHealth", "SecurityAlert", "SecurityIncident", "Operation"
+]);
+let _SpikeMultiplier = 3.0;
+let _MinDailyMB = 10;
+let _Baseline =
+    Usage
+    | where TimeGenerated between (ago(15d) .. ago(1d))
+    | where IsBillable == true
+    | where DataType !in (_AuxiliaryTables)
+    | summarize DailyMB = sum(Quantity) by Day = bin(TimeGenerated, 1d), DataType
+    | summarize AvgDailyMB = avg(DailyMB) by DataType
+    | where AvgDailyMB > _MinDailyMB;
+Usage
+| where TimeGenerated > ago(1d)
+| where IsBillable == true
+| where DataType !in (_AuxiliaryTables)
+| summarize TodayMB = sum(Quantity) by DataType
+| join kind=inner _Baseline on DataType
+| where TodayMB > (AvgDailyMB * _SpikeMultiplier)
+| extend 
+    SpikeMultiplier = round(TodayMB / AvgDailyMB, 1),
+    ExcessMB = round(TodayMB - AvgDailyMB, 1),
+    ExcessGB = round((TodayMB - AvgDailyMB) / 1024.0, 3),
+    EstExcessCostUSD = round(((TodayMB - AvgDailyMB) / 1024.0) * 2.76, 2)
+| project 
+    TimeGenerated = now(),
+    DataType,
+    TodayMB = round(TodayMB, 1),
+    AvgDailyMB = round(AvgDailyMB, 1),
+    SpikeMultiplier, ExcessMB, ExcessGB, EstExcessCostUSD
+| order by SpikeMultiplier desc

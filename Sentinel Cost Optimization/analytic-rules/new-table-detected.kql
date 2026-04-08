@@ -1,0 +1,16 @@
+let _KnownTables =
+    Usage
+    | where TimeGenerated between (ago(31d) .. ago(1d))
+    | distinct DataType;
+Usage
+| where TimeGenerated > ago(1d)
+| where DataType !in (_KnownTables)
+| summarize 
+    FirstSeen = min(TimeGenerated),
+    TodayMB = round(sum(Quantity), 2),
+    IsBillable = max(IsBillable)
+    by DataType
+| extend 
+    TablePlan = iff(IsBillable == true, "Analytics (Billable)", "Auxiliary/Free"),
+    EstDailyCostUSD = iff(IsBillable == true, round((TodayMB / 1024.0) * 2.76, 2), 0.0)
+| project TimeGenerated = now(), DataType, FirstSeen, TodayMB, TablePlan, EstDailyCostUSD

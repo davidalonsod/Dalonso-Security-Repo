@@ -1,0 +1,67 @@
+// SecurityEvent - Logon Noise Analysis (EventID 4624/4625)
+// Successful and failed logon events are typically the #2 cost driver.
+// Identifies noisy logon types, accounts, and machines that can be
+// filtered via DCR transform or reduced via GPO audit policy.
+// =====================================================================
+
+let _Window = 7d;
+// --- Part 1: Logon Type Breakdown ---
+let _LogonTypeBreakdown =
+    SecurityEvent
+    | where TimeGenerated > ago(_Window)
+    | where EventID in (4624, 4625)
+    | extend LogonTypeName = case(
+        LogonType == 2, "Interactive",
+        LogonType == 3, "Network",
+        LogonType == 4, "Batch",
+        LogonType == 5, "Service",
+        LogonType == 7, "Unlock",
+        LogonType == 8, "NetworkCleartext",
+        LogonType == 9, "NewCredentials",
+        LogonType == 10, "RemoteInteractive",
+        LogonType == 11, "CachedInteractive",
+        strcat("Type ", tostring(LogonType))
+    )
+    | summarize 
+        EventCount = count(),
+        DistinctAccounts = dcount(TargetAccount),
+        DistinctComputers = dcount(Computer),
+        FailedCount = countif(EventID == 4625),
+        SuccessCount = countif(EventID == 4624)
+        by LogonType, LogonTypeName
+    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / toscalar(
+        SecurityEvent | where TimeGenerated > ago(_Window) | where EventID in (4624, 4625) | count
+    ), 1)
+    | extend FilterAction = case(
+        LogonType == 3 and PctOfTotal > 40, "FILTER: Network logons dominate - Filter machine-to-machine via DCR",
+        LogonType == 5 and PctOfTotal > 20, "FILTER: Service logons noisy - Filter known service accounts",
+        LogonType == 7 and PctOfTotal > 10, "FILTER: Unlock events low-value - Strong DCR exclude candidate",
+        LogonType == 4 and PctOfTotal > 10, "FILTER: Batch logons - Review if needed, often low-value",
+        "KEEP"
+    );
+// --- Part 2: Noisiest Accounts ---
+let _NoisyAccounts =
+    SecurityEvent
+    | where TimeGenerated > ago(_Window)
+    | where EventID in (4624, 4625)
+    | summarize EventCount = count() by TargetAccount
+    | top 20 by EventCount desc
+    | extend 
+        AccountType = case(
+            TargetAccount has "$", "Machine Account",
+            TargetAccount has_any ("svc", "service", "scan", "monitor", "backup", "ndes"), "Likely Service Account",
+            "User Account"
+        ),
+        FilterAction = case(
+            TargetAccount has "$", "FILTER: Machine account - Typically redundant, filter in DCR",
+            TargetAccount has_any ("svc", "service", "scan", "monitor"), "REVIEW: Service account - Often noisy, low detection value",
+            "KEEP: User account - Review individually"
+        );
+// Output both parts
+_LogonTypeBreakdown
+| project Section = "LOGON_TYPE", Name = LogonTypeName, EventCount, PctOfTotal, Detail = strcat("Success: ", SuccessCount, " | Failed: ", FailedCount), FilterAction
+| union (
+    _NoisyAccounts
+    | project Section = "NOISY_ACCOUNT", Name = TargetAccount, EventCount, PctOfTotal = 0.0, Detail = AccountType, FilterAction
+)
+| order by Section asc, EventCount desc

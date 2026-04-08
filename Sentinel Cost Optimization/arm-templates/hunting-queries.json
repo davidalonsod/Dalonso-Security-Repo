@@ -1,0 +1,310 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "Sentinel Data Ingestion Control - Queries (Standalone)",
+    "description": "Deploys 15 queries as savedSearches for data ingestion monitoring, Auxiliary table tracking, retention compliance, and cost optimization in Microsoft Sentinel.",
+    "author": "TI Mindmap HUB",
+    "version": "2.0.0"
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace with Sentinel enabled"
+      }
+    },
+    "costPerGB": {
+      "type": "string",
+      "defaultValue": "2.76",
+      "metadata": {
+        "description": "Cost per GB for ingestion estimation (EUR/USD)"
+      }
+    },
+    "m365LicensedUsers": {
+      "type": "int",
+      "defaultValue": 100,
+      "metadata": {
+        "description": "Number of M365 E5/A5/F5/G5 licensed users for benefit grant calculation (5 MB/user/day)"
+      }
+    }
+  },
+  "variables": {
+    "_AlwaysFree": "dynamic([\"AzureActivity\", \"SecurityAlert\", \"SecurityIncident\", \"Operation\", \"Heartbeat\", \"SentinelHealth\", \"OfficeActivity\"])",
+    "_DataLakeTables": "dynamic([\"DeviceFileEvents\", \"DeviceRegistryEvents\"])"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-ingestion-dashboard'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Ingestion Dashboard - Analytics Tables (30d)",
+        "category": "Hunting Queries",
+        "query": "[concat('let _AlwaysFree = ', variables('_AlwaysFree'), ';\nlet _TotalBillableGB = toscalar(\n    Usage \n    | where TimeGenerated > ago(30d) \n    | where IsBillable == true \n    | where DataType !in (_AlwaysFree)\n    | summarize round(sum(Quantity) / 1024.0, 2)\n);\nUsage\n| where TimeGenerated > ago(30d)\n| where IsBillable == true\n| where DataType !in (_AlwaysFree)\n| summarize \n    DailyAvgMB = round(avg(Quantity), 2),\n    TotalMB    = round(sum(Quantity), 2),\n    MaxDayMB   = round(max(Quantity), 2),\n    MinDayMB   = round(min(Quantity), 2),\n    DaysActive = dcount(bin(TimeGenerated, 1d))\n    by DataType, Solution\n| extend \n    TotalGB        = round(TotalMB / 1024.0, 2),\n    DailyAvgGB     = round(DailyAvgMB / 1024.0, 4),\n    SpikeRatio     = iff(DailyAvgMB > 0, round(MaxDayMB / DailyAvgMB, 1), 0.0),\n    EstMonthlyCost = round((DailyAvgMB / 1024.0) * 30 * ', parameters('costPerGB'), ', 2),\n    PctOfTotal     = round(TotalMB / 1024.0 / _TotalBillableGB * 100, 1)\n| project \n    DataType, Solution, TotalGB, DailyAvgGB,\n    MaxDayMB, SpikeRatio, DaysActive,\n    EstMonthlyCost, PctOfTotal\n| order by TotalGB desc')]",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Full ingestion overview for all billable Analytics tables with cost estimates."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-hourly-heatmap'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Hourly Ingestion Heatmap (7d)",
+        "category": "Hunting Queries",
+        "query": "[concat('let _AlwaysFree = ', variables('_AlwaysFree'), ';\nUsage\n| where TimeGenerated > ago(7d)\n| where IsBillable == true\n| where DataType !in (_AlwaysFree)\n| extend \n    DayOfWeek = dayofweek(TimeGenerated) / 1d,\n    HourOfDay = hourofday(TimeGenerated)\n| summarize HourlyMB = round(sum(Quantity), 1) by DayOfWeek = toint(DayOfWeek), HourOfDay\n| extend \n    DayName = case(\n        DayOfWeek == 0, \"Sun\",\n        DayOfWeek == 1, \"Mon\",\n        DayOfWeek == 2, \"Tue\",\n        DayOfWeek == 3, \"Wed\",\n        DayOfWeek == 4, \"Thu\",\n        DayOfWeek == 5, \"Fri\",\n        \"Sat\"\n    ),\n    HourlyGB = round(HourlyMB / 1024.0, 3)\n| project DayName, DayOfWeek, HourOfDay, HourlyGB, HourlyMB\n| order by DayOfWeek asc, HourOfDay asc')]",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Hourly ingestion heatmap for time-of-day pattern detection."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-growth-rate'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Table Growth Rate - Week-over-Week",
+        "category": "Hunting Queries",
+        "query": "[concat('let _AlwaysFree = ', variables('_AlwaysFree'), ';\nlet _ThisWeek =\n    Usage\n    | where TimeGenerated > ago(7d)\n    | where IsBillable == true\n    | where DataType !in (_AlwaysFree)\n    | summarize ThisWeekMB = sum(Quantity) by DataType;\nlet _LastWeek =\n    Usage\n    | where TimeGenerated between (ago(14d) .. ago(7d))\n    | where IsBillable == true\n    | where DataType !in (_AlwaysFree)\n    | summarize LastWeekMB = sum(Quantity) by DataType;\n_ThisWeek\n| join kind=leftouter _LastWeek on DataType\n| extend \n    LastWeekMB = coalesce(LastWeekMB, 0.0),\n    GrowthPct = iff(LastWeekMB > 0, round((ThisWeekMB - LastWeekMB) / LastWeekMB * 100, 1), 100.0),\n    DeltaGB = round((ThisWeekMB - coalesce(LastWeekMB, 0.0)) / 1024.0, 3),\n    GrowthCategory = case(\n        LastWeekMB == 0, \"NEW\",\n        (ThisWeekMB - LastWeekMB) / LastWeekMB > 0.5, \"RAPID GROWTH (>50%)\",\n        (ThisWeekMB - LastWeekMB) / LastWeekMB > 0.2, \"GROWING (>20%)\",\n        (ThisWeekMB - LastWeekMB) / LastWeekMB < -0.5, \"MAJOR DROP (>50%)\",\n        (ThisWeekMB - LastWeekMB) / LastWeekMB < -0.2, \"DECLINING (>20%)\",\n        \"STABLE\"\n    )\n| project \n    DataType, \n    ThisWeekGB = round(ThisWeekMB / 1024.0, 2),\n    LastWeekGB = round(LastWeekMB / 1024.0, 2),\n    DeltaGB, GrowthPct, GrowthCategory\n| order by GrowthPct desc')]",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Week-over-week growth comparison with categorization."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-top10-noisy'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Top 10 Noisiest Tables - Daily Trend (30d)",
+        "category": "Hunting Queries",
+        "query": "[concat('let _AlwaysFree = ', variables('_AlwaysFree'), ';\nlet _Top10 = \n    Usage\n    | where TimeGenerated > ago(30d)\n    | where IsBillable == true\n    | where DataType !in (_AlwaysFree)\n    | summarize TotalMB = sum(Quantity) by DataType\n    | top 10 by TotalMB desc\n    | project DataType;\nUsage\n| where TimeGenerated > ago(30d)\n| where IsBillable == true\n| where DataType in (_Top10)\n| summarize DailyGB = round(sum(Quantity) / 1024.0, 3) by Day = bin(TimeGenerated, 1d), DataType\n| order by Day asc, DailyGB desc')]",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Daily ingestion trend for the 10 highest-volume billable tables."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-custom-table-cost'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Custom Table (_CL) Cost Analysis",
+        "category": "Hunting Queries",
+        "query": "[concat('Usage\n| where TimeGenerated > ago(30d)\n| where IsBillable == true\n| where DataType endswith \"_CL\"\n| summarize \n    TotalMB = round(sum(Quantity), 2),\n    DailyAvgMB = round(avg(Quantity), 2),\n    DaysActive = dcount(bin(TimeGenerated, 1d)),\n    LastIngestion = max(TimeGenerated)\n    by DataType\n| extend \n    TotalGB = round(TotalMB / 1024.0, 2),\n    EstMonthlyCostUSD = round((DailyAvgMB / 1024.0) * 30 * ', parameters('costPerGB'), ', 2),\n    IsStale = iff(LastIngestion < ago(7d), true, false)\n| project DataType, TotalGB, DailyAvgMB, EstMonthlyCostUSD, DaysActive, LastIngestion, IsStale\n| order by TotalGB desc')]",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Analyzes custom log tables (_CL) for volume, cost, and staleness."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-solution-breakdown'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Per-Solution Ingestion Breakdown",
+        "category": "Hunting Queries",
+        "query": "[concat('let _AlwaysFree = ', variables('_AlwaysFree'), ';\nUsage\n| where TimeGenerated > ago(30d)\n| where IsBillable == true\n| where DataType !in (_AlwaysFree)\n| summarize \n    TotalGB = round(sum(Quantity) / 1024.0, 2),\n    TableCount = dcount(DataType),\n    DailyAvgGB = round(avg(Quantity) / 1024.0, 4)\n    by Solution\n| extend EstMonthlyCostUSD = round(DailyAvgGB * 30 * ', parameters('costPerGB'), ', 2)\n| order by TotalGB desc')]",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Ingestion breakdown by Sentinel Solution/connector with cost estimates."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-migration-candidates'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Auxiliary Migration Candidates (Cost Optimizer)",
+        "category": "Hunting Queries",
+        "query": "[concat('let Price = ', parameters('costPerGB'), ';\nlet _AlwaysFree = ', variables('_AlwaysFree'), ';\nlet _DataLakeTables = ', variables('_DataLakeTables'), ';\nlet _IngestionProfile =\n    Usage\n    | where TimeGenerated > ago(30d)\n    | where IsBillable == true\n    | where DataType !in (_AlwaysFree)\n    | where DataType !in (_DataLakeTables)\n    | summarize MonthlyMB = round(sum(Quantity), 2) by DataType\n    | extend MonthlyGB = round(MonthlyMB / 1024.0, 2)\n    | where MonthlyGB > 1;\nlet _QueryProfile =\n    LAQueryLogs\n    | where TimeGenerated > ago(30d)\n    | extend Tables = extract_all(@\"(\\\\w+)\\\\s*\\\\|\", QueryText)\n    | mv-expand Tables to typeof(string)\n    | summarize QueryCount = count() by Tables\n    | project DataType = Tables, QueryCount;\n_IngestionProfile\n| join kind=leftouter _QueryProfile on DataType\n| extend \n    QueryCount = coalesce(QueryCount, 0),\n    MonthlyCostUSD = round(MonthlyGB * Price, 2),\n    MigrationCandidate = case(\n        QueryCount == 0 and MonthlyGB > 5, \"STRONG - Never queried, high volume\",\n        QueryCount < 10 and MonthlyGB > 5, \"GOOD - Rarely queried, high volume\",\n        QueryCount < 50 and MonthlyGB > 2, \"MODERATE - Low query, moderate volume\",\n        \"KEEP AS ANALYTICS\"\n    ),\n    PotentialSavingsPct = 67\n| extend PotentialSavingsUSD = round(MonthlyCostUSD * PotentialSavingsPct / 100.0, 2)\n| where MigrationCandidate != \"KEEP AS ANALYTICS\"\n| project \n    DataType, MonthlyGB, MonthlyCostUSD,\n    QueryCount, MigrationCandidate,\n    PotentialSavingsUSD\n| order by PotentialSavingsUSD desc')]",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identifies Analytics tables for Data Lake migration with ~67% cost savings. Excludes already-migrated tables."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-retention-per-table'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Effective Data Retention per Table",
+        "category": "Hunting Queries",
+        "query": "Usage\n| where TimeGenerated > ago(365d)\n| summarize \n    OldestRecord = min(TimeGenerated),\n    NewestRecord = max(TimeGenerated),\n    TotalMB = round(sum(Quantity), 2),\n    Records = count()\n    by DataType\n| extend \n    ObservedRetentionDays = datetime_diff('day', now(), OldestRecord),\n    DataSpanDays = datetime_diff('day', NewestRecord, OldestRecord)\n| extend\n    RetentionTier = case(\n        ObservedRetentionDays >= 365, \"1 Year+\",\n        ObservedRetentionDays >= 180, \"6 Months+\",\n        ObservedRetentionDays >= 90, \"90 Days (Standard)\",\n        ObservedRetentionDays >= 30, \"30 Days\",\n        \"< 30 Days\"\n    )\n| project \n    DataType, ObservedRetentionDays, DataSpanDays, RetentionTier,\n    OldestRecord, NewestRecord,\n    TotalGB = round(TotalMB / 1024.0, 3)\n| order by ObservedRetentionDays desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Observed data retention per table with tier classification."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-retention-gap'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Retention Gap Detection",
+        "category": "Hunting Queries",
+        "query": "let _ExpectedRetentionDays = 90;\nlet _MinRecords = 100;\nUsage\n| where TimeGenerated > ago(365d)\n| summarize \n    OldestRecord = min(TimeGenerated),\n    RecordCount = count()\n    by DataType\n| where RecordCount > _MinRecords\n| extend \n    ObservedDays = datetime_diff('day', now(), OldestRecord),\n    ExpectedDays = _ExpectedRetentionDays,\n    GapDays = _ExpectedRetentionDays - datetime_diff('day', now(), OldestRecord)\n| where GapDays > 5\n| extend\n    GapSeverity = case(\n        GapDays > 60, \"CRITICAL - Major data loss\",\n        GapDays > 30, \"HIGH - Significant gap\",\n        GapDays > 14, \"MEDIUM - Notable shortfall\",\n        \"LOW - Minor gap\"\n    ),\n    PossibleCause = case(\n        ObservedDays < 7, \"Recently enabled connector\",\n        ObservedDays < 30, \"Connector enabled within last month\",\n        \"Possible data purge or retention override\"\n    )\n| project \n    DataType, ObservedDays, ExpectedDays, GapDays, GapSeverity, PossibleCause\n| order by GapDays desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects tables below 90-day expected retention."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-securityevent-top-eventids'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "SecurityEvent - Top Event IDs by Volume",
+        "category": "Hunting Queries",
+        "query": "let _TotalEvents = toscalar(SecurityEvent | where TimeGenerated > ago(30d) | count);\nSecurityEvent\n| where TimeGenerated > ago(30d)\n| summarize \n    EventCount = count(),\n    DistinctComputers = dcount(Computer),\n    DistinctAccounts = dcount(Account),\n    LastSeen = max(TimeGenerated),\n    FirstSeen = min(TimeGenerated)\n    by EventID\n| extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalEvents, 2)\n| extend \n    EventDescription = case(\n        EventID == 4688, \"Process Creation\",\n        EventID == 4689, \"Process Termination\",\n        EventID == 4624, \"Successful Logon\",\n        EventID == 4625, \"Failed Logon\",\n        EventID == 4648, \"Explicit Credential Logon\",\n        EventID == 4672, \"Special Privileges Assigned\",\n        EventID == 4673, \"Privileged Service Called\",\n        EventID == 4674, \"Privileged Object Operation\",\n        EventID == 4663, \"Object Access Attempt\",\n        EventID == 4656, \"Handle to Object Requested\",\n        EventID == 4658, \"Handle to Object Closed\",\n        EventID == 4670, \"Object Permissions Changed\",\n        EventID == 4697, \"Service Installed\",\n        EventID == 4698, \"Scheduled Task Created\",\n        EventID == 4719, \"Audit Policy Changed\",\n        EventID == 4720, \"User Account Created\",\n        EventID == 4722, \"User Account Enabled\",\n        EventID == 4726, \"User Account Deleted\",\n        EventID == 4728, \"Member Added to Global Group\",\n        EventID == 4732, \"Member Added to Local Group\",\n        EventID == 4735, \"Local Group Changed\",\n        EventID == 4740, \"User Account Locked Out\",\n        EventID == 4756, \"Member Added to Universal Group\",\n        EventID == 4768, \"Kerberos TGT Requested\",\n        EventID == 4769, \"Kerberos Service Ticket Requested\",\n        EventID == 4771, \"Kerberos Pre-Auth Failed\",\n        EventID == 4776, \"NTLM Authentication\",\n        EventID == 5140, \"Network Share Accessed\",\n        EventID == 5145, \"Network Share Object Checked\",\n        EventID == 5156, \"Windows Filtering Platform Connection\",\n        EventID == 5157, \"Windows Filtering Platform Blocked\",\n        EventID == 1102, \"Audit Log Cleared\",\n        EventID == 7045, \"New Service Installed\",\n        strcat(\"EventID \", tostring(EventID))\n    ),\n    Recommendation = case(\n        PctOfTotal > 25, \"CRITICAL: >25% - Apply DCR transform to filter or reduce\",\n        PctOfTotal > 15, \"HIGH: >15% - Review DCR, consider filtering\",\n        PctOfTotal > 5, \"MODERATE: >5% - Evaluate if all instances needed\",\n        \"OK - Normal proportion\"\n    )\n| project \n    EventID, EventDescription, EventCount, PctOfTotal,\n    DistinctComputers, DistinctAccounts,\n    Recommendation, FirstSeen, LastSeen\n| order by EventCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identifies noisiest SecurityEvent IDs with DCR filtering recommendations."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-column-size-analysis'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Column Size Analysis - Oversized Columns per Table",
+        "category": "Hunting Queries",
+        "query": "let _SampleSize = 50000;\nlet _analyzeSecurityEvent = SecurityEvent | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = \"SecurityEvent\";\nlet _analyzeSigninLogs = SigninLogs | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = \"SigninLogs\";\nlet _analyzeAADNonInteractive = AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = \"AADNonInteractiveUserSignInLogs\";\nlet _analyzeCSL = CommonSecurityLog | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = \"CommonSecurityLog\";\nlet _analyzeSyslog = Syslog | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = \"Syslog\";\nlet _analyzeAuditLogs = AuditLogs | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = \"AuditLogs\";\nlet _analyzeAzureActivity = AzureActivity | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = \"AzureActivity\";\nlet _analyzeOfficeActivity = OfficeActivity | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = \"OfficeActivity\";\nlet _analyzeHeartbeat = Heartbeat | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = \"Heartbeat\";\nlet _analyzeEvent = Event | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = \"Event\";\nlet _allColumns = union\n    _analyzeSecurityEvent, _analyzeSigninLogs, _analyzeAADNonInteractive,\n    _analyzeCSL, _analyzeSyslog, _analyzeAuditLogs,\n    _analyzeAzureActivity, _analyzeOfficeActivity, _analyzeHeartbeat, _analyzeEvent;\n_allColumns\n| join kind=inner (\n    _allColumns | summarize TotalAvgLen = sum(AvgLenBytes) by TableName\n) on TableName\n| extend PctOfRowSize = round(AvgLenBytes / toreal(TotalAvgLen) * 100, 1)\n| where PctOfRowSize > 30\n| extend Recommendation = case(\n    PctOfRowSize > 50, \"CRITICAL: >50% of row size - Use project-away in DCR transform\",\n    \"Medium: >30% of row size - Study to use project-away in DCR transform\"\n)\n| project TableName, Column, AvgLenBytes, MaxLenBytes, PctOfRowSize, Recommendation\n| order by TableName asc, PctOfRowSize desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Iterates over top 10 ingesting tables, pivots columns with narrow(), shows only columns consuming >50% of row size. Use for DCR project-away recommendations."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-m365-e5-benefit'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "M365 E5 Benefit Usage - Daily Benefit Consumption",
+        "category": "Hunting Queries",
+        "query": "[concat('let Price = ', parameters('costPerGB'), ';\nlet LicensedUsers = ', parameters('m365LicensedUsers'), ';\nlet GrantPerUserMB = 5;\nlet DailyGrantMB = LicensedUsers * GrantPerUserMB;\nlet DailyGrantGB = round(toreal(DailyGrantMB) / 1024.0, 4);\nOperation\n| where TimeGenerated > ago(30d)\n| where OperationCategory == \"Billing\"\n| where Detail has \"Benefit amount used\"\n| extend\n    BenefitGB = todouble(extract(@\"Benefit amount used:\\\\s*([\\\\d.]+)\\\\s*GB\", 1, Detail)),\n    BenefitType = extract(@\"Benefit type used:\\\\s*(\\\\S+)\", 1, Detail)\n| where isnotnull(BenefitGB)\n| summarize\n    ClaimedBenefitGB = round(sum(BenefitGB), 6)\n    by Day = bin(TimeGenerated, 1d)\n| extend\n    ClaimedBenefitMB = round(ClaimedBenefitGB * 1024, 2),\n    DailyGrantGB = DailyGrantGB,\n    DailyGrantMB = toreal(DailyGrantMB)\n| extend\n    GrantUsedPct = round(iff(DailyGrantGB > 0, ClaimedBenefitGB / DailyGrantGB * 100, 0.0), 1),\n    OverGrantGB = round(iff(ClaimedBenefitGB > DailyGrantGB, ClaimedBenefitGB - DailyGrantGB, 0.0), 4),\n    SavedCostUSD = round(ClaimedBenefitGB * Price, 2)\n| project\n    Day,\n    ClaimedBenefitGB, ClaimedBenefitMB,\n    DailyGrantGB, DailyGrantMB, GrantUsedPct, OverGrantGB,\n    SavedCostUSD\n| order by Day desc')]",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Daily M365 E5/A5/F5/G5 benefit consumption from Operation/Billing records vs grant capacity (5 MB/user/day). Shows claimed benefit, grant usage %, overage, and cost savings."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-ingestion-per-server'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Data Ingestion per Server (Computer)",
+        "category": "Hunting Queries",
+        "query": "let Price = 3.0;\nunion withsource=TableName\n    SecurityEvent, Syslog, Event, Heartbeat, CommonSecurityLog,\n    Perf, ConfigurationData, WindowsFirewall\n| where TimeGenerated > ago(7d)\n| where isnotempty(Computer)\n| summarize\n    TotalEvents = count(),\n    SizeInMB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0, 2),\n    Tables = make_set(TableName),\n    TableCount = dcount(TableName),\n    LastSeen = max(TimeGenerated)\n    by Computer\n| extend\n    SizeInGB = round(SizeInMB / 1024.0, 3),\n    DailyAvgMB = round(SizeInMB / 7.0, 2),\n    EstMonthlyCostUSD = round((SizeInMB / 1024.0 / 7.0) * 30 * Price, 2)\n| project\n    Computer, SizeInGB, SizeInMB, DailyAvgMB,\n    TotalEvents, TableCount, Tables,\n    EstMonthlyCostUSD, LastSeen\n| order by SizeInGB desc\n| take 50",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Top 50 noisiest servers by data ingestion with estimated monthly cost. Identifies over-reporting machines."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-defender-xdr-sizes'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "M365 E5 Benefit - Table Sizes by Product",
+        "category": "Hunting Queries",
+        "query": "let Price = 3.0;\nunion withsource=TableName\n    SigninLogs, AuditLogs, AADNonInteractiveUserSignInLogs,\n    AADServicePrincipalSignInLogs, AADManagedIdentitySignInLogs,\n    AADProvisioningLogs, ADFSSignInLogs,\n    DeviceEvents, DeviceFileEvents, DeviceLogonEvents, DeviceNetworkEvents,\n    DeviceProcessEvents, DeviceRegistryEvents, DeviceImageLoadEvents,\n    DeviceNetworkInfo, DeviceInfo, DeviceFileCertificateInfo,\n    IdentityLogonEvents, IdentityQueryEvents, IdentityDirectoryEvents,\n    AlertEvidence,\n    EmailEvents, EmailUrlInfo, EmailAttachmentInfo, EmailPostDeliveryEvents,\n    CloudAppEvents\n| where TimeGenerated > ago(30d)\n| summarize\n    TotalEvents = count(),\n    SizeInGB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0 / 1000.0, 2),\n    SizeInMB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0, 2),\n    FirstEvent = min(TimeGenerated),\n    LastEvent = max(TimeGenerated)\n    by TableName\n| extend\n    DailyAvgMB = round(SizeInMB / 30.0, 2),\n    IfBillableCostUSD = round(SizeInGB * Price, 2),\n    DefenderProduct = case(\n        TableName has \"Signin\" or TableName has \"Audit\" or TableName startswith \"AAD\" or TableName == \"ADFSSignInLogs\", \"Microsoft Entra ID\",\n        TableName startswith \"Device\", \"Microsoft Defender for Endpoint (MDE)\",\n        TableName startswith \"Identity\", \"Microsoft Defender for Identity (MDI)\",\n        TableName startswith \"Email\", \"Microsoft Defender for Office 365 (MDO)\",\n        TableName startswith \"CloudApp\", \"Microsoft Defender for Cloud Apps (MCA)\",\n        TableName startswith \"Alert\", \"Microsoft 365 Defender (Alerts)\",\n        \"Other M365 E5 Benefit\"\n    )\n| project\n    DefenderProduct, TableName, SizeInGB, SizeInMB, DailyAvgMB,\n    TotalEvents, IfBillableCostUSD,\n    FirstEvent, LastEvent\n| order by DefenderProduct asc, SizeInGB desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Size of all M365 E5 benefit tables (Entra ID + Defender XDR) with actual GB using estimate_data_size and cost if billable."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-all-tables-price'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "All Tables with Estimated Sentinel Price Ingestion",
+        "category": "Hunting Queries",
+        "query": "let Price = 3.0;\nunion withsource=SourceTable *\n| where TimeGenerated > ago(30d)\n| summarize\n    TotalEntries = count(),\n    TableSizeInGB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0 / 1000.0, 2),\n    TableSizeInMB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0, 2),\n    EstSentinelPriceUSD = round(sum(estimate_data_size(*)) / (1000.0 * 1000.0 * 1000.0) * Price, 2)\n    by SourceTable\n| extend\n    DailyAvgMB = round(TableSizeInMB / 30.0, 2),\n    DailyAvgGB = round(TableSizeInGB / 30.0, 4),\n    PctOfTotal = round(TableSizeInGB / toscalar(\n        union withsource=T * | where TimeGenerated > ago(30d) | summarize round(sum(estimate_data_size(*)) / 1000.0 / 1000.0 / 1000.0, 2)\n    ) * 100, 1)\n| project\n    SourceTable, TotalEntries, TableSizeInGB, TableSizeInMB,\n    DailyAvgGB, DailyAvgMB,\n    EstSentinelPriceUSD, PctOfTotal\n| order by TableSizeInGB desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Every table with actual size via estimate_data_size and Sentinel + Log Analytics cost projection."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-computers-not-reporting'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Computers Not Sending Security Events (>1h)",
+        "category": "Hunting Queries",
+        "query": "SecurityEvent\n| where TimeGenerated > ago(1d)\n| summarize ['Last Record Received'] = datetime_diff(\"minute\", now(), max(TimeGenerated)) by Computer\n| project Computer, ['Last Record Received']\n| where ['Last Record Received'] >= 60\n| extend\n    SilentHours = round(toreal(['Last Record Received']) / 60.0, 1),\n    Severity = case(\n        ['Last Record Received'] >= 1440, \"CRITICAL: >24h silent\",\n        ['Last Record Received'] >= 480, \"HIGH: >8h silent\",\n        ['Last Record Received'] >= 120, \"MEDIUM: >2h silent\",\n        \"LOW: >1h silent\"\n    )\n| project Computer, ['Last Record Received'], SilentHours, Severity\n| order by ['Last Record Received'] desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Finds servers that stopped sending SecurityEvent for over 1 hour. Indicates broken agents or offline machines."
+          }
+        ]
+      }
+    }
+  ]
+}

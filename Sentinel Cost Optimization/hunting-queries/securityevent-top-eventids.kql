@@ -1,0 +1,64 @@
+// SecurityEvent - Top Event IDs by Volume
+// Identifies the noisiest SecurityEvent IDs by volume with filtering recommendations.
+// Use to optimize DCR transforms and reduce ingestion costs.
+// =====================================================================
+
+let _TotalEvents = toscalar(SecurityEvent | where TimeGenerated > ago(30d) | count);
+SecurityEvent
+| where TimeGenerated > ago(30d)
+| summarize 
+    EventCount = count(),
+    DistinctComputers = dcount(Computer),
+    DistinctAccounts = dcount(Account),
+    LastSeen = max(TimeGenerated),
+    FirstSeen = min(TimeGenerated)
+    by EventID
+| extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalEvents, 2)
+| extend 
+    EventDescription = case(
+        EventID == 4688, "Process Creation",
+        EventID == 4689, "Process Termination",
+        EventID == 4624, "Successful Logon",
+        EventID == 4625, "Failed Logon",
+        EventID == 4648, "Explicit Credential Logon",
+        EventID == 4672, "Special Privileges Assigned",
+        EventID == 4673, "Privileged Service Called",
+        EventID == 4674, "Privileged Object Operation",
+        EventID == 4663, "Object Access Attempt",
+        EventID == 4656, "Handle to Object Requested",
+        EventID == 4658, "Handle to Object Closed",
+        EventID == 4670, "Object Permissions Changed",
+        EventID == 4697, "Service Installed",
+        EventID == 4698, "Scheduled Task Created",
+        EventID == 4719, "Audit Policy Changed",
+        EventID == 4720, "User Account Created",
+        EventID == 4722, "User Account Enabled",
+        EventID == 4726, "User Account Deleted",
+        EventID == 4728, "Member Added to Global Group",
+        EventID == 4732, "Member Added to Local Group",
+        EventID == 4735, "Local Group Changed",
+        EventID == 4740, "User Account Locked Out",
+        EventID == 4756, "Member Added to Universal Group",
+        EventID == 4768, "Kerberos TGT Requested",
+        EventID == 4769, "Kerberos Service Ticket Requested",
+        EventID == 4771, "Kerberos Pre-Auth Failed",
+        EventID == 4776, "NTLM Authentication",
+        EventID == 5140, "Network Share Accessed",
+        EventID == 5145, "Network Share Object Checked",
+        EventID == 5156, "Windows Filtering Platform Connection",
+        EventID == 5157, "Windows Filtering Platform Blocked",
+        EventID == 1102, "Audit Log Cleared",
+        EventID == 7045, "New Service Installed",
+        strcat("EventID ", tostring(EventID))
+    ),
+    Recommendation = case(
+        PctOfTotal > 25, "CRITICAL: >25% of all events - Apply DCR transform to filter or reduce",
+        PctOfTotal > 15, "HIGH: >15% - Review data collection rule, consider filtering",
+        PctOfTotal > 5, "MODERATE: >5% - Evaluate if all instances are needed",
+        "OK - Normal proportion"
+    )
+| project 
+    EventID, EventDescription, EventCount, PctOfTotal,
+    DistinctComputers, DistinctAccounts,
+    Recommendation, FirstSeen, LastSeen
+| order by EventCount desc

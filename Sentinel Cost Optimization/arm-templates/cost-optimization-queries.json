@@ -1,0 +1,282 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "Sentinel Cost Optimization - Noise and Duplicate Detection Queries",
+    "description": "Deploys 11 queries for identifying noisy data, redundant ingestion, and cost optimization opportunities in Microsoft Sentinel.",
+    "author": "TI Mindmap HUB",
+    "version": "1.0.0"
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace with Sentinel enabled"
+      }
+    },
+    "costPerGB": {
+      "type": "string",
+      "defaultValue": "3.0",
+      "metadata": {
+        "description": "Cost per GB for ingestion estimation (EUR/USD)"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-noise-process-creation'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Cost Optimization - SecurityEvent Process Creation Noise (4688)",
+        "category": "Hunting Queries",
+        "query": "let _TotalProcessEvents = toscalar(\n    SecurityEvent\n    | where TimeGenerated > ago(7d)\n    | where EventID == 4688\n    | count\n);\nSecurityEvent\n| where TimeGenerated > ago(7d)\n| where EventID == 4688\n| extend ProcessName = tostring(split(NewProcessName, \"\\\\\")[-1])\n| summarize \n    EventCount = count(),\n    DistinctComputers = dcount(Computer),\n    DistinctAccounts = dcount(SubjectAccount)\n    by ProcessName\n| extend \n    PctOfAllProcessEvents = round(toreal(EventCount) * 100.0 / _TotalProcessEvents, 2),\n    CumulativeCount = row_cumsum(EventCount)\n| extend \n    CumulativePct = round(toreal(CumulativeCount) * 100.0 / _TotalProcessEvents, 2)\n| extend\n    FilterAction = case(\n        PctOfAllProcessEvents > 10, \"FILTER: >10% of all process events - Strong DCR exclude candidate\",\n        PctOfAllProcessEvents > 5, \"REVIEW: >5% - Likely low-value, evaluate security need\",\n        PctOfAllProcessEvents > 2, \"CONSIDER: >2% - Check if covered by EDR/MDE already\",\n        \"KEEP\"\n    )\n| project \n    ProcessName, EventCount, PctOfAllProcessEvents, CumulativePct,\n    DistinctComputers, DistinctAccounts, FilterAction\n| order by EventCount desc\n| take 50",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identifies noisiest process names in EventID 4688 for DCR transform filtering to reduce SecurityEvent ingestion costs."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-noise-logon-events'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Cost Optimization - SecurityEvent Logon Type Noise Analysis",
+        "category": "Hunting Queries",
+        "query": "let _Window = 7d;\nlet _LogonTypeBreakdown =\n    SecurityEvent\n    | where TimeGenerated > ago(_Window)\n    | where EventID in (4624, 4625)\n    | extend LogonTypeName = case(\n        LogonType == 2, \"Interactive\",\n        LogonType == 3, \"Network\",\n        LogonType == 4, \"Batch\",\n        LogonType == 5, \"Service\",\n        LogonType == 7, \"Unlock\",\n        LogonType == 8, \"NetworkCleartext\",\n        LogonType == 9, \"NewCredentials\",\n        LogonType == 10, \"RemoteInteractive\",\n        LogonType == 11, \"CachedInteractive\",\n        strcat(\"Type \", tostring(LogonType))\n    )\n    | summarize \n        EventCount = count(),\n        DistinctAccounts = dcount(TargetAccount),\n        DistinctComputers = dcount(Computer),\n        FailedCount = countif(EventID == 4625),\n        SuccessCount = countif(EventID == 4624)\n        by LogonType, LogonTypeName\n    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / toscalar(\n        SecurityEvent | where TimeGenerated > ago(_Window) | where EventID in (4624, 4625) | count\n    ), 1)\n    | extend FilterAction = case(\n        LogonType == 3 and PctOfTotal > 40, \"FILTER: Network logons dominate - Filter machine-to-machine via DCR\",\n        LogonType == 5 and PctOfTotal > 20, \"FILTER: Service logons noisy - Filter known service accounts\",\n        LogonType == 7 and PctOfTotal > 10, \"FILTER: Unlock events low-value - Strong DCR exclude candidate\",\n        LogonType == 4 and PctOfTotal > 10, \"FILTER: Batch logons - Review if needed, often low-value\",\n        \"KEEP\"\n    );\nlet _NoisyAccounts =\n    SecurityEvent\n    | where TimeGenerated > ago(_Window)\n    | where EventID in (4624, 4625)\n    | summarize EventCount = count() by TargetAccount\n    | top 20 by EventCount desc\n    | extend \n        AccountType = case(\n            TargetAccount has \"$\", \"Machine Account\",\n            TargetAccount has_any (\"svc\", \"service\", \"scan\", \"monitor\", \"backup\", \"ndes\"), \"Likely Service Account\",\n            \"User Account\"\n        ),\n        FilterAction = case(\n            TargetAccount has \"$\", \"FILTER: Machine account - Typically redundant, filter in DCR\",\n            TargetAccount has_any (\"svc\", \"service\", \"scan\", \"monitor\"), \"REVIEW: Service account - Often noisy, low detection value\",\n            \"KEEP: User account - Review individually\"\n        );\n_LogonTypeBreakdown\n| project Section = \"LOGON_TYPE\", Name = LogonTypeName, EventCount, PctOfTotal, Detail = strcat(\"Success: \", SuccessCount, \" | Failed: \", FailedCount), FilterAction\n| union (\n    _NoisyAccounts\n    | project Section = \"NOISY_ACCOUNT\", Name = TargetAccount, EventCount, PctOfTotal = 0.0, Detail = AccountType, FilterAction\n)\n| order by Section asc, EventCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Breaks down logon events by type and account to identify machine accounts, service logons, and network logons for DCR filtering."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-noise-syslog-facility'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Cost Optimization - Syslog Facility and Severity Noise",
+        "category": "Hunting Queries",
+        "query": "let _Window = 7d;\nlet _TotalSyslog = toscalar(Syslog | where TimeGenerated > ago(_Window) | count);\nlet _BySeverity =\n    Syslog\n    | where TimeGenerated > ago(_Window)\n    | summarize \n        EventCount = count(),\n        DistinctHosts = dcount(HostName),\n        DistinctFacilities = dcount(Facility)\n        by SeverityLevel\n    | extend \n        PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalSyslog, 1),\n        FilterAction = case(\n            SeverityLevel in (\"info\", \"notice\", \"debug\"), \"FILTER: Low-value severity - Strong DCR exclude candidate\",\n            SeverityLevel == \"warning\", \"REVIEW: Evaluate if all warnings are needed\",\n            \"KEEP: Security-relevant severity\"\n        ),\n        EstDailyGB = round(toreal(EventCount) / 7.0 * 0.0005 / 1024.0, 3)  // rough ~500 bytes/event\n    | project Section = \"SEVERITY\", Name = SeverityLevel, EventCount, PctOfTotal, EstDailyGB, DistinctHosts, FilterAction;\nlet _ByFacility =\n    Syslog\n    | where TimeGenerated > ago(_Window)\n    | summarize \n        EventCount = count(),\n        DistinctHosts = dcount(HostName),\n        SeverityBreakdown = strcat(\n            \"err:\", countif(SeverityLevel in (\"err\", \"crit\", \"alert\", \"emerg\")),\n            \" warn:\", countif(SeverityLevel == \"warning\"),\n            \" info:\", countif(SeverityLevel in (\"info\", \"notice\", \"debug\"))\n        )\n        by Facility\n    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalSyslog, 1)\n    | extend FilterAction = case(\n        Facility in (\"cron\", \"ntp\", \"lpr\", \"uucp\", \"ftp\") and PctOfTotal > 2, \"FILTER: Non-security facility, high volume\",\n        Facility == \"kern\" and PctOfTotal > 15, \"REVIEW: Kernel logs often noisy, evaluate host scope\",\n        Facility == \"daemon\" and PctOfTotal > 15, \"REVIEW: Daemon logs - filter by process name in DCR\",\n        Facility in (\"auth\", \"authpriv\"), \"KEEP: Authentication logs - security critical\",\n        PctOfTotal < 1, \"OK: Low volume\",\n        \"REVIEW: Evaluate detection coverage\"\n    )\n    | project Section = \"FACILITY\", Name = Facility, EventCount, PctOfTotal, EstDailyGB = 0.0, DistinctHosts, FilterAction;\nlet _TopCombos =\n    Syslog\n    | where TimeGenerated > ago(_Window)\n    | summarize EventCount = count() by Facility, SeverityLevel\n    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalSyslog, 1)\n    | where PctOfTotal > 3\n    | extend FilterAction = case(\n        SeverityLevel in (\"info\", \"notice\", \"debug\") and PctOfTotal > 10, \"FILTER: High-vol low-severity combo - Top DCR candidate\",\n        SeverityLevel in (\"info\", \"notice\", \"debug\") and PctOfTotal > 5, \"FILTER: Significant low-severity volume\",\n        \"REVIEW\"\n    )\n    | project Section = \"TOP_COMBO\", Name = strcat(Facility, \"/\", SeverityLevel), EventCount, PctOfTotal, EstDailyGB = 0.0, DistinctHosts = 0, FilterAction\n    | top 15 by EventCount desc;\n_BySeverity | union _ByFacility | union _TopCombos\n| order by Section asc, EventCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Analyzes Syslog by severity and facility to identify info/notice/debug logs and non-security facilities for DCR filtering."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-noise-noninteractive-signin'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Cost Optimization - AAD Non-Interactive Sign-In App Noise",
+        "category": "Hunting Queries",
+        "query": "let _Window = 7d;\nlet _TotalSignIns = toscalar(\n    AADNonInteractiveUserSignInLogs \n    | where TimeGenerated > ago(_Window) \n    | count\n);\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(_Window)\n| summarize \n    EventCount = count(),\n    DistinctUsers = dcount(UserPrincipalName),\n    FailedCount = countif(ResultType != \"0\"),\n    SuccessCount = countif(ResultType == \"0\"),\n    DistinctIPs = dcount(IPAddress)\n    by AppDisplayName, AppId\n| extend \n    PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalSignIns, 2),\n    FailurePct = round(toreal(FailedCount) * 100.0 / EventCount, 1)\n| extend \n    FilterAction = case(\n        PctOfTotal > 20 and FailurePct < 1, \"FILTER: >20% volume, near-zero failures - Strong DCR candidate\",\n        PctOfTotal > 10 and FailurePct < 5, \"FILTER: >10% volume, low failures - DCR filter by AppId\",\n        PctOfTotal > 5 and FailurePct < 2, \"REVIEW: >5% volume - Evaluate if token refresh noise\",\n        FailurePct > 30, \"KEEP: High failure rate - Investigate potential brute force\",\n        \"KEEP\"\n    ),\n    RiskNote = case(\n        AppDisplayName has_any (\"Outlook\", \"Teams\", \"OneDrive\", \"SharePoint\", \"Exchange\"), \"Token refresh noise - Usually safe to filter success-only\",\n        AppDisplayName has_any (\"Azure\", \"Portal\", \"Graph\"), \"Admin context - Keep for audit trail\",\n        AppDisplayName has \"OIDC\", \"OIDC background flow - Usually safe to filter\",\n        \"\"\n    )\n| project \n    AppDisplayName, AppId, EventCount, PctOfTotal,\n    SuccessCount, FailedCount, FailurePct,\n    DistinctUsers, DistinctIPs,\n    FilterAction, RiskNote\n| order by EventCount desc\n| take 30",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identifies apps generating bulk non-interactive sign-ins (Outlook, Teams token refresh) for AppId-based DCR filtering."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-noise-commonsecuritylog'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Cost Optimization - CommonSecurityLog Device and Action Noise",
+        "category": "Hunting Queries",
+        "query": "let _Window = 7d;\nlet _TotalCSL = toscalar(CommonSecurityLog | where TimeGenerated > ago(_Window) | count);\nlet _ByProduct =\n    CommonSecurityLog\n    | where TimeGenerated > ago(_Window)\n    | summarize \n        EventCount = count(),\n        DistinctSources = dcount(DeviceAddress),\n        DistinctDestinations = dcount(DestinationIP)\n        by DeviceVendor, DeviceProduct\n    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalCSL, 1)\n    | extend \n        EstDailyGB = round(toreal(EventCount) / 7.0 * 0.001 / 1024.0, 2),  // ~1KB/event avg\n        FilterAction = case(\n            PctOfTotal > 40, \"CRITICAL: >40% - Investigate activity filter or DCR transform\",\n            PctOfTotal > 20, \"HIGH: >20% - Review DeviceAction distribution below\",\n            PctOfTotal > 10, \"MODERATE: >10% - Evaluate what actions are ingested\",\n            \"OK\"\n        )\n    | project Section = \"BY_PRODUCT\", Name = strcat(DeviceVendor, \" / \", DeviceProduct), EventCount, PctOfTotal, EstDailyGB, FilterAction;\nlet _ByAction =\n    CommonSecurityLog\n    | where TimeGenerated > ago(_Window)\n    | summarize EventCount = count() by DeviceAction, DeviceVendor\n    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalCSL, 1)\n    | extend FilterAction = case(\n        DeviceAction has_any (\"allow\", \"permit\", \"pass\", \"accept\") and PctOfTotal > 30, \n            \"FILTER: Allowed traffic >30% - Filter routine allows, keep denies\",\n        DeviceAction has_any (\"allow\", \"permit\", \"pass\") and PctOfTotal > 15, \n            \"REVIEW: Allowed traffic >15% - Consider ingesting denies only\",\n        DeviceAction has_any (\"drop\", \"deny\", \"block\", \"reject\"), \n            \"KEEP: Blocked traffic - Security relevant\",\n        PctOfTotal > 10, \"REVIEW: High volume action\",\n        \"OK\"\n    )\n    | project Section = \"BY_ACTION\", Name = strcat(DeviceVendor, \": \", DeviceAction), EventCount, PctOfTotal, EstDailyGB = 0.0, FilterAction;\nlet _ByEventClass =\n    CommonSecurityLog\n    | where TimeGenerated > ago(_Window)\n    | summarize EventCount = count() by DeviceEventClassID, DeviceVendor, Activity\n    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalCSL, 1)\n    | where PctOfTotal > 2\n    | extend FilterAction = case(\n        Activity has_any (\"health\", \"heartbeat\", \"keepalive\", \"status\"), \"FILTER: Health/heartbeat traffic - Zero detection value\",\n        Activity has_any (\"session\", \"traffic\", \"flow\") and PctOfTotal > 10, \"REVIEW: Session/flow logs >10% - May overlap with firewall allow\",\n        PctOfTotal > 15, \"REVIEW: >15% from single rule - Investigate\",\n        \"KEEP\"\n    )\n    | project Section = \"BY_EVENTCLASS\", Name = strcat(DeviceVendor, \": \", DeviceEventClassID, \" - \", Activity), EventCount, PctOfTotal, EstDailyGB = 0.0, FilterAction\n    | top 20 by EventCount desc;\n_ByProduct | union _ByAction | union _ByEventClass\n| order by Section asc, EventCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Analyzes CEF logs by device vendor/product, action, and event class to identify allowed traffic and health events for filtering."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-noise-heartbeat-frequency'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Cost Optimization - Heartbeat Over-Reporting and Duplicate Agents",
+        "category": "Hunting Queries",
+        "query": "let _Window = 1d;\nHeartbeat\n| where TimeGenerated > ago(_Window)\n| summarize \n    HeartbeatCount = count(),\n    DistinctCategories = dcount(Category),\n    Categories = make_set(Category),\n    AgentVersions = make_set(Version),\n    OSTypes = make_set(OSType)\n    by Computer\n| extend \n    ExpectedDaily = 1440,  // 60-sec interval = 1440/day\n    ExcessHeartbeats = HeartbeatCount - 1440,\n    OverReportPct = round((toreal(HeartbeatCount) - 1440.0) / 1440.0 * 100, 1)\n| extend\n    Issue = case(\n        array_length(Categories) > 1, strcat(\"DUPLICATE AGENT: \", tostring(Categories), \" - Remove redundant agent\"),\n        HeartbeatCount > 2880, \"EXCESSIVE: >2x expected - Check heartbeat interval config\",\n        HeartbeatCount > 1800, \"HIGH: >25% over expected - Review agent config\",\n        HeartbeatCount < 1000, \"LOW: <70% expected - Agent may be intermittent\",\n        \"NORMAL\"\n    ),\n    WastedBytes = iff(HeartbeatCount > 1440, (HeartbeatCount - 1440) * 600, 0)  // ~600 bytes per heartbeat\n| where Issue != \"NORMAL\"\n| extend WastedMBDaily = round(toreal(WastedBytes) / 1024.0 / 1024.0, 3)\n| project \n    Computer, \n    HeartbeatCount, ExpectedDaily, ExcessHeartbeats, OverReportPct,\n    Categories, AgentVersions, \n    Issue, WastedMBDaily\n| order by HeartbeatCount desc\n| take 50",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects machines with duplicate agents (MMA+AMA) or excessive heartbeat frequency, quantifying wasted ingestion per day."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-noise-repeated-values'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Cost Optimization - Repeated Value Dominance per Column",
+        "category": "Hunting Queries",
+        "query": "let _TargetTable = SecurityEvent;  // <-- CHANGE THIS\nlet _SampleSize = 100000;\nlet _MinDominancePct = 30;  // Only show columns where top value is >30% of rows\n_TargetTable\n| where TimeGenerated > ago(1d)\n| take _SampleSize\n| evaluate narrow()\n| where isnotempty(tostring(Value))\n| summarize ValueCount = count() by Column, Value = tostring(Value)\n| as _AllValues\n| join kind=inner (\n    _AllValues\n    | summarize TotalNonNull = sum(ValueCount) by Column\n) on Column\n| extend ValuePct = round(toreal(ValueCount) * 100.0 / TotalNonNull, 1)\n| where ValuePct >= _MinDominancePct\n| summarize \n    TopValue = arg_max(ValuePct, Value),\n    TopValueCount = max(ValueCount),\n    DistinctValues = dcount(Value),\n    TotalRows = max(TotalNonNull)\n    by Column\n| extend \n    TopValuePreview = iff(strlen(Value) > 80, strcat(substring(Value, 0, 80), \"...\"), Value),\n    FilterAction = case(\n        ValuePct > 80, \"CRITICAL: >80% same value - Column is nearly constant, project-away or filter\",\n        ValuePct > 60, \"HIGH: >60% same value - Strong DCR filter candidate\",\n        ValuePct > 40, \"MODERATE: >40% same value - Review if value adds detection context\",\n        \"LOW: Common but varied\"\n    )\n| project \n    Column, TopValuePreview, ValuePct, TopValueCount, TotalRows,\n    DistinctValues, FilterAction\n| order by ValuePct desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Generic query using evaluate narrow() to find columns where a single value dominates >30 pct of rows for DCR project-away recommendations."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-noise-auditlogs-operations'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Cost Optimization - AuditLogs Operation Noise Analysis",
+        "category": "Hunting Queries",
+        "query": "let _Window = 7d;\nlet _TotalAudit = toscalar(AuditLogs | where TimeGenerated > ago(_Window) | count);\nAuditLogs\n| where TimeGenerated > ago(_Window)\n| summarize \n    EventCount = count(),\n    DistinctActors = dcount(tostring(InitiatedBy.user.userPrincipalName)),\n    DistinctTargets = dcount(tostring(TargetResources[0].displayName)),\n    ResultBreakdown = strcat(\n        \"Success:\", countif(Result == \"success\"),\n        \" Failure:\", countif(Result == \"failure\")\n    )\n    by OperationName, Category\n| extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalAudit, 1)\n| extend FilterAction = case(\n    OperationName has_any (\"Update policy\", \"Update user\", \"Update application\") and PctOfTotal > 10, \n        \"REVIEW: High-volume update operation - Consider filtering routine updates\",\n    OperationName has_any (\"consent\", \"Add delegated permission\") and PctOfTotal > 5, \n        \"REVIEW: Consent operations - Often noisy from app registrations\",\n    OperationName has_any (\"Add member to group\", \"Remove member from group\") and PctOfTotal > 10, \n        \"REVIEW: Group membership churn - Filter known sync service accounts\",\n    OperationName has_any (\"Update device\", \"Update service principal\") and PctOfTotal > 5,\n        \"FILTER: Device/SP updates - Usually automated, low detection value\",\n    Category == \"Policy\" and PctOfTotal > 10,\n        \"REVIEW: Policy operations noisy - Evaluate if conditional access eval logs needed\",\n    PctOfTotal > 15, \"HIGH VOLUME: >15% - Investigate source\",\n    \"OK\"\n)\n| project \n    OperationName, Category, EventCount, PctOfTotal,\n    DistinctActors, DistinctTargets, ResultBreakdown, FilterAction\n| order by EventCount desc\n| take 30",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identifies high-volume AuditLogs operations (Update policy, group membership churn) that can be filtered in DCR transforms."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-noise-master-summary'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Cost Optimization - Master Noise Summary with Savings Estimate",
+        "category": "Hunting Queries",
+        "query": "[concat('let _Window = 7d;\nlet _CostPerGB = ', parameters('costPerGB'), ';\nlet _SecEvent =\n    SecurityEvent\n    | where TimeGenerated > ago(_Window)\n    | summarize \n        Total = count(),\n        ProcessCreation4688 = countif(EventID == 4688),\n        Logon4624 = countif(EventID == 4624),\n        NetworkLogon = countif(EventID == 4624 and LogonType == 3),\n        ServiceLogon = countif(EventID == 4624 and LogonType == 5),\n        UnlockLogon = countif(EventID == 4624 and LogonType == 7)\n    | extend \n        FilterableEvents = ProcessCreation4688 + NetworkLogon + ServiceLogon + UnlockLogon,\n        FilterablePct = round(toreal(ProcessCreation4688 + NetworkLogon + ServiceLogon + UnlockLogon) * 100.0 / Total, 1)\n    | project \n        Table = \"SecurityEvent\", TotalEvents = Total, FilterableEvents, FilterablePct,\n        TopNoise = strcat(\"4688:\", ProcessCreation4688, \" NetLogon:\", NetworkLogon, \" SvcLogon:\", ServiceLogon);\nlet _NonInteractive =\n    AADNonInteractiveUserSignInLogs\n    | where TimeGenerated > ago(_Window)\n    | summarize \n        Total = count(),\n        SuccessfulTokenRefresh = countif(ResultType == \"0\")\n    | extend \n        FilterableEvents = SuccessfulTokenRefresh,\n        FilterablePct = round(toreal(SuccessfulTokenRefresh) * 100.0 / Total, 1)\n    | project \n        Table = \"AADNonInteractiveUserSignInLogs\", TotalEvents = Total, FilterableEvents, FilterablePct,\n        TopNoise = strcat(\"SuccessTokenRefresh:\", SuccessfulTokenRefresh);\nlet _Syslog =\n    Syslog\n    | where TimeGenerated > ago(_Window)\n    | summarize \n        Total = count(),\n        InfoNoticeDebug = countif(SeverityLevel in (\"info\", \"notice\", \"debug\"))\n    | extend \n        FilterableEvents = InfoNoticeDebug,\n        FilterablePct = round(toreal(InfoNoticeDebug) * 100.0 / Total, 1)\n    | project \n        Table = \"Syslog\", TotalEvents = Total, FilterableEvents, FilterablePct,\n        TopNoise = strcat(\"Info/Notice/Debug:\", InfoNoticeDebug);\nlet _CSL =\n    CommonSecurityLog\n    | where TimeGenerated > ago(_Window)\n    | summarize \n        Total = count(),\n        AllowedTraffic = countif(DeviceAction has_any (\"allow\", \"permit\", \"pass\", \"accept\")),\n        HealthEvents = countif(Activity has_any (\"health\", \"heartbeat\", \"keepalive\"))\n    | extend \n        FilterableEvents = AllowedTraffic + HealthEvents,\n        FilterablePct = round(toreal(AllowedTraffic + HealthEvents) * 100.0 / Total, 1)\n    | project \n        Table = \"CommonSecurityLog\", TotalEvents = Total, FilterableEvents, FilterablePct,\n        TopNoise = strcat(\"Allowed:\", AllowedTraffic, \" Health:\", HealthEvents);\n_SecEvent | union _NonInteractive | union _Syslog | union _CSL\n| join kind=leftouter (\n    Usage\n    | where TimeGenerated > ago(_Window)\n    | summarize WeeklyMB = sum(Quantity) by DataType\n    | project Table = DataType, WeeklyMB\n) on Table\n| extend \n    WeeklyGB = round(WeeklyMB / 1024.0, 2),\n    EstFilterableGB = round(WeeklyMB / 1024.0 * FilterablePct / 100.0, 2),\n    EstMonthlyFilterableGB = round(WeeklyMB / 1024.0 * FilterablePct / 100.0 * 4.3, 2)\n| extend \n    EstMonthlySavingsUSD = round(EstMonthlyFilterableGB * _CostPerGB, 2),\n    Priority = case(\n        EstMonthlyFilterableGB > 50, \"P1 - CRITICAL\",\n        EstMonthlyFilterableGB > 10, \"P2 - HIGH\",\n        EstMonthlyFilterableGB > 2, \"P3 - MEDIUM\",\n        \"P4 - LOW\"\n    )\n| project \n    Table, TotalEvents, FilterableEvents, FilterablePct, TopNoise,\n    WeeklyGB, EstFilterableGB, EstMonthlyFilterableGB,\n    EstMonthlySavingsUSD, Priority\n| order by EstMonthlySavingsUSD desc')]",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Aggregates noise indicators across SecurityEvent, Syslog, AADNonInteractive, and CommonSecurityLog with GB savings and cost reduction estimates."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-duplicate-cross-table-overlap'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Cost Optimization - Cross-Table Entity Overlap Detection",
+        "category": "Hunting Queries",
+        "query": "let _Window = 1d;\nlet _AccountSources =\n    union withsource=SourceTable\n        (SecurityEvent | where TimeGenerated > ago(_Window) | project Account = TargetAccount, SourceTable),\n        (SigninLogs | where TimeGenerated > ago(_Window) | project Account = UserPrincipalName, SourceTable),\n        (AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(_Window) | project Account = UserPrincipalName, SourceTable),\n        (OfficeActivity | where TimeGenerated > ago(_Window) | project Account = UserId, SourceTable),\n        (AuditLogs | where TimeGenerated > ago(_Window) | project Account = tostring(InitiatedBy.user.userPrincipalName), SourceTable),\n        (IdentityLogonEvents | where TimeGenerated > ago(_Window) | project Account = AccountUpn, SourceTable)\n    | where isnotempty(Account)\n    | summarize Tables = make_set(SourceTable), TableCount = dcount(SourceTable), EventCount = count() by Account;\nlet _OverlappingAccounts =\n    _AccountSources\n    | where TableCount >= 3\n    | top 20 by EventCount desc\n    | project \n        EntityType = \"Account\", Entity = Account, \n        TablesCount = TableCount, Tables = tostring(Tables), \n        TotalEvents = EventCount,\n        Recommendation = case(\n            TableCount >= 5, \"HIGH OVERLAP: Account in 5+ tables - Review which tables add unique detection value\",\n            TableCount >= 3, \"OVERLAP: Account in 3+ tables - Evaluate if all sources needed\",\n            \"\"\n        );\nlet _IPSources =\n    union withsource=SourceTable\n        (SigninLogs | where TimeGenerated > ago(_Window) | project IP = IPAddress, SourceTable),\n        (AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(_Window) | project IP = IPAddress, SourceTable),\n        (CommonSecurityLog | where TimeGenerated > ago(_Window) | project IP = SourceIP, SourceTable),\n        (AzureActivity | where TimeGenerated > ago(_Window) | project IP = CallerIpAddress, SourceTable),\n        (SecurityEvent | where TimeGenerated > ago(_Window) | where isnotempty(IpAddress) | project IP = IpAddress, SourceTable),\n        (OfficeActivity | where TimeGenerated > ago(_Window) | project IP = ClientIP, SourceTable)\n    | where isnotempty(IP) and IP != \"-\" and IP != \"0.0.0.0\"\n    | summarize Tables = make_set(SourceTable), TableCount = dcount(SourceTable), EventCount = count() by IP;\nlet _OverlappingIPs =\n    _IPSources\n    | where TableCount >= 3\n    | top 20 by EventCount desc\n    | project \n        EntityType = \"IP\", Entity = IP,\n        TablesCount = TableCount, Tables = tostring(Tables),\n        TotalEvents = EventCount,\n        Recommendation = case(\n            TableCount >= 4, \"HIGH OVERLAP: IP in 4+ tables - Likely internal, check if all sources add value\",\n            TableCount >= 3, \"OVERLAP: IP in 3+ tables - Common for corp egress IPs\",\n            \"\"\n        );\nlet _HostSources =\n    union withsource=SourceTable\n        (SecurityEvent | where TimeGenerated > ago(_Window) | project Host = Computer, SourceTable),\n        (Syslog | where TimeGenerated > ago(_Window) | project Host = HostName, SourceTable),\n        (Heartbeat | where TimeGenerated > ago(_Window) | project Host = Computer, SourceTable),\n        (CommonSecurityLog | where TimeGenerated > ago(_Window) | project Host = DeviceName, SourceTable),\n        (Event | where TimeGenerated > ago(_Window) | project Host = Computer, SourceTable)\n    | where isnotempty(Host)\n    | summarize Tables = make_set(SourceTable), TableCount = dcount(SourceTable), EventCount = count() by Host;\nlet _OverlappingHosts =\n    _HostSources\n    | where TableCount >= 3\n    | top 20 by EventCount desc\n    | project \n        EntityType = \"Host\", Entity = Host,\n        TablesCount = TableCount, Tables = tostring(Tables),\n        TotalEvents = EventCount,\n        Recommendation = case(\n            TableCount >= 4, \"HIGH OVERLAP: Host in 4+ tables - Likely double-agent or multi-connector\",\n            TableCount >= 3, \"OVERLAP: Host in 3+ tables - Check for MMA+AMA or redundant forwarding\",\n            \"\"\n        );\n_OverlappingAccounts | union _OverlappingIPs | union _OverlappingHosts\n| order by EntityType asc, TotalEvents desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects accounts, IPs, and hosts appearing in 3+ tables simultaneously, indicating redundant data collection across connectors."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-duplicate-signin-overlap'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Cost Optimization - SignInLogs vs NonInteractive Overlap",
+        "category": "Hunting Queries",
+        "query": "let _Window = 1d;\nlet _Interactive = \n    SigninLogs\n    | where TimeGenerated > ago(_Window)\n    | summarize \n        InteractiveCount = count(),\n        InteractiveUsers = dcount(UserPrincipalName),\n        InteractiveApps = dcount(AppDisplayName),\n        InteractiveFailed = countif(ResultType != \"0\");\nlet _NonInteractive =\n    AADNonInteractiveUserSignInLogs\n    | where TimeGenerated > ago(_Window)\n    | summarize \n        NonInteractiveCount = count(),\n        NonInteractiveUsers = dcount(UserPrincipalName),\n        NonInteractiveApps = dcount(AppDisplayName),\n        NonInteractiveFailed = countif(ResultType != \"0\");\nlet _VolumeComparison = \n    _Interactive | extend placeholder = 1\n    | join kind=inner (_NonInteractive | extend placeholder = 1) on placeholder\n    | project \n        Section = \"VOLUME_COMPARISON\",\n        InteractiveEvents = InteractiveCount,\n        NonInteractiveEvents = NonInteractiveCount,\n        VolumeRatio = strcat(\"Non-Interactive is \", tostring(round(toreal(NonInteractiveCount) / toreal(InteractiveCount), 1)), \"x Interactive\"),\n        InteractiveUsers, NonInteractiveUsers,\n        InteractiveFailed, NonInteractiveFailed,\n        Recommendation = case(\n            NonInteractiveCount > InteractiveCount * 10, \"CRITICAL: Non-Interactive >10x volume - Filter successful token refreshes\",\n            NonInteractiveCount > InteractiveCount * 5, \"HIGH: >5x volume - Filter top apps by AppId in DCR\",\n            \"NORMAL: Acceptable ratio\"\n        );\nlet _InteractiveUsers = SigninLogs | where TimeGenerated > ago(_Window) | distinct UserPrincipalName;\nlet _NonInteractiveUsers = AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(_Window) | distinct UserPrincipalName;\nlet _UserOverlap =\n    _InteractiveUsers\n    | join kind=inner _NonInteractiveUsers on UserPrincipalName\n    | summarize OverlappingUsers = dcount(UserPrincipalName);\nlet _InteractiveApps = SigninLogs | where TimeGenerated > ago(_Window) | distinct AppDisplayName;\nlet _NonInteractiveApps = AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(_Window) | distinct AppDisplayName;\nlet _AppOverlap =\n    _InteractiveApps\n    | join kind=inner _NonInteractiveApps on AppDisplayName\n    | summarize OverlappingApps = dcount(AppDisplayName);\n_VolumeComparison",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Compares SignInLogs and AADNonInteractiveUserSignInLogs volume ratio and user overlap to quantify redundant sign-in data."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-m365-e5-benefit'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "M365 E5 Benefit Usage - Defender XDR Included Tables",
+        "category": "Hunting Queries",
+        "query": "let Price = 3.0; // Sentinel + Log Analytics ingestion per GB\nlet _DefenderXDRTables = dynamic([\n    \"DeviceEvents\", \"DeviceFileEvents\", \"DeviceLogonEvents\", \"DeviceNetworkEvents\",\n    \"DeviceProcessEvents\", \"DeviceRegistryEvents\", \"DeviceImageLoadEvents\",\n    \"DeviceNetworkInfo\", \"DeviceInfo\", \"DeviceFileCertificateInfo\", \"DeviceTvmSoftwareInventory\",\n    \"DeviceTvmSoftwareVulnerabilities\", \"DeviceTvmSecureConfigurationAssessment\",\n    \"IdentityLogonEvents\", \"IdentityQueryEvents\", \"IdentityDirectoryEvents\",\n    \"AlertInfo\", \"AlertEvidence\",\n    \"EmailEvents\", \"EmailUrlInfo\", \"EmailAttachmentInfo\", \"EmailPostDeliveryEvents\",\n    \"CloudAppEvents\", \"UrlClickEvents\", \"AADSignInEventsBeta\", \"AADSpnSignInEventsBeta\"\n]);\nUsage\n| where TimeGenerated > ago(30d)\n| where DataType in (_DefenderXDRTables)\n| summarize\n    TotalMB = round(sum(Quantity), 2),\n    DailyAvgMB = round(sum(Quantity) / 30.0, 2),\n    DaysActive = dcount(bin(TimeGenerated, 1d))\n    by DataType\n| extend\n    TotalGB = round(TotalMB / 1024.0, 2),\n    DailyAvgGB = round(DailyAvgMB / 1024.0, 4),\n    IfBillableCostUSD = round((TotalMB / 1024.0) * Price, 2),\n    BenefitStatus = \"INCLUDED in M365 E5 (free ingestion)\"\n| project\n    DataType, TotalGB, DailyAvgMB, DailyAvgGB, DaysActive,\n    IfBillableCostUSD, BenefitStatus\n| order by TotalGB desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Shows M365 E5 included Defender XDR table usage and estimated value of the free ingestion benefit."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-ingestion-per-server'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Data Ingestion per Server (Computer)",
+        "category": "Hunting Queries",
+        "query": "let Price = 3.0;\nunion withsource=TableName\n    SecurityEvent, Syslog, Event, Heartbeat, CommonSecurityLog,\n    Perf, ConfigurationData, WindowsFirewall\n| where TimeGenerated > ago(7d)\n| where isnotempty(Computer)\n| summarize\n    TotalEvents = count(),\n    SizeInMB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0, 2),\n    Tables = make_set(TableName),\n    TableCount = dcount(TableName),\n    LastSeen = max(TimeGenerated)\n    by Computer\n| extend\n    SizeInGB = round(SizeInMB / 1024.0, 3),\n    DailyAvgMB = round(SizeInMB / 7.0, 2),\n    EstMonthlyCostUSD = round((SizeInMB / 1024.0 / 7.0) * 30 * Price, 2)\n| project\n    Computer, SizeInGB, SizeInMB, DailyAvgMB,\n    TotalEvents, TableCount, Tables,\n    EstMonthlyCostUSD, LastSeen\n| order by SizeInGB desc\n| take 50",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Top 50 noisiest servers by data ingestion with estimated monthly cost. Identifies over-reporting machines."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-defender-xdr-sizes'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Defender XDR Table Sizes by Product",
+        "category": "Hunting Queries",
+        "query": "let Price = 3.0;\nunion withsource=TableName\n    DeviceEvents, DeviceFileEvents, DeviceLogonEvents, DeviceNetworkEvents,\n    DeviceProcessEvents, DeviceRegistryEvents, DeviceImageLoadEvents,\n    DeviceNetworkInfo, DeviceInfo, DeviceFileCertificateInfo,\n    DeviceTvmSoftwareInventory, DeviceTvmSoftwareVulnerabilities,\n    DeviceTvmSecureConfigurationAssessment,\n    IdentityLogonEvents, IdentityQueryEvents, IdentityDirectoryEvents,\n    AlertInfo, AlertEvidence,\n    EmailEvents, EmailUrlInfo, EmailAttachmentInfo, EmailPostDeliveryEvents,\n    CloudAppEvents, UrlClickEvents\n| where TimeGenerated > ago(30d)\n| summarize\n    TotalEvents = count(),\n    SizeInGB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0 / 1000.0, 2),\n    SizeInMB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0, 2),\n    FirstEvent = min(TimeGenerated),\n    LastEvent = max(TimeGenerated)\n    by TableName\n| extend\n    DailyAvgMB = round(SizeInMB / 30.0, 2),\n    IfBillableCostUSD = round(SizeInGB * Price, 2),\n    DefenderProduct = case(\n        TableName startswith \"Device\", \"Microsoft Defender for Endpoint (MDE)\",\n        TableName startswith \"Identity\", \"Microsoft Defender for Identity (MDI)\",\n        TableName startswith \"Email\" or TableName == \"UrlClickEvents\", \"Microsoft Defender for Office 365 (MDO)\",\n        TableName startswith \"CloudApp\", \"Microsoft Defender for Cloud Apps (MCA)\",\n        TableName startswith \"Alert\", \"Microsoft 365 Defender (Alerts)\",\n        \"Other Defender XDR\"\n    )\n| project\n    DefenderProduct, TableName, SizeInGB, SizeInMB, DailyAvgMB,\n    TotalEvents, IfBillableCostUSD,\n    FirstEvent, LastEvent\n| order by DefenderProduct asc, SizeInGB desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Size of all MDE, MDI, MDO, MCA tables with actual GB using estimate_data_size and cost if billable."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', guid('hunt-all-tables-price'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "All Tables with Estimated Sentinel Price Ingestion",
+        "category": "Hunting Queries",
+        "query": "let Price = 3.0;\nunion withsource=TableName *\n| where TimeGenerated > ago(30d)\n| summarize\n    TotalEntries = count(),\n    TableSizeInGB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0 / 1000.0, 2),\n    TableSizeInMB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0, 2),\n    EstSentinelPriceUSD = round(sum(estimate_data_size(*)) / (1000.0 * 1000.0 * 1000.0) * Price, 2)\n    by TableName\n| extend\n    DailyAvgMB = round(TableSizeInMB / 30.0, 2),\n    DailyAvgGB = round(TableSizeInGB / 30.0, 4),\n    PctOfTotal = round(TableSizeInGB / toscalar(\n        union withsource=T * | where TimeGenerated > ago(30d) | summarize round(sum(estimate_data_size(*)) / 1000.0 / 1000.0 / 1000.0, 2)\n    ) * 100, 1)\n| project\n    TableName, TotalEntries, TableSizeInGB, TableSizeInMB,\n    DailyAvgGB, DailyAvgMB,\n    EstSentinelPriceUSD, PctOfTotal\n| order by TableSizeInGB desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Every table with actual size via estimate_data_size and Sentinel + Log Analytics cost projection."
+          }
+        ]
+      }
+    }
+  ]
+}

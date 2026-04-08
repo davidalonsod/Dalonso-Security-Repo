@@ -1,0 +1,29 @@
+// Data Ingestion per Server (Computer)
+// Identifies the noisiest servers by total data ingestion across all tables.
+// Use to find over-reporting machines, misconfigured agents, or decommissioned
+// servers still sending data.
+// =====================================================================
+
+let Price = 3.0;
+union withsource=TableName
+    SecurityEvent, Syslog, Event, Heartbeat, CommonSecurityLog,
+    Perf, ConfigurationData, WindowsFirewall
+| where TimeGenerated > ago(7d)
+| where isnotempty(Computer)
+| summarize 
+    TotalEvents = count(),
+    SizeInMB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0, 2),
+    Tables = make_set(TableName),
+    TableCount = dcount(TableName),
+    LastSeen = max(TimeGenerated)
+    by Computer
+| extend 
+    SizeInGB = round(SizeInMB / 1024.0, 3),
+    DailyAvgMB = round(SizeInMB / 7.0, 2),
+    EstMonthlyCostUSD = round((SizeInMB / 1024.0 / 7.0) * 30 * Price, 2)
+| project 
+    Computer, SizeInGB, SizeInMB, DailyAvgMB,
+    TotalEvents, TableCount, Tables,
+    EstMonthlyCostUSD, LastSeen
+| order by SizeInGB desc
+| take 50

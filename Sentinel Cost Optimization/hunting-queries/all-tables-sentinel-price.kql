@@ -1,0 +1,26 @@
+// All Tables with Estimated Sentinel Price Ingestion
+// Shows every table in the workspace with actual size using estimate_data_size()
+// and projected cost at current Sentinel + Log Analytics ingestion rate.
+// Price = Sentinel ingestion + Log Analytics ingestion (update from Azure Pricing Calculator)
+// =====================================================================
+
+let Price = 3.0;
+union withsource=TableName *
+| where TimeGenerated > ago(30d)
+| summarize 
+    TotalEntries = count(),
+    TableSizeInGB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0 / 1000.0, 2),
+    TableSizeInMB = round(sum(estimate_data_size(*)) / 1000.0 / 1000.0, 2),
+    EstSentinelPriceUSD = round(sum(estimate_data_size(*)) / (1000.0 * 1000.0 * 1000.0) * Price, 2)
+    by TableName
+| extend 
+    DailyAvgMB = round(TableSizeInMB / 30.0, 2),
+    DailyAvgGB = round(TableSizeInGB / 30.0, 4),
+    PctOfTotal = round(TableSizeInGB / toscalar(
+        union withsource=T * | where TimeGenerated > ago(30d) | summarize round(sum(estimate_data_size(*)) / 1000.0 / 1000.0 / 1000.0, 2)
+    ) * 100, 1)
+| project 
+    TableName, TotalEntries, TableSizeInGB, TableSizeInMB, 
+    DailyAvgGB, DailyAvgMB,
+    EstSentinelPriceUSD, PctOfTotal
+| order by TableSizeInGB desc

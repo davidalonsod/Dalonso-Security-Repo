@@ -1,0 +1,25 @@
+let _AuxiliaryTables = dynamic([
+    "OfficeActivity", "AzureActivity", "Heartbeat",
+    "SentinelHealth", "SecurityAlert", "SecurityIncident", "Operation"
+]);
+Usage
+| where TimeGenerated > ago(7d)
+| where IsBillable == true
+| where DataType !in (_AuxiliaryTables)
+| extend 
+    DayOfWeek = dayofweek(TimeGenerated) / 1d,
+    HourOfDay = hourofday(TimeGenerated)
+| summarize HourlyMB = round(sum(Quantity), 1) by DayOfWeek = toint(DayOfWeek), HourOfDay
+| extend 
+    DayName = case(
+        DayOfWeek == 0, "Sun",
+        DayOfWeek == 1, "Mon",
+        DayOfWeek == 2, "Tue",
+        DayOfWeek == 3, "Wed",
+        DayOfWeek == 4, "Thu",
+        DayOfWeek == 5, "Fri",
+        "Sat"
+    ),
+    HourlyGB = round(HourlyMB / 1024.0, 3)
+| project DayName, DayOfWeek, HourOfDay, HourlyGB, HourlyMB
+| order by DayOfWeek asc, HourOfDay asc

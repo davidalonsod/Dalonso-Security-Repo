@@ -1,0 +1,16 @@
+Usage
+| where TimeGenerated > ago(30d)
+| where IsBillable == true
+| where DataType endswith "_CL"
+| summarize 
+    TotalMB = round(sum(Quantity), 2),
+    DailyAvgMB = round(avg(Quantity), 2),
+    DaysActive = dcount(bin(TimeGenerated, 1d)),
+    LastIngestion = max(TimeGenerated)
+    by DataType
+| extend 
+    TotalGB = round(TotalMB / 1024.0, 2),
+    EstMonthlyCostUSD = round((DailyAvgMB / 1024.0) * 30 * 2.76, 2),
+    IsStale = iff(LastIngestion < ago(7d), true, false)
+| project DataType, TotalGB, DailyAvgMB, EstMonthlyCostUSD, DaysActive, LastIngestion, IsStale
+| order by TotalGB desc

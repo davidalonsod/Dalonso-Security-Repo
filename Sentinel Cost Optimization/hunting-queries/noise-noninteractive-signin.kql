@@ -1,0 +1,46 @@
+// AADNonInteractiveUserSignInLogs - App Noise Analysis
+// Non-interactive sign-ins are often the BIGGEST table in Entra ID environments.
+// Most volume comes from a handful of apps (Outlook, Teams, OneDrive, SharePoint).
+// This identifies apps that can be filtered via DCR transforms.
+// =====================================================================
+
+let _Window = 7d;
+let _TotalSignIns = toscalar(
+    AADNonInteractiveUserSignInLogs 
+    | where TimeGenerated > ago(_Window) 
+    | count
+);
+// --- Part 1: By Application ---
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(_Window)
+| summarize 
+    EventCount = count(),
+    DistinctUsers = dcount(UserPrincipalName),
+    FailedCount = countif(ResultType != "0"),
+    SuccessCount = countif(ResultType == "0"),
+    DistinctIPs = dcount(IPAddress)
+    by AppDisplayName, AppId
+| extend 
+    PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalSignIns, 2),
+    FailurePct = round(toreal(FailedCount) * 100.0 / EventCount, 1)
+| extend 
+    FilterAction = case(
+        PctOfTotal > 20 and FailurePct < 1, "FILTER: >20% volume, near-zero failures - Strong DCR candidate",
+        PctOfTotal > 10 and FailurePct < 5, "FILTER: >10% volume, low failures - DCR filter by AppId",
+        PctOfTotal > 5 and FailurePct < 2, "REVIEW: >5% volume - Evaluate if token refresh noise",
+        FailurePct > 30, "KEEP: High failure rate - Investigate potential brute force",
+        "KEEP"
+    ),
+    RiskNote = case(
+        AppDisplayName has_any ("Outlook", "Teams", "OneDrive", "SharePoint", "Exchange"), "Token refresh noise - Usually safe to filter success-only",
+        AppDisplayName has_any ("Azure", "Portal", "Graph"), "Admin context - Keep for audit trail",
+        AppDisplayName has "OIDC", "OIDC background flow - Usually safe to filter",
+        ""
+    )
+| project 
+    AppDisplayName, AppId, EventCount, PctOfTotal,
+    SuccessCount, FailedCount, FailurePct,
+    DistinctUsers, DistinctIPs,
+    FilterAction, RiskNote
+| order by EventCount desc
+| take 30

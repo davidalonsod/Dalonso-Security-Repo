@@ -1,0 +1,38 @@
+// SecurityEvent - Process Creation Noise (EventID 4688)
+// Process creation is typically the #1 cost driver in SecurityEvent.
+// This query identifies the noisiest process names that could be
+// filtered via DCR transform (where EventID != 4688 or ProcessName !in (...))
+// =====================================================================
+
+let _TotalProcessEvents = toscalar(
+    SecurityEvent
+    | where TimeGenerated > ago(7d)
+    | where EventID == 4688
+    | count
+);
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4688
+| extend ProcessName = tostring(split(NewProcessName, "\\")[-1])
+| summarize 
+    EventCount = count(),
+    DistinctComputers = dcount(Computer),
+    DistinctAccounts = dcount(SubjectAccount)
+    by ProcessName
+| extend 
+    PctOfAllProcessEvents = round(toreal(EventCount) * 100.0 / _TotalProcessEvents, 2),
+    CumulativeCount = row_cumsum(EventCount)
+| extend 
+    CumulativePct = round(toreal(CumulativeCount) * 100.0 / _TotalProcessEvents, 2)
+| extend
+    FilterAction = case(
+        PctOfAllProcessEvents > 10, "FILTER: >10% of all process events - Strong DCR exclude candidate",
+        PctOfAllProcessEvents > 5, "REVIEW: >5% - Likely low-value, evaluate security need",
+        PctOfAllProcessEvents > 2, "CONSIDER: >2% - Check if covered by EDR/MDE already",
+        "KEEP"
+    )
+| project 
+    ProcessName, EventCount, PctOfAllProcessEvents, CumulativePct,
+    DistinctComputers, DistinctAccounts, FilterAction
+| order by EventCount desc
+| take 50

@@ -1,0 +1,37 @@
+let _AuxiliaryTables = dynamic([
+    "OfficeActivity", "AzureActivity", "Heartbeat",
+    "SentinelHealth", "SecurityAlert", "SecurityIncident", "Operation"
+]);
+let _ThisWeek =
+    Usage
+    | where TimeGenerated > ago(7d)
+    | where IsBillable == true
+    | where DataType !in (_AuxiliaryTables)
+    | summarize ThisWeekMB = sum(Quantity) by DataType;
+let _LastWeek =
+    Usage
+    | where TimeGenerated between (ago(14d) .. ago(7d))
+    | where IsBillable == true
+    | where DataType !in (_AuxiliaryTables)
+    | summarize LastWeekMB = sum(Quantity) by DataType;
+_ThisWeek
+| join kind=leftouter _LastWeek on DataType
+| extend 
+    LastWeekMB = coalesce(LastWeekMB, 0.0),
+    GrowthPct = iff(LastWeekMB > 0, round((ThisWeekMB - LastWeekMB) / LastWeekMB * 100, 1), 100.0),
+    DeltaMB = round(ThisWeekMB - coalesce(LastWeekMB, 0.0), 1),
+    DeltaGB = round((ThisWeekMB - coalesce(LastWeekMB, 0.0)) / 1024.0, 3),
+    GrowthCategory = case(
+        LastWeekMB == 0, "NEW",
+        (ThisWeekMB - LastWeekMB) / LastWeekMB > 0.5, "RAPID GROWTH (>50%)",
+        (ThisWeekMB - LastWeekMB) / LastWeekMB > 0.2, "GROWING (>20%)",
+        (ThisWeekMB - LastWeekMB) / LastWeekMB < -0.5, "MAJOR DROP (>50%)",
+        (ThisWeekMB - LastWeekMB) / LastWeekMB < -0.2, "DECLINING (>20%)",
+        "STABLE"
+    )
+| project 
+    DataType, 
+    ThisWeekGB = round(ThisWeekMB / 1024.0, 2),
+    LastWeekGB = round(LastWeekMB / 1024.0, 2),
+    DeltaGB, GrowthPct, GrowthCategory
+| order by GrowthPct desc

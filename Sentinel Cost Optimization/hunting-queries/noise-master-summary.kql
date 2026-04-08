@@ -1,0 +1,90 @@
+// Master Noise Summary - All Tables Combined
+// Aggregates noise indicators across ALL key tables to produce a
+// single executive summary of cost optimization opportunities.
+// Shows estimated GB savings and projected monthly cost reduction.
+// =====================================================================
+
+let _Window = 7d;
+let _CostPerGB = 2.76;
+// --- SecurityEvent noise estimate ---
+let _SecEvent =
+    SecurityEvent
+    | where TimeGenerated > ago(_Window)
+    | summarize 
+        Total = count(),
+        ProcessCreation4688 = countif(EventID == 4688),
+        Logon4624 = countif(EventID == 4624),
+        NetworkLogon = countif(EventID == 4624 and LogonType == 3),
+        ServiceLogon = countif(EventID == 4624 and LogonType == 5),
+        UnlockLogon = countif(EventID == 4624 and LogonType == 7)
+    | extend 
+        FilterableEvents = ProcessCreation4688 + NetworkLogon + ServiceLogon + UnlockLogon,
+        FilterablePct = round(toreal(ProcessCreation4688 + NetworkLogon + ServiceLogon + UnlockLogon) * 100.0 / Total, 1)
+    | project 
+        Table = "SecurityEvent", TotalEvents = Total, FilterableEvents, FilterablePct,
+        TopNoise = strcat("4688:", ProcessCreation4688, " NetLogon:", NetworkLogon, " SvcLogon:", ServiceLogon);
+// --- AADNonInteractiveUserSignInLogs noise estimate ---
+let _NonInteractive =
+    AADNonInteractiveUserSignInLogs
+    | where TimeGenerated > ago(_Window)
+    | summarize 
+        Total = count(),
+        SuccessfulTokenRefresh = countif(ResultType == "0")
+    | extend 
+        FilterableEvents = SuccessfulTokenRefresh,
+        FilterablePct = round(toreal(SuccessfulTokenRefresh) * 100.0 / Total, 1)
+    | project 
+        Table = "AADNonInteractiveUserSignInLogs", TotalEvents = Total, FilterableEvents, FilterablePct,
+        TopNoise = strcat("SuccessTokenRefresh:", SuccessfulTokenRefresh);
+// --- Syslog noise estimate ---
+let _Syslog =
+    Syslog
+    | where TimeGenerated > ago(_Window)
+    | summarize 
+        Total = count(),
+        InfoNoticeDebug = countif(SeverityLevel in ("info", "notice", "debug"))
+    | extend 
+        FilterableEvents = InfoNoticeDebug,
+        FilterablePct = round(toreal(InfoNoticeDebug) * 100.0 / Total, 1)
+    | project 
+        Table = "Syslog", TotalEvents = Total, FilterableEvents, FilterablePct,
+        TopNoise = strcat("Info/Notice/Debug:", InfoNoticeDebug);
+// --- CommonSecurityLog noise estimate ---
+let _CSL =
+    CommonSecurityLog
+    | where TimeGenerated > ago(_Window)
+    | summarize 
+        Total = count(),
+        AllowedTraffic = countif(DeviceAction has_any ("allow", "permit", "pass", "accept")),
+        HealthEvents = countif(Activity has_any ("health", "heartbeat", "keepalive"))
+    | extend 
+        FilterableEvents = AllowedTraffic + HealthEvents,
+        FilterablePct = round(toreal(AllowedTraffic + HealthEvents) * 100.0 / Total, 1)
+    | project 
+        Table = "CommonSecurityLog", TotalEvents = Total, FilterableEvents, FilterablePct,
+        TopNoise = strcat("Allowed:", AllowedTraffic, " Health:", HealthEvents);
+// --- Combine all ---
+_SecEvent | union _NonInteractive | union _Syslog | union _CSL
+| join kind=leftouter (
+    Usage
+    | where TimeGenerated > ago(_Window)
+    | summarize WeeklyMB = sum(Quantity) by DataType
+    | project Table = DataType, WeeklyMB
+) on Table
+| extend 
+    WeeklyGB = round(WeeklyMB / 1024.0, 2),
+    EstFilterableGB = round(WeeklyMB / 1024.0 * FilterablePct / 100.0, 2),
+    EstMonthlyFilterableGB = round(WeeklyMB / 1024.0 * FilterablePct / 100.0 * 4.3, 2)
+| extend 
+    EstMonthlySavingsUSD = round(EstMonthlyFilterableGB * _CostPerGB, 2),
+    Priority = case(
+        EstMonthlyFilterableGB > 50, "P1 - CRITICAL",
+        EstMonthlyFilterableGB > 10, "P2 - HIGH",
+        EstMonthlyFilterableGB > 2, "P3 - MEDIUM",
+        "P4 - LOW"
+    )
+| project 
+    Table, TotalEvents, FilterableEvents, FilterablePct, TopNoise,
+    WeeklyGB, EstFilterableGB, EstMonthlyFilterableGB,
+    EstMonthlySavingsUSD, Priority
+| order by EstMonthlySavingsUSD desc

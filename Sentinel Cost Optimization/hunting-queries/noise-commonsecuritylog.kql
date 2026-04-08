@@ -1,0 +1,61 @@
+// CommonSecurityLog - Device Vendor/Product Noise Analysis
+// CEF logs via CommonSecurityLog are often the most expensive connector.
+// This identifies which firewall/IDS/proxy products drive the most volume
+// and which DeviceAction + DeviceEventClassID combos can be safely filtered.
+// =====================================================================
+
+let _Window = 7d;
+let _TotalCSL = toscalar(CommonSecurityLog | where TimeGenerated > ago(_Window) | count);
+// --- Part 1: By Device Vendor + Product ---
+let _ByProduct =
+    CommonSecurityLog
+    | where TimeGenerated > ago(_Window)
+    | summarize 
+        EventCount = count(),
+        DistinctSources = dcount(DeviceAddress),
+        DistinctDestinations = dcount(DestinationIP)
+        by DeviceVendor, DeviceProduct
+    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalCSL, 1)
+    | extend 
+        EstDailyGB = round(toreal(EventCount) / 7.0 * 0.001 / 1024.0, 2),  // ~1KB/event avg
+        FilterAction = case(
+            PctOfTotal > 40, "CRITICAL: >40% - Investigate activity filter or DCR transform",
+            PctOfTotal > 20, "HIGH: >20% - Review DeviceAction distribution below",
+            PctOfTotal > 10, "MODERATE: >10% - Evaluate what actions are ingested",
+            "OK"
+        )
+    | project Section = "BY_PRODUCT", Name = strcat(DeviceVendor, " / ", DeviceProduct), EventCount, PctOfTotal, EstDailyGB, FilterAction;
+// --- Part 2: By DeviceAction (Allow/Deny/Drop) ---
+let _ByAction =
+    CommonSecurityLog
+    | where TimeGenerated > ago(_Window)
+    | summarize EventCount = count() by DeviceAction, DeviceVendor
+    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalCSL, 1)
+    | extend FilterAction = case(
+        DeviceAction has_any ("allow", "permit", "pass", "accept") and PctOfTotal > 30, 
+            "FILTER: Allowed traffic >30% - Filter routine allows, keep denies",
+        DeviceAction has_any ("allow", "permit", "pass") and PctOfTotal > 15, 
+            "REVIEW: Allowed traffic >15% - Consider ingesting denies only",
+        DeviceAction has_any ("drop", "deny", "block", "reject"), 
+            "KEEP: Blocked traffic - Security relevant",
+        PctOfTotal > 10, "REVIEW: High volume action",
+        "OK"
+    )
+    | project Section = "BY_ACTION", Name = strcat(DeviceVendor, ": ", DeviceAction), EventCount, PctOfTotal, EstDailyGB = 0.0, FilterAction;
+// --- Part 3: Top Event Class IDs (noisiest rule triggers) ---
+let _ByEventClass =
+    CommonSecurityLog
+    | where TimeGenerated > ago(_Window)
+    | summarize EventCount = count() by DeviceEventClassID, DeviceVendor, Activity
+    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalCSL, 1)
+    | where PctOfTotal > 2
+    | extend FilterAction = case(
+        Activity has_any ("health", "heartbeat", "keepalive", "status"), "FILTER: Health/heartbeat traffic - Zero detection value",
+        Activity has_any ("session", "traffic", "flow") and PctOfTotal > 10, "REVIEW: Session/flow logs >10% - May overlap with firewall allow",
+        PctOfTotal > 15, "REVIEW: >15% from single rule - Investigate",
+        "KEEP"
+    )
+    | project Section = "BY_EVENTCLASS", Name = strcat(DeviceVendor, ": ", DeviceEventClassID, " - ", Activity), EventCount, PctOfTotal, EstDailyGB = 0.0, FilterAction
+    | top 20 by EventCount desc;
+_ByProduct | union _ByAction | union _ByEventClass
+| order by Section asc, EventCount desc

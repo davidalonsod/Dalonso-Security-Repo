@@ -1,0 +1,65 @@
+// Syslog - Facility & Severity Noise Analysis
+// Identifies high-volume Syslog facilities and severity levels
+// that are candidates for DCR filtering. Informational and Notice
+// logs are typically >60% of Syslog volume with low detection value.
+// =====================================================================
+
+let _Window = 7d;
+let _TotalSyslog = toscalar(Syslog | where TimeGenerated > ago(_Window) | count);
+// --- By Severity ---
+let _BySeverity =
+    Syslog
+    | where TimeGenerated > ago(_Window)
+    | summarize 
+        EventCount = count(),
+        DistinctHosts = dcount(HostName),
+        DistinctFacilities = dcount(Facility)
+        by SeverityLevel
+    | extend 
+        PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalSyslog, 1),
+        FilterAction = case(
+            SeverityLevel in ("info", "notice", "debug"), "FILTER: Low-value severity - Strong DCR exclude candidate",
+            SeverityLevel == "warning", "REVIEW: Evaluate if all warnings are needed",
+            "KEEP: Security-relevant severity"
+        ),
+        EstDailyGB = round(toreal(EventCount) / 7.0 * 0.0005 / 1024.0, 3)  // rough ~500 bytes/event
+    | project Section = "SEVERITY", Name = SeverityLevel, EventCount, PctOfTotal, EstDailyGB, DistinctHosts, FilterAction;
+// --- By Facility ---
+let _ByFacility =
+    Syslog
+    | where TimeGenerated > ago(_Window)
+    | summarize 
+        EventCount = count(),
+        DistinctHosts = dcount(HostName),
+        SeverityBreakdown = strcat(
+            "err:", countif(SeverityLevel in ("err", "crit", "alert", "emerg")),
+            " warn:", countif(SeverityLevel == "warning"),
+            " info:", countif(SeverityLevel in ("info", "notice", "debug"))
+        )
+        by Facility
+    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalSyslog, 1)
+    | extend FilterAction = case(
+        Facility in ("cron", "ntp", "lpr", "uucp", "ftp") and PctOfTotal > 2, "FILTER: Non-security facility, high volume",
+        Facility == "kern" and PctOfTotal > 15, "REVIEW: Kernel logs often noisy, evaluate host scope",
+        Facility == "daemon" and PctOfTotal > 15, "REVIEW: Daemon logs - filter by process name in DCR",
+        Facility in ("auth", "authpriv"), "KEEP: Authentication logs - security critical",
+        PctOfTotal < 1, "OK: Low volume",
+        "REVIEW: Evaluate detection coverage"
+    )
+    | project Section = "FACILITY", Name = Facility, EventCount, PctOfTotal, EstDailyGB = 0.0, DistinctHosts, FilterAction;
+// --- By Facility + Severity combo (top noise) ---
+let _TopCombos =
+    Syslog
+    | where TimeGenerated > ago(_Window)
+    | summarize EventCount = count() by Facility, SeverityLevel
+    | extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalSyslog, 1)
+    | where PctOfTotal > 3
+    | extend FilterAction = case(
+        SeverityLevel in ("info", "notice", "debug") and PctOfTotal > 10, "FILTER: High-vol low-severity combo - Top DCR candidate",
+        SeverityLevel in ("info", "notice", "debug") and PctOfTotal > 5, "FILTER: Significant low-severity volume",
+        "REVIEW"
+    )
+    | project Section = "TOP_COMBO", Name = strcat(Facility, "/", SeverityLevel), EventCount, PctOfTotal, EstDailyGB = 0.0, DistinctHosts = 0, FilterAction
+    | top 15 by EventCount desc;
+_BySeverity | union _ByFacility | union _TopCombos
+| order by Section asc, EventCount desc

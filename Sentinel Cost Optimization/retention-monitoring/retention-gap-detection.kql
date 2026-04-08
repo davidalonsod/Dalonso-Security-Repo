@@ -1,0 +1,29 @@
+let _ExpectedRetentionDays = 90;
+let _MinRecords = 100;
+Usage
+| where TimeGenerated > ago(365d)
+| summarize 
+    OldestRecord = min(TimeGenerated),
+    RecordCount = count()
+    by DataType
+| where RecordCount > _MinRecords
+| extend 
+    ObservedDays = datetime_diff('day', now(), OldestRecord),
+    ExpectedDays = _ExpectedRetentionDays,
+    GapDays = _ExpectedRetentionDays - datetime_diff('day', now(), OldestRecord)
+| where GapDays > 5
+| extend
+    GapSeverity = case(
+        GapDays > 60, "CRITICAL - Major data loss",
+        GapDays > 30, "HIGH - Significant gap",
+        GapDays > 14, "MEDIUM - Notable shortfall",
+        "LOW - Minor gap"
+    ),
+    PossibleCause = case(
+        ObservedDays < 7, "Recently enabled connector",
+        ObservedDays < 30, "Connector enabled within last month",
+        "Possible data purge or retention override"
+    )
+| project 
+    DataType, ObservedDays, ExpectedDays, GapDays, GapSeverity, PossibleCause
+| order by GapDays desc

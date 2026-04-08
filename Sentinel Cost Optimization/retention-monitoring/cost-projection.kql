@@ -1,0 +1,51 @@
+let _AuxiliaryTables = dynamic([
+    "OfficeActivity", "AzureActivity", "Heartbeat",
+    "SentinelHealth", "SecurityAlert", "SecurityIncident", "Operation"
+]);
+let _AnalyticsIngestionRate = 2.76;
+let _AnalyticsRetentionRate = 0.12;
+let _AuxiliaryIngestionRate = 0.76;
+let _AuxiliaryRetentionRate = 0.02;
+let _CurrentRetentionDays = 90;
+let _ExtendedRetentionMonths = 0;
+Usage
+| where TimeGenerated > ago(30d)
+| summarize 
+    MonthlyMB = round(sum(Quantity), 2),
+    IsBillable = max(IsBillable)
+    by DataType
+| extend 
+    MonthlyGB = round(MonthlyMB / 1024.0, 2),
+    TablePlan = iff(DataType in (_AuxiliaryTables), "Auxiliary", "Analytics")
+| extend
+    MonthlyIngestionCost = round(
+        iff(TablePlan == "Analytics",
+            MonthlyGB * _AnalyticsIngestionRate,
+            MonthlyGB * _AuxiliaryIngestionRate
+        ), 2),
+    MonthlyRetentionCost = round(
+        iff(_ExtendedRetentionMonths > 0,
+            iff(TablePlan == "Analytics",
+                MonthlyGB * _CurrentRetentionDays / 30.0 * _AnalyticsRetentionRate * _ExtendedRetentionMonths,
+                MonthlyGB * _CurrentRetentionDays / 30.0 * _AuxiliaryRetentionRate * _ExtendedRetentionMonths
+            ),
+            0.0
+        ), 2),
+    StoredGB = round(MonthlyGB * _CurrentRetentionDays / 30.0, 2)
+| extend TotalMonthlyCost = MonthlyIngestionCost + MonthlyRetentionCost
+| summarize 
+    TotalIngestionGB = round(sum(MonthlyGB), 2),
+    TotalStoredGB = round(sum(StoredGB), 2),
+    TotalIngestionCost = round(sum(MonthlyIngestionCost), 2),
+    TotalRetentionCost = round(sum(MonthlyRetentionCost), 2),
+    TotalMonthlyCost = round(sum(TotalMonthlyCost), 2),
+    AnalyticsTables = dcountif(DataType, TablePlan == "Analytics"),
+    AuxiliaryTables = dcountif(DataType, TablePlan == "Auxiliary")
+    by TablePlan
+| extend AnnualProjection = round(TotalMonthlyCost * 12, 2)
+| project 
+    TablePlan, 
+    Tables = iff(TablePlan == "Analytics", AnalyticsTables, AuxiliaryTables),
+    TotalIngestionGB, TotalStoredGB,
+    TotalIngestionCost, TotalRetentionCost, TotalMonthlyCost,
+    AnnualProjection

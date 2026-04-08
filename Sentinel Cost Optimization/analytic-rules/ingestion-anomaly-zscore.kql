@@ -1,0 +1,41 @@
+let _AuxiliaryTables = dynamic([
+    "OfficeActivity", "AzureActivity", "Heartbeat",
+    "SentinelHealth", "SecurityAlert", "SecurityIncident", "Operation"
+]);
+let _LookbackDays = 14d;
+let _Threshold = 3.0;
+let _Baseline =
+    Usage
+    | where TimeGenerated > ago(_LookbackDays)
+    | where IsBillable == true
+    | where DataType !in (_AuxiliaryTables)
+    | summarize DailyMB = sum(Quantity) by Day = bin(TimeGenerated, 1d), DataType
+    | summarize 
+        AvgDailyMB  = avg(DailyMB),
+        StdDevMB    = stdev(DailyMB),
+        MedianMB    = percentile(DailyMB, 50),
+        P95MB       = percentile(DailyMB, 95)
+        by DataType;
+Usage
+| where TimeGenerated > ago(1d)
+| where IsBillable == true
+| where DataType !in (_AuxiliaryTables)
+| summarize TodayMB = sum(Quantity) by DataType
+| join kind=inner _Baseline on DataType
+| extend 
+    ZScore = iff(StdDevMB > 0, round((TodayMB - AvgDailyMB) / StdDevMB, 2), 0.0),
+    DeviationPct = round((TodayMB - AvgDailyMB) / AvgDailyMB * 100, 1)
+| where ZScore > _Threshold or ZScore < -_Threshold
+| extend 
+    AnomalyType = iff(ZScore > 0, "SPIKE", "DROP"),
+    TodayGB = round(TodayMB / 1024.0, 3),
+    AvgGB = round(AvgDailyMB / 1024.0, 3)
+| project 
+    TimeGenerated = now(),
+    DataType, AnomalyType, ZScore, DeviationPct,
+    TodayGB, AvgGB, 
+    TodayMB = round(TodayMB, 1),
+    AvgDailyMB = round(AvgDailyMB, 1),
+    StdDevMB = round(StdDevMB, 1),
+    P95MB = round(P95MB, 1)
+| order by abs(ZScore) desc

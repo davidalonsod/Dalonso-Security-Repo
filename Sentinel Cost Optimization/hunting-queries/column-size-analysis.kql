@@ -1,0 +1,33 @@
+// Column Size Analysis - Identify Oversized Columns per Table
+// Analyzes each of the top ingesting tables individually, pivots columns
+// with narrow(), and finds columns consuming >30% of average row size.
+// These are prime candidates for project-away in DCR transforms.
+// =====================================================================
+
+let _SampleSize = 50000;
+let _analyzeSecurityEvent = SecurityEvent | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = "SecurityEvent";
+let _analyzeSigninLogs = SigninLogs | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = "SigninLogs";
+let _analyzeAADNonInteractive = AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = "AADNonInteractiveUserSignInLogs";
+let _analyzeCSL = CommonSecurityLog | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = "CommonSecurityLog";
+let _analyzeSyslog = Syslog | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = "Syslog";
+let _analyzeAuditLogs = AuditLogs | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = "AuditLogs";
+let _analyzeAzureActivity = AzureActivity | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = "AzureActivity";
+let _analyzeOfficeActivity = OfficeActivity | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = "OfficeActivity";
+let _analyzeHeartbeat = Heartbeat | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = "Heartbeat";
+let _analyzeEvent = Event | where TimeGenerated > ago(1d) | take _SampleSize | evaluate narrow() | where isnotempty(tostring(Value)) | summarize AvgLenBytes = round(avg(toreal(strlen(tostring(Value)))), 0), MaxLenBytes = max(strlen(tostring(Value))) by Column | where AvgLenBytes > 0 | extend TableName = "Event";
+let _allColumns = union
+    _analyzeSecurityEvent, _analyzeSigninLogs, _analyzeAADNonInteractive,
+    _analyzeCSL, _analyzeSyslog, _analyzeAuditLogs,
+    _analyzeAzureActivity, _analyzeOfficeActivity, _analyzeHeartbeat, _analyzeEvent;
+_allColumns
+| join kind=inner (
+    _allColumns | summarize TotalAvgLen = sum(AvgLenBytes) by TableName
+) on TableName
+| extend PctOfRowSize = round(AvgLenBytes / toreal(TotalAvgLen) * 100, 1)
+| where PctOfRowSize > 30
+| extend Recommendation = case(
+    PctOfRowSize > 50, "CRITICAL: >50% of row size - Use project-away in DCR transform",
+    "Medium: >30% of row size - Study to use project-away in DCR transform"
+)
+| project TableName, Column, AvgLenBytes, MaxLenBytes, PctOfRowSize, Recommendation
+| order by TableName asc, PctOfRowSize desc

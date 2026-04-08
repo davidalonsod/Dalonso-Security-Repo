@@ -1,0 +1,20 @@
+// Computers Not Sending Security Events
+// Finds servers/workstations that have not sent any SecurityEvent for over 1 hour.
+// Indicates broken agents, offline machines, or disabled audit policies.
+// =====================================================================
+
+SecurityEvent
+| where TimeGenerated > ago(1d)
+| summarize ['Last Record Received'] = datetime_diff("minute", now(), max(TimeGenerated)) by Computer
+| project Computer, ['Last Record Received']
+| where ['Last Record Received'] >= 60
+| extend 
+    SilentHours = round(toreal(['Last Record Received']) / 60.0, 1),
+    Severity = case(
+        ['Last Record Received'] >= 1440, "CRITICAL: >24h silent",
+        ['Last Record Received'] >= 480, "HIGH: >8h silent",
+        ['Last Record Received'] >= 120, "MEDIUM: >2h silent",
+        "LOW: >1h silent"
+    )
+| project Computer, ['Last Record Received'], SilentHours, Severity
+| order by ['Last Record Received'] desc

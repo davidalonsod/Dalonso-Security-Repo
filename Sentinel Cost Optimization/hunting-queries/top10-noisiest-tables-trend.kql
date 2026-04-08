@@ -1,0 +1,18 @@
+let _AuxiliaryTables = dynamic([
+    "OfficeActivity", "AzureActivity", "Heartbeat",
+    "SentinelHealth", "SecurityAlert", "SecurityIncident", "Operation"
+]);
+let _Top10 = 
+    Usage
+    | where TimeGenerated > ago(30d)
+    | where IsBillable == true
+    | where DataType !in (_AuxiliaryTables)
+    | summarize TotalMB = sum(Quantity) by DataType
+    | top 10 by TotalMB desc
+    | project DataType;
+Usage
+| where TimeGenerated > ago(30d)
+| where IsBillable == true
+| where DataType in (_Top10)
+| summarize DailyGB = round(sum(Quantity) / 1024.0, 3) by Day = bin(TimeGenerated, 1d), DataType
+| order by Day asc, DailyGB desc

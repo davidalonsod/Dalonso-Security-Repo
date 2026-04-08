@@ -40,6 +40,11 @@ sentinel-ingestion-control/
 │   ├── noise-master-summary.kql
 │   ├── duplicate-cross-table-overlap.kql
 │   └── duplicate-signin-overlap.kql
+├── auxiliary-monitoring/               # 4 Auxiliary table queries (.kql)
+│   ├── auxiliary-vs-analytics-inventory.kql
+│   ├── auxiliary-volume-monitor.kql
+│   ├── auxiliary-daily-trend.kql
+│   └── migration-candidates.kql
 ├── retention-monitoring/               # 4 Retention compliance queries (.kql)
 │   ├── effective-retention-per-table.kql
 │   ├── retention-gap-detection.kql

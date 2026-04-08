@@ -1,0 +1,39 @@
+// AuditLogs - Operation Noise Analysis
+// AuditLogs captures every Entra ID/Azure AD change.
+// Certain operations (token issuance, policy evaluation, app consent)
+// generate massive volume with minimal detection value.
+// =====================================================================
+
+let _Window = 7d;
+let _TotalAudit = toscalar(AuditLogs | where TimeGenerated > ago(_Window) | count);
+AuditLogs
+| where TimeGenerated > ago(_Window)
+| summarize 
+    EventCount = count(),
+    DistinctActors = dcount(tostring(InitiatedBy.user.userPrincipalName)),
+    DistinctTargets = dcount(tostring(TargetResources[0].displayName)),
+    ResultBreakdown = strcat(
+        "Success:", countif(Result == "success"),
+        " Failure:", countif(Result == "failure")
+    )
+    by OperationName, Category
+| extend PctOfTotal = round(toreal(EventCount) * 100.0 / _TotalAudit, 1)
+| extend FilterAction = case(
+    OperationName has_any ("Update policy", "Update user", "Update application") and PctOfTotal > 10, 
+        "REVIEW: High-volume update operation - Consider filtering routine updates",
+    OperationName has_any ("consent", "Add delegated permission") and PctOfTotal > 5, 
+        "REVIEW: Consent operations - Often noisy from app registrations",
+    OperationName has_any ("Add member to group", "Remove member from group") and PctOfTotal > 10, 
+        "REVIEW: Group membership churn - Filter known sync service accounts",
+    OperationName has_any ("Update device", "Update service principal") and PctOfTotal > 5,
+        "FILTER: Device/SP updates - Usually automated, low detection value",
+    Category == "Policy" and PctOfTotal > 10,
+        "REVIEW: Policy operations noisy - Evaluate if conditional access eval logs needed",
+    PctOfTotal > 15, "HIGH VOLUME: >15% - Investigate source",
+    "OK"
+)
+| project 
+    OperationName, Category, EventCount, PctOfTotal,
+    DistinctActors, DistinctTargets, ResultBreakdown, FilterAction
+| order by EventCount desc
+| take 30

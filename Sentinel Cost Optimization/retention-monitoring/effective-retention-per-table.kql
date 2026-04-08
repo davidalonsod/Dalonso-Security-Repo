@@ -1,0 +1,26 @@
+Usage
+| where TimeGenerated > ago(365d)
+| summarize 
+    OldestRecord = min(TimeGenerated),
+    NewestRecord = max(TimeGenerated),
+    TotalMB = round(sum(Quantity), 2),
+    Records = count()
+    by DataType
+| extend 
+    ObservedRetentionDays = datetime_diff('day', now(), OldestRecord),
+    DataSpanDays = datetime_diff('day', NewestRecord, OldestRecord),
+    LastIngestion = NewestRecord,
+    TablePlan = iff(TotalMB > 0, "Active", "Empty")
+| extend
+    RetentionTier = case(
+        ObservedRetentionDays >= 365, "1 Year+",
+        ObservedRetentionDays >= 180, "6 Months+",
+        ObservedRetentionDays >= 90, "90 Days (Standard)",
+        ObservedRetentionDays >= 30, "30 Days",
+        "< 30 Days"
+    )
+| project 
+    DataType, ObservedRetentionDays, DataSpanDays, RetentionTier,
+    OldestRecord, NewestRecord,
+    TotalGB = round(TotalMB / 1024.0, 3)
+| order by ObservedRetentionDays desc
