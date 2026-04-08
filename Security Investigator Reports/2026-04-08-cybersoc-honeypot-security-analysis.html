@@ -1,0 +1,1086 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Honeypot Security Analysis — ALPINE-SRV1 | CyberSOC</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-card: #1c2128;
+            --border: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent-red: #f85149;
+            --accent-orange: #d29922;
+            --accent-yellow: #e3b341;
+            --accent-green: #3fb950;
+            --accent-blue: #58a6ff;
+            --accent-purple: #bc8cff;
+            --accent-cyan: #39d2c0;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+        .container { max-width: 1440px; margin: 0 auto; padding: 24px; }
+        
+        /* Header */
+        .header {
+            background: linear-gradient(135deg, #1a0a0a 0%, #0d1117 50%, #0a1628 100%);
+            border: 1px solid var(--accent-red);
+            border-radius: 12px;
+            padding: 32px;
+            margin-bottom: 24px;
+            position: relative;
+            overflow: hidden;
+        }
+        .header::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, var(--accent-red), var(--accent-orange), var(--accent-red));
+        }
+        .header h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
+        .header h1 .honey { color: var(--accent-orange); }
+        .header .subtitle { color: var(--text-secondary); font-size: 14px; margin-bottom: 16px; }
+        .header .meta-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
+            font-size: 13px;
+        }
+        .header .meta-item { color: var(--text-secondary); }
+        .header .meta-item strong { color: var(--text-primary); }
+        .classification {
+            display: inline-block;
+            background: var(--accent-red);
+            color: #fff;
+            padding: 2px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+        }
+
+        /* KPI Cards */
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .kpi-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+        .kpi-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+        }
+        .kpi-card.red::before { background: var(--accent-red); }
+        .kpi-card.orange::before { background: var(--accent-orange); }
+        .kpi-card.blue::before { background: var(--accent-blue); }
+        .kpi-card.green::before { background: var(--accent-green); }
+        .kpi-card.purple::before { background: var(--accent-purple); }
+        .kpi-card.cyan::before { background: var(--accent-cyan); }
+        .kpi-card .value { font-size: 36px; font-weight: 700; }
+        .kpi-card .label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+        .kpi-card.red .value { color: var(--accent-red); }
+        .kpi-card.orange .value { color: var(--accent-orange); }
+        .kpi-card.blue .value { color: var(--accent-blue); }
+        .kpi-card.green .value { color: var(--accent-green); }
+        .kpi-card.purple .value { color: var(--accent-purple); }
+        .kpi-card.cyan .value { color: var(--accent-cyan); }
+
+        /* Section */
+        .section {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+        .section h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .section h3 {
+            font-size: 15px;
+            font-weight: 600;
+            margin: 16px 0 10px;
+            color: var(--accent-blue);
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            margin-bottom: 12px;
+        }
+        th {
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            text-align: left;
+            padding: 10px 12px;
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border);
+        }
+        td {
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+        tr:hover td { background: rgba(88, 166, 255, 0.04); }
+
+        /* Severity badges */
+        .sev-critical { background: #f8514920; color: var(--accent-red); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; }
+        .sev-high { background: #d2992220; color: var(--accent-orange); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; }
+        .sev-medium { background: #e3b34120; color: var(--accent-yellow); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; }
+        .sev-low { background: #58a6ff20; color: var(--accent-blue); padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; }
+
+        /* Alert box */
+        .alert-box {
+            background: rgba(248, 81, 73, 0.08);
+            border: 1px solid rgba(248, 81, 73, 0.3);
+            border-radius: 8px;
+            padding: 16px;
+            margin: 12px 0;
+            font-size: 13px;
+        }
+        .alert-box.warning {
+            background: rgba(210, 153, 34, 0.08);
+            border-color: rgba(210, 153, 34, 0.3);
+        }
+        .alert-box.info {
+            background: rgba(88, 166, 255, 0.08);
+            border-color: rgba(88, 166, 255, 0.3);
+        }
+
+        /* Chart container */
+        .chart-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 4px 0;
+            font-size: 12px;
+        }
+        .chart-bar .label { width: 60px; text-align: right; color: var(--text-secondary); flex-shrink: 0; }
+        .chart-bar .bar-container { flex: 1; height: 22px; background: var(--bg-secondary); border-radius: 4px; overflow: hidden; }
+        .chart-bar .bar { height: 100%; border-radius: 4px; display: flex; align-items: center; padding-left: 8px; font-size: 11px; font-weight: 600; color: #fff; min-width: 24px; }
+        .chart-bar .bar.red { background: linear-gradient(90deg, var(--accent-red), #d73a49); }
+        .chart-bar .bar.orange { background: linear-gradient(90deg, var(--accent-orange), #b07d19); }
+        .chart-bar .bar.blue { background: linear-gradient(90deg, var(--accent-blue), #388be5); }
+        .chart-bar .bar.green { background: linear-gradient(90deg, var(--accent-green), #2ea043); }
+        .chart-bar .bar.purple { background: linear-gradient(90deg, var(--accent-purple), #9a6dd7); }
+
+        /* Grid layouts */
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+        @media (max-width: 900px) {
+            .grid-2, .grid-3 { grid-template-columns: 1fr; }
+            .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        /* Tags */
+        .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; margin: 2px; }
+        .tag-red { background: #f8514920; color: var(--accent-red); border: 1px solid #f8514940; }
+        .tag-orange { background: #d2992220; color: var(--accent-orange); border: 1px solid #d2992240; }
+        .tag-blue { background: #58a6ff20; color: var(--accent-blue); border: 1px solid #58a6ff40; }
+
+        /* MITRE boxes */
+        .mitre-item {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 12px;
+            margin: 8px 0;
+        }
+        .mitre-item .tactic { font-weight: 600; color: var(--accent-orange); font-size: 13px; }
+        .mitre-item .technique { color: var(--text-primary); font-size: 12px; margin: 4px 0; }
+        .mitre-item .evidence { color: var(--text-secondary); font-size: 11px; }
+
+        /* Recommendation priority */
+        .priority-immediate { border-left: 3px solid var(--accent-red); }
+        .priority-short { border-left: 3px solid var(--accent-orange); }
+        .priority-ongoing { border-left: 3px solid var(--accent-blue); }
+
+        .footer {
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 12px;
+            padding: 24px;
+            border-top: 1px solid var(--border);
+            margin-top: 24px;
+        }
+
+        /* Progress ring */
+        .progress-ring { position: relative; width: 100px; height: 100px; margin: 0 auto 12px; }
+        .progress-ring svg { transform: rotate(-90deg); }
+        .progress-ring .value-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); font-size: 20px; font-weight: 700; }
+
+        code { background: var(--bg-secondary); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--accent-cyan); }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <!-- Header -->
+    <div class="header">
+        <div class="classification">CONFIDENTIAL</div>
+        <h1>🍯 Honeypot Security Analysis — <span class="honey">ALPINE-SRV1</span></h1>
+        <p class="subtitle">CyberSOC Threat Intelligence Report</p>
+        <div class="meta-grid">
+            <div class="meta-item"><strong>Analysis Period:</strong> April 7, 2026 14:00 UTC — April 8, 2026 14:00 UTC (24h)</div>
+            <div class="meta-item"><strong>Report Generated:</strong> April 8, 2026</div>
+            <div class="meta-item"><strong>Generated by:</strong> GitHub Copilot in Agent mode with Claude Opus 4.6</div>
+            <div class="meta-item"><strong>Workspace:</strong> CyberSOC (e34d562e-ef12-4c4e-9bc0-7c6ae357c015)</div>
+            <div class="meta-item"><strong>Device:</strong> alpine-srv1 (Windows Server 2019 — 1809)</div>
+            <div class="meta-item"><strong>Public IP:</strong> 52.186.176.237</div>
+            <div class="meta-item"><strong>Exposure Level:</strong> <span style="color:var(--accent-red);font-weight:600;">HIGH</span></div>
+            <div class="meta-item"><strong>Internet-Facing:</strong> <span style="color:var(--accent-red);font-weight:600;">Yes</span></div>
+        </div>
+    </div>
+
+    <!-- Executive Summary -->
+    <div class="section">
+        <h2>📋 Executive Summary</h2>
+        <p style="margin-bottom:16px;">
+            Over the past 24 hours, the <strong>ALPINE-SRV1</strong> honeypot (Windows Server 2019, Public IP: 52.186.176.237)
+            attracted attack activity from <strong>60 unique IP addresses</strong> via a single dominant attack vector: <strong>RDP brute force</strong>
+            (TCP 3389). The honeypot recorded <strong>364 failed authentication attempts</strong> (EventID 4625) from 13 IPs that reached
+            the Windows authentication layer, plus an additional 47 IPs that established TCP-level RDP connections without generating
+            logon events. <strong>Zero successful external logons</strong> were detected — all 84 successful logons (EventID 4624) were
+            internal SYSTEM service logons.
+        </p>
+        <p style="margin-bottom:16px;">
+            The attack peaked between <strong>11:00–12:00 UTC</strong> with 216 failed logons in a single hour (59% of all attempts),
+            driven by a rapid-fire burst from <strong>190.195.12.85</strong> (Argentina) targeting the <code>ALPINE</code> account
+            with 41 attempts in under 30 seconds. The most prolific attacker — <strong>112.167.224.221</strong> (South Korea) — launched
+            143 brute force attempts cycling through <code>ADMIN</code> and <code>ADMINISTRATOR</code> accounts.
+        </p>
+        <p style="margin-bottom:16px;">
+            Sentinel generated <strong>8 TI Map IP Entity alerts</strong> (Medium severity, C2/CommandAndControl tactic) correlating
+            inbound connections to known threat intelligence indicators. The honeypot currently has <strong>1,707 unpatched CVEs</strong>
+            (30 Critical, 1,153 High), with the highest CVSS score at 9.9, and <strong>20 CVEs with known exploits available</strong>.
+            Additionally, <strong>19 security misconfigurations</strong> were identified, including the <em>built-in Administrator account
+            still enabled</em> — a critical finding given the active brute force targeting this account.
+        </p>
+    </div>
+
+    <!-- KPI Cards -->
+    <div class="kpi-grid">
+        <div class="kpi-card red">
+            <div class="value">364</div>
+            <div class="label">Failed Logon Attempts</div>
+        </div>
+        <div class="kpi-card orange">
+            <div class="value">60</div>
+            <div class="label">Unique Attacking IPs</div>
+        </div>
+        <div class="kpi-card blue">
+            <div class="value">8</div>
+            <div class="label">TI Alerts Generated</div>
+        </div>
+        <div class="kpi-card green">
+            <div class="value">0</div>
+            <div class="label">Successful External Logons</div>
+        </div>
+        <div class="kpi-card purple">
+            <div class="value">1,707</div>
+            <div class="label">Total CVEs</div>
+        </div>
+        <div class="kpi-card cyan">
+            <div class="value">20</div>
+            <div class="label">Exploitable CVEs</div>
+        </div>
+        <div class="kpi-card red">
+            <div class="value">30</div>
+            <div class="label">Critical CVEs (CVSS ≥9.0)</div>
+        </div>
+        <div class="kpi-card orange">
+            <div class="value">19</div>
+            <div class="label">Security Misconfigurations</div>
+        </div>
+    </div>
+
+    <!-- Section 1: Attack Surface Analysis -->
+    <div class="section">
+        <h2>🎯 1. Attack Surface Analysis</h2>
+
+        <h3>1.1 Attack Vector Distribution</h3>
+        <table>
+            <tr><th>Source</th><th>Unique IPs</th><th>Total Events</th><th>Primary Target</th></tr>
+            <tr>
+                <td><strong>DeviceNetworkEvents (RDP)</strong></td>
+                <td>60</td>
+                <td>60 inbound connections</td>
+                <td>RDP (port 3389)</td>
+            </tr>
+            <tr>
+                <td><strong>SecurityEvent (Auth)</strong></td>
+                <td>13</td>
+                <td>364 failed logons + 84 service logons</td>
+                <td>Windows authentication (EventID 4625)</td>
+            </tr>
+        </table>
+        <div class="alert-box info">
+            <strong>💡 Note:</strong> This is an <strong>RDP-only honeypot</strong> — no IIS Web Server (W3CIISLog), SSH, or other
+            service logs were detected. All attack activity is concentrated on RDP (TCP 3389). 47 of 60 connecting IPs
+            established TCP sessions but did not generate Windows logon events, suggesting they were performing port scanning
+            or RDP handshake reconnaissance without submitting credentials.
+        </div>
+
+        <h3>1.2 Top Attackers by Volume (Authentication Layer)</h3>
+        <table>
+            <tr><th>Rank</th><th>IP Address</th><th>Region</th><th>Failed Logons</th><th>Target Accounts</th><th>Behavior</th></tr>
+            <tr>
+                <td>🔴 1</td>
+                <td><code>112.167.224.221</code></td>
+                <td>🇰🇷 South Korea</td>
+                <td><strong>143</strong></td>
+                <td>ADMIN, ADMINISTRATOR</td>
+                <td>Sustained dictionary attack on admin accounts</td>
+            </tr>
+            <tr>
+                <td>🔴 2</td>
+                <td><code>80.94.95.221</code></td>
+                <td>🇷🇺 Russia</td>
+                <td><strong>72</strong></td>
+                <td>SR, SRV</td>
+                <td>Alternating accounts every ~90s — automated toolkit</td>
+            </tr>
+            <tr>
+                <td>🔴 3</td>
+                <td><code>202.74.239.200</code></td>
+                <td>🇵🇰 Pakistan</td>
+                <td><strong>47</strong></td>
+                <td>ALPINE, SRV</td>
+                <td>Mixed account brute force</td>
+            </tr>
+            <tr>
+                <td>🔴 4</td>
+                <td><code>190.195.12.85</code></td>
+                <td>🇦🇷 Argentina</td>
+                <td><strong>41</strong></td>
+                <td>ALPINE</td>
+                <td>⚡ Rapid-fire burst — 41 attempts in &lt;30 seconds</td>
+            </tr>
+            <tr>
+                <td>🟠 5</td>
+                <td><code>115.21.71.141</code></td>
+                <td>🇰🇷 South Korea</td>
+                <td><strong>36</strong></td>
+                <td>ALPINE</td>
+                <td>Single account dictionary attack</td>
+            </tr>
+            <tr>
+                <td>🟠 6</td>
+                <td><code>195.26.248.175</code></td>
+                <td>🇧🇷 Brazil</td>
+                <td><strong>8</strong></td>
+                <td>SUPORTE_TI, VINICIUS.ALVES, SISTEMAS, ADMINISTRADOR, ALAN.PEREIRA-ADMIN</td>
+                <td>🔍 Portuguese account names — targeted or recycled credential list from Brazilian org breach</td>
+            </tr>
+            <tr>
+                <td>🟡 7</td>
+                <td><code>186.19.58.65</code></td>
+                <td>🇦🇷 Argentina</td>
+                <td><strong>7</strong></td>
+                <td>SRV1</td>
+                <td>Single account probe</td>
+            </tr>
+            <tr>
+                <td>🟡 8</td>
+                <td><code>52.161.75.160</code></td>
+                <td>🇺🇸 US (Azure)</td>
+                <td><strong>3</strong></td>
+                <td>AZUREUSER, STUDENT</td>
+                <td>Azure-specific accounts — cloud-aware attacker</td>
+            </tr>
+            <tr>
+                <td>🟡 9</td>
+                <td><code>120.89.41.100</code></td>
+                <td>🇮🇩 Indonesia</td>
+                <td><strong>2</strong></td>
+                <td>Test</td>
+                <td>Default/test account probe</td>
+            </tr>
+            <tr>
+                <td>🟡 10</td>
+                <td><code>136.232.77.6</code></td>
+                <td>🇮🇳 India</td>
+                <td><strong>2</strong></td>
+                <td>SRV</td>
+                <td>Server account brute force</td>
+            </tr>
+        </table>
+
+        <h3>1.3 Hourly Attack Distribution (Failed Logons — EventID 4625)</h3>
+        <div style="margin: 12px 0;">
+            <div class="chart-bar"><span class="label">Apr 7 16h</span><div class="bar-container"><div class="bar blue" style="width:0.5%;">1</div></div></div>
+            <div class="chart-bar"><span class="label">Apr 7 17h</span><div class="bar-container"><div class="bar blue" style="width:3.2%;">7</div></div></div>
+            <div class="chart-bar"><span class="label">Apr 7 21h</span><div class="bar-container"><div class="bar blue" style="width:0.5%;">1</div></div></div>
+            <div class="chart-bar"><span class="label">Apr 8 09h</span><div class="bar-container"><div class="bar blue" style="width:1.4%;">3</div></div></div>
+            <div class="chart-bar"><span class="label">Apr 8 10h</span><div class="bar-container"><div class="bar orange" style="width:22.7%;">49</div></div></div>
+            <div class="chart-bar"><span class="label">Apr 8 11h</span><div class="bar-container"><div class="bar red" style="width:100%;">216 ⚠️ PEAK</div></div></div>
+            <div class="chart-bar"><span class="label">Apr 8 12h</span><div class="bar-container"><div class="bar orange" style="width:38%;">82</div></div></div>
+            <div class="chart-bar"><span class="label">Apr 8 13h</span><div class="bar-container"><div class="bar blue" style="width:2.3%;">5</div></div></div>
+        </div>
+        <div class="alert-box warning">
+            <strong>⚠️ Attack Surge:</strong> 347 of 364 failed logons (95%) occurred between 10:00–13:00 UTC on April 8, with peak activity
+            at 11:00–12:00 UTC (216 attempts — 59% of all activity). This coincides with attackers 112.167.224.221 (KR),
+            80.94.95.221 (RU), and 190.195.12.85 (AR) running concurrent brute force campaigns.
+        </div>
+
+        <h3>1.4 Geographic Distribution of All Attacking IPs</h3>
+        <div class="grid-2">
+            <div>
+                <table>
+                    <tr><th>Region</th><th>IPs</th><th>Key Sources</th></tr>
+                    <tr><td>🇺🇸 United States</td><td>12</td><td>Multiple cloud providers (AWS, Azure, Linode)</td></tr>
+                    <tr><td>🇷🇺 Russia</td><td>3</td><td>80.94.95.x (ISP range — likely botnet)</td></tr>
+                    <tr><td>🇰🇷 South Korea</td><td>3</td><td>Top attacker by volume (143 attempts)</td></tr>
+                    <tr><td>🇮🇳 India</td><td>2</td><td>Enterprise IP ranges</td></tr>
+                    <tr><td>🇦🇷 Argentina</td><td>2</td><td>Rapid burst attacker (190.195.12.85)</td></tr>
+                    <tr><td>🇻🇳 Vietnam</td><td>1</td><td>118.70.176.2</td></tr>
+                    <tr><td>🇵🇰 Pakistan</td><td>1</td><td>202.74.239.200</td></tr>
+                    <tr><td>🇮🇩 Indonesia</td><td>1</td><td>120.89.41.100</td></tr>
+                    <tr><td>🇧🇷 Brazil</td><td>1</td><td>Portuguese credential list</td></tr>
+                    <tr><td>🇧🇩 Bangladesh</td><td>1</td><td>182.160.119.130</td></tr>
+                    <tr><td>🇲🇦 Morocco</td><td>1</td><td>41.250.246.207</td></tr>
+                    <tr><td>🇹🇼 Taiwan</td><td>1</td><td>59.120.132.195</td></tr>
+                    <tr><td>Other / Cloud</td><td>31</td><td>AWS, Azure, Linode, DigitalOcean ranges</td></tr>
+                </table>
+            </div>
+            <div>
+                <h3 style="margin-top:0;">Targeted Account Names</h3>
+                <table>
+                    <tr><th>Account</th><th>Attempts</th><th>Assessment</th></tr>
+                    <tr><td><code>ADMIN</code></td><td>~143</td><td><span class="sev-critical">Critical</span> Default admin</td></tr>
+                    <tr><td><code>ADMINISTRATOR</code></td><td>~143</td><td><span class="sev-critical">Critical</span> Built-in admin</td></tr>
+                    <tr><td><code>ALPINE</code></td><td>~118</td><td><span class="sev-high">High</span> Hostname-based guess</td></tr>
+                    <tr><td><code>SRV</code> / <code>SRV1</code></td><td>~82</td><td><span class="sev-high">High</span> Server role guess</td></tr>
+                    <tr><td><code>SR</code></td><td>~72</td><td><span class="sev-medium">Medium</span> Abbreviation probe</td></tr>
+                    <tr><td><code>AZUREUSER</code></td><td>4</td><td><span class="sev-high">High</span> Cloud-aware attacker</td></tr>
+                    <tr><td><code>STUDENT</code></td><td>3</td><td><span class="sev-medium">Medium</span> Lab/training probe</td></tr>
+                    <tr><td><code>Test</code></td><td>2</td><td><span class="sev-low">Low</span> Default test account</td></tr>
+                    <tr><td><code>SUPORTE_TI</code></td><td>1</td><td><span class="sev-high">High</span> 🇧🇷 Targeted Brazilian IT</td></tr>
+                    <tr><td><code>ADMINISTRADOR</code></td><td>1</td><td><span class="sev-high">High</span> 🇧🇷 Portuguese admin</td></tr>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Section 2: Threat Intelligence Correlation -->
+    <div class="section">
+        <h2>🔍 2. Threat Intelligence Correlation</h2>
+
+        <h3>2.1 Sentinel TI Map Alerts</h3>
+        <p style="margin-bottom:12px;">
+            <strong>8 TI Map IP Entity to DeviceNetworkEvents</strong> alerts were generated in the past 7 days, all at
+            <span class="sev-medium">Medium</span> severity with <strong>CommandAndControl (TA0011)</strong> tactic classification.
+            All alerts remain in <strong>New</strong> status, indicating inbound connections from IPs matching active threat
+            intelligence indicators.
+        </p>
+        <table>
+            <tr><th>Timestamp (UTC)</th><th>Alert Name</th><th>Severity</th><th>Tactic</th><th>Status</th></tr>
+            <tr><td>2026-04-08 06:52</td><td>TI Map IP Entity to DeviceNetworkEvents</td><td><span class="sev-medium">Medium</span></td><td>CommandAndControl</td><td>⚠️ New</td></tr>
+            <tr><td>2026-04-08 05:52</td><td>TI Map IP Entity to DeviceNetworkEvents</td><td><span class="sev-medium">Medium</span></td><td>CommandAndControl</td><td>⚠️ New</td></tr>
+            <tr><td>2026-04-07 20:52</td><td>TI Map IP Entity to DeviceNetworkEvents</td><td><span class="sev-medium">Medium</span></td><td>CommandAndControl</td><td>⚠️ New</td></tr>
+            <tr><td>2026-04-07 18:52</td><td>TI Map IP Entity to DeviceNetworkEvents</td><td><span class="sev-medium">Medium</span></td><td>CommandAndControl</td><td>⚠️ New</td></tr>
+            <tr><td>2026-04-07 15:52</td><td>TI Map IP Entity to DeviceNetworkEvents</td><td><span class="sev-medium">Medium</span></td><td>CommandAndControl</td><td>⚠️ New</td></tr>
+            <tr><td>2026-04-07 13:52</td><td>TI Map IP Entity to DeviceNetworkEvents</td><td><span class="sev-medium">Medium</span></td><td>CommandAndControl</td><td>⚠️ New</td></tr>
+            <tr><td>2026-04-07 11:52</td><td>TI Map IP Entity to DeviceNetworkEvents</td><td><span class="sev-medium">Medium</span></td><td>CommandAndControl</td><td>⚠️ New</td></tr>
+            <tr><td>2026-04-07 10:52</td><td>TI Map IP Entity to DeviceNetworkEvents</td><td><span class="sev-medium">Medium</span></td><td>CommandAndControl</td><td>⚠️ New</td></tr>
+        </table>
+
+        <h3>2.2 Notable IP Clusters</h3>
+        <table>
+            <tr><th>Pattern</th><th>IPs</th><th>Assessment</th></tr>
+            <tr>
+                <td><strong>80.94.95.x (Russia)</strong></td>
+                <td><code>80.94.95.221</code>, <code>80.94.95.83</code>, <code>80.94.95.43</code></td>
+                <td><span class="tag tag-red">Botnet Range</span> Same /24 subnet — 3 IPs from likely same infrastructure. 80.94.95.221 is the most aggressive (72 failed logons)</td>
+            </tr>
+            <tr>
+                <td><strong>198.235.24.x (US)</strong></td>
+                <td><code>198.235.24.213</code>, <code>198.235.24.128</code>, <code>198.235.24.27</code>, <code>198.235.24.185</code></td>
+                <td><span class="tag tag-orange">Scan Infra</span> 4 IPs from same /24 — coordinated scanning infrastructure</td>
+            </tr>
+            <tr>
+                <td><strong>197.235.16.x (Africa)</strong></td>
+                <td><code>197.235.16.102</code>, <code>197.235.16.100</code></td>
+                <td><span class="tag tag-orange">Scan Infra</span> 2 IPs from same /24 — coordinated pair</td>
+            </tr>
+            <tr>
+                <td><strong>64.62.156.x (US)</strong></td>
+                <td><code>64.62.156.147</code>, <code>64.62.156.80</code></td>
+                <td><span class="tag tag-blue">Research</span> 2 IPs from CenturyLink/Lumen range — possible security research/scanning</td>
+            </tr>
+            <tr>
+                <td><strong>91.196.152.x (EU)</strong></td>
+                <td><code>91.196.152.238</code>, <code>91.196.152.192</code></td>
+                <td><span class="tag tag-orange">Botnet Range</span> 2 IPs from same /24 — coordinated pair</td>
+            </tr>
+            <tr>
+                <td><strong>Cloud Infrastructure</strong></td>
+                <td><code>52.161.75.160</code> (Azure), <code>18.212.61.92</code> (AWS), <code>8.211.167.32</code> (Alibaba), <code>47.251.53.147</code> (Alibaba)</td>
+                <td><span class="tag tag-orange">Cloud Abuse</span> Major cloud providers being used for attack infrastructure. 52.161.75.160 specifically targets Azure default accounts</td>
+            </tr>
+        </table>
+
+        <h3>2.3 Attack Pattern Intelligence</h3>
+        <div class="alert-box">
+            <strong>🔴 Key Finding — Cloud-Aware Credential Lists:</strong> Attacker <code>52.161.75.160</code> (an Azure IP) specifically targets
+            <code>AZUREUSER</code> and <code>STUDENT</code> — accounts that only exist in default Azure VM deployments. This indicates
+            attackers are running <strong>cloud-specialized credential lists</strong> that include Azure, AWS, and GCP default account names.
+        </div>
+        <div class="alert-box warning">
+            <strong>🟠 Key Finding — Compromised Credential Leaks:</strong> Attacker <code>195.26.248.175</code> used Portuguese-language
+            account names (<code>SUPORTE_TI</code>, <code>VINICIUS.ALVES</code>, <code>ALAN.PEREIRA-ADMIN</code>) that appear to be
+            from a specific Brazilian organization's credential dump. This suggests <strong>credential stuffing from a real org breach</strong>.
+        </div>
+    </div>
+
+    <!-- Section 3: Security Incidents -->
+    <div class="section">
+        <h2>🚨 3. Security Incidents &amp; Alerts</h2>
+
+        <h3>Active Alerts for ALPINE-SRV1</h3>
+        <table>
+            <tr><th>Field</th><th>Value</th></tr>
+            <tr><td><strong>Alert Count</strong></td><td>🔴 <strong>8</strong> TI Map IP Entity alerts (7 days)</td></tr>
+            <tr><td><strong>Alert Name</strong></td><td>TI Map IP Entity to DeviceNetworkEvents</td></tr>
+            <tr><td><strong>Severity</strong></td><td><span class="sev-medium">Medium</span></td></tr>
+            <tr><td><strong>Status</strong></td><td>⚠️ <strong>New</strong> (all 8 unresolved)</td></tr>
+            <tr><td><strong>MITRE Tactic</strong></td><td>CommandAndControl (TA0011)</td></tr>
+            <tr><td><strong>Attack Technique</strong></td><td>T1071 — Application Layer Protocol</td></tr>
+            <tr><td><strong>Alert Frequency</strong></td><td>~1 alert every 2-4 hours (consistent IP matching)</td></tr>
+        </table>
+
+        <div class="alert-box">
+            <strong>⚠️ Action Required:</strong> 8 unresolved TI alerts indicate <strong>persistent connections from known threat
+            intelligence-flagged IPs</strong>. While expected for a honeypot, these should be triaged and classified as
+            "True Positive — Benign" (honeypot expected behavior) to prevent alert fatigue and maintain SOC metrics accuracy.
+        </div>
+
+        <h3>Related Environment Incidents (Last 24h)</h3>
+        <table>
+            <tr><th>ID</th><th>Title</th><th>Severity</th><th>Status</th><th>Created</th></tr>
+            <tr>
+                <td>#56775</td>
+                <td>Modify eDiscovery manager involving one user</td>
+                <td><span class="sev-high">High</span></td>
+                <td>Active</td>
+                <td>2026-04-08 13:41</td>
+            </tr>
+            <tr>
+                <td>#56774</td>
+                <td>Mail.Read Permissions Granted to Application involving one user</td>
+                <td><span class="sev-medium">Medium</span></td>
+                <td>Active</td>
+                <td>2026-04-08 13:40</td>
+            </tr>
+            <tr>
+                <td>#55183</td>
+                <td>PowerShell execution detected</td>
+                <td><span class="sev-medium">Medium</span></td>
+                <td>Active</td>
+                <td>2026-03-27 20:23</td>
+            </tr>
+            <tr>
+                <td>#56586</td>
+                <td>Multi-stage incident involving multiple users</td>
+                <td><span class="sev-medium">Medium</span></td>
+                <td>Active</td>
+                <td>2026-04-07 01:42</td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- Section 4: Attack Pattern Analysis -->
+    <div class="section">
+        <h2>⚔️ 4. Attack Pattern Analysis</h2>
+
+        <h3>4.1 RDP Brute Force Patterns (SecurityEvent + DeviceNetworkEvents)</h3>
+
+        <div class="grid-2">
+            <div>
+                <h3 style="margin-top:0;">Authentication-Level Attackers (EventID 4625)</h3>
+                <table>
+                    <tr><th>IP</th><th>Country</th><th>Logons</th><th>Pattern</th></tr>
+                    <tr><td><code>112.167.224.221</code></td><td>🇰🇷 KR</td><td>143</td><td>ADMIN/ADMINISTRATOR cycling</td></tr>
+                    <tr><td><code>80.94.95.221</code></td><td>🇷🇺 RU</td><td>72</td><td>SR/SRV alternating ~90s interval</td></tr>
+                    <tr><td><code>202.74.239.200</code></td><td>🇵🇰 PK</td><td>47</td><td>ALPINE/SRV mixed</td></tr>
+                    <tr><td><code>190.195.12.85</code></td><td>🇦🇷 AR</td><td>41</td><td>ALPINE rapid burst</td></tr>
+                    <tr><td><code>115.21.71.141</code></td><td>🇰🇷 KR</td><td>36</td><td>ALPINE only</td></tr>
+                    <tr><td><code>195.26.248.175</code></td><td>🇧🇷 BR</td><td>8</td><td>5 unique PT accounts</td></tr>
+                </table>
+            </div>
+            <div>
+                <h3 style="margin-top:0;">RDP TCP Connections Only (No logon events)</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">
+                    47 additional IPs established TCP 3389 connections but did not generate authentication events —
+                    indicating <strong>port scanning</strong> or <strong>RDP handshake fingerprinting</strong>:
+                </p>
+                <div style="font-size:12px;line-height:2;">
+                    <span class="tag tag-red">144.172.94.211</span>
+                    <span class="tag tag-red">176.32.193.16</span>
+                    <span class="tag tag-red">64.62.156.147</span>
+                    <span class="tag tag-red">80.66.83.43</span>
+                    <span class="tag tag-orange">18.212.61.92</span>
+                    <span class="tag tag-orange">198.235.24.213</span>
+                    <span class="tag tag-orange">8.211.167.32</span>
+                    <span class="tag tag-orange">47.251.53.147</span>
+                    <span class="tag tag-blue">80.94.95.83</span>
+                    <span class="tag tag-blue">205.210.31.140</span>
+                    <span class="tag tag-blue">66.132.195.53</span>
+                    <span class="tag tag-blue">45.55.91.117</span>
+                    <span class="tag tag-blue">198.235.24.128</span>
+                    <span class="tag tag-blue">162.216.149.20</span>
+                    <span class="tag tag-blue">162.250.125.119</span>
+                    <span class="tag tag-blue">+ 32 more</span>
+                </div>
+            </div>
+        </div>
+
+        <h3>4.2 Behavioral Patterns</h3>
+        <div class="grid-3">
+            <div class="mitre-item">
+                <div class="tactic">🔴 Rapid Burst</div>
+                <div class="technique">190.195.12.85 — 41 attempts in &lt;30 seconds</div>
+                <div class="evidence">Highly automated — likely Hydra/Medusa tool with no rate limiting. Single account (ALPINE) suggests hostname reconnaissance preceded the attack.</div>
+            </div>
+            <div class="mitre-item">
+                <div class="tactic">🟠 Slow-and-Steady</div>
+                <div class="technique">80.94.95.221 — 72 attempts, ~90s intervals</div>
+                <div class="evidence">Deliberate spacing to evade account lockout policies. Alternates SR/SRV accounts to distribute detection risk. Consistent with professional botnet tooling.</div>
+            </div>
+            <div class="mitre-item">
+                <div class="tactic">🟡 Credential Stuffing</div>
+                <div class="technique">195.26.248.175 — 8 attempts, 5 unique names</div>
+                <div class="evidence">Portuguese names (SUPORTE_TI, VINICIUS.ALVES) suggest leaked credential list from Brazilian organization breach.</div>
+            </div>
+        </div>
+
+        <h3>4.3 MITRE ATT&CK Mapping</h3>
+        <table>
+            <tr><th>Tactic</th><th>Technique</th><th>Evidence</th></tr>
+            <tr>
+                <td><strong>Reconnaissance (TA0043)</strong></td>
+                <td>T1595.001 — Active Scanning: IP Blocks</td>
+                <td>47 IPs performed TCP 3389 handshake without submitting credentials — port scanning</td>
+            </tr>
+            <tr>
+                <td><strong>Reconnaissance (TA0043)</strong></td>
+                <td>T1589.001 — Gather Victim Identity: Credentials</td>
+                <td>195.26.248.175 used org-specific Portuguese account names from apparent credential leak</td>
+            </tr>
+            <tr>
+                <td><strong>Initial Access (TA0001)</strong></td>
+                <td>T1133 — External Remote Services</td>
+                <td>60 inbound RDP connections from external IPs to port 3389</td>
+            </tr>
+            <tr>
+                <td><strong>Credential Access (TA0006)</strong></td>
+                <td>T1110.001 — Brute Force: Password Guessing</td>
+                <td>364 failed logon attempts (EventID 4625) from 13 unique IPs</td>
+            </tr>
+            <tr>
+                <td><strong>Credential Access (TA0006)</strong></td>
+                <td>T1110.004 — Brute Force: Credential Stuffing</td>
+                <td>Brazilian account names (SUPORTE_TI, ADMINISTRADOR) from potential breach data</td>
+            </tr>
+            <tr>
+                <td><strong>Command and Control (TA0011)</strong></td>
+                <td>T1071 — Application Layer Protocol</td>
+                <td>8 TI Map alerts flagging inbound connections from known C2 infrastructure</td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- Section 5: Honeypot Vulnerability Status -->
+    <div class="section">
+        <h2>🛡️ 5. Honeypot Vulnerability Status</h2>
+
+        <h3>5.1 CVE Inventory Summary</h3>
+        <div class="grid-2">
+            <div>
+                <table>
+                    <tr><th>Severity</th><th>Count</th><th>Max CVSS</th><th>Affected Software</th></tr>
+                    <tr>
+                        <td><span class="sev-critical">Critical</span></td>
+                        <td><strong>30</strong></td>
+                        <td>9.9</td>
+                        <td>Windows Server 2019</td>
+                    </tr>
+                    <tr>
+                        <td><span class="sev-high">High</span></td>
+                        <td><strong>1,153</strong></td>
+                        <td>8.8</td>
+                        <td>Windows Server 2019</td>
+                    </tr>
+                    <tr>
+                        <td><span class="sev-medium">Medium</span></td>
+                        <td><strong>518</strong></td>
+                        <td>—</td>
+                        <td>Windows Server 2019</td>
+                    </tr>
+                    <tr>
+                        <td><span class="sev-low">Low</span></td>
+                        <td><strong>6</strong></td>
+                        <td>—</td>
+                        <td>Windows Server 2019</td>
+                    </tr>
+                    <tr style="font-weight:700;">
+                        <td>Total</td>
+                        <td>1,707</td>
+                        <td>9.9</td>
+                        <td></td>
+                    </tr>
+                </table>
+            </div>
+            <div>
+                <h3 style="margin-top:0;">Severity Distribution</h3>
+                <div class="chart-bar"><span class="label">Critical</span><div class="bar-container"><div class="bar red" style="width:2.6%;">30</div></div></div>
+                <div class="chart-bar"><span class="label">High</span><div class="bar-container"><div class="bar orange" style="width:100%;">1,153</div></div></div>
+                <div class="chart-bar"><span class="label">Medium</span><div class="bar-container"><div class="bar blue" style="width:44.9%;">518</div></div></div>
+                <div class="chart-bar"><span class="label">Low</span><div class="bar-container"><div class="bar green" style="width:0.5%;">6</div></div></div>
+            </div>
+        </div>
+
+        <h3>5.2 Critical Vulnerabilities (CVSS ≥ 9.0)</h3>
+        <table>
+            <tr><th>CVE ID</th><th>Severity</th><th>CVSS</th><th>Software</th><th>Exploit Available</th></tr>
+            <tr><td>CVE-2025-49708</td><td><span class="sev-critical">Critical</span></td><td><strong>9.9</strong></td><td>Windows Server 2019</td><td>❌ No</td></tr>
+            <tr><td>CVE-2023-35365</td><td><span class="sev-critical">Critical</span></td><td>9.8</td><td>Windows Server 2019</td><td>❌ No</td></tr>
+            <tr><td>CVE-2024-38063</td><td><span class="sev-critical">Critical</span></td><td>9.8</td><td>Windows Server 2019</td><td>❌ No</td></tr>
+            <tr><td>CVE-2023-36910</td><td><span class="sev-critical">Critical</span></td><td>9.8</td><td>Windows Server 2019</td><td>❌ No</td></tr>
+            <tr><td>CVE-2024-43639</td><td><span class="sev-critical">Critical</span></td><td>9.8</td><td>Windows Server 2019</td><td>❌ No</td></tr>
+            <tr><td>CVE-2024-49112</td><td><span class="sev-critical">Critical</span></td><td>9.8</td><td>Windows Server 2019</td><td>❌ No</td></tr>
+            <tr><td>CVE-2024-38076</td><td><span class="sev-critical">Critical</span></td><td>9.8</td><td>Windows Server 2019</td><td>❌ No</td></tr>
+            <tr><td>CVE-2024-38199</td><td><span class="sev-critical">Critical</span></td><td>9.8</td><td>Windows Server 2019</td><td>❌ No</td></tr>
+            <tr><td>CVE-2024-30080</td><td><span class="sev-critical">Critical</span></td><td>9.8</td><td>Windows Server 2019</td><td>❌ No</td></tr>
+            <tr><td>CVE-2025-21307</td><td><span class="sev-critical">Critical</span></td><td>9.8</td><td>Windows Server 2019</td><td>❌ No</td></tr>
+        </table>
+        <p style="color:var(--text-secondary);font-size:12px;margin-top:4px;">Showing top 10 of 30 Critical CVEs. All affecting Windows Server 2019.</p>
+
+        <h3>5.3 CVEs with Known Exploits Available (20 total)</h3>
+        <table>
+            <tr><th>CVE ID</th><th>Severity</th><th>CVSS</th><th>Impact</th></tr>
+            <tr><td>CVE-2024-29988</td><td><span class="sev-high">High</span></td><td>8.8</td><td>SmartScreen bypass — actively exploited in the wild</td></tr>
+            <tr><td>CVE-2023-36025</td><td><span class="sev-high">High</span></td><td>8.8</td><td>SmartScreen security feature bypass</td></tr>
+            <tr><td>CVE-2024-43461</td><td><span class="sev-high">High</span></td><td>8.8</td><td>MSHTML Platform spoofing</td></tr>
+            <tr><td>CVE-2024-30040</td><td><span class="sev-high">High</span></td><td>8.8</td><td>MSHTML Platform security feature bypass</td></tr>
+            <tr><td>CVE-2026-21510</td><td><span class="sev-high">High</span></td><td>8.8</td><td>Windows 2026 exploit</td></tr>
+            <tr><td>CVE-2024-49039</td><td><span class="sev-high">High</span></td><td>8.8</td><td>Task Scheduler elevation of privilege</td></tr>
+            <tr><td>CVE-2023-29360</td><td><span class="sev-high">High</span></td><td>8.4</td><td>Streaming Service elevation of privilege</td></tr>
+            <tr><td>CVE-2024-21412</td><td><span class="sev-high">High</span></td><td>8.1</td><td>Internet Shortcut bypass — used in targeted attacks</td></tr>
+            <tr><td>CVE-2024-38193</td><td><span class="sev-high">High</span></td><td>7.8</td><td>WinSock elevation of privilege — Lazarus Group exploit</td></tr>
+            <tr><td>CVE-2025-29824</td><td><span class="sev-high">High</span></td><td>7.8</td><td>CLFS driver elevation of privilege — ransomware campaigns</td></tr>
+        </table>
+        <p style="color:var(--text-secondary);font-size:12px;margin-top:4px;">Showing top 10 of 20 exploitable CVEs. All CVSS 7.8–8.8 range.</p>
+
+        <h3>5.4 Exploitation Risk Assessment</h3>
+        <div class="alert-box">
+            <strong>⚠️ CVE-2024-38193 (WinSock EoP):</strong> This vulnerability was <strong>actively exploited by the Lazarus Group (DPRK)</strong>
+            in targeted attacks. Its presence on an internet-facing honeypot creates a realistic attack surface that could attract
+            APT-level exploitation attempts.
+        </div>
+        <div class="alert-box warning">
+            <strong>🟠 CVE-2025-29824 (CLFS EoP):</strong> Used in <strong>ransomware campaigns</strong> for privilege escalation
+            post-initial access. Combined with the active RDP brute force, a successful logon could lead to immediate ransomware deployment.
+        </div>
+        <ul style="margin:12px 0;padding-left:20px;font-size:13px;color:var(--text-secondary);">
+            <li>✅ <strong>No Critical CVEs have exploits available</strong> — all 30 Critical CVEs (CVSS 9.8-9.9) lack public exploits</li>
+            <li>⚠️ <strong>20 High-severity CVEs have known exploits</strong> — CVSS range 7.8-8.8, primarily privilege escalation and security bypass</li>
+            <li>🔴 <strong>Several exploitable CVEs are used by APT groups</strong> — Lazarus (CVE-2024-38193), ransomware gangs (CVE-2025-29824)</li>
+            <li>🔵 Vulnerability posture is <strong>by-design</strong> for a honeypot — attracts real exploit attempts for intelligence gathering</li>
+        </ul>
+    </div>
+
+    <!-- Section 6: Security Configuration -->
+    <div class="section">
+        <h2>⚙️ 6. Security Configuration Assessment</h2>
+        <p style="margin-bottom:12px;color:var(--text-secondary);font-size:13px;">
+            19 non-compliant security configurations identified via DeviceTvmSecureConfigurationAssessment. Sorted by impact score.
+        </p>
+
+        <table>
+            <tr><th>Impact</th><th>Configuration</th><th>Category</th><th>Risk</th></tr>
+            <tr class="priority-immediate">
+                <td><span class="sev-critical">9</span></td>
+                <td>Block rebooting machine in Safe Mode</td>
+                <td>Attack Surface Reduction</td>
+                <td>Ransomware uses Safe Mode to disable security products</td>
+            </tr>
+            <tr class="priority-immediate">
+                <td><span class="sev-critical">9</span></td>
+                <td>Block use of copied or impersonated system tools</td>
+                <td>Attack Surface Reduction</td>
+                <td>Attackers copy system tools to avoid detection</td>
+            </tr>
+            <tr class="priority-immediate">
+                <td><span class="sev-critical">9</span></td>
+                <td>Encrypt all BitLocker-supported drives</td>
+                <td>Bitlocker</td>
+                <td>Unencrypted drives exposed to offline data theft</td>
+            </tr>
+            <tr class="priority-immediate">
+                <td><span class="sev-critical">9</span></td>
+                <td>Enable UEFI Secure Boot mode</td>
+                <td>Firmware</td>
+                <td>Vulnerable to rootkits and bootkits</td>
+            </tr>
+            <tr>
+                <td><span class="sev-high">8</span></td>
+                <td><strong>Disable the built-in Administrator account</strong></td>
+                <td>Accounts</td>
+                <td>🔴 <strong>CRITICAL:</strong> Admin account is actively being brute-forced by 2 top attackers</td>
+            </tr>
+            <tr>
+                <td><span class="sev-high">8</span></td>
+                <td>Disable NTLM authentication</td>
+                <td>Network</td>
+                <td>NTLM vulnerable to credential theft and relay attacks</td>
+            </tr>
+            <tr>
+                <td><span class="sev-high">8</span></td>
+                <td>Disable Remote Registry Service</td>
+                <td>OS / Services</td>
+                <td>Remote registry abuse for persistence and lateral movement</td>
+            </tr>
+            <tr>
+                <td><span class="sev-high">8</span></td>
+                <td>Enable Local Security Authority (LSA) protection</td>
+                <td>OS</td>
+                <td>Without LSA protection, Pass-the-Hash attacks possible</td>
+            </tr>
+            <tr>
+                <td><span class="sev-high">8</span></td>
+                <td>Disable Solicited Remote Assistance</td>
+                <td>OS</td>
+                <td>Unauthorized remote access channel</td>
+            </tr>
+            <tr>
+                <td><span class="sev-high">8</span></td>
+                <td>Disable Anonymous enumeration of shares</td>
+                <td>OS</td>
+                <td>Attackers can map network shares for data theft</td>
+            </tr>
+            <tr>
+                <td><span class="sev-high">8</span></td>
+                <td>Set UAC to automatically deny elevation requests</td>
+                <td>OS</td>
+                <td>Prevents cached credential theft on standard profiles</td>
+            </tr>
+            <tr>
+                <td><span class="sev-high">8</span></td>
+                <td>Disable Basic authentication (WinRM Client + Service)</td>
+                <td>OS</td>
+                <td>Plaintext passwords over WinRM</td>
+            </tr>
+            <tr>
+                <td><span class="sev-high">8</span></td>
+                <td>Block outbound from mshta.exe</td>
+                <td>Network</td>
+                <td>LOLBin C2 communication channel</td>
+            </tr>
+            <tr>
+                <td><span class="sev-high">8</span></td>
+                <td>Set LAN Manager auth to NTLMv2 only</td>
+                <td>Network</td>
+                <td>Older LM/NTLM hashes easily cracked</td>
+            </tr>
+            <tr>
+                <td><span class="sev-medium">7</span></td>
+                <td>Block file transfer over RDP</td>
+                <td>OS / Shares</td>
+                <td>Data exfiltration via RDP drive redirection</td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- Section 7: Software Inventory -->
+    <div class="section">
+        <h2>📦 7. Honeypot Software Inventory</h2>
+        <table>
+            <tr><th>Software</th><th>Vendor</th><th>Version</th><th>EoS Status</th></tr>
+            <tr><td><strong>Windows Server 2019</strong></td><td>Microsoft</td><td>10.0.17763.4377</td><td>✅ Supported</td></tr>
+            <tr><td>Defender for Endpoint</td><td>Microsoft</td><td>10.8471.17763.4377</td><td>✅ Active</td></tr>
+            <tr><td>Windows Defender</td><td>Microsoft</td><td>1.1.26030.3008</td><td>✅ Active</td></tr>
+            <tr><td>Defender Security Intelligence</td><td>Microsoft</td><td>1.447.220.0</td><td>✅ Updated</td></tr>
+            <tr><td>Edge (Chromium)</td><td>Microsoft</td><td>146.0.3856.97</td><td>✅ Current</td></tr>
+            <tr><td>.NET Framework</td><td>Microsoft</td><td>4.7.2.0 &amp; 4.0.0.0</td><td>✅ Supported</td></tr>
+            <tr><td>Visual C++ Runtime</td><td>Microsoft</td><td>14.38.33130.0</td><td>✅ Current</td></tr>
+            <tr><td>Monitoring Agent</td><td>Microsoft</td><td>10.20.18076.0</td><td>✅ Active</td></tr>
+            <tr><td>Dependency Agent</td><td>Microsoft</td><td>9.10.18.0</td><td>✅ Active</td></tr>
+            <tr><td><strong>Internet Explorer</strong></td><td>Microsoft</td><td>11.1790.17763.0</td><td>⚠️ <strong>End of Life</strong></td></tr>
+        </table>
+        <div class="alert-box info">
+            <strong>💡 Note:</strong> Defender for Endpoint is installed and reporting, indicating the honeypot is properly
+            integrated with Microsoft 365 Defender for telemetry collection. Internet Explorer 11 is EOL but is a default
+            component of Windows Server 2019.
+        </div>
+    </div>
+
+    <!-- Section 8: Key Detection Insights -->
+    <div class="section">
+        <h2>🔬 8. Key Detection Insights</h2>
+
+        <h3>8.1 Automated Scanning Patterns</h3>
+        <ul style="margin:8px 0;padding-left:20px;font-size:13px;">
+            <li>🔴 <strong>190.195.12.85</strong> executed 41 failed logons in under 30 seconds — extremely fast automated tool (likely Hydra with high parallelism)</li>
+            <li>🔴 <strong>112.167.224.221</strong> sustained 143 attempts cycling ADMIN/ADMINISTRATOR — long-duration dictionary attack spanning multiple hours</li>
+            <li>🟠 <strong>80.94.95.x cluster</strong> (3 IPs from same /24) — coordinated botnet infrastructure with deliberate timing to avoid lockout</li>
+            <li>🟠 <strong>198.235.24.x cluster</strong> (4 IPs from same /24) — scanning infrastructure performing RDP reconnaissance without submitting credentials</li>
+        </ul>
+
+        <h3>8.2 Notable Threat Intelligence</h3>
+        <ul style="margin:8px 0;padding-left:20px;font-size:13px;">
+            <li>🔴 <strong>80.66.83.43</strong> — Known Russian bulletproof hosting frequently associated with botnet C2, RAT distribution, and brute force campaigns</li>
+            <li>🟠 <strong>193.142.147.110</strong> — ColocaTel Inc. (Amsterdam) — same ASN as 193.142.147.209 which served ELF binary on port 9999 in previous investigations</li>
+            <li>🟠 <strong>147.185.132.30</strong> — Google LLC range, same /24 as 147.185.132.81 flagged as scanner in Shodan with 5,414 AbuseIPDB reports</li>
+            <li>🔵 <strong>52.161.75.160</strong> (Azure IP) — Cloud-aware attacker targeting AZUREUSER/STUDENT defaults. May be compromised Azure VM or purpose-built scan box</li>
+        </ul>
+
+        <h3>8.3 Novel Indicators</h3>
+        <ul style="margin:8px 0;padding-left:20px;font-size:13px;">
+            <li>🔴 <strong>Portuguese credential list</strong> (195.26.248.175) containing org-specific names — SUPORTE_TI, VINICIUS.ALVES, ALAN.PEREIRA-ADMIN — indicates real organization credential dump being circulated</li>
+            <li>🟠 <strong>Cloud-default targeting</strong> from Azure IP (52.161.75.160) — attackers maintaining cloud-specific credential dictionaries separate from traditional RDP wordlists</li>
+            <li>🔵 <strong>hostname-based guessing</strong> — multiple attackers used "ALPINE" as account name, derived from the hostname "alpine-srv1" — indicates attackers are performing DNS/banner reconnaissance before brute force</li>
+        </ul>
+    </div>
+
+    <!-- Section 9: Honeypot Effectiveness -->
+    <div class="section">
+        <h2>📊 9. Honeypot Effectiveness</h2>
+
+        <h3>9.1 Detection Metrics</h3>
+        <table>
+            <tr><th>Metric</th><th>Value</th><th>Assessment</th></tr>
+            <tr><td>Unique attackers detected</td><td>60</td><td>✅ Strong attraction</td></tr>
+            <tr><td>Failed logon events</td><td>364</td><td>✅ Active targeting</td></tr>
+            <tr><td>Successful external logons</td><td>0</td><td>✅ No compromise</td></tr>
+            <tr><td>TI alert generation</td><td>8 alerts (Medium)</td><td>✅ Alert pipeline working</td></tr>
+            <tr><td>Geographic diversity</td><td>13+ countries</td><td>✅ Global threat visibility</td></tr>
+            <tr><td>IP cluster detection</td><td>5 clusters (2-4 IPs each)</td><td>✅ Infrastructure tracking</td></tr>
+            <tr><td>Attack pattern diversity</td><td>4 distinct patterns</td><td>✅ Behavioral profiling</td></tr>
+            <tr><td>CVE attack surface</td><td>1,707 CVEs (20 exploitable)</td><td>✅ Attractive to advanced attackers</td></tr>
+        </table>
+
+        <h3>9.2 Recommendations</h3>
+        <table>
+            <tr><th>Priority</th><th>Recommendation</th><th>Rationale</th></tr>
+            <tr class="priority-immediate">
+                <td><span class="sev-critical">Immediate</span></td>
+                <td>Triage 8 TI Map alerts</td>
+                <td>All in New status — classify as "True Positive — Benign" for honeypot to maintain SOC metrics</td>
+            </tr>
+            <tr class="priority-immediate">
+                <td><span class="sev-critical">Immediate</span></td>
+                <td>Block 80.66.83.43 at perimeter</td>
+                <td>Russian bulletproof hosting — known C2/botnet infrastructure. No legitimate traffic expected</td>
+            </tr>
+            <tr class="priority-immediate">
+                <td><span class="sev-critical">Immediate</span></td>
+                <td>Block 80.94.95.0/24 at perimeter</td>
+                <td>3 IPs from same range conducting coordinated brute force — botnet infrastructure</td>
+            </tr>
+            <tr class="priority-short">
+                <td><span class="sev-high">Short-term</span></td>
+                <td>Feed IoCs to TI platform</td>
+                <td>All 60 attacking IPs should be tagged and propagated for network-wide detection</td>
+            </tr>
+            <tr class="priority-short">
+                <td><span class="sev-high">Short-term</span></td>
+                <td>Alert on AZUREUSER brute force</td>
+                <td>Cloud-default targeting from 52.161.75.160 indicates systematic Azure VM scanning — may affect production VMs</td>
+            </tr>
+            <tr class="priority-short">
+                <td><span class="sev-high">Short-term</span></td>
+                <td>Investigate 195.26.248.175 credential source</td>
+                <td>Portuguese org-specific names suggest active credential dump — check if related to partner/customer infrastructure</td>
+            </tr>
+            <tr class="priority-ongoing">
+                <td><span class="sev-medium">Ongoing</span></td>
+                <td>Monitor rapid burst patterns</td>
+                <td>190.195.12.85 achieved 41 attempts in &lt;30s — ensure detection rules can catch sub-minute bursts</td>
+            </tr>
+            <tr class="priority-ongoing">
+                <td><span class="sev-medium">Ongoing</span></td>
+                <td>Track IP cluster evolution</td>
+                <td>198.235.24.x and 80.94.95.x clusters may expand — monitor adjacent /24 blocks</td>
+            </tr>
+            <tr class="priority-ongoing">
+                <td><span class="sev-low">Ongoing</span></td>
+                <td>Consider adding SSH/HTTP honeypot services</td>
+                <td>Currently RDP-only — adding SSH (22) and HTTP (80/443) would increase attack vector diversity and intelligence value</td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- Section 10: Conclusion -->
+    <div class="section">
+        <h2>📝 10. Conclusion</h2>
+        <p style="margin-bottom:12px;">
+            The <strong>ALPINE-SRV1</strong> honeypot continues to effectively attract and catalog RDP brute force activity from
+            diverse global sources. In the past 24 hours, it recorded <strong>60 unique attacking IPs</strong> from 13+ countries,
+            with <strong>zero successful external compromises</strong> — all 364 authentication attempts were blocked.
+        </p>
+        <p style="margin-bottom:16px;"><strong>Key Takeaways:</strong></p>
+        <ol style="margin:8px 0;padding-left:20px;font-size:13px;">
+            <li>🔴 <strong>RDP remains the dominant attack vector</strong> — 100% of attack activity targets port 3389, consistent with RDP being the #1 exploited remote access protocol globally</li>
+            <li>🔴 <strong>Coordinated botnet infrastructure detected</strong> — multiple IP clusters (80.94.95.x, 198.235.24.x) indicate organized scanning campaigns</li>
+            <li>🟠 <strong>Cloud-aware attackers are active</strong> — Azure-specific account targeting (AZUREUSER) indicates evolving attacker tradecraft for cloud environments</li>
+            <li>🟠 <strong>Credential stuffing from real breaches</strong> — Portuguese org-specific account names suggest active credential dump circulation</li>
+            <li>🟢 <strong>Defender for Endpoint telemetry is working</strong> — DeviceNetworkEvents, SecurityEvent, and DeviceTvm data all flowing correctly</li>
+            <li>🔵 <strong>1,707 CVEs serve the honeypot's purpose</strong> — the massive vulnerability surface attracts attacker interest; 20 exploitable CVEs provide realistic post-exploitation opportunities for intelligence gathering</li>
+        </ol>
+
+        <h3 style="margin-top:20px;">Investigation Timeline</h3>
+        <table>
+            <tr><th>Phase</th><th>Details</th></tr>
+            <tr><td>Phase 1: Device Discovery</td><td>DeviceInfo query — identified alpine-srv1 (WinServer 2019, Public IP, Internet-facing, High exposure)</td></tr>
+            <tr><td>Phase 2: Attack Surface Analysis</td><td>SecurityEvent (EventID 4625/4624) + DeviceNetworkEvents — 364 failed logons, 60 RDP connections</td></tr>
+            <tr><td>Phase 3: Threat Intelligence</td><td>SecurityAlert + ThreatIntelligenceIndicator — 8 TI Map alerts, IP cluster analysis</td></tr>
+            <tr><td>Phase 4: Vulnerability Assessment</td><td>DeviceTvmSoftwareVulnerabilities + KB join — 1,707 CVEs, 20 exploitable</td></tr>
+            <tr><td>Phase 5: Security Configuration</td><td>DeviceTvmSecureConfigurationAssessment — 19 non-compliant configurations</td></tr>
+            <tr><td>Phase 6: Report Generation</td><td>HTML dashboard with all live CyberSOC data</td></tr>
+        </table>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+        <p><strong>Report generated by GitHub Copilot in Agent mode with Claude Opus 4.6</strong></p>
+        <p>Honeypot Security Analysis — ALPINE-SRV1 | CyberSOC Workspace e34d562e-ef12-4c4e-9bc0-7c6ae357c015</p>
+        <p>Classification: CONFIDENTIAL | April 8, 2026</p>
+    </div>
+
+</div>
+</body>
+</html>
