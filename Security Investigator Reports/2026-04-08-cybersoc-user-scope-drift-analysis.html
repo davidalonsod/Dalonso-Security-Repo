@@ -1,0 +1,1424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Account Scope Drift Report — Claudine Irwin (u101)</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #1c2333;
+            --border-color: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-yellow: #d29922;
+            --accent-orange: #db6d28;
+            --accent-red: #f85149;
+            --accent-purple: #bc8cff;
+            --accent-cyan: #39d2c0;
+            --stable-color: #58a6ff;
+            --monitor-color: #d29922;
+            --flag-color: #db6d28;
+            --critical-color: #f85149;
+            --contracting-color: #3fb950;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding: 20px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+
+        /* Header */
+        .report-header {
+            background: linear-gradient(135deg, #1a1e2e 0%, #0d1117 100%);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 24px;
+            position: relative;
+            overflow: hidden;
+        }
+        .report-header::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple), var(--accent-cyan));
+        }
+        .header-grid {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 20px;
+            align-items: start;
+        }
+        .report-header h1 {
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 4px;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .report-header .subtitle {
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+        .verdict-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+        .verdict-monitor {
+            background: rgba(210, 153, 34, 0.15);
+            border: 1px solid rgba(210, 153, 34, 0.4);
+            color: var(--accent-yellow);
+        }
+        .verdict-flag {
+            background: rgba(219, 109, 40, 0.15);
+            border: 1px solid rgba(219, 109, 40, 0.4);
+            color: var(--accent-orange);
+        }
+        .user-info-bar {
+            display: flex;
+            gap: 24px;
+            margin-top: 16px;
+            flex-wrap: wrap;
+        }
+        .user-info-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .user-info-item .label { color: var(--text-muted); }
+        .user-info-item .value { color: var(--text-primary); font-weight: 500; }
+
+        /* Cards */
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+        .card h2 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .card h2 .icon { font-size: 18px; }
+        .card h3 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin: 16px 0 10px;
+        }
+
+        /* Grid layouts */
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+        .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+
+        @media (max-width: 900px) {
+            .grid-2, .grid-3 { grid-template-columns: 1fr; }
+            .grid-4 { grid-template-columns: 1fr 1fr; }
+        }
+
+        /* Stat boxes */
+        .stat-box {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px;
+            text-align: center;
+        }
+        .stat-box .stat-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+        .stat-box .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+        }
+        .stat-box .stat-sub {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+
+        /* Drift Score Gauge */
+        .drift-gauge-container {
+            display: flex;
+            align-items: center;
+            gap: 30px;
+            padding: 20px;
+            background: var(--bg-tertiary);
+            border-radius: 10px;
+            border: 1px solid var(--border-color);
+            margin-bottom: 16px;
+        }
+        .gauge-visual {
+            position: relative;
+            width: 140px;
+            height: 140px;
+            flex-shrink: 0;
+        }
+        .gauge-visual svg { transform: rotate(-90deg); }
+        .gauge-bg { fill: none; stroke: #21262d; stroke-width: 10; }
+        .gauge-fill { fill: none; stroke-width: 10; stroke-linecap: round; transition: stroke-dashoffset 1s ease; }
+        .gauge-text {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+        .gauge-score {
+            font-size: 32px;
+            font-weight: 700;
+            line-height: 1;
+        }
+        .gauge-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .gauge-details { flex: 1; }
+        .gauge-details h3 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .dimension-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 0;
+            font-size: 13px;
+            border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+        }
+        .dimension-row:last-child { border-bottom: none; }
+        .dim-name { width: 100px; color: var(--text-secondary); }
+        .dim-bar-container {
+            flex: 1;
+            height: 6px;
+            background: #21262d;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .dim-bar {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 1s ease;
+        }
+        .dim-value { width: 60px; text-align: right; font-weight: 600; font-size: 12px; }
+        .dim-weight { width: 40px; text-align: right; color: var(--text-muted); font-size: 11px; }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(48, 54, 61, 0.4);
+            color: var(--text-primary);
+        }
+        tr:hover td { background: rgba(88, 166, 255, 0.04); }
+
+        /* Badges & Tags */
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .badge-high { background: rgba(248, 81, 73, 0.15); color: var(--accent-red); border: 1px solid rgba(248, 81, 73, 0.3); }
+        .badge-medium { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); border: 1px solid rgba(210, 153, 34, 0.3); }
+        .badge-low { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); border: 1px solid rgba(88, 166, 255, 0.3); }
+        .badge-info { background: rgba(57, 210, 192, 0.15); color: var(--accent-cyan); border: 1px solid rgba(57, 210, 192, 0.3); }
+        .badge-new { background: rgba(219, 109, 40, 0.15); color: var(--accent-orange); border: 1px solid rgba(219, 109, 40, 0.3); }
+        .badge-success { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); border: 1px solid rgba(63, 185, 80, 0.3); }
+        .badge-failure { background: rgba(248, 81, 73, 0.15); color: var(--accent-red); border: 1px solid rgba(248, 81, 73, 0.3); }
+
+        .tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
+        .tag {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+        }
+        .tag-new {
+            background: rgba(219, 109, 40, 0.1);
+            border-color: rgba(219, 109, 40, 0.3);
+            color: var(--accent-orange);
+        }
+
+        /* Arrow indicators */
+        .arrow-up { color: var(--accent-red); }
+        .arrow-up::before { content: '▲ '; font-size: 10px; }
+        .arrow-down { color: var(--accent-green); }
+        .arrow-down::before { content: '▼ '; font-size: 10px; }
+        .arrow-stable { color: var(--accent-blue); }
+        .arrow-stable::before { content: '● '; font-size: 10px; }
+
+        /* Chart containers */
+        .chart-container {
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+        .bar-chart { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 10px; }
+        .bar-col {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+        }
+        .bar {
+            width: 100%;
+            border-radius: 3px 3px 0 0;
+            min-height: 2px;
+            transition: height 0.5s ease;
+        }
+        .bar-label { font-size: 9px; color: var(--text-muted); writing-mode: vertical-rl; text-orientation: mixed; max-height: 50px; overflow: hidden; }
+        .bar-value { font-size: 10px; color: var(--text-secondary); font-weight: 600; }
+
+        /* Comparison tables */
+        .comparison-row {
+            display: grid;
+            grid-template-columns: 150px 1fr 80px 80px 80px;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(48, 54, 61, 0.3);
+            font-size: 13px;
+        }
+        .comparison-row.header {
+            color: var(--text-muted);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+
+        /* Timeline */
+        .timeline { position: relative; padding-left: 24px; }
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 6px;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: var(--border-color);
+        }
+        .timeline-item {
+            position: relative;
+            padding: 8px 0 16px;
+        }
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -22px;
+            top: 14px;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            border: 2px solid var(--accent-blue);
+            background: var(--bg-secondary);
+        }
+        .timeline-item.critical::before { border-color: var(--accent-red); }
+        .timeline-item.warning::before { border-color: var(--accent-yellow); }
+        .timeline-time { font-size: 11px; color: var(--text-muted); }
+        .timeline-event { font-size: 13px; color: var(--text-primary); }
+        .timeline-detail { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+
+        /* Executive summary */
+        .exec-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        .exec-card {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px;
+            border-left: 3px solid var(--accent-blue);
+        }
+        .exec-card.warn { border-left-color: var(--accent-yellow); }
+        .exec-card.danger { border-left-color: var(--accent-red); }
+        .exec-card.info { border-left-color: var(--accent-cyan); }
+        .exec-card .ec-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+        .exec-card .ec-value { font-size: 22px; font-weight: 700; margin: 4px 0; }
+        .exec-card .ec-desc { font-size: 12px; color: var(--text-secondary); }
+
+        /* Section divider */
+        .section-divider {
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--border-color), transparent);
+            margin: 24px 0;
+        }
+
+        /* Tooltip */
+        .info-tip {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-size: 10px;
+            text-align: center;
+            line-height: 14px;
+            cursor: help;
+            margin-left: 4px;
+        }
+
+        /* Print */
+        @media print {
+            body { background: white; color: #1a1a2e; }
+            .card { border: 1px solid #ddd; break-inside: avoid; }
+        }
+
+        /* Collapsible sections */
+        .collapsible-header {
+            cursor: pointer;
+            user-select: none;
+        }
+        .collapsible-header::after {
+            content: ' ▾';
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .highlight-row {
+            background: rgba(248, 81, 73, 0.05) !important;
+        }
+
+        /* Footer */
+        .report-footer {
+            text-align: center;
+            padding: 20px;
+            color: var(--text-muted);
+            font-size: 12px;
+            border-top: 1px solid var(--border-color);
+            margin-top: 24px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <!-- ============ HEADER ============ -->
+    <div class="report-header">
+        <div class="header-grid">
+            <div>
+                <h1>&#x1F50D; User Account Scope Drift Report</h1>
+                <div class="subtitle">Behavioral baseline deviation analysis &mdash; CyberSOC Sentinel Workspace</div>
+                <div class="user-info-bar">
+                    <div class="user-info-item">
+                        <span class="label">User:</span>
+                        <span class="value">Claudine Irwin</span>
+                    </div>
+                    <div class="user-info-item">
+                        <span class="label">UPN:</span>
+                        <span class="value">u101@ops.zava-corp.com</span>
+                    </div>
+                    <div class="user-info-item">
+                        <span class="label">Object&nbsp;ID:</span>
+                        <span class="value" style="font-family:monospace;font-size:12px;">b8c6f5e7-194d-40d9-8804-f3fb7e55623a</span>
+                    </div>
+                    <div class="user-info-item">
+                        <span class="label">Baseline:</span>
+                        <span class="value">90 days (Jan&nbsp;2&nbsp;&ndash;&nbsp;Apr&nbsp;1,&nbsp;2026)</span>
+                    </div>
+                    <div class="user-info-item">
+                        <span class="label">Recent:</span>
+                        <span class="value">7 days (Apr&nbsp;1&ndash;8,&nbsp;2026)</span>
+                    </div>
+                    <div class="user-info-item">
+                        <span class="label">Generated:</span>
+                        <span class="value">2026-04-08 14:20 UTC</span>
+                    </div>
+                </div>
+            </div>
+            <div style="text-align:right;">
+                <div class="verdict-badge verdict-flag">&#x26A0; MONITOR &mdash; FLAG</div>
+                <div style="font-size:12px;color:var(--text-muted);margin-top:6px;">Multiple expansion signals detected</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ EXECUTIVE SUMMARY ============ -->
+    <div class="card">
+        <h2><span class="icon">&#x1F4CA;</span> Executive Summary</h2>
+        <div class="exec-summary">
+            <div class="exec-card warn">
+                <div class="ec-label">Interactive Drift Score</div>
+                <div class="ec-value" style="color:var(--accent-blue);">103.6</div>
+                <div class="ec-desc">Stable (slight expansion)</div>
+            </div>
+            <div class="exec-card">
+                <div class="ec-label">Non-Interactive Drift Score</div>
+                <div class="ec-value" style="color:var(--accent-blue);">89.3</div>
+                <div class="ec-desc">Stable range</div>
+            </div>
+            <div class="exec-card danger">
+                <div class="ec-label">Security Alerts (7d)</div>
+                <div class="ec-value" style="color:var(--accent-red);">34</div>
+                <div class="ec-desc">7 High Insider Risk, 8 DLP</div>
+            </div>
+            <div class="exec-card danger">
+                <div class="ec-label">Email Sent Surge</div>
+                <div class="ec-value" style="color:var(--accent-red);">+4,791%</div>
+                <div class="ec-desc">0.5/day &rarr; 23.4/day</div>
+            </div>
+            <div class="exec-card warn">
+                <div class="ec-label">New Locations</div>
+                <div class="ec-value" style="color:var(--accent-orange);">3</div>
+                <div class="ec-desc">US, DE, FR &mdash; new in 7d</div>
+            </div>
+            <div class="exec-card warn">
+                <div class="ec-label">PIM Activations (7d)</div>
+                <div class="ec-value" style="color:var(--accent-yellow);">4</div>
+                <div class="ec-desc">Global Administrator role</div>
+            </div>
+            <div class="exec-card danger">
+                <div class="ec-label">Suspicious App Consent</div>
+                <div class="ec-value" style="color:var(--accent-red);">1</div>
+                <div class="ec-desc">"FinanceDataAnalysis Blueprint"</div>
+            </div>
+            <div class="exec-card info">
+                <div class="ec-label">Identity Protection</div>
+                <div class="ec-value" style="color:var(--accent-green);">0</div>
+                <div class="ec-desc">No risk events detected</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ INTERACTIVE SIGN-IN DRIFT ============ -->
+    <div class="card">
+        <h2><span class="icon">&#x1F511;</span> Interactive Sign-In Drift</h2>
+
+        <div class="drift-gauge-container">
+            <div class="gauge-visual">
+                <svg viewBox="0 0 140 140">
+                    <circle class="gauge-bg" cx="70" cy="70" r="60"/>
+                    <circle class="gauge-fill" cx="70" cy="70" r="60"
+                        stroke="var(--stable-color)"
+                        stroke-dasharray="377"
+                        stroke-dashoffset="142"/>
+                </svg>
+                <div class="gauge-text">
+                    <div class="gauge-score" style="color:var(--stable-color);">103.6</div>
+                    <div class="gauge-label">Stable</div>
+                </div>
+            </div>
+            <div class="gauge-details">
+                <h3>Drift Dimensions — Interactive</h3>
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+                    Formula: 0.25V + 0.20A + 0.10R + 0.15IP + 0.10L + 0.10D + 0.10F &nbsp;|&nbsp;
+                    &lt;80 Contracting &bull; 80-120 Stable &bull; 120-150 Monitor &bull; &gt;150 FLAG &bull; &gt;250 Critical
+                </div>
+
+                <div class="dimension-row">
+                    <span class="dim-name">Volume/day</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:60%;background:var(--accent-orange);"></div>
+                    </div>
+                    <span class="dim-value arrow-up" style="color:var(--accent-orange);">150.4%</span>
+                    <span class="dim-weight">×0.25</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Apps</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:52%;background:var(--accent-green);"></div>
+                    </div>
+                    <span class="dim-value arrow-down">52.0%</span>
+                    <span class="dim-weight">×0.20</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Resources</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:51.5%;background:var(--accent-green);"></div>
+                    </div>
+                    <span class="dim-value arrow-down">51.5%</span>
+                    <span class="dim-weight">×0.10</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">IP Addresses</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:90.9%;background:var(--accent-blue);"></div>
+                    </div>
+                    <span class="dim-value arrow-stable">90.9%</span>
+                    <span class="dim-weight">×0.15</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Locations</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:66.7%;background:var(--accent-red);"></div>
+                    </div>
+                    <span class="dim-value arrow-up" style="color:var(--accent-red);">166.7%</span>
+                    <span class="dim-weight">×0.10</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Devices</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:66.7%;background:var(--accent-green);"></div>
+                    </div>
+                    <span class="dim-value arrow-down">66.7%</span>
+                    <span class="dim-weight">×0.10</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Failure Rate</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:53.7%;background:var(--accent-orange);"></div>
+                    </div>
+                    <span class="dim-value arrow-up" style="color:var(--accent-orange);">134.3%</span>
+                    <span class="dim-weight">×0.10</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Baseline vs Recent comparison -->
+        <div class="grid-2" style="margin-top:16px;">
+            <div>
+                <h3>Baseline (90d)</h3>
+                <div class="grid-2" style="gap:8px;">
+                    <div class="stat-box"><div class="stat-label">Total Events</div><div class="stat-value">1,533</div><div class="stat-sub">22 active days</div></div>
+                    <div class="stat-box"><div class="stat-label">Avg/Day</div><div class="stat-value">69.7</div></div>
+                    <div class="stat-box"><div class="stat-label">Unique Apps</div><div class="stat-value">50</div></div>
+                    <div class="stat-box"><div class="stat-label">Resources</div><div class="stat-value">33</div></div>
+                    <div class="stat-box"><div class="stat-label">IP Addresses</div><div class="stat-value">11</div></div>
+                    <div class="stat-box"><div class="stat-label">Locations</div><div class="stat-value">3</div></div>
+                    <div class="stat-box"><div class="stat-label">Devices</div><div class="stat-value">3</div></div>
+                    <div class="stat-box"><div class="stat-label">Failure Rate</div><div class="stat-value">33.5%</div><div class="stat-sub">514 failures</div></div>
+                </div>
+            </div>
+            <div>
+                <h3>Recent (7d)</h3>
+                <div class="grid-2" style="gap:8px;">
+                    <div class="stat-box"><div class="stat-label">Total Events</div><div class="stat-value" style="color:var(--accent-orange);">524</div><div class="stat-sub">5 active days</div></div>
+                    <div class="stat-box"><div class="stat-label">Avg/Day</div><div class="stat-value" style="color:var(--accent-orange);">104.8</div></div>
+                    <div class="stat-box"><div class="stat-label">Unique Apps</div><div class="stat-value">26</div><div class="stat-sub">8 new</div></div>
+                    <div class="stat-box"><div class="stat-label">Resources</div><div class="stat-value">17</div></div>
+                    <div class="stat-box"><div class="stat-label">IP Addresses</div><div class="stat-value">10</div><div class="stat-sub">2 new</div></div>
+                    <div class="stat-box"><div class="stat-label">Locations</div><div class="stat-value" style="color:var(--accent-red);">5</div><div class="stat-sub">3 new</div></div>
+                    <div class="stat-box"><div class="stat-label">Devices</div><div class="stat-value">2</div></div>
+                    <div class="stat-box"><div class="stat-label">Failure Rate</div><div class="stat-value" style="color:var(--accent-red);">45.0%</div><div class="stat-sub">236 failures</div></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Daily Volume Trend -->
+        <h3>Interactive Sign-In Volume Trend (14d)</h3>
+        <div class="chart-container">
+            <div class="bar-chart">
+                <div class="bar-col">
+                    <div class="bar-value">16</div>
+                    <div class="bar" style="height:5%;background:var(--accent-blue);"></div>
+                    <div class="bar-label">Mar 25</div>
+                </div>
+                <div class="bar-col">
+                    <div class="bar-value">114</div>
+                    <div class="bar" style="height:38%;background:var(--accent-blue);"></div>
+                    <div class="bar-label">Mar 26</div>
+                </div>
+                <div class="bar-col">
+                    <div class="bar-value">236</div>
+                    <div class="bar" style="height:79%;background:var(--accent-blue);"></div>
+                    <div class="bar-label">Mar 27</div>
+                </div>
+                <div class="bar-col">
+                    <div class="bar-value">297</div>
+                    <div class="bar" style="height:100%;background:var(--accent-orange);"></div>
+                    <div class="bar-label">Mar 28</div>
+                </div>
+                <div class="bar-col">
+                    <div class="bar-value">21</div>
+                    <div class="bar" style="height:7%;background:var(--accent-blue);"></div>
+                    <div class="bar-label">Mar 29</div>
+                </div>
+                <div class="bar-col">
+                    <div class="bar-value">162</div>
+                    <div class="bar" style="height:55%;background:var(--accent-blue);"></div>
+                    <div class="bar-label">Mar 30</div>
+                </div>
+                <div class="bar-col">
+                    <div class="bar-value">135</div>
+                    <div class="bar" style="height:45%;background:var(--accent-blue);"></div>
+                    <div class="bar-label">Mar 31</div>
+                </div>
+                <div class="bar-col">
+                    <div class="bar-value">292</div>
+                    <div class="bar" style="height:98%;background:var(--accent-orange);"></div>
+                    <div class="bar-label">Apr 1</div>
+                </div>
+                <div class="bar-col">
+                    <div class="bar-value">113</div>
+                    <div class="bar" style="height:38%;background:var(--accent-blue);"></div>
+                    <div class="bar-label">Apr 2</div>
+                </div>
+                <div class="bar-col">
+                    <div class="bar-value">52</div>
+                    <div class="bar" style="height:18%;background:var(--accent-blue);"></div>
+                    <div class="bar-label">Apr 3</div>
+                </div>
+                <div class="bar-col" style="opacity:0.3;">
+                    <div class="bar-value">0</div>
+                    <div class="bar" style="height:1%;background:var(--text-muted);"></div>
+                    <div class="bar-label">Apr 4-6</div>
+                </div>
+                <div class="bar-col">
+                    <div class="bar-value">56</div>
+                    <div class="bar" style="height:19%;background:var(--accent-cyan);"></div>
+                    <div class="bar-label">Apr 7</div>
+                </div>
+                <div class="bar-col">
+                    <div class="bar-value">61</div>
+                    <div class="bar" style="height:21%;background:var(--accent-cyan);"></div>
+                    <div class="bar-label">Apr 8</div>
+                </div>
+            </div>
+            <div style="display:flex;gap:16px;justify-content:center;margin-top:10px;font-size:11px;color:var(--text-muted);">
+                <span>&#x25A0; <span style="color:var(--accent-blue);">Baseline</span></span>
+                <span>&#x25A0; <span style="color:var(--accent-orange);">Peak (&gt;250)</span></span>
+                <span>&#x25A0; <span style="color:var(--accent-cyan);">Recent 7d</span></span>
+            </div>
+        </div>
+
+        <!-- New items -->
+        <div class="grid-2">
+            <div>
+                <h3>&#x1F195; New Applications (not in baseline)</h3>
+                <div class="tag-list">
+                    <span class="tag tag-new">FinanceDataAnalysis Blueprint</span>
+                    <span class="tag tag-new">Power Platform CLI - pac</span>
+                    <span class="tag tag-new">Microsoft Azure CLI</span>
+                    <span class="tag tag-new">Dataverse</span>
+                    <span class="tag tag-new">Office Online Core SSO</span>
+                    <span class="tag tag-new">My Apps</span>
+                    <span class="tag tag-new">App Home Pages Prod</span>
+                    <span class="tag tag-new">Microsoft_AAD_UsersAndTenants</span>
+                </div>
+            </div>
+            <div>
+                <h3>&#x1F195; New Locations &amp; IPs</h3>
+                <table>
+                    <thead><tr><th>New Location</th><th>Country</th></tr></thead>
+                    <tbody>
+                        <tr class="highlight-row"><td>Washington</td><td><span class="badge badge-new">US</span></td></tr>
+                        <tr class="highlight-row"><td>Frankfurt Am Main</td><td><span class="badge badge-new">DE</span></td></tr>
+                        <tr class="highlight-row"><td>Malakoff</td><td><span class="badge badge-new">FR</span></td></tr>
+                    </tbody>
+                </table>
+                <table style="margin-top:10px;">
+                    <thead><tr><th>New IP Address</th></tr></thead>
+                    <tbody>
+                        <tr><td><code style="color:var(--accent-orange);">172.171.236.24</code></td></tr>
+                        <tr><td><code style="color:var(--accent-orange);">4.184.232.211</code></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Top Apps -->
+        <h3 style="margin-top:16px;">Top Interactive Applications (Recent 7d)</h3>
+        <table>
+            <thead><tr><th>Application</th><th>Events</th><th>Status</th></tr></thead>
+            <tbody>
+                <tr><td>ppuxdevcenter</td><td>201</td><td><span class="badge badge-info">Baseline</span></td></tr>
+                <tr><td>Office365 Shell WCSS-Client</td><td>88</td><td><span class="badge badge-info">Baseline</span></td></tr>
+                <tr><td>Azure Portal</td><td>84</td><td><span class="badge badge-info">Baseline</span></td></tr>
+                <tr><td>M365 Copilot extension</td><td>30</td><td><span class="badge badge-info">Baseline</span></td></tr>
+                <tr><td>M365 Admin portal</td><td>20</td><td><span class="badge badge-info">Baseline</span></td></tr>
+                <tr class="highlight-row"><td>FinanceDataAnalysis Blueprint</td><td>—</td><td><span class="badge badge-new">New</span></td></tr>
+                <tr class="highlight-row"><td>Power Platform CLI - pac</td><td>—</td><td><span class="badge badge-new">New</span></td></tr>
+                <tr class="highlight-row"><td>Dataverse</td><td>—</td><td><span class="badge badge-new">New</span></td></tr>
+            </tbody>
+        </table>
+
+        <!-- Top IPs -->
+        <h3 style="margin-top:16px;">Top Interactive IPs (Recent 7d)</h3>
+        <table>
+            <thead><tr><th>IP Address</th><th>Events</th><th>Country</th><th>City</th><th>Status</th></tr></thead>
+            <tbody>
+                <tr><td><code>40.68.200.63</code></td><td>331</td><td>NL</td><td>Amsterdam</td><td><span class="badge badge-info">Baseline</span></td></tr>
+                <tr><td><code>172.167.23.70</code></td><td>61</td><td>GB</td><td>London</td><td><span class="badge badge-info">Baseline</span></td></tr>
+                <tr><td><code>91.165.169.168</code></td><td>57</td><td>FR</td><td>—</td><td><span class="badge badge-info">Baseline</span></td></tr>
+                <tr class="highlight-row"><td><code>172.171.236.24</code></td><td>—</td><td>—</td><td>—</td><td><span class="badge badge-new">New</span></td></tr>
+                <tr class="highlight-row"><td><code>4.184.232.211</code></td><td>—</td><td>US</td><td>Washington</td><td><span class="badge badge-new">New</span></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- ============ NON-INTERACTIVE SIGN-IN DRIFT ============ -->
+    <div class="card">
+        <h2><span class="icon">&#x1F916;</span> Non-Interactive Sign-In Drift</h2>
+
+        <div class="drift-gauge-container">
+            <div class="gauge-visual">
+                <svg viewBox="0 0 140 140">
+                    <circle class="gauge-bg" cx="70" cy="70" r="60"/>
+                    <circle class="gauge-fill" cx="70" cy="70" r="60"
+                        stroke="var(--stable-color)"
+                        stroke-dasharray="377"
+                        stroke-dashoffset="171"/>
+                </svg>
+                <div class="gauge-text">
+                    <div class="gauge-score" style="color:var(--stable-color);">89.3</div>
+                    <div class="gauge-label">Stable</div>
+                </div>
+            </div>
+            <div class="gauge-details">
+                <h3>Drift Dimensions — Non-Interactive</h3>
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+                    Formula: 0.30V + 0.20A + 0.15R + 0.15IP + 0.10L + 0.10F
+                </div>
+
+                <div class="dimension-row">
+                    <span class="dim-name">Volume/day</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:51.4%;background:var(--accent-orange);"></div>
+                    </div>
+                    <span class="dim-value arrow-up" style="color:var(--accent-orange);">128.4%</span>
+                    <span class="dim-weight">×0.30</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Apps</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:71.4%;background:var(--accent-green);"></div>
+                    </div>
+                    <span class="dim-value arrow-down">71.4%</span>
+                    <span class="dim-weight">×0.20</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Resources</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:75.3%;background:var(--accent-green);"></div>
+                    </div>
+                    <span class="dim-value arrow-down">75.3%</span>
+                    <span class="dim-weight">×0.15</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">IP Addresses</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:48%;background:var(--accent-green);"></div>
+                    </div>
+                    <span class="dim-value arrow-down">48.0%</span>
+                    <span class="dim-weight">×0.15</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Locations</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:83.3%;background:var(--accent-blue);"></div>
+                    </div>
+                    <span class="dim-value arrow-stable">83.3%</span>
+                    <span class="dim-weight">×0.10</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Failure Rate</span>
+                    <div class="dim-bar-container">
+                        <div class="dim-bar" style="width:96.8%;background:var(--accent-blue);"></div>
+                    </div>
+                    <span class="dim-value arrow-stable">96.8%</span>
+                    <span class="dim-weight">×0.10</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid-2">
+            <div>
+                <h3>Baseline (90d)</h3>
+                <div class="grid-2" style="gap:8px;">
+                    <div class="stat-box"><div class="stat-label">Total Events</div><div class="stat-value">65,276</div><div class="stat-sub">24 active days</div></div>
+                    <div class="stat-box"><div class="stat-label">Avg/Day</div><div class="stat-value">2,720</div></div>
+                    <div class="stat-box"><div class="stat-label">Unique Apps</div><div class="stat-value">154</div></div>
+                    <div class="stat-box"><div class="stat-label">Resources</div><div class="stat-value">182</div></div>
+                    <div class="stat-box"><div class="stat-label">IP Addresses</div><div class="stat-value">25</div></div>
+                    <div class="stat-box"><div class="stat-label">Locations</div><div class="stat-value">6</div></div>
+                    <div class="stat-box"><div class="stat-label">Failure Rate</div><div class="stat-value">8.8%</div><div class="stat-sub">5,715 failures</div></div>
+                </div>
+            </div>
+            <div>
+                <h3>Recent (7d)</h3>
+                <div class="grid-2" style="gap:8px;">
+                    <div class="stat-box"><div class="stat-label">Total Events</div><div class="stat-value">24,454</div><div class="stat-sub">7 active days</div></div>
+                    <div class="stat-box"><div class="stat-label">Avg/Day</div><div class="stat-value" style="color:var(--accent-orange);">3,493</div></div>
+                    <div class="stat-box"><div class="stat-label">Unique Apps</div><div class="stat-value">110</div><div class="stat-sub">9 new</div></div>
+                    <div class="stat-box"><div class="stat-label">Resources</div><div class="stat-value">137</div></div>
+                    <div class="stat-box"><div class="stat-label">IP Addresses</div><div class="stat-value">12</div></div>
+                    <div class="stat-box"><div class="stat-label">Locations</div><div class="stat-value">5</div></div>
+                    <div class="stat-box"><div class="stat-label">Failure Rate</div><div class="stat-value">8.5%</div><div class="stat-sub">2,073 failures</div></div>
+                </div>
+            </div>
+        </div>
+
+        <h3 style="margin-top:16px;">New Non-Interactive Apps (not in baseline)</h3>
+        <div class="tag-list">
+            <span class="tag tag-new">IPMLService B2</span>
+            <span class="tag tag-new">Microsoft_Azure_Monitoring</span>
+            <span class="tag tag-new">Storage Explorer</span>
+            <span class="tag tag-new">Microsoft_OperationsManagementSuite_Workspace</span>
+            <span class="tag tag-new">PowerApps Service</span>
+            <span class="tag tag-new">Microsoft password reset service</span>
+            <span class="tag tag-new">Power Platform CLI - pac</span>
+            <span class="tag tag-new">App Home Pages Prod</span>
+            <span class="tag tag-new">Microsoft Azure CLI</span>
+        </div>
+    </div>
+
+    <!-- ============ ACCOUNT CONFIGURATION CHANGES ============ -->
+    <div class="card">
+        <h2><span class="icon">&#x2699;&#xFE0F;</span> Account Configuration Changes (Recent 7d)</h2>
+
+        <div class="grid-4" style="margin-bottom:16px;">
+            <div class="stat-box"><div class="stat-label">PIM Activations</div><div class="stat-value" style="color:var(--accent-yellow);">4</div><div class="stat-sub">Global Administrator</div></div>
+            <div class="stat-box"><div class="stat-label">Group Changes</div><div class="stat-value">39</div><div class="stat-sub">Add member to group</div></div>
+            <div class="stat-box"><div class="stat-label">Role Removals</div><div class="stat-value">7</div><div class="stat-sub">PIM expirations</div></div>
+            <div class="stat-box"><div class="stat-label">User Updates</div><div class="stat-value">4</div></div>
+        </div>
+
+        <h3>Audit Log Timeline (Key Events)</h3>
+        <div class="timeline">
+            <div class="timeline-item critical">
+                <div class="timeline-time">2026-04-08 09:00 UTC</div>
+                <div class="timeline-event"><span class="badge badge-high">HIGH</span> PIM Activation &mdash; Global Administrator</div>
+                <div class="timeline-detail">Group: Demo OPS &bull; Claudine Irwin activated GA role via PIM</div>
+            </div>
+            <div class="timeline-item critical">
+                <div class="timeline-time">2026-04-07 16:35 UTC</div>
+                <div class="timeline-event"><span class="badge badge-high">ALERT</span> Failed Admin Consent &mdash; "FinanceDataAnalysis Blueprint"</div>
+                <div class="timeline-detail">
+                    Requested permissions: <code>Mail.ReadWrite</code>, <code>Mail.Send</code>, <code>Chat.ReadWrite</code>, <code>User.Read.All</code>,
+                    <code>Sites.Read.All</code>, <code>AgentData.ReadWrite</code>, <code>McpServersMetadata.Read.All</code><br>
+                    ConsentType: AllPrincipals &bull; Result: <span style="color:var(--accent-red);">RestConcurrencyException (failed)</span>
+                </div>
+            </div>
+            <div class="timeline-item warning">
+                <div class="timeline-time">2026-04-07 20:11 UTC</div>
+                <div class="timeline-event">Update User</div>
+                <div class="timeline-detail">UserType: Member &bull; u101@ops.zava-corp.com</div>
+            </div>
+            <div class="timeline-item critical">
+                <div class="timeline-time">2026-04-07 16:10 UTC</div>
+                <div class="timeline-event"><span class="badge badge-high">HIGH</span> PIM Activation &mdash; Global Administrator</div>
+                <div class="timeline-detail">Group: ProductOwner &bull; Claudine Irwin activated GA role via PIM</div>
+            </div>
+            <div class="timeline-item">
+                <div class="timeline-time">2026-04-03 16:48 UTC</div>
+                <div class="timeline-event">License Change</div>
+                <div class="timeline-detail">License assignment detail modified via PropagationService</div>
+            </div>
+            <div class="timeline-item warning">
+                <div class="timeline-time">2026-04-03 06:19 UTC</div>
+                <div class="timeline-event"><span class="badge badge-medium">MED</span> PIM Activation &mdash; Global Administrator</div>
+                <div class="timeline-detail">Group: Demo OPS &bull; Claudine Irwin activated GA role</div>
+            </div>
+            <div class="timeline-item warning">
+                <div class="timeline-time">2026-04-02 16:33 UTC</div>
+                <div class="timeline-event"><span class="badge badge-medium">MED</span> PIM Activation &mdash; Global Administrator</div>
+                <div class="timeline-detail">Group: ProductOwner &bull; Claudine Irwin activated GA role</div>
+            </div>
+        </div>
+
+        <h3 style="margin-top:20px;">Audit Operation Summary (Baseline vs Recent)</h3>
+        <table>
+            <thead>
+                <tr><th>Operation</th><th>Baseline (90d)</th><th>Recent (7d)</th><th>Trend</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Add user sponsor</td><td>53,049</td><td>6</td><td><span class="arrow-down">Contracting</span></td></tr>
+                <tr><td>Add member to group</td><td>173</td><td>39</td><td><span class="arrow-stable">Stable</span></td></tr>
+                <tr><td>GroupsODataV4_Get</td><td>134</td><td>40</td><td><span class="arrow-stable">Stable</span></td></tr>
+                <tr><td>Add member to role (PIM)</td><td>35</td><td>6</td><td><span class="arrow-stable">Stable</span></td></tr>
+                <tr><td>PIM activation requested</td><td>30</td><td>6</td><td><span class="arrow-stable">Stable</span></td></tr>
+                <tr><td>PIM activation completed</td><td>30</td><td>6</td><td><span class="arrow-stable">Stable</span></td></tr>
+                <tr><td>Consent to application</td><td>26</td><td>2</td><td><span class="arrow-stable">Stable</span></td></tr>
+                <tr><td>Remove member from role</td><td>28</td><td>7</td><td><span class="arrow-stable">Stable</span></td></tr>
+                <tr><td>Admin registered security info</td><td>7</td><td>2</td><td><span class="arrow-stable">Stable</span></td></tr>
+                <tr><td>Get signInIdentifiers</td><td>4</td><td>6</td><td><span class="arrow-up">Expanding</span></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- ============ IDENTITY PROTECTION ============ -->
+    <div class="card">
+        <h2><span class="icon">&#x1F6E1;&#xFE0F;</span> Identity Protection</h2>
+        <div class="stat-box" style="max-width:300px;">
+            <div class="stat-label">Risk Events (7d)</div>
+            <div class="stat-value" style="color:var(--accent-green);">0</div>
+            <div class="stat-sub">No risk detections during sign-in</div>
+        </div>
+        <p style="margin-top:12px;font-size:13px;color:var(--text-secondary);">
+            No sign-ins flagged by Identity Protection risk engine in the recent 7-day period.
+            RiskLevelDuringSignIn reported as "none" across all 524 interactive sign-in events.
+        </p>
+
+        <h3 style="margin-top:16px;">Conditional Access Summary (Recent 7d)</h3>
+        <table>
+            <thead><tr><th>CA Status</th><th>Result</th><th>Description</th><th>Count</th></tr></thead>
+            <tbody>
+                <tr><td><span class="badge badge-success">success</span></td><td>0</td><td>Successful CA evaluation</td><td>287</td></tr>
+                <tr class="highlight-row"><td><span class="badge badge-failure">failure</span></td><td>50158</td><td>External security challenge not satisfied</td><td>23</td></tr>
+                <tr><td><span class="badge badge-success">success</span></td><td>70044</td><td>Session expired (sign-in frequency check)</td><td>5</td></tr>
+                <tr><td><span class="badge badge-success">success</span></td><td>650053</td><td>App asked for scope that doesn't exist on resource</td><td>3</td></tr>
+                <tr><td><span class="badge badge-success">success</span></td><td>50140</td><td>KMSI interrupt during sign-in</td><td>2</td></tr>
+                <tr><td><span class="badge badge-success">success</span></td><td>65001</td><td>User/admin has not consented to application</td><td>1</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- ============ CLOUD APP ACTIVITY DRIFT ============ -->
+    <div class="card">
+        <h2><span class="icon">&#x2601;&#xFE0F;</span> Cloud App Activity Drift</h2>
+
+        <div class="grid-3" style="margin-bottom:16px;">
+            <div class="stat-box">
+                <div class="stat-label">Baseline Events (90d)</div>
+                <div class="stat-value">19,464</div>
+                <div class="stat-sub">216.3/day &bull; 10 apps &bull; 310 actions</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Recent Events (7d)</div>
+                <div class="stat-value" style="color:var(--accent-red);">5,453</div>
+                <div class="stat-sub">779.0/day &bull; 8 apps &bull; 82 actions</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Volume Change</div>
+                <div class="stat-value" style="color:var(--accent-red);">+260%</div>
+                <div class="stat-sub">Daily rate: 216 &rarr; 779</div>
+            </div>
+        </div>
+
+        <div style="background:rgba(248,81,73,0.08);border:1px solid rgba(248,81,73,0.2);border-radius:8px;padding:14px;font-size:13px;">
+            <strong style="color:var(--accent-red);">&#x26A0; Cloud App Activity Surge Detected</strong><br>
+            <span style="color:var(--text-secondary);">
+                Daily Cloud App event rate increased from 216.3/day (baseline) to 779.0/day (recent) &mdash; a <strong>360%</strong> ratio
+                indicating significant expansion in cloud application usage. Combined with the suspicious "FinanceDataAnalysis Blueprint"
+                consent attempt and Purview Data Exfiltration alerts, this warrants investigation.
+            </span>
+        </div>
+    </div>
+
+    <!-- ============ EMAIL PATTERN DRIFT ============ -->
+    <div class="card">
+        <h2><span class="icon">&#x1F4E7;</span> Email Pattern Drift</h2>
+
+        <div class="grid-4" style="margin-bottom:16px;">
+            <div class="stat-box">
+                <div class="stat-label">Baseline Total (90d)</div>
+                <div class="stat-value">3,498</div>
+                <div class="stat-sub">38.9/day</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Recent Total (7d)</div>
+                <div class="stat-value">621</div>
+                <div class="stat-sub">88.7/day (+128%)</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Baseline Sent (90d)</div>
+                <div class="stat-value">43</div>
+                <div class="stat-sub">0.5/day</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Recent Sent (7d)</div>
+                <div class="stat-value" style="color:var(--accent-red);">164</div>
+                <div class="stat-sub">23.4/day</div>
+            </div>
+        </div>
+
+        <div class="grid-2">
+            <div class="stat-box">
+                <div class="stat-label">Sent Email Rate Change</div>
+                <div class="stat-value" style="color:var(--accent-red);font-size:36px;">+4,791%</div>
+                <div class="stat-sub">0.5 sent/day (baseline) &rarr; 23.4 sent/day (recent)</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Received Email Rate Change</div>
+                <div class="stat-value" style="color:var(--accent-orange);">+70%</div>
+                <div class="stat-sub">38.4 received/day (baseline) &rarr; 65.3 received/day (recent)</div>
+            </div>
+        </div>
+
+        <div style="margin-top:16px;background:rgba(248,81,73,0.1);border:1px solid rgba(248,81,73,0.3);border-radius:8px;padding:14px;font-size:13px;">
+            <strong style="color:var(--accent-red);">&#x1F6A8; CRITICAL: Email Sending Explosion</strong><br>
+            <span style="color:var(--text-secondary);">
+                User went from sending ~0.5 emails/day in the 90-day baseline to <strong>23.4 emails/day</strong> in the recent 7-day period.
+                This <strong>4,791%</strong> increase is a classic indicator of potential data exfiltration, bulk forwarding, or account compromise.
+                Combined with active Purview Insider Risk Management alerts for Data Exfiltration, this is the highest-priority finding in this report.
+            </span>
+        </div>
+    </div>
+
+    <!-- ============ CORRELATED SECURITY ALERTS ============ -->
+    <div class="card">
+        <h2><span class="icon">&#x1F6A8;</span> Correlated Security Alerts</h2>
+
+        <div class="grid-3" style="margin-bottom:16px;">
+            <div class="stat-box" style="border-left:3px solid var(--accent-red);">
+                <div class="stat-label">High Severity (7d)</div>
+                <div class="stat-value" style="color:var(--accent-red);">21</div>
+            </div>
+            <div class="stat-box" style="border-left:3px solid var(--accent-yellow);">
+                <div class="stat-label">Medium Severity (7d)</div>
+                <div class="stat-value" style="color:var(--accent-yellow);">3</div>
+            </div>
+            <div class="stat-box" style="border-left:3px solid var(--accent-blue);">
+                <div class="stat-label">Low Severity (7d)</div>
+                <div class="stat-value" style="color:var(--accent-blue);">8</div>
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr><th>Alert Name</th><th>Severity</th><th>Product</th><th>Base (90d)</th><th>Recent (7d)</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+                <tr class="highlight-row">
+                    <td>Insider Risk Management Alert Observed</td>
+                    <td><span class="badge badge-high">High</span></td>
+                    <td>Azure Sentinel</td>
+                    <td>19</td>
+                    <td><strong>7</strong></td>
+                    <td>New</td>
+                </tr>
+                <tr class="highlight-row">
+                    <td>Purview IRM Data Exfiltration Monitoring</td>
+                    <td><span class="badge badge-high">High</span></td>
+                    <td>M365 Insider Risk Mgmt</td>
+                    <td>6</td>
+                    <td><strong>4</strong></td>
+                    <td>New</td>
+                </tr>
+                <tr>
+                    <td>Azure VM extension followed by ransomware/HOTK attack</td>
+                    <td><span class="badge badge-medium">Medium</span></td>
+                    <td>M365 Defender</td>
+                    <td>16</td>
+                    <td>3</td>
+                    <td>Resolved</td>
+                </tr>
+                <tr class="highlight-row">
+                    <td>DLP: Block sharing sensitive info (9fa7210e…txt)</td>
+                    <td><span class="badge badge-high">High</span></td>
+                    <td>Microsoft DLP</td>
+                    <td>3</td>
+                    <td><strong>3</strong></td>
+                    <td>New</td>
+                </tr>
+                <tr class="highlight-row">
+                    <td>DLP: Block sharing (ad_users.json) in OneDrive</td>
+                    <td><span class="badge badge-high">High</span></td>
+                    <td>Microsoft DLP</td>
+                    <td>0</td>
+                    <td><strong>2</strong></td>
+                    <td><span class="badge badge-new">New</span></td>
+                </tr>
+                <tr class="highlight-row">
+                    <td>DLP: Block sharing (Security_Threat_Report_2026-04-02.txt)</td>
+                    <td><span class="badge badge-high">High</span></td>
+                    <td>Microsoft DLP</td>
+                    <td>0</td>
+                    <td><strong>2</strong></td>
+                    <td><span class="badge badge-new">New</span></td>
+                </tr>
+                <tr class="highlight-row">
+                    <td>DLP: Block sharing (Security_Threat_Alerts_2026-04-02.docx)</td>
+                    <td><span class="badge badge-high">High</span></td>
+                    <td>Microsoft DLP</td>
+                    <td>0</td>
+                    <td><strong>1</strong></td>
+                    <td><span class="badge badge-new">New</span></td>
+                </tr>
+                <tr class="highlight-row">
+                    <td>Suspicious interaction with Copilot — Finance file access</td>
+                    <td><span class="badge badge-high">High</span></td>
+                    <td>Cloud App Security</td>
+                    <td>1</td>
+                    <td><strong>1</strong></td>
+                    <td>New</td>
+                </tr>
+                <tr>
+                    <td>Purview IRM Risky AI Usage — M365 Copilot</td>
+                    <td><span class="badge badge-high">High</span></td>
+                    <td>M365 Insider Risk Mgmt</td>
+                    <td>5</td>
+                    <td>3</td>
+                    <td>New</td>
+                </tr>
+                <tr>
+                    <td>DLP-Restrict Copilot by Label</td>
+                    <td><span class="badge badge-low">Low</span></td>
+                    <td>Microsoft DLP</td>
+                    <td>14</td>
+                    <td>2</td>
+                    <td>New</td>
+                </tr>
+                <tr>
+                    <td>Purview IRM Risky AI Usage quick policy</td>
+                    <td><span class="badge badge-low">Low</span></td>
+                    <td>M365 Insider Risk Mgmt</td>
+                    <td>10</td>
+                    <td>3</td>
+                    <td>New</td>
+                </tr>
+                <tr>
+                    <td>DSPM for AI — Detect Risky AI Usage</td>
+                    <td><span class="badge badge-low">Low</span></td>
+                    <td>M365 Insider Risk Mgmt</td>
+                    <td>10</td>
+                    <td>3</td>
+                    <td>New</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- ============ SECURITY ASSESSMENT ============ -->
+    <div class="card">
+        <h2><span class="icon">&#x1F50E;</span> Security Assessment</h2>
+
+        <div style="margin-bottom:20px;">
+            <h3>Key Findings</h3>
+            <table>
+                <thead><tr><th>#</th><th>Finding</th><th>Severity</th><th>Category</th></tr></thead>
+                <tbody>
+                    <tr class="highlight-row">
+                        <td>1</td>
+                        <td><strong>Email sending explosion (+4,791%)</strong> — 0.5/day baseline to 23.4/day recent. Combined with Purview Data Exfiltration alerts, this is the strongest exfiltration signal.</td>
+                        <td><span class="badge badge-high">Critical</span></td>
+                        <td>Data Exfiltration</td>
+                    </tr>
+                    <tr class="highlight-row">
+                        <td>2</td>
+                        <td><strong>Suspicious app consent attempt</strong> — "FinanceDataAnalysis Blueprint" requested Mail.ReadWrite, Mail.Send, Chat.ReadWrite, User.Read.All, Sites.Read.All with AllPrincipals scope. Consent failed due to concurrency exception.</td>
+                        <td><span class="badge badge-high">High</span></td>
+                        <td>Consent Phishing</td>
+                    </tr>
+                    <tr class="highlight-row">
+                        <td>3</td>
+                        <td><strong>DLP violations for sensitive files</strong> — ad_users.json, Security_Threat_Report_2026-04-02.txt, Security_Threat_Alerts_2026-04-02.docx shared via OneDrive. All are newly triggered alerts not seen in baseline.</td>
+                        <td><span class="badge badge-high">High</span></td>
+                        <td>DLP / Data Loss</td>
+                    </tr>
+                    <tr>
+                        <td>4</td>
+                        <td><strong>Frequent PIM Global Admin activations</strong> — 4 activations in 7 days via two different groups (Demo OPS, ProductOwner). Excessive privilege elevation frequency.</td>
+                        <td><span class="badge badge-medium">Medium</span></td>
+                        <td>Privilege Escalation</td>
+                    </tr>
+                    <tr>
+                        <td>5</td>
+                        <td><strong>Geographic expansion</strong> — 3 new locations (US/Washington, DE/Frankfurt, FR/Malakoff) not seen in 90-day baseline. New IPs 172.171.236.24 and 4.184.232.211.</td>
+                        <td><span class="badge badge-medium">Medium</span></td>
+                        <td>Anomalous Access</td>
+                    </tr>
+                    <tr>
+                        <td>6</td>
+                        <td><strong>Cloud App event surge (+260%)</strong> — Daily rate jumped from 216 to 779 events/day. Combined with new app adoption (Dataverse, Azure CLI, Power Platform CLI).</td>
+                        <td><span class="badge badge-medium">Medium</span></td>
+                        <td>Activity Expansion</td>
+                    </tr>
+                    <tr>
+                        <td>7</td>
+                        <td><strong>Suspicious Copilot interaction</strong> — Finance-related file access flagged by Cloud App Security. Combined with risky AI usage alerts from Purview.</td>
+                        <td><span class="badge badge-medium">Medium</span></td>
+                        <td>AI Misuse</td>
+                    </tr>
+                    <tr>
+                        <td>8</td>
+                        <td><strong>Interactive failure rate increase</strong> — 33.5% baseline to 45.0% recent. 23 CA-blocked sign-ins due to external security challenges not satisfied.</td>
+                        <td><span class="badge badge-low">Low</span></td>
+                        <td>Auth Anomaly</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <h3>Risk Correlation Matrix</h3>
+        <div style="background:var(--bg-tertiary);border-radius:8px;padding:16px;border:1px solid var(--border-color);">
+            <table>
+                <thead><tr><th>Signal</th><th>Email Exfil</th><th>App Consent</th><th>DLP Alerts</th><th>PIM Abuse</th><th>Geo Expansion</th></tr></thead>
+                <tbody>
+                    <tr><td><strong>Email Exfil (+4,791%)</strong></td><td style="text-align:center;">—</td><td style="text-align:center;color:var(--accent-red);">&#x25CF;</td><td style="text-align:center;color:var(--accent-red);">&#x25CF;</td><td style="text-align:center;color:var(--accent-yellow);">&#x25CF;</td><td style="text-align:center;color:var(--text-muted);">&#x25CB;</td></tr>
+                    <tr><td><strong>App Consent Attempt</strong></td><td style="text-align:center;color:var(--accent-red);">&#x25CF;</td><td style="text-align:center;">—</td><td style="text-align:center;color:var(--accent-yellow);">&#x25CF;</td><td style="text-align:center;color:var(--accent-red);">&#x25CF;</td><td style="text-align:center;color:var(--text-muted);">&#x25CB;</td></tr>
+                    <tr><td><strong>DLP Violations</strong></td><td style="text-align:center;color:var(--accent-red);">&#x25CF;</td><td style="text-align:center;color:var(--accent-yellow);">&#x25CF;</td><td style="text-align:center;">—</td><td style="text-align:center;color:var(--text-muted);">&#x25CB;</td><td style="text-align:center;color:var(--text-muted);">&#x25CB;</td></tr>
+                    <tr><td><strong>PIM GA Activations</strong></td><td style="text-align:center;color:var(--accent-yellow);">&#x25CF;</td><td style="text-align:center;color:var(--accent-red);">&#x25CF;</td><td style="text-align:center;color:var(--text-muted);">&#x25CB;</td><td style="text-align:center;">—</td><td style="text-align:center;color:var(--accent-yellow);">&#x25CF;</td></tr>
+                    <tr><td><strong>Geo Expansion</strong></td><td style="text-align:center;color:var(--text-muted);">&#x25CB;</td><td style="text-align:center;color:var(--text-muted);">&#x25CB;</td><td style="text-align:center;color:var(--text-muted);">&#x25CB;</td><td style="text-align:center;color:var(--accent-yellow);">&#x25CF;</td><td style="text-align:center;">—</td></tr>
+                </tbody>
+            </table>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+                <span style="color:var(--accent-red);">&#x25CF; Strong correlation</span> &nbsp;&bull;&nbsp;
+                <span style="color:var(--accent-yellow);">&#x25CF; Moderate correlation</span> &nbsp;&bull;&nbsp;
+                <span>&#x25CB; Weak/no correlation</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============ VERDICT ============ -->
+    <div class="card" style="border-left:4px solid var(--accent-orange);">
+        <h2><span class="icon">&#x2696;&#xFE0F;</span> Verdict</h2>
+
+        <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;">
+            <div class="verdict-badge verdict-flag" style="font-size:20px;">&#x26A0; MONITOR &mdash; FLAG</div>
+        </div>
+
+        <div style="font-size:14px;line-height:1.8;color:var(--text-secondary);">
+            <p><strong style="color:var(--text-primary);">Account: Claudine Irwin (u101@ops.zava-corp.com)</strong></p>
+            <p style="margin-top:8px;">
+                While the computed drift scores fall within the <strong>Stable</strong> range (Interactive: 103.6, Non-Interactive: 89.3),
+                the raw drift metrics mask several critical behavioral signals that independently warrant escalation:
+            </p>
+            <ul style="margin:12px 0 12px 20px;">
+                <li><strong style="color:var(--accent-red);">Email sending volume exploded by 4,791%</strong> — the single strongest exfiltration indicator.</li>
+                <li><strong style="color:var(--accent-red);">Failed admin consent for "FinanceDataAnalysis Blueprint"</strong> with overly broad permissions (Mail.Send, Chat.ReadWrite, User.Read.All) on behalf of AllPrincipals.</li>
+                <li><strong style="color:var(--accent-red);">5 new DLP alerts</strong> for sharing sensitive files (ad_users.json, Security_Threat_Report) not observed in the 90-day baseline.</li>
+                <li><strong style="color:var(--accent-yellow);">4 PIM activations to Global Administrator</strong> in 7 days across two different group contexts.</li>
+                <li><strong style="color:var(--accent-yellow);">3 new geographic locations</strong> (US, Germany, France) and 2 new IPs not in the 90-day baseline.</li>
+                <li><strong style="color:var(--accent-yellow);">7 Insider Risk Management alerts</strong> at High severity, plus 4 explicit Data Exfiltration alerts.</li>
+            </ul>
+            <p><strong style="color:var(--text-primary);">Recommended Actions:</strong></p>
+            <ol style="margin:8px 0 0 20px;">
+                <li>Investigate the email sending surge — check EmailEvents for recipients, attachment types, and external destinations.</li>
+                <li>Block or quarantine "FinanceDataAnalysis Blueprint" app registration — review scope and re-consent attempt.</li>
+                <li>Review DLP-flagged files (ad_users.json, Security_Threat_Report) for classification and sharing scope.</li>
+                <li>Audit PIM activation justifications — verify business need for 4 GA activations in 7 days.</li>
+                <li>Validate new geographic locations (Washington, Frankfurt, Malakoff) with the user's known travel/VPN patterns.</li>
+                <li>Consider temporary conditional access restriction to limit the account to known locations pending investigation.</li>
+            </ol>
+        </div>
+    </div>
+
+    <!-- ============ APPENDIX ============ -->
+    <div class="card">
+        <h2><span class="icon">&#x1F4CE;</span> Appendix — Drift Score Calculation</h2>
+
+        <div class="grid-2">
+            <div>
+                <h3>Interactive Drift Score</h3>
+                <table>
+                    <thead><tr><th>Dimension</th><th>Baseline</th><th>Recent</th><th>Ratio</th><th>Weight</th><th>Contribution</th></tr></thead>
+                    <tbody>
+                        <tr><td>Volume/day</td><td>69.7</td><td>104.8</td><td>150.4%</td><td>0.25</td><td>37.60</td></tr>
+                        <tr><td>Apps</td><td>50</td><td>26</td><td>52.0%</td><td>0.20</td><td>10.40</td></tr>
+                        <tr><td>Resources</td><td>33</td><td>17</td><td>51.5%</td><td>0.10</td><td>5.15</td></tr>
+                        <tr><td>IP Addresses</td><td>11</td><td>10</td><td>90.9%</td><td>0.15</td><td>13.64</td></tr>
+                        <tr><td>Locations</td><td>3</td><td>5</td><td>166.7%</td><td>0.10</td><td>16.67</td></tr>
+                        <tr><td>Devices</td><td>3</td><td>2</td><td>66.7%</td><td>0.10</td><td>6.67</td></tr>
+                        <tr><td>Failure Rate</td><td>33.5%</td><td>45.0%</td><td>134.3%</td><td>0.10</td><td>13.43</td></tr>
+                        <tr style="font-weight:700;background:var(--bg-tertiary);">
+                            <td colspan="5" style="text-align:right;">Total Score</td>
+                            <td style="color:var(--stable-color);">103.56</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div>
+                <h3>Non-Interactive Drift Score</h3>
+                <table>
+                    <thead><tr><th>Dimension</th><th>Baseline</th><th>Recent</th><th>Ratio</th><th>Weight</th><th>Contribution</th></tr></thead>
+                    <tbody>
+                        <tr><td>Volume/day</td><td>2,720</td><td>3,493</td><td>128.4%</td><td>0.30</td><td>38.52</td></tr>
+                        <tr><td>Apps</td><td>154</td><td>110</td><td>71.4%</td><td>0.20</td><td>14.28</td></tr>
+                        <tr><td>Resources</td><td>182</td><td>137</td><td>75.3%</td><td>0.15</td><td>11.30</td></tr>
+                        <tr><td>IP Addresses</td><td>25</td><td>12</td><td>48.0%</td><td>0.15</td><td>7.20</td></tr>
+                        <tr><td>Locations</td><td>6</td><td>5</td><td>83.3%</td><td>0.10</td><td>8.33</td></tr>
+                        <tr><td>Failure Rate</td><td>8.76%</td><td>8.48%</td><td>96.8%</td><td>0.10</td><td>9.68</td></tr>
+                        <tr style="font-weight:700;background:var(--bg-tertiary);">
+                            <td colspan="5" style="text-align:right;">Total Score</td>
+                            <td style="color:var(--stable-color);">89.31</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <h3 style="margin-top:16px;">Drift Score Interpretation</h3>
+        <div style="display:flex;gap:2px;height:30px;border-radius:6px;overflow:hidden;margin-bottom:8px;">
+            <div style="flex:80;background:var(--contracting-color);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#0d1117;">&lt;80 Contracting</div>
+            <div style="flex:40;background:var(--stable-color);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#0d1117;">80-120 Stable</div>
+            <div style="flex:30;background:var(--monitor-color);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#0d1117;">120-150 Monitor</div>
+            <div style="flex:100;background:var(--flag-color);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#0d1117;">150-250 FLAG</div>
+            <div style="flex:50;background:var(--critical-color);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#0d1117;">&gt;250 CRITICAL</div>
+        </div>
+        <div style="font-size:12px;color:var(--text-muted);">
+            Drift scores represent weighted behavioral ratio (recent/baseline × 100). A score of 100 indicates identical behavior.
+            Scores below 100 indicate contraction (fewer resources used). Scores above 100 indicate expansion (more resources or higher volume).
+        </div>
+
+        <h3 style="margin-top:16px;">Data Sources</h3>
+        <table>
+            <thead><tr><th>Source</th><th>Table</th><th>Period</th><th>Records Analyzed</th></tr></thead>
+            <tbody>
+                <tr><td>Interactive Sign-Ins</td><td>SigninLogs</td><td>97 days</td><td>~92K scanned</td></tr>
+                <tr><td>Non-Interactive Sign-Ins</td><td>AADNonInteractiveUserSignInLogs</td><td>97 days</td><td>~1.4M scanned</td></tr>
+                <tr><td>Audit Logs</td><td>AuditLogs</td><td>97 days</td><td>~42K scanned</td></tr>
+                <tr><td>Security Alerts</td><td>SecurityAlert</td><td>97 days</td><td>~12.5K scanned</td></tr>
+                <tr><td>Security Incidents</td><td>SecurityIncident</td><td>97 days</td><td>~13K scanned</td></tr>
+                <tr><td>Cloud App Events</td><td>CloudAppEvents</td><td>97 days</td><td>~387K scanned</td></tr>
+                <tr><td>Email Events</td><td>EmailEvents</td><td>97 days</td><td>~82K scanned</td></tr>
+                <tr><td>Identity Protection</td><td>SigninLogs (risk fields)</td><td>14 days</td><td>524 events</td></tr>
+            </tbody>
+        </table>
+
+        <div style="margin-top:16px;font-size:12px;color:var(--text-muted);">
+            <strong>Workspace:</strong> e34d562e-ef12-4c4e-9bc0-7c6ae357c015 (CyberSOC)<br>
+            <strong>Report Generated:</strong> 2026-04-08T14:20:00Z<br>
+            <strong>Analysis Engine:</strong> Sentinel MCP Data Exploration + Advanced Hunting<br>
+            <strong>Methodology:</strong> Weighted ratio comparison of recent (7d) vs baseline (90d) behavioral dimensions
+        </div>
+    </div>
+
+    <!-- ============ FOOTER ============ -->
+    <div class="report-footer">
+        CyberSOC &mdash; User Account Scope Drift Report &mdash; CONFIDENTIAL<br>
+        Generated by Sentinel MCP automated analysis pipeline &bull; 2026-04-08<br>
+        &copy; 2026 Zava-Corp Security Operations
+    </div>
+
+</div>
+</body>
+</html>
