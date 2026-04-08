@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Account Scope Drift Report — Lydia Bauer (lydiab)</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #1c2333;
+            --border-color: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-yellow: #d29922;
+            --accent-orange: #db6d28;
+            --accent-red: #f85149;
+            --accent-purple: #bc8cff;
+            --accent-cyan: #39d2c0;
+            --stable-color: #58a6ff;
+            --monitor-color: #d29922;
+            --flag-color: #db6d28;
+            --critical-color: #f85149;
+            --contracting-color: #3fb950;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding: 20px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .report-header {
+            background: linear-gradient(135deg, #2a1020 0%, #0d1117 100%);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 24px;
+            position: relative;
+            overflow: hidden;
+        }
+        .report-header::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, var(--accent-red), var(--accent-orange), var(--accent-yellow));
+        }
+        .header-grid { display: grid; grid-template-columns: 1fr auto; gap: 20px; align-items: start; }
+        .report-header h1 {
+            font-size: 24px; font-weight: 700; margin-bottom: 4px;
+            background: linear-gradient(90deg, var(--accent-red), var(--accent-orange));
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .report-header .subtitle { color: var(--text-secondary); font-size: 14px; }
+        .verdict-badge {
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 10px 20px; border-radius: 8px;
+            font-size: 16px; font-weight: 700; letter-spacing: 0.5px;
+        }
+        .verdict-critical {
+            background: rgba(248, 81, 73, 0.2); border: 2px solid rgba(248, 81, 73, 0.6);
+            color: var(--accent-red); animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.4); }
+            50% { box-shadow: 0 0 20px 4px rgba(248, 81, 73, 0.2); }
+        }
+        .user-info-bar { display: flex; gap: 24px; margin-top: 16px; flex-wrap: wrap; }
+        .user-info-item { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+        .user-info-item .label { color: var(--text-muted); }
+        .user-info-item .value { color: var(--text-primary); font-weight: 500; }
+        .card {
+            background: var(--bg-secondary); border: 1px solid var(--border-color);
+            border-radius: 10px; padding: 24px; margin-bottom: 20px;
+        }
+        .card h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+        .card h2 .icon { font-size: 18px; }
+        .card h3 { font-size: 14px; font-weight: 600; color: var(--text-secondary); margin: 16px 0 10px; }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+        .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+        @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } .grid-4 { grid-template-columns: 1fr 1fr; } }
+        .stat-box {
+            background: var(--bg-tertiary); border: 1px solid var(--border-color);
+            border-radius: 8px; padding: 16px; text-align: center;
+        }
+        .stat-box .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); margin-bottom: 4px; }
+        .stat-box .stat-value { font-size: 28px; font-weight: 700; }
+        .stat-box .stat-sub { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+        .drift-gauge-container {
+            display: flex; align-items: center; gap: 30px; padding: 20px;
+            background: var(--bg-tertiary); border-radius: 10px;
+            border: 1px solid var(--border-color); margin-bottom: 16px;
+        }
+        .gauge-visual { position: relative; width: 140px; height: 140px; flex-shrink: 0; }
+        .gauge-visual svg { transform: rotate(-90deg); }
+        .gauge-bg { fill: none; stroke: #21262d; stroke-width: 10; }
+        .gauge-fill { fill: none; stroke-width: 10; stroke-linecap: round; transition: stroke-dashoffset 1s ease; }
+        .gauge-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; }
+        .gauge-score { font-size: 32px; font-weight: 700; line-height: 1; }
+        .gauge-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+        .gauge-details { flex: 1; }
+        .gauge-details h3 { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+        .dimension-row {
+            display: flex; align-items: center; gap: 8px; padding: 5px 0;
+            font-size: 13px; border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+        }
+        .dimension-row:last-child { border-bottom: none; }
+        .dim-name { width: 100px; color: var(--text-secondary); }
+        .dim-bar-container { flex: 1; height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; }
+        .dim-bar { height: 100%; border-radius: 3px; transition: width 1s ease; }
+        .dim-value { width: 60px; text-align: right; font-weight: 600; font-size: 12px; }
+        .dim-weight { width: 40px; text-align: right; color: var(--text-muted); font-size: 11px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th {
+            text-align: left; padding: 10px 12px; background: var(--bg-tertiary);
+            color: var(--text-secondary); font-weight: 600; font-size: 11px;
+            text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border-color);
+        }
+        td { padding: 10px 12px; border-bottom: 1px solid rgba(48, 54, 61, 0.4); color: var(--text-primary); }
+        tr:hover td { background: rgba(88, 166, 255, 0.04); }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+        .badge-high { background: rgba(248, 81, 73, 0.15); color: var(--accent-red); border: 1px solid rgba(248, 81, 73, 0.3); }
+        .badge-medium { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); border: 1px solid rgba(210, 153, 34, 0.3); }
+        .badge-low { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); border: 1px solid rgba(88, 166, 255, 0.3); }
+        .badge-info { background: rgba(57, 210, 192, 0.15); color: var(--accent-cyan); border: 1px solid rgba(57, 210, 192, 0.3); }
+        .badge-new { background: rgba(219, 109, 40, 0.15); color: var(--accent-orange); border: 1px solid rgba(219, 109, 40, 0.3); }
+        .badge-success { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); border: 1px solid rgba(63, 185, 80, 0.3); }
+        .badge-failure { background: rgba(248, 81, 73, 0.15); color: var(--accent-red); border: 1px solid rgba(248, 81, 73, 0.3); }
+        .badge-critical { background: rgba(248, 81, 73, 0.25); color: #ff6b6b; border: 2px solid rgba(248, 81, 73, 0.5); font-weight: 700; }
+        .tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
+        .tag { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 12px; background: var(--bg-tertiary); border: 1px solid var(--border-color); color: var(--text-secondary); }
+        .tag-new { background: rgba(219, 109, 40, 0.1); border-color: rgba(219, 109, 40, 0.3); color: var(--accent-orange); }
+        .tag-danger { background: rgba(248, 81, 73, 0.1); border-color: rgba(248, 81, 73, 0.3); color: var(--accent-red); }
+        .arrow-up { color: var(--accent-red); }
+        .arrow-up::before { content: '▲ '; font-size: 10px; }
+        .arrow-down { color: var(--accent-green); }
+        .arrow-down::before { content: '▼ '; font-size: 10px; }
+        .arrow-stable { color: var(--accent-blue); }
+        .arrow-stable::before { content: '● '; font-size: 10px; }
+        .chart-container { background: var(--bg-tertiary); border-radius: 8px; border: 1px solid var(--border-color); padding: 16px; margin-bottom: 16px; }
+        .bar-chart { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 10px; }
+        .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .bar { width: 100%; border-radius: 3px 3px 0 0; min-height: 2px; transition: height 0.5s ease; }
+        .bar-label { font-size: 9px; color: var(--text-muted); writing-mode: vertical-rl; text-orientation: mixed; max-height: 50px; overflow: hidden; }
+        .bar-value { font-size: 10px; color: var(--text-secondary); font-weight: 600; }
+        .timeline { position: relative; padding-left: 24px; }
+        .timeline::before { content: ''; position: absolute; left: 6px; top: 0; bottom: 0; width: 2px; background: var(--border-color); }
+        .timeline-item { position: relative; padding: 8px 0 16px; }
+        .timeline-item::before {
+            content: ''; position: absolute; left: -22px; top: 14px;
+            width: 10px; height: 10px; border-radius: 50%;
+            border: 2px solid var(--accent-blue); background: var(--bg-secondary);
+        }
+        .timeline-item.critical::before { border-color: var(--accent-red); }
+        .timeline-item.warning::before { border-color: var(--accent-yellow); }
+        .timeline-time { font-size: 11px; color: var(--text-muted); }
+        .timeline-event { font-size: 13px; color: var(--text-primary); }
+        .timeline-detail { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+        .exec-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px; }
+        .exec-card { background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; border-left: 3px solid var(--accent-blue); }
+        .exec-card.warn { border-left-color: var(--accent-yellow); }
+        .exec-card.danger { border-left-color: var(--accent-red); }
+        .exec-card.info { border-left-color: var(--accent-cyan); }
+        .exec-card .ec-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+        .exec-card .ec-value { font-size: 22px; font-weight: 700; margin: 4px 0; }
+        .exec-card .ec-desc { font-size: 12px; color: var(--text-secondary); }
+        .highlight-row { background: rgba(248, 81, 73, 0.05) !important; }
+        .alert-banner {
+            background: rgba(248, 81, 73, 0.12); border: 2px solid rgba(248, 81, 73, 0.4);
+            border-radius: 10px; padding: 16px; margin-bottom: 20px; font-size: 14px;
+        }
+        .report-footer {
+            text-align: center; padding: 20px; color: var(--text-muted); font-size: 12px;
+            border-top: 1px solid var(--border-color); margin-top: 24px;
+        }
+        @media print { body { background: white; color: #1a1a2e; } .card { border: 1px solid #ddd; break-inside: avoid; } }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <!-- HEADER -->
+    <div class="report-header">
+        <div class="header-grid">
+            <div>
+                <h1>&#x1F6A8; User Account Scope Drift Report</h1>
+                <div class="subtitle">Behavioral baseline deviation analysis &mdash; CyberSOC Sentinel Workspace</div>
+                <div class="user-info-bar">
+                    <div class="user-info-item"><span class="label">User:</span><span class="value">Lydia Bauer</span></div>
+                    <div class="user-info-item"><span class="label">UPN:</span><span class="value">lydiab@zava-corp.com</span></div>
+                    <div class="user-info-item"><span class="label">Object&nbsp;ID:</span><span class="value" style="font-family:monospace;font-size:12px;">10aa82fa-c500-476e-882b-08a9f9b3f3e6</span></div>
+                    <div class="user-info-item"><span class="label">Baseline:</span><span class="value">90 days (Jan&nbsp;2&ndash;Apr&nbsp;1,&nbsp;2026)</span></div>
+                    <div class="user-info-item"><span class="label">Recent:</span><span class="value">7 days (Apr&nbsp;1&ndash;8,&nbsp;2026)</span></div>
+                    <div class="user-info-item"><span class="label">Generated:</span><span class="value">2026-04-08 14:38 UTC</span></div>
+                </div>
+            </div>
+            <div style="text-align:right;">
+                <div class="verdict-badge verdict-critical">&#x1F6A8; CRITICAL &mdash; COMPROMISED</div>
+                <div style="font-size:12px;color:var(--accent-red);margin-top:6px;font-weight:600;">Active ransomware &amp; hands-on-keyboard attack</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ALERT BANNER -->
+    <div class="alert-banner">
+        <strong style="color:var(--accent-red);font-size:16px;">&#x1F6A8; IMMEDIATE ACTION REQUIRED</strong><br>
+        <span style="color:var(--text-secondary);">
+            Account <strong>lydiab@zava-corp.com</strong> shows strong indicators of compromise: <strong>170+ security alerts</strong> including ransomware,
+            hands-on-keyboard attacks, and lateral movement; <strong>6 new Tor exit node IPs</strong>; automated tooling (<code>UDS user automation</code>)
+            driving 605% volume increase; <strong>100% authentication failure rate since Apr 4</strong> (CA policies blocking).
+            The account appears to have been weaponized via Tor-routed access and is actively being used in a ransomware campaign.
+        </span>
+    </div>
+
+    <!-- EXECUTIVE SUMMARY -->
+    <div class="card">
+        <h2><span class="icon">&#x1F4CA;</span> Executive Summary</h2>
+        <div class="exec-summary">
+            <div class="exec-card danger">
+                <div class="ec-label">Interactive Drift Score</div>
+                <div class="ec-value" style="color:var(--accent-red);">204.0</div>
+                <div class="ec-desc">FLAG — Extreme expansion</div>
+            </div>
+            <div class="exec-card info">
+                <div class="ec-label">Non-Interactive Drift Score</div>
+                <div class="ec-value" style="color:var(--accent-green);">50.4</div>
+                <div class="ec-desc">Heavy contraction</div>
+            </div>
+            <div class="exec-card danger">
+                <div class="ec-label">Security Alerts (7d)</div>
+                <div class="ec-value" style="color:var(--accent-red);">170+</div>
+                <div class="ec-desc">Ransomware, HOTK, Phishing, Tor</div>
+            </div>
+            <div class="exec-card danger">
+                <div class="ec-label">Volume Explosion</div>
+                <div class="ec-value" style="color:var(--accent-red);">+506%</div>
+                <div class="ec-desc">12.3/day &rarr; 74.2/day</div>
+            </div>
+            <div class="exec-card danger">
+                <div class="ec-label">New Tor IPs</div>
+                <div class="ec-value" style="color:var(--accent-red);">6</div>
+                <div class="ec-desc">NL, SE, PL — known exit nodes</div>
+            </div>
+            <div class="exec-card danger">
+                <div class="ec-label">Failure Rate</div>
+                <div class="ec-value" style="color:var(--accent-red);">61.3%</div>
+                <div class="ec-desc">100% since Apr 4 (blocked)</div>
+            </div>
+            <div class="exec-card danger">
+                <div class="ec-label">Identity Protection</div>
+                <div class="ec-value" style="color:var(--accent-red);">20</div>
+                <div class="ec-desc">Medium risk, 1 atRisk state</div>
+            </div>
+            <div class="exec-card danger">
+                <div class="ec-label">CloudApp Surge</div>
+                <div class="ec-value" style="color:var(--accent-red);">+711%</div>
+                <div class="ec-desc">77/day &rarr; 625/day</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- INTERACTIVE SIGN-IN DRIFT -->
+    <div class="card" style="border-left:4px solid var(--accent-red);">
+        <h2><span class="icon">&#x1F511;</span> Interactive Sign-In Drift</h2>
+
+        <div class="drift-gauge-container" style="border-color:rgba(248,81,73,0.3);">
+            <div class="gauge-visual">
+                <svg viewBox="0 0 140 140">
+                    <circle class="gauge-bg" cx="70" cy="70" r="60"/>
+                    <circle class="gauge-fill" cx="70" cy="70" r="60"
+                        stroke="var(--accent-red)"
+                        stroke-dasharray="377"
+                        stroke-dashoffset="72"/>
+                </svg>
+                <div class="gauge-text">
+                    <div class="gauge-score" style="color:var(--accent-red);">204.0</div>
+                    <div class="gauge-label" style="color:var(--accent-red);">FLAG</div>
+                </div>
+            </div>
+            <div class="gauge-details">
+                <h3 style="color:var(--accent-red);">Drift Dimensions — Interactive</h3>
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+                    Formula: 0.25V + 0.20A + 0.10R + 0.15IP + 0.10L + 0.10D + 0.10F &nbsp;|&nbsp;
+                    &lt;80 Contracting &bull; 80-120 Stable &bull; 120-150 Monitor &bull; &gt;150 FLAG &bull; &gt;250 Critical
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Volume/day</span>
+                    <div class="dim-bar-container"><div class="dim-bar" style="width:100%;background:var(--accent-red);"></div></div>
+                    <span class="dim-value" style="color:var(--accent-red);">&#x25B2; 605.5%</span>
+                    <span class="dim-weight">&times;0.25</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Apps</span>
+                    <div class="dim-bar-container"><div class="dim-bar" style="width:16.7%;background:var(--accent-green);"></div></div>
+                    <span class="dim-value arrow-down">16.7%</span>
+                    <span class="dim-weight">&times;0.20</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Resources</span>
+                    <div class="dim-bar-container"><div class="dim-bar" style="width:22.2%;background:var(--accent-green);"></div></div>
+                    <span class="dim-value arrow-down">22.2%</span>
+                    <span class="dim-weight">&times;0.10</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">IP Addresses</span>
+                    <div class="dim-bar-container"><div class="dim-bar" style="width:80%;background:var(--accent-blue);"></div></div>
+                    <span class="dim-value arrow-stable">80.0%</span>
+                    <span class="dim-weight">&times;0.15</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Locations</span>
+                    <div class="dim-bar-container"><div class="dim-bar" style="width:80%;background:var(--accent-blue);"></div></div>
+                    <span class="dim-value arrow-stable">80.0%</span>
+                    <span class="dim-weight">&times;0.10</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Devices</span>
+                    <div class="dim-bar-container"><div class="dim-bar" style="width:33.3%;background:var(--accent-green);"></div></div>
+                    <span class="dim-value arrow-down">33.3%</span>
+                    <span class="dim-weight">&times;0.10</span>
+                </div>
+                <div class="dimension-row">
+                    <span class="dim-name">Failure Rate</span>
+                    <div class="dim-bar-container"><div class="dim-bar" style="width:94.8%;background:var(--accent-red);"></div></div>
+                    <span class="dim-value" style="color:var(--accent-red);">&#x25B2; 236.9%</span>
+                    <span class="dim-weight">&times;0.10</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Baseline vs Recent -->
+        <div class="grid-2" style="margin-top:16px;">
+            <div>
+                <h3>Baseline (90d)</h3>
+                <div class="grid-2" style="gap:8px;">
+                    <div class="stat-box"><div class="stat-label">Total Events</div><div class="stat-value">147</div><div class="stat-sub">12 active days</div></div>
+                    <div class="stat-box"><div class="stat-label">Avg/Day</div><div class="stat-value">12.3</div></div>
+                    <div class="stat-box"><div class="stat-label">Unique Apps</div><div class="stat-value">18</div></div>
+                    <div class="stat-box"><div class="stat-label">Resources</div><div class="stat-value">9</div></div>
+                    <div class="stat-box"><div class="stat-label">IP Addresses</div><div class="stat-value">10</div></div>
+                    <div class="stat-box"><div class="stat-label">Locations</div><div class="stat-value">5</div></div>
+                    <div class="stat-box"><div class="stat-label">Devices</div><div class="stat-value">6</div></div>
+                    <div class="stat-box"><div class="stat-label">Failure Rate</div><div class="stat-value">25.9%</div><div class="stat-sub">38 failures</div></div>
+                </div>
+            </div>
+            <div>
+                <h3>Recent (7d)</h3>
+                <div class="grid-2" style="gap:8px;">
+                    <div class="stat-box"><div class="stat-label">Total Events</div><div class="stat-value" style="color:var(--accent-red);">445</div><div class="stat-sub">6 active days</div></div>
+                    <div class="stat-box"><div class="stat-label">Avg/Day</div><div class="stat-value" style="color:var(--accent-red);">74.2</div></div>
+                    <div class="stat-box"><div class="stat-label">Unique Apps</div><div class="stat-value">3</div><div class="stat-sub">concentrated</div></div>
+                    <div class="stat-box"><div class="stat-label">Resources</div><div class="stat-value">2</div></div>
+                    <div class="stat-box"><div class="stat-label">IP Addresses</div><div class="stat-value">8</div><div class="stat-sub">6 new (Tor)</div></div>
+                    <div class="stat-box"><div class="stat-label">Locations</div><div class="stat-value">4</div><div class="stat-sub">3 new</div></div>
+                    <div class="stat-box"><div class="stat-label">Devices</div><div class="stat-value">2</div></div>
+                    <div class="stat-box"><div class="stat-label">Failure Rate</div><div class="stat-value" style="color:var(--accent-red);">61.3%</div><div class="stat-sub">273 failures</div></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Daily Volume Trend -->
+        <h3>Interactive Sign-In Volume Trend (14d)</h3>
+        <div class="chart-container">
+            <div class="bar-chart">
+                <div class="bar-col"><div class="bar-value">2</div><div class="bar" style="height:2%;background:var(--accent-blue);"></div><div class="bar-label">Mar 27</div></div>
+                <div class="bar-col"><div class="bar-value">2</div><div class="bar" style="height:2%;background:var(--accent-blue);"></div><div class="bar-label">Mar 28</div></div>
+                <div class="bar-col"><div class="bar-value">1</div><div class="bar" style="height:1%;background:var(--accent-blue);"></div><div class="bar-label">Mar 29</div></div>
+                <div class="bar-col"><div class="bar-value">1</div><div class="bar" style="height:1%;background:var(--accent-blue);"></div><div class="bar-label">Mar 30</div></div>
+                <div class="bar-col"><div class="bar-value">11</div><div class="bar" style="height:9%;background:var(--accent-blue);"></div><div class="bar-label">Mar 31</div></div>
+                <div class="bar-col"><div class="bar-value">49</div><div class="bar" style="height:38%;background:var(--accent-orange);"></div><div class="bar-label">Apr 1</div></div>
+                <div class="bar-col"><div class="bar-value">102</div><div class="bar" style="height:79%;background:var(--accent-orange);"></div><div class="bar-label">Apr 2</div></div>
+                <div class="bar-col"><div class="bar-value">95</div><div class="bar" style="height:74%;background:var(--accent-orange);"></div><div class="bar-label">Apr 3</div></div>
+                <div class="bar-col"><div class="bar-value">129</div><div class="bar" style="height:100%;background:var(--accent-red);"></div><div class="bar-label">Apr 4</div></div>
+                <div class="bar-col"><div class="bar-value">13</div><div class="bar" style="height:10%;background:var(--accent-red);"></div><div class="bar-label">Apr 5</div></div>
+                <div class="bar-col" style="opacity:0.3;"><div class="bar-value">0</div><div class="bar" style="height:1%;background:var(--text-muted);"></div><div class="bar-label">Apr 6</div></div>
+                <div class="bar-col"><div class="bar-value">48</div><div class="bar" style="height:37%;background:var(--accent-red);"></div><div class="bar-label">Apr 7</div></div>
+                <div class="bar-col"><div class="bar-value">58</div><div class="bar" style="height:45%;background:var(--accent-red);"></div><div class="bar-label">Apr 8</div></div>
+            </div>
+            <div style="display:flex;gap:16px;justify-content:center;margin-top:10px;font-size:11px;color:var(--text-muted);">
+                <span>&#x25A0; <span style="color:var(--accent-blue);">Normal</span></span>
+                <span>&#x25A0; <span style="color:var(--accent-orange);">Compromised (partial fails)</span></span>
+                <span>&#x25A0; <span style="color:var(--accent-red);">100% Blocked</span></span>
+            </div>
+        </div>
+
+        <!-- Suspicious IPs -->
+        <h3>&#x1F6A8; IP Addresses (Recent 7d) — 6 New Tor Exit Nodes</h3>
+        <table>
+            <thead><tr><th>IP Address</th><th>Events</th><th>Country</th><th>City</th><th>Status</th><th>Risk</th></tr></thead>
+            <tbody>
+                <tr><td><code>74.235.241.47</code></td><td>384</td><td>US</td><td>Washington</td><td><span class="badge badge-info">Baseline</span></td><td>Low</td></tr>
+                <tr><td><code>40.68.200.63</code></td><td>3</td><td>NL</td><td>Amsterdam</td><td><span class="badge badge-info">Baseline</span></td><td>Low</td></tr>
+                <tr class="highlight-row"><td><code>5.255.123.158</code></td><td>14</td><td>NL</td><td>Amsterdam</td><td><span class="badge badge-critical">New &mdash; Tor</span></td><td><span class="badge badge-high">Medium Risk</span></td></tr>
+                <tr class="highlight-row"><td><code>193.189.100.206</code></td><td>13</td><td>SE</td><td>Tranemo</td><td><span class="badge badge-critical">New &mdash; Tor</span></td><td><span class="badge badge-high">Suspicious</span></td></tr>
+                <tr class="highlight-row"><td><code>171.25.193.235</code></td><td>11</td><td>SE</td><td>Stockholm</td><td><span class="badge badge-critical">New &mdash; Tor</span></td><td><span class="badge badge-high">Suspicious</span></td></tr>
+                <tr class="highlight-row"><td><code>192.42.116.12</code></td><td>9</td><td>NL</td><td>Amsterdam</td><td><span class="badge badge-critical">New &mdash; Tor</span></td><td><span class="badge badge-high">Suspicious</span></td></tr>
+                <tr class="highlight-row"><td><code>45.141.215.200</code></td><td>8</td><td>PL</td><td>Warszawa</td><td><span class="badge badge-critical">New &mdash; Tor</span></td><td><span class="badge badge-high">Medium Risk</span></td></tr>
+                <tr class="highlight-row"><td><code>40.68.199.203</code></td><td>3</td><td>NL</td><td>Amsterdam</td><td><span class="badge badge-new">New</span></td><td>Low</td></tr>
+            </tbody>
+        </table>
+
+        <h3 style="margin-top:16px;">New Locations (not in baseline)</h3>
+        <div class="tag-list">
+            <span class="tag tag-danger">&#x1F6A9; PL — Warszawa (Tor)</span>
+            <span class="tag tag-danger">&#x1F6A9; SE — Stockholm (Tor)</span>
+            <span class="tag tag-danger">&#x1F6A9; SE — Tranemo (Tor)</span>
+        </div>
+
+        <h3 style="margin-top:16px;">Interactive Applications (Recent 7d)</h3>
+        <table>
+            <thead><tr><th>Application</th><th>Events</th><th>% of Total</th><th>Assessment</th></tr></thead>
+            <tbody>
+                <tr class="highlight-row"><td><strong>UDS user automation</strong></td><td>439</td><td>98.7%</td><td><span class="badge badge-critical">Suspicious Automation</span></td></tr>
+                <tr><td>Microsoft Teams Web Client</td><td>5</td><td>1.1%</td><td><span class="badge badge-info">Normal</span></td></tr>
+                <tr><td>Graph Explorer</td><td>1</td><td>0.2%</td><td><span class="badge badge-medium">Recon Tool</span></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- NON-INTERACTIVE SIGN-IN DRIFT -->
+    <div class="card">
+        <h2><span class="icon">&#x1F916;</span> Non-Interactive Sign-In Drift</h2>
+
+        <div class="drift-gauge-container">
+            <div class="gauge-visual">
+                <svg viewBox="0 0 140 140">
+                    <circle class="gauge-bg" cx="70" cy="70" r="60"/>
+                    <circle class="gauge-fill" cx="70" cy="70" r="60"
+                        stroke="var(--accent-green)"
+                        stroke-dasharray="377"
+                        stroke-dashoffset="327"/>
+                </svg>
+                <div class="gauge-text">
+                    <div class="gauge-score" style="color:var(--accent-green);">50.4</div>
+                    <div class="gauge-label">Contracting</div>
+                </div>
+            </div>
+            <div class="gauge-details">
+                <h3>Drift Dimensions — Non-Interactive</h3>
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">
+                    Formula: 0.30V + 0.20A + 0.15R + 0.15IP + 0.10L + 0.10F
+                </div>
+                <div class="dimension-row"><span class="dim-name">Volume/day</span><div class="dim-bar-container"><div class="dim-bar" style="width:64.2%;background:var(--accent-green);"></div></div><span class="dim-value arrow-down">64.2%</span><span class="dim-weight">&times;0.30</span></div>
+                <div class="dimension-row"><span class="dim-name">Apps</span><div class="dim-bar-container"><div class="dim-bar" style="width:26%;background:var(--accent-green);"></div></div><span class="dim-value arrow-down">26.0%</span><span class="dim-weight">&times;0.20</span></div>
+                <div class="dimension-row"><span class="dim-name">Resources</span><div class="dim-bar-container"><div class="dim-bar" style="width:40.3%;background:var(--accent-green);"></div></div><span class="dim-value arrow-down">40.3%</span><span class="dim-weight">&times;0.15</span></div>
+                <div class="dimension-row"><span class="dim-name">IP Addresses</span><div class="dim-bar-container"><div class="dim-bar" style="width:55.6%;background:var(--accent-green);"></div></div><span class="dim-value arrow-down">55.6%</span><span class="dim-weight">&times;0.15</span></div>
+                <div class="dimension-row"><span class="dim-name">Locations</span><div class="dim-bar-container"><div class="dim-bar" style="width:100%;background:var(--accent-blue);"></div></div><span class="dim-value arrow-stable">100.0%</span><span class="dim-weight">&times;0.10</span></div>
+                <div class="dimension-row"><span class="dim-name">Failure Rate</span><div class="dim-bar-container"><div class="dim-bar" style="width:15.1%;background:var(--accent-green);"></div></div><span class="dim-value arrow-down">15.1%</span><span class="dim-weight">&times;0.10</span></div>
+            </div>
+        </div>
+
+        <div class="grid-2">
+            <div>
+                <h3>Baseline (90d)</h3>
+                <div class="grid-2" style="gap:8px;">
+                    <div class="stat-box"><div class="stat-label">Total Events</div><div class="stat-value">13,341</div><div class="stat-sub">23 active days</div></div>
+                    <div class="stat-box"><div class="stat-label">Avg/Day</div><div class="stat-value">580</div></div>
+                    <div class="stat-box"><div class="stat-label">Unique Apps</div><div class="stat-value">50</div></div>
+                    <div class="stat-box"><div class="stat-label">Resources</div><div class="stat-value">72</div></div>
+                    <div class="stat-box"><div class="stat-label">IP Addresses</div><div class="stat-value">18</div></div>
+                    <div class="stat-box"><div class="stat-label">Locations</div><div class="stat-value">4</div></div>
+                    <div class="stat-box"><div class="stat-label">Failure Rate</div><div class="stat-value">51.8%</div><div class="stat-sub">6,915 failures</div></div>
+                </div>
+            </div>
+            <div>
+                <h3>Recent (7d)</h3>
+                <div class="grid-2" style="gap:8px;">
+                    <div class="stat-box"><div class="stat-label">Total Events</div><div class="stat-value">745</div><div class="stat-sub">2 active days</div></div>
+                    <div class="stat-box"><div class="stat-label">Avg/Day</div><div class="stat-value">372.5</div></div>
+                    <div class="stat-box"><div class="stat-label">Unique Apps</div><div class="stat-value">13</div></div>
+                    <div class="stat-box"><div class="stat-label">Resources</div><div class="stat-value">29</div></div>
+                    <div class="stat-box"><div class="stat-label">IP Addresses</div><div class="stat-value">10</div></div>
+                    <div class="stat-box"><div class="stat-label">Locations</div><div class="stat-value">4</div></div>
+                    <div class="stat-box"><div class="stat-label">Failure Rate</div><div class="stat-value" style="color:var(--accent-green);">7.8%</div><div class="stat-sub">58 failures</div></div>
+                </div>
+            </div>
+        </div>
+        <div style="margin-top:12px;background:rgba(57,210,192,0.08);border:1px solid rgba(57,210,192,0.2);border-radius:8px;padding:12px;font-size:13px;">
+            <strong style="color:var(--accent-cyan);">&#x2139;&#xFE0F; Non-Interactive Contraction Explained:</strong>
+            <span style="color:var(--text-secondary);">
+                Heavy contraction in non-interactive sign-ins (only 2 active days vs 23 in baseline) likely reflects the account being
+                partially disabled or token refresh mechanisms being blocked by CA policies. The failure rate dropping from 51.8% to 7.8%
+                suggests previously failing service principals are no longer retrying.
+            </span>
+        </div>
+    </div>
+
+    <!-- IDENTITY PROTECTION -->
+    <div class="card" style="border-left:4px solid var(--accent-red);">
+        <h2><span class="icon">&#x1F6E1;&#xFE0F;</span> Identity Protection</h2>
+
+        <div class="grid-3" style="margin-bottom:16px;">
+            <div class="stat-box" style="border-left:3px solid var(--accent-red);">
+                <div class="stat-label">Risk Events (7d)</div>
+                <div class="stat-value" style="color:var(--accent-red);">20</div>
+                <div class="stat-sub">All Medium risk level</div>
+            </div>
+            <div class="stat-box" style="border-left:3px solid var(--accent-red);">
+                <div class="stat-label">Risk State</div>
+                <div class="stat-value" style="color:var(--accent-red);font-size:20px;">atRisk</div>
+                <div class="stat-sub">1 event confirmed at risk</div>
+            </div>
+            <div class="stat-box" style="border-left:3px solid var(--accent-yellow);">
+                <div class="stat-label">Risk Dismissed</div>
+                <div class="stat-value" style="color:var(--accent-yellow);">5</div>
+                <div class="stat-sub">Risk manually dismissed</div>
+            </div>
+        </div>
+
+        <h3>Risk Events Detail</h3>
+        <table>
+            <thead><tr><th>Time (UTC)</th><th>Risk Level</th><th>Risk State</th><th>IP</th><th>Location</th><th>App</th></tr></thead>
+            <tbody>
+                <tr class="highlight-row"><td>Apr 2 11:28</td><td><span class="badge badge-medium">Medium</span></td><td><strong style="color:var(--accent-red);">atRisk</strong></td><td><code>5.255.123.158</code></td><td>NL</td><td>UDS user automation</td></tr>
+                <tr><td>Apr 2 11:30</td><td><span class="badge badge-medium">Medium</span></td><td>dismissed</td><td><code>5.255.123.158</code></td><td>NL</td><td>UDS user automation</td></tr>
+                <tr><td>Apr 2 11:24</td><td><span class="badge badge-medium">Medium</span></td><td>none</td><td><code>5.255.123.158</code></td><td>NL</td><td>UDS user automation</td></tr>
+                <tr><td>Apr 2 09:48</td><td><span class="badge badge-medium">Medium</span></td><td>none</td><td><code>45.141.215.200</code></td><td>PL</td><td>UDS user automation</td></tr>
+                <tr><td>Apr 2 09:47</td><td><span class="badge badge-medium">Medium</span></td><td>none</td><td><code>45.141.215.200</code></td><td>PL</td><td>UDS user automation</td></tr>
+            </tbody>
+        </table>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:8px;">Showing top 5 of 20 risk events. All from Tor exit node IPs via "UDS user automation" app on Apr 2.</div>
+
+        <h3 style="margin-top:16px;">Conditional Access Summary (Recent 7d)</h3>
+        <table>
+            <thead><tr><th>CA Status</th><th>Result</th><th>Description</th><th>Count</th></tr></thead>
+            <tbody>
+                <tr><td><span class="badge badge-success">success</span></td><td>0</td><td>Passed CA evaluation</td><td>172</td></tr>
+                <tr><td><span class="badge badge-success">success</span></td><td>50140</td><td>KMSI interrupt</td><td>2</td></tr>
+                <tr><td><span class="badge badge-success">success</span></td><td>50133</td><td>Password expiration</td><td>1</td></tr>
+            </tbody>
+        </table>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:6px;">
+            &#x26A0; Note: 273 failed sign-ins had <code>ConditionalAccessStatus = notApplied</code>, indicating the <strong>UDS user automation</strong>
+            tool is being blocked at a stage before CA evaluation (likely authentication failure / invalid credentials since Apr 4).
+        </div>
+    </div>
+
+    <!-- ACCOUNT CONFIGURATION CHANGES -->
+    <div class="card">
+        <h2><span class="icon">&#x2699;&#xFE0F;</span> Account Configuration Changes (Recent 7d)</h2>
+
+        <div class="grid-4" style="margin-bottom:16px;">
+            <div class="stat-box"><div class="stat-label">Sync Rule Actions</div><div class="stat-value">5</div></div>
+            <div class="stat-box"><div class="stat-label">User Updates</div><div class="stat-value">3</div></div>
+            <div class="stat-box"><div class="stat-label">Imports</div><div class="stat-value">2</div></div>
+            <div class="stat-box" style="border-left:3px solid var(--accent-red);"><div class="stat-label">Security Info Registered</div><div class="stat-value" style="color:var(--accent-red);">2</div><div class="stat-sub">NEW — not in baseline</div></div>
+        </div>
+
+        <div style="background:rgba(248,81,73,0.08);border:1px solid rgba(248,81,73,0.2);border-radius:8px;padding:14px;font-size:13px;margin-bottom:16px;">
+            <strong style="color:var(--accent-red);">&#x26A0; MFA Persistence Attempt:</strong>
+            <span style="color:var(--text-secondary);">
+                <code>Admin registered security info</code> appeared <strong>2 times in 7 days</strong> with <strong>0 occurrences in the entire 90-day baseline</strong>.
+                This is a classic indicator of an attacker registering their own MFA method for persistent access.
+                Combined with the Tor IP access and UDS automation tool, this strongly suggests the threat actor registered backdoor authentication methods.
+            </span>
+        </div>
+
+        <h3>Audit Operation Summary (Baseline vs Recent)</h3>
+        <table>
+            <thead><tr><th>Operation</th><th>Baseline (90d)</th><th>Recent (7d)</th><th>Trend</th></tr></thead>
+            <tbody>
+                <tr><td>Synchronization rule action</td><td>90</td><td>5</td><td><span class="arrow-down">Contracting</span></td></tr>
+                <tr><td>Import</td><td>34</td><td>2</td><td><span class="arrow-down">Contracting</span></td></tr>
+                <tr><td>Update user</td><td>25</td><td>3</td><td><span class="arrow-stable">Stable</span></td></tr>
+                <tr><td>Add member to group</td><td>16</td><td>0</td><td><span class="arrow-down">Stopped</span></td></tr>
+                <tr><td>Disable account</td><td>8</td><td>1</td><td><span class="arrow-down">Contracting</span></td></tr>
+                <tr class="highlight-row"><td><strong>Admin registered security info</strong></td><td><strong>0</strong></td><td><strong style="color:var(--accent-red);">2</strong></td><td><span class="arrow-up" style="color:var(--accent-red);">NEW &mdash; Not in baseline</span></td></tr>
+                <tr><td>Remove member from group</td><td>3</td><td>2</td><td><span class="arrow-stable">Stable</span></td></tr>
+                <tr><td>Remove access pkg assignment</td><td>5</td><td>1</td><td><span class="arrow-down">Contracting</span></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- CLOUD APP ACTIVITY DRIFT -->
+    <div class="card">
+        <h2><span class="icon">&#x2601;&#xFE0F;</span> Cloud App Activity Drift</h2>
+        <div class="grid-3" style="margin-bottom:16px;">
+            <div class="stat-box"><div class="stat-label">Baseline Events (90d)</div><div class="stat-value">6,950</div><div class="stat-sub">77.2/day &bull; 6 apps &bull; 32 actions</div></div>
+            <div class="stat-box"><div class="stat-label">Recent Events (7d)</div><div class="stat-value" style="color:var(--accent-red);">4,378</div><div class="stat-sub">625.4/day &bull; 5 apps &bull; 9 actions</div></div>
+            <div class="stat-box"><div class="stat-label">Volume Change</div><div class="stat-value" style="color:var(--accent-red);">+711%</div><div class="stat-sub">77/day &rarr; 625/day</div></div>
+        </div>
+        <div style="background:rgba(248,81,73,0.08);border:1px solid rgba(248,81,73,0.2);border-radius:8px;padding:14px;font-size:13px;">
+            <strong style="color:var(--accent-red);">&#x26A0; Massive Cloud App Surge</strong><br>
+            <span style="color:var(--text-secondary);">
+                Daily cloud app event rate exploded from 77/day to 625/day (+711%). Despite app contraction (6→5)
+                and action type contraction (32→9), the volume explosion indicates highly concentrated automated activity.
+                This is consistent with automated lateral movement, data access, or ransomware deployment via cloud APIs.
+            </span>
+        </div>
+    </div>
+
+    <!-- EMAIL PATTERN DRIFT -->
+    <div class="card">
+        <h2><span class="icon">&#x1F4E7;</span> Email Pattern Drift</h2>
+        <div class="grid-4" style="margin-bottom:16px;">
+            <div class="stat-box"><div class="stat-label">Baseline Total (90d)</div><div class="stat-value">263</div><div class="stat-sub">2.9/day</div></div>
+            <div class="stat-box"><div class="stat-label">Recent Total (7d)</div><div class="stat-value">8</div><div class="stat-sub">1.1/day</div></div>
+            <div class="stat-box"><div class="stat-label">Baseline Sent</div><div class="stat-value">184</div><div class="stat-sub">2.0/day</div></div>
+            <div class="stat-box"><div class="stat-label">Recent Sent</div><div class="stat-value">4</div><div class="stat-sub">0.6/day</div></div>
+        </div>
+        <div style="background:rgba(57,210,192,0.08);border:1px solid rgba(57,210,192,0.2);border-radius:8px;padding:12px;font-size:13px;">
+            <strong style="color:var(--accent-cyan);">&#x2139;&#xFE0F; Email Contraction:</strong>
+            <span style="color:var(--text-secondary);">
+                Email activity dropped significantly (2.9/day → 1.1/day). This is expected for a compromised account where the attacker
+                is focused on lateral movement and ransomware rather than email exfiltration. The low email volume does NOT indicate the account is safe.
+            </span>
+        </div>
+    </div>
+
+    <!-- CORRELATED SECURITY ALERTS -->
+    <div class="card" style="border-left:4px solid var(--accent-red);">
+        <h2><span class="icon">&#x1F6A8;</span> Correlated Security Alerts</h2>
+
+        <div class="grid-4" style="margin-bottom:16px;">
+            <div class="stat-box" style="border-left:3px solid var(--accent-red);"><div class="stat-label">High Severity (7d)</div><div class="stat-value" style="color:var(--accent-red);">~115</div></div>
+            <div class="stat-box" style="border-left:3px solid var(--accent-yellow);"><div class="stat-label">Medium Severity (7d)</div><div class="stat-value" style="color:var(--accent-yellow);">5</div></div>
+            <div class="stat-box" style="border-left:3px solid var(--accent-blue);"><div class="stat-label">Low Severity (7d)</div><div class="stat-value" style="color:var(--accent-blue);">13</div></div>
+            <div class="stat-box" style="border-left:3px solid var(--text-muted);"><div class="stat-label">Informational (7d)</div><div class="stat-value">14</div></div>
+        </div>
+
+        <table>
+            <thead><tr><th>Alert Name</th><th>Severity</th><th>Product</th><th>Base</th><th>Recent</th><th>Status</th></tr></thead>
+            <tbody>
+                <tr class="highlight-row"><td><strong>Hands-on-keyboard attack involving multiple devices</strong></td><td><span class="badge badge-high">High</span></td><td>MDE</td><td>111</td><td><strong>24</strong></td><td>Resolved</td></tr>
+                <tr class="highlight-row"><td><strong>Potential human-operated malicious activity</strong></td><td><span class="badge badge-high">High</span></td><td>MDE</td><td>91</td><td><strong>18</strong></td><td>Resolved</td></tr>
+                <tr class="highlight-row"><td><strong>Compromised account conducting HOTK attack</strong></td><td><span class="badge badge-high">High</span></td><td>MDE</td><td>52</td><td><strong>11</strong></td><td>Resolved</td></tr>
+                <tr class="highlight-row"><td><strong>Phishing alert</strong></td><td><span class="badge badge-high">High</span></td><td>M365 Defender</td><td>58</td><td><strong>10</strong></td><td>Resolved</td></tr>
+                <tr class="highlight-row"><td>Ransomware-like behavior (assets)</td><td><span class="badge badge-high">High</span></td><td>MDE</td><td>52</td><td><strong>8</strong></td><td>Resolved</td></tr>
+                <tr class="highlight-row"><td>Ransomware-like behavior (assets)</td><td><span class="badge badge-high">High</span></td><td>MDE</td><td>49</td><td><strong>8</strong></td><td>New</td></tr>
+                <tr class="highlight-row"><td>Ransomware: known malicious extension</td><td><span class="badge badge-high">High</span></td><td>MDE</td><td>37</td><td><strong>8</strong></td><td>Resolved</td></tr>
+                <tr class="highlight-row"><td>Ransomware behavior in file system</td><td><span class="badge badge-high">High</span></td><td>MDE</td><td>28</td><td><strong>6</strong></td><td>Resolved</td></tr>
+                <tr class="highlight-row"><td>Unusual network authentication across devices</td><td><span class="badge badge-high">High</span></td><td>M365 Defender</td><td>22</td><td><strong>6</strong></td><td>Resolved</td></tr>
+                <tr class="highlight-row"><td><strong>Activity from a TOR IP address</strong></td><td><span class="badge badge-low">Low</span></td><td>MCAS</td><td>1</td><td><strong>6</strong></td><td><span class="badge badge-new">New</span></td></tr>
+                <tr><td>Lateral movement using RDP blocked</td><td><span class="badge badge-info">Info</span></td><td>M365 Defender</td><td>33</td><td>9</td><td>Resolved</td></tr>
+                <tr><td>Lateral movement using SMB blocked</td><td><span class="badge badge-info">Info</span></td><td>M365 Defender</td><td>22</td><td>5</td><td>Resolved</td></tr>
+                <tr><td>Suspicious remote activity</td><td><span class="badge badge-medium">Medium</span></td><td>MDE</td><td>27</td><td>5</td><td>Resolved</td></tr>
+                <tr class="highlight-row"><td>Risk of tampering via Safe Mode (ransomware disruption)</td><td><span class="badge badge-high">High</span></td><td>MDE</td><td>26</td><td><strong>4</strong></td><td>Resolved</td></tr>
+                <tr class="highlight-row"><td>Possible compromised user delivering ransomware files</td><td><span class="badge badge-high">High</span></td><td>MDE</td><td>26</td><td><strong>4</strong></td><td>Resolved</td></tr>
+                <tr><td>Email reported as malware or phish</td><td><span class="badge badge-low">Low</span></td><td>O365 ATP</td><td>54</td><td>6</td><td>Resolved</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- SECURITY ASSESSMENT -->
+    <div class="card">
+        <h2><span class="icon">&#x1F50E;</span> Security Assessment</h2>
+
+        <h3>Kill Chain Reconstruction</h3>
+        <div class="timeline">
+            <div class="timeline-item critical">
+                <div class="timeline-time">Phase 1: Initial Access (Apr 1–2)</div>
+                <div class="timeline-event"><span class="badge badge-critical">CRITICAL</span> Tor-Routed Credential Access</div>
+                <div class="timeline-detail">
+                    Account accessed via <strong>6 Tor exit node IPs</strong> (NL: 5.255.123.158, 192.42.116.12; SE: 171.25.193.235, 193.189.100.206; PL: 45.141.215.200)
+                    using <code>UDS user automation</code> tool. 20 medium-risk Identity Protection events triggered. One event confirmed <strong>atRisk</strong>.
+                </div>
+            </div>
+            <div class="timeline-item critical">
+                <div class="timeline-time">Phase 2: Persistence (Apr 2)</div>
+                <div class="timeline-event"><span class="badge badge-critical">CRITICAL</span> MFA Method Registration</div>
+                <div class="timeline-detail">
+                    <code>Admin registered security info</code> — 2 events with ZERO baseline occurrences. Attacker registered
+                    backdoor authentication methods to maintain access even after credential reset.
+                </div>
+            </div>
+            <div class="timeline-item critical">
+                <div class="timeline-time">Phase 3: Execution (Apr 2–3)</div>
+                <div class="timeline-event"><span class="badge badge-critical">CRITICAL</span> Automated Tooling &amp; Lateral Movement</div>
+                <div class="timeline-detail">
+                    439 sign-in events via <code>UDS user automation</code> (98.7% of all interactive activity). Hands-on-keyboard
+                    attacks across multiple devices. Lateral movement via RDP and SMB. Graph Explorer used for reconnaissance.
+                </div>
+            </div>
+            <div class="timeline-item critical">
+                <div class="timeline-time">Phase 4: Impact (Apr 2–4)</div>
+                <div class="timeline-event"><span class="badge badge-critical">CRITICAL</span> Ransomware Deployment</div>
+                <div class="timeline-detail">
+                    30+ ransomware-related alerts: file system encryption, malicious extensions, Safe Mode tampering,
+                    compromised user delivering ransomware files. Cloud App events surged <strong>+711%</strong>.
+                </div>
+            </div>
+            <div class="timeline-item warning">
+                <div class="timeline-time">Phase 5: Containment (Apr 4+)</div>
+                <div class="timeline-event"><span class="badge badge-medium">BLOCKED</span> Authentication Failing 100%</div>
+                <div class="timeline-detail">
+                    Since Apr 4, <strong>100% of sign-in attempts are failing</strong> (129 fails on Apr 4, 48 on Apr 7, 58 on Apr 8).
+                    The automation tool continues attempting access but is being blocked — likely via password reset, account disable,
+                    or CA policy enforcement. However, the tool has NOT stopped attempting.
+                </div>
+            </div>
+        </div>
+
+        <h3 style="margin-top:20px;">Key Findings</h3>
+        <table>
+            <thead><tr><th>#</th><th>Finding</th><th>Severity</th><th>Category</th></tr></thead>
+            <tbody>
+                <tr class="highlight-row"><td>1</td><td><strong>Active ransomware campaign</strong> — 30+ ransomware alerts including file system encryption, malicious extensions, and Safe Mode tampering. Compromised user delivering ransomware files to other devices.</td><td><span class="badge badge-critical">Critical</span></td><td>Ransomware</td></tr>
+                <tr class="highlight-row"><td>2</td><td><strong>Tor exit node access</strong> — 6 new IPs from known Tor exit nodes in NL, SE, PL. 20 Identity Protection risk events. Account flagged "atRisk".</td><td><span class="badge badge-critical">Critical</span></td><td>Account Compromise</td></tr>
+                <tr class="highlight-row"><td>3</td><td><strong>MFA persistence attack</strong> — "Admin registered security info" (2 events, ZERO in baseline). Attacker registered backdoor auth methods.</td><td><span class="badge badge-critical">Critical</span></td><td>Persistence</td></tr>
+                <tr class="highlight-row"><td>4</td><td><strong>Automated attack tooling</strong> — "UDS user automation" responsible for 98.7% of all interactive sign-ins (439/445). This is not a legitimate user application visible in baseline context.</td><td><span class="badge badge-high">High</span></td><td>Automation/C2</td></tr>
+                <tr class="highlight-row"><td>5</td><td><strong>Lateral movement</strong> — 14 alerts for RDP and SMB-based lateral movement. Unusual network authentication across devices (6 alerts).</td><td><span class="badge badge-high">High</span></td><td>Lateral Movement</td></tr>
+                <tr class="highlight-row"><td>6</td><td><strong>Hands-on-keyboard attack</strong> — 53 alerts (24+18+11) indicating active human operator conducting attacks across multiple devices.</td><td><span class="badge badge-high">High</span></td><td>HOTK</td></tr>
+                <tr><td>7</td><td><strong>CloudApp activity surge +711%</strong> — Automated API calls consistent with data access or ransomware deployment via cloud services.</td><td><span class="badge badge-high">High</span></td><td>Cloud Abuse</td></tr>
+                <tr><td>8</td><td><strong>Ongoing automation attempts</strong> — 100% failure rate since Apr 4 but automation tool continues (48-58 attempts/day). Attacker infrastructure is still active.</td><td><span class="badge badge-medium">Medium</span></td><td>Ongoing Threat</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- VERDICT -->
+    <div class="card" style="border: 2px solid rgba(248, 81, 73, 0.5); background: linear-gradient(135deg, rgba(248,81,73,0.05), var(--bg-secondary));">
+        <h2><span class="icon">&#x2696;&#xFE0F;</span> Verdict</h2>
+
+        <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;">
+            <div class="verdict-badge verdict-critical" style="font-size:22px;">&#x1F6A8; CRITICAL &mdash; ACCOUNT COMPROMISED</div>
+        </div>
+
+        <div style="font-size:14px;line-height:1.8;color:var(--text-secondary);">
+            <p><strong style="color:var(--text-primary);">Account: Lydia Bauer (lydiab@zava-corp.com)</strong></p>
+            <p style="margin-top:8px;">
+                This account has been <strong style="color:var(--accent-red);">actively compromised and weaponized</strong> in a ransomware campaign.
+                The interactive drift score of <strong>204.0 (FLAG)</strong> is driven by automated attack tooling causing a 605% volume increase,
+                combined with a catastrophic failure rate increase of 237%.
+            </p>
+            <p style="margin-top:8px;">
+                The attack followed a textbook kill chain: <strong>Tor-routed initial access → MFA persistence → automated lateral movement → ransomware deployment</strong>.
+                Containment appears partially effective (100% auth failures since Apr 4), but the automation infrastructure continues attempting access.
+            </p>
+
+            <p style="margin-top:12px;"><strong style="color:var(--text-primary);">Immediate Actions Required:</strong></p>
+            <ol style="margin:8px 0 0 20px;">
+                <li><strong style="color:var(--accent-red);">REVOKE ALL SESSIONS</strong> — Immediately revoke all active refresh tokens and sessions.</li>
+                <li><strong style="color:var(--accent-red);">REMOVE REGISTERED AUTH METHODS</strong> — Audit and remove the 2 newly registered security info entries (attacker MFA backdoor).</li>
+                <li><strong style="color:var(--accent-red);">RESET CREDENTIALS</strong> — Force password reset and ensure new password is not derived from the old one.</li>
+                <li><strong>DISABLE ACCOUNT</strong> — Temporarily disable until forensic investigation is complete.</li>
+                <li><strong>ISOLATE AFFECTED DEVICES</strong> — Identify and isolate all devices touched by the hands-on-keyboard and ransomware alerts.</li>
+                <li><strong>BLOCK TOR IPS</strong> — Add 5.255.123.158, 171.25.193.235, 192.42.116.12, 193.189.100.206, 45.141.215.200 to Named Locations block list.</li>
+                <li><strong>INVESTIGATE UDS USER AUTOMATION</strong> — Identify the app registration and client ID behind "UDS user automation" and revoke its credentials.</li>
+                <li><strong>ASSESS BLAST RADIUS</strong> — Use lateral movement alerts to determine which devices and accounts were affected in the ransomware campaign.</li>
+            </ol>
+        </div>
+    </div>
+
+    <!-- APPENDIX -->
+    <div class="card">
+        <h2><span class="icon">&#x1F4CE;</span> Appendix — Drift Score Calculation</h2>
+        <div class="grid-2">
+            <div>
+                <h3>Interactive Drift Score</h3>
+                <table>
+                    <thead><tr><th>Dimension</th><th>Baseline</th><th>Recent</th><th>Ratio</th><th>Weight</th><th>Contribution</th></tr></thead>
+                    <tbody>
+                        <tr class="highlight-row"><td>Volume/day</td><td>12.3</td><td>74.2</td><td style="color:var(--accent-red);">605.5%</td><td>0.25</td><td>151.38</td></tr>
+                        <tr><td>Apps</td><td>18</td><td>3</td><td>16.7%</td><td>0.20</td><td>3.34</td></tr>
+                        <tr><td>Resources</td><td>9</td><td>2</td><td>22.2%</td><td>0.10</td><td>2.22</td></tr>
+                        <tr><td>IP Addresses</td><td>10</td><td>8</td><td>80.0%</td><td>0.15</td><td>12.00</td></tr>
+                        <tr><td>Locations</td><td>5</td><td>4</td><td>80.0%</td><td>0.10</td><td>8.00</td></tr>
+                        <tr><td>Devices</td><td>6</td><td>2</td><td>33.3%</td><td>0.10</td><td>3.33</td></tr>
+                        <tr class="highlight-row"><td>Failure Rate</td><td>25.9%</td><td>61.3%</td><td style="color:var(--accent-red);">236.9%</td><td>0.10</td><td>23.69</td></tr>
+                        <tr style="font-weight:700;background:var(--bg-tertiary);"><td colspan="5" style="text-align:right;">Total Score</td><td style="color:var(--accent-red);">203.96</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div>
+                <h3>Non-Interactive Drift Score</h3>
+                <table>
+                    <thead><tr><th>Dimension</th><th>Baseline</th><th>Recent</th><th>Ratio</th><th>Weight</th><th>Contribution</th></tr></thead>
+                    <tbody>
+                        <tr><td>Volume/day</td><td>580.0</td><td>372.5</td><td>64.2%</td><td>0.30</td><td>19.26</td></tr>
+                        <tr><td>Apps</td><td>50</td><td>13</td><td>26.0%</td><td>0.20</td><td>5.20</td></tr>
+                        <tr><td>Resources</td><td>72</td><td>29</td><td>40.3%</td><td>0.15</td><td>6.05</td></tr>
+                        <tr><td>IP Addresses</td><td>18</td><td>10</td><td>55.6%</td><td>0.15</td><td>8.34</td></tr>
+                        <tr><td>Locations</td><td>4</td><td>4</td><td>100.0%</td><td>0.10</td><td>10.00</td></tr>
+                        <tr><td>Failure Rate</td><td>51.8%</td><td>7.8%</td><td>15.1%</td><td>0.10</td><td>1.51</td></tr>
+                        <tr style="font-weight:700;background:var(--bg-tertiary);"><td colspan="5" style="text-align:right;">Total Score</td><td style="color:var(--accent-green);">50.36</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <h3 style="margin-top:16px;">Drift Score Interpretation</h3>
+        <div style="display:flex;gap:2px;height:30px;border-radius:6px;overflow:hidden;margin-bottom:8px;">
+            <div style="flex:80;background:var(--contracting-color);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#0d1117;">&lt;80 Contracting</div>
+            <div style="flex:40;background:var(--stable-color);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#0d1117;">80-120 Stable</div>
+            <div style="flex:30;background:var(--monitor-color);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#0d1117;">120-150 Monitor</div>
+            <div style="flex:100;background:var(--flag-color);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#0d1117;">150-250 FLAG</div>
+            <div style="flex:50;background:var(--critical-color);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#0d1117;">&gt;250 CRITICAL</div>
+        </div>
+        <div style="position:relative;height:8px;margin-bottom:16px;">
+            <div style="position:absolute;left:68%;top:-4px;width:2px;height:16px;background:var(--accent-red);"></div>
+            <div style="position:absolute;left:68%;top:14px;font-size:10px;color:var(--accent-red);font-weight:700;transform:translateX(-50%);">204.0 &#x25B2;</div>
+        </div>
+
+        <h3 style="margin-top:24px;">Data Sources</h3>
+        <table>
+            <thead><tr><th>Source</th><th>Table</th><th>Period</th><th>Records Analyzed</th></tr></thead>
+            <tbody>
+                <tr><td>Interactive Sign-Ins</td><td>SigninLogs</td><td>97 days</td><td>~92K scanned</td></tr>
+                <tr><td>Non-Interactive Sign-Ins</td><td>AADNonInteractiveUserSignInLogs</td><td>97 days</td><td>~1.3M scanned</td></tr>
+                <tr><td>Audit Logs</td><td>AuditLogs</td><td>97 days</td><td>~42K scanned</td></tr>
+                <tr><td>Security Alerts</td><td>SecurityAlert</td><td>97 days</td><td>~12.5K scanned</td></tr>
+                <tr><td>Cloud App Events</td><td>CloudAppEvents</td><td>97 days</td><td>~394K scanned</td></tr>
+                <tr><td>Email Events</td><td>EmailEvents</td><td>97 days</td><td>~83K scanned</td></tr>
+                <tr><td>Identity Protection</td><td>SigninLogs (risk fields)</td><td>7 days</td><td>445 events</td></tr>
+            </tbody>
+        </table>
+
+        <div style="margin-top:16px;font-size:12px;color:var(--text-muted);">
+            <strong>Workspace:</strong> e34d562e-ef12-4c4e-9bc0-7c6ae357c015 (CyberSOC)<br>
+            <strong>Report Generated:</strong> 2026-04-08T14:38:00Z<br>
+            <strong>Analysis Engine:</strong> Sentinel MCP Data Exploration<br>
+            <strong>Methodology:</strong> Weighted ratio comparison of recent (7d) vs baseline (90d) behavioral dimensions
+        </div>
+    </div>
+
+    <div class="report-footer">
+        CyberSOC &mdash; User Account Scope Drift Report &mdash; <strong style="color:var(--accent-red);">CRITICAL / CONFIDENTIAL</strong><br>
+        Generated by Sentinel MCP automated analysis pipeline &bull; 2026-04-08<br>
+        &copy; 2026 Zava-Corp Security Operations
+    </div>
+</div>
+</body>
+</html>
