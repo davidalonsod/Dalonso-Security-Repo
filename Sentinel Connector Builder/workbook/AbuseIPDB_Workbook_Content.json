@@ -1,0 +1,433 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "## AbuseIPDB Threat Intelligence Workbook\n---\nThis workbook provides visibility into AbuseIPDB blacklist data ingested into Microsoft Sentinel, correlates threat intelligence with your environment's sign-in and network telemetry, and highlights affected users and devices.\n\n**Data source:** `AbuseIPDB_Blacklist_CL` via the AbuseIPDB CCF Connector"
+      },
+      "name": "workbook-header"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "time-range",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "type": 4,
+            "isRequired": true,
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 3600000 },
+                { "durationMs": 14400000 },
+                { "durationMs": 43200000 },
+                { "durationMs": 86400000 },
+                { "durationMs": 259200000 },
+                { "durationMs": 604800000 },
+                { "durationMs": 1209600000 },
+                { "durationMs": 2592000000 }
+              ],
+              "allowCustom": true
+            },
+            "value": {
+              "durationMs": 604800000
+            },
+            "label": "Time Range"
+          },
+          {
+            "id": "min-confidence",
+            "version": "KqlParameterItem/1.0",
+            "name": "MinConfidence",
+            "type": 1,
+            "isRequired": true,
+            "value": "50",
+            "label": "Min Abuse Confidence Score"
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 1. Data Ingestion Health\n---"
+      },
+      "name": "section-ingestion"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| summarize\n    TotalRecords = count(),\n    UniqueIPs = dcount(IpAddress),\n    UniqueCountries = dcount(CountryCode),\n    AvgScore = round(avg(AbuseConfidenceScore), 1),\n    MaxScore = max(AbuseConfidenceScore),\n    LastIngestion = max(TimeGenerated)\n| project\n    ['Total Records'] = TotalRecords,\n    ['Unique IPs'] = UniqueIPs,\n    ['Countries'] = UniqueCountries,\n    ['Avg Abuse Score'] = AvgScore,\n    ['Max Abuse Score'] = MaxScore,\n    ['Last Ingestion'] = LastIngestion",
+        "size": 4,
+        "title": "Ingestion Summary",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "tiles",
+        "tileSettings": {
+          "titleContent": { "columnMatch": "Total Records", "formatter": 12, "formatOptions": { "palette": "auto" } },
+          "showBorder": true
+        }
+      },
+      "name": "ingestion-summary-tiles"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| summarize Records = count(), UniqueIPs = dcount(IpAddress) by bin(TimeGenerated, 1d)\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Daily Ingestion Volume",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart",
+        "chartSettings": {
+          "xAxis": "TimeGenerated",
+          "yAxis": ["Records", "UniqueIPs"],
+          "seriesLabelSettings": [
+            { "seriesName": "Records", "color": "blue" },
+            { "seriesName": "UniqueIPs", "color": "orange" }
+          ]
+        }
+      },
+      "customWidth": "50",
+      "name": "ingestion-volume-chart"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| summarize Count = count() by ScoreBucket = case(\n    AbuseConfidenceScore == 100, \"100 (Critical)\",\n    AbuseConfidenceScore >= 90, \"90-99 (Very High)\",\n    AbuseConfidenceScore >= 75, \"75-89 (High)\",\n    AbuseConfidenceScore >= 50, \"50-74 (Medium)\",\n    AbuseConfidenceScore >= 25, \"25-49 (Low)\",\n    \"< 25\")\n| order by ScoreBucket asc",
+        "size": 0,
+        "title": "Abuse Confidence Score Distribution",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "piechart"
+      },
+      "customWidth": "50",
+      "name": "score-distribution-chart"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 2. IOC Geolocation\n---"
+      },
+      "name": "section-geolocation"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize\n    TotalIPs = dcount(IpAddress),\n    AvgScore = round(avg(AbuseConfidenceScore), 1),\n    CriticalIPs = dcountif(IpAddress, AbuseConfidenceScore == 100),\n    HighIPs = dcountif(IpAddress, AbuseConfidenceScore >= 75)\n    by CountryCode\n| extend CriticalPct = round(100.0 * CriticalIPs / TotalIPs, 1)\n| order by TotalIPs desc\n| take 25",
+        "size": 0,
+        "title": "Top 25 Countries by Blacklisted IP Count",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "TotalIPs", "formatter": 4, "formatOptions": { "palette": "redGreen" } },
+            { "columnMatch": "AvgScore", "formatter": 8, "formatOptions": { "palette": "redGreen", "min": 25, "max": 100 } },
+            { "columnMatch": "CriticalPct", "formatter": 8, "formatOptions": { "palette": "redGreen", "min": 0, "max": 100 } }
+          ]
+        }
+      },
+      "customWidth": "50",
+      "name": "geo-country-table"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize Count = dcount(IpAddress) by CountryCode\n| order by Count desc\n| take 15",
+        "size": 0,
+        "title": "Blacklisted IPs by Country (Top 15)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart",
+        "chartSettings": {
+          "xAxis": "CountryCode",
+          "yAxis": ["Count"],
+          "seriesLabelSettings": [
+            { "seriesName": "Count", "color": "redBright" }
+          ]
+        }
+      },
+      "customWidth": "50",
+      "name": "geo-country-bar"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 3. Environment Correlation — Sign-ins from Blacklisted IPs\n---\nCorrelates AbuseIPDB blacklisted IPs with Azure AD sign-in logs to identify users authenticating from known abusive IP addresses."
+      },
+      "name": "section-signin-correlation"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let BlacklistedIPs = AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize AbuseScore = max(AbuseConfidenceScore), Country = any(CountryCode) by IpAddress;\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where IPAddress in ((BlacklistedIPs | project IpAddress))\n| join kind=inner BlacklistedIPs on $left.IPAddress == $right.IpAddress\n| summarize\n    TotalSignIns = count(),\n    SuccessfulSignIns = countif(ResultType == 0),\n    FailedSignIns = countif(ResultType != 0),\n    DistinctUsers = dcount(UserPrincipalName),\n    AbuseScore = max(AbuseScore)\n| project\n    ['Total Sign-ins from Blacklisted IPs'] = TotalSignIns,\n    ['Successful'] = SuccessfulSignIns,\n    ['Failed'] = FailedSignIns,\n    ['Distinct Users Affected'] = DistinctUsers,\n    ['Max Abuse Score'] = AbuseScore",
+        "size": 4,
+        "title": "Sign-in Correlation Summary",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "tiles"
+      },
+      "name": "signin-correlation-tiles"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let BlacklistedIPs = AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize AbuseScore = max(AbuseConfidenceScore), Country = any(CountryCode) by IpAddress;\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where IPAddress in ((BlacklistedIPs | project IpAddress))\n| join kind=inner BlacklistedIPs on $left.IPAddress == $right.IpAddress\n| summarize\n    TotalAttempts = count(),\n    Successful = countif(ResultType == 0),\n    Failed = countif(ResultType != 0),\n    Apps = make_set(AppDisplayName, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by IPAddress, AbuseScore, Country\n| order by AbuseScore desc, TotalAttempts desc",
+        "size": 0,
+        "title": "Blacklisted IPs Seen in Sign-in Logs",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "AbuseScore", "formatter": 8, "formatOptions": { "palette": "redGreen", "min": 25, "max": 100 } },
+            { "columnMatch": "Successful", "formatter": 18, "formatOptions": { "thresholdsOptions": "colors", "thresholdsGrid": [{ "operator": ">", "thresholdValue": "0", "representation": "redBright", "text": "{0}" }, { "operator": "Default", "representation": "green", "text": "{0}" }] } }
+          ]
+        }
+      },
+      "name": "blacklisted-ips-in-signins"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let BlacklistedIPs = AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize AbuseScore = max(AbuseConfidenceScore), Country = any(CountryCode) by IpAddress;\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where IPAddress in ((BlacklistedIPs | project IpAddress))\n| join kind=inner BlacklistedIPs on $left.IPAddress == $right.IpAddress\n| summarize\n    SignIns = count(),\n    Successful = countif(ResultType == 0),\n    Failed = countif(ResultType != 0)\n    by bin(TimeGenerated, 1h)\n| order by TimeGenerated asc",
+        "size": 0,
+        "title": "Sign-in Activity from Blacklisted IPs Over Time",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "linechart",
+        "chartSettings": {
+          "xAxis": "TimeGenerated",
+          "yAxis": ["Successful", "Failed"],
+          "seriesLabelSettings": [
+            { "seriesName": "Successful", "color": "redBright" },
+            { "seriesName": "Failed", "color": "orange" }
+          ]
+        }
+      },
+      "name": "signin-timeline"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 4. Affected Users\n---\nUsers who have authenticated from IP addresses on the AbuseIPDB blacklist."
+      },
+      "name": "section-affected-users"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let BlacklistedIPs = AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize AbuseScore = max(AbuseConfidenceScore), Country = any(CountryCode) by IpAddress;\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where IPAddress in ((BlacklistedIPs | project IpAddress))\n| join kind=inner BlacklistedIPs on $left.IPAddress == $right.IpAddress\n| summarize\n    TotalSignIns = count(),\n    SuccessfulSignIns = countif(ResultType == 0),\n    FailedSignIns = countif(ResultType != 0),\n    DistinctBlacklistedIPs = dcount(IPAddress),\n    MaxAbuseScore = max(AbuseScore),\n    BlacklistedIPs = make_set(IPAddress, 10),\n    Countries = make_set(Country, 10),\n    Apps = make_set(AppDisplayName, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by UserPrincipalName\n| extend RiskLevel = case(\n    SuccessfulSignIns > 0 and MaxAbuseScore >= 80, \"Critical\",\n    SuccessfulSignIns > 0, \"High\",\n    FailedSignIns >= 20, \"Medium\",\n    \"Low\")\n| order by SuccessfulSignIns desc, MaxAbuseScore desc",
+        "size": 0,
+        "title": "Affected Users — Sign-ins from Blacklisted IPs",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "MaxAbuseScore", "formatter": 8, "formatOptions": { "palette": "redGreen", "min": 25, "max": 100 } },
+            { "columnMatch": "RiskLevel", "formatter": 18, "formatOptions": { "thresholdsOptions": "colors", "thresholdsGrid": [{ "operator": "==", "thresholdValue": "Critical", "representation": "red", "text": "{0}" }, { "operator": "==", "thresholdValue": "High", "representation": "orange", "text": "{0}" }, { "operator": "==", "thresholdValue": "Medium", "representation": "yellow", "text": "{0}" }, { "operator": "Default", "representation": "green", "text": "{0}" }] } },
+            { "columnMatch": "SuccessfulSignIns", "formatter": 18, "formatOptions": { "thresholdsOptions": "colors", "thresholdsGrid": [{ "operator": ">", "thresholdValue": "0", "representation": "redBright", "text": "{0}" }, { "operator": "Default", "representation": "green", "text": "{0}" }] } }
+          ]
+        }
+      },
+      "name": "affected-users-table"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let BlacklistedIPs = AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize AbuseScore = max(AbuseConfidenceScore) by IpAddress;\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where IPAddress in ((BlacklistedIPs | project IpAddress))\n| where ResultType == 0\n| join kind=inner BlacklistedIPs on $left.IPAddress == $right.IpAddress\n| summarize SuccessfulSignIns = count(), MaxScore = max(AbuseScore) by UserPrincipalName\n| order by SuccessfulSignIns desc\n| take 15",
+        "size": 0,
+        "title": "Top 15 Users with Successful Sign-ins from Blacklisted IPs",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart",
+        "chartSettings": {
+          "xAxis": "UserPrincipalName",
+          "yAxis": ["SuccessfulSignIns"],
+          "seriesLabelSettings": [
+            { "seriesName": "SuccessfulSignIns", "color": "redBright" }
+          ]
+        }
+      },
+      "name": "top-affected-users-chart"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 5. Affected Devices\n---\nDevices communicating with AbuseIPDB blacklisted IPs (Defender for Endpoint telemetry)."
+      },
+      "name": "section-affected-devices"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let BlacklistedIPs = AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize AbuseScore = max(AbuseConfidenceScore), Country = any(CountryCode) by IpAddress;\nDeviceNetworkEvents\n| where Timestamp {TimeRange}\n| where RemoteIP in ((BlacklistedIPs | project IpAddress))\n| join kind=inner BlacklistedIPs on $left.RemoteIP == $right.IpAddress\n| summarize\n    Connections = count(),\n    DistinctRemoteIPs = dcount(RemoteIP),\n    DistinctPorts = dcount(RemotePort),\n    MaxAbuseScore = max(AbuseScore),\n    RemoteIPs = make_set(RemoteIP, 10),\n    Ports = make_set(RemotePort, 10),\n    Processes = make_set(InitiatingProcessFileName, 10),\n    FirstSeen = min(Timestamp),\n    LastSeen = max(Timestamp)\n    by DeviceName\n| order by Connections desc",
+        "size": 0,
+        "title": "Devices Communicating with Blacklisted IPs",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "Connections", "formatter": 4, "formatOptions": { "palette": "redGreen" } },
+            { "columnMatch": "MaxAbuseScore", "formatter": 8, "formatOptions": { "palette": "redGreen", "min": 25, "max": 100 } }
+          ]
+        }
+      },
+      "name": "affected-devices-table"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let BlacklistedIPs = AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize AbuseScore = max(AbuseConfidenceScore) by IpAddress;\nDeviceNetworkEvents\n| where Timestamp {TimeRange}\n| where RemoteIP in ((BlacklistedIPs | project IpAddress))\n| join kind=inner BlacklistedIPs on $left.RemoteIP == $right.IpAddress\n| summarize Connections = count() by InitiatingProcessFileName\n| order by Connections desc\n| take 10",
+        "size": 0,
+        "title": "Top Processes Connecting to Blacklisted IPs",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "piechart"
+      },
+      "customWidth": "50",
+      "name": "process-connections-pie"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let BlacklistedIPs = AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize AbuseScore = max(AbuseConfidenceScore) by IpAddress;\nDeviceNetworkEvents\n| where Timestamp {TimeRange}\n| where RemoteIP in ((BlacklistedIPs | project IpAddress))\n| join kind=inner BlacklistedIPs on $left.RemoteIP == $right.IpAddress\n| summarize Connections = count() by RemotePort = tostring(RemotePort)\n| order by Connections desc\n| take 10",
+        "size": 0,
+        "title": "Top Destination Ports (Blacklisted IP Connections)",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart",
+        "chartSettings": {
+          "xAxis": "RemotePort",
+          "yAxis": ["Connections"],
+          "seriesLabelSettings": [
+            { "seriesName": "Connections", "color": "orange" }
+          ]
+        }
+      },
+      "customWidth": "50",
+      "name": "dest-ports-bar"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 6. Threat Intelligence Details\n---\nDetailed breakdown of the AbuseIPDB blacklist: highest-risk IPs, recently reported IPs, and score trends."
+      },
+      "name": "section-ti-details"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize\n    AbuseScore = max(AbuseConfidenceScore),\n    Country = any(CountryCode),\n    LastReported = max(LastReportedAt),\n    TimesSeen = count()\n    by IpAddress\n| order by AbuseScore desc, TimesSeen desc\n| take 50",
+        "size": 0,
+        "title": "Top 50 Highest-Risk Blacklisted IPs",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "AbuseScore", "formatter": 8, "formatOptions": { "palette": "redGreen", "min": 25, "max": 100 } },
+            { "columnMatch": "TimesSeen", "formatter": 4, "formatOptions": { "palette": "blue" } }
+          ]
+        }
+      },
+      "name": "top-risk-ips"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize\n    AbuseScore = max(AbuseConfidenceScore),\n    Country = any(CountryCode)\n    by IpAddress, LastReportedAt\n| order by LastReportedAt desc\n| take 25",
+        "size": 0,
+        "title": "Most Recently Reported Abusive IPs",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "AbuseScore", "formatter": 8, "formatOptions": { "palette": "redGreen", "min": 25, "max": 100 } }
+          ]
+        }
+      },
+      "name": "recently-reported-ips"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 7. Geolocation Environment Match\n---\nCompares countries in the AbuseIPDB blacklist against countries observed in your environment's sign-in logs. Highlights:\n- **Overlap countries:** Countries with BOTH legitimate sign-ins AND blacklisted IPs (higher risk)\n- **Blacklist-only countries:** Nations with only threat activity (potential geo-blocking candidates)"
+      },
+      "name": "section-geo-match"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let BlacklistCountries = AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| summarize BlacklistedIPs = dcount(IpAddress), AvgAbuseScore = round(avg(AbuseConfidenceScore), 1) by CountryCode;\nlet SignInCountries = SigninLogs\n| where TimeGenerated {TimeRange}\n| extend SignInCountry = tostring(parse_json(LocationDetails).countryOrRegion)\n| where isnotempty(SignInCountry)\n| summarize SignIns = count(), DistinctUsers = dcount(UserPrincipalName) by SignInCountry;\nBlacklistCountries\n| join kind=fullouter SignInCountries on $left.CountryCode == $right.SignInCountry\n| extend\n    Country = coalesce(CountryCode, SignInCountry),\n    BlacklistedIPs = coalesce(BlacklistedIPs, 0),\n    AvgAbuseScore = coalesce(AvgAbuseScore, 0.0),\n    SignIns = coalesce(SignIns, 0),\n    DistinctUsers = coalesce(DistinctUsers, 0)\n| extend Category = case(\n    BlacklistedIPs > 0 and SignIns > 0, \"Overlap (Risk)\",\n    BlacklistedIPs > 0, \"Blacklist Only\",\n    \"Environment Only\")\n| project Country, Category, BlacklistedIPs, AvgAbuseScore, SignIns, DistinctUsers\n| order by Category asc, BlacklistedIPs desc",
+        "size": 0,
+        "title": "Geolocation Cross-Reference: Blacklist vs Environment Sign-ins",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "Category", "formatter": 18, "formatOptions": { "thresholdsOptions": "colors", "thresholdsGrid": [{ "operator": "==", "thresholdValue": "Overlap (Risk)", "representation": "redBright", "text": "{0}" }, { "operator": "==", "thresholdValue": "Blacklist Only", "representation": "orange", "text": "{0}" }, { "operator": "Default", "representation": "green", "text": "{0}" }] } },
+            { "columnMatch": "BlacklistedIPs", "formatter": 4, "formatOptions": { "palette": "redGreen" } },
+            { "columnMatch": "AvgAbuseScore", "formatter": 8, "formatOptions": { "palette": "redGreen", "min": 25, "max": 100 } }
+          ]
+        }
+      },
+      "name": "geo-crossref-table"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 8. Security Alerts Correlation\n---\nSecurity incidents and alerts involving IP addresses from the AbuseIPDB blacklist."
+      },
+      "name": "section-alerts"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let BlacklistedIPs = AbuseIPDB_Blacklist_CL\n| where TimeGenerated {TimeRange}\n| where AbuseConfidenceScore >= {MinConfidence}\n| distinct IpAddress;\nSecurityAlert\n| where TimeGenerated {TimeRange}\n| where Entities has_any ((BlacklistedIPs))\n| summarize arg_max(TimeGenerated, *) by SystemAlertId\n| project\n    TimeGenerated,\n    AlertName,\n    AlertSeverity,\n    ProviderName,\n    Status,\n    Description = substring(Description, 0, 200)\n| order by TimeGenerated desc\n| take 25",
+        "size": 0,
+        "title": "Security Alerts Involving Blacklisted IPs",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "AlertSeverity", "formatter": 18, "formatOptions": { "thresholdsOptions": "colors", "thresholdsGrid": [{ "operator": "==", "thresholdValue": "High", "representation": "red", "text": "{0}" }, { "operator": "==", "thresholdValue": "Medium", "representation": "orange", "text": "{0}" }, { "operator": "==", "thresholdValue": "Low", "representation": "yellow", "text": "{0}" }, { "operator": "Default", "representation": "blue", "text": "{0}" }] } }
+          ]
+        }
+      },
+      "name": "security-alerts-table"
+    }
+  ],
+  "fallbackResourceIds": [],
+  "fromTemplateId": "sentinel-UserWorkbook",
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
