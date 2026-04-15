@@ -1,0 +1,28 @@
+{
+    "id": "AbuseIPDB-AR5-CommonSecurityLog-Inbound-Blacklisted-IP",
+    "name": "AbuseIPDB - Inbound Network Traffic from Blacklisted IP",
+    "description": "Detects repeated inbound network connections (>= 5 in 1 hour) from an AbuseIPDB blacklisted IP (score >= 75) as seen by firewalls, proxies, or IDS/IPS devices reporting to CommonSecurityLog. Indicates active scanning, exploitation attempts, or persistent C2 from known malicious infrastructure.",
+    "severity": "Medium",
+    "enabled": true,
+    "tactics": ["InitialAccess", "Reconnaissance"],
+    "techniques": ["T1190", "T1595"],
+    "query": "let HighConfidenceIPs = AbuseIPDB_Blacklist_CL\n| where TimeGenerated > ago(1d)\n| where AbuseConfidenceScore >= 75\n| summarize AbuseScore = max(AbuseConfidenceScore), Country = any(CountryCode) by IpAddress;\nCommonSecurityLog\n| where TimeGenerated > ago(1h)\n| where SourceIP in ((HighConfidenceIPs | project IpAddress))\n| summarize\n    ConnectionCount = count(),\n    DistinctDestinations = dcount(DestinationIP),\n    DestPorts = make_set(DestinationPort, 10),\n    Devices = make_set(strcat(DeviceVendor, ' - ', DeviceProduct), 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by SourceIP\n| where ConnectionCount >= 5\n| join kind=inner HighConfidenceIPs on $left.SourceIP == $right.IpAddress\n| project SourceIP, ConnectionCount, DistinctDestinations, DestPorts, AbuseScore, Country, Devices, FirstSeen, LastSeen",
+    "queryFrequency": "PT1H",
+    "queryPeriod": "P1D",
+    "triggerOperator": "GreaterThan",
+    "triggerThreshold": 0,
+    "suppressionDuration": "PT5H",
+    "suppressionEnabled": false,
+    "entityMappings": [
+        {
+            "entityType": "IP",
+            "fieldMappings": [
+                { "identifier": "Address", "columnName": "SourceIP" }
+            ]
+        }
+    ],
+    "requiredDataConnectors": [
+        { "connectorId": "AbuseIPDBConnectorDefinition", "dataTypes": ["AbuseIPDB_Blacklist_CL"] },
+        { "connectorId": "CEF", "dataTypes": ["CommonSecurityLog"] }
+    ]
+}

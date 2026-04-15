@@ -1,0 +1,13 @@
+{
+    "id": "AbuseIPDB-HQ5-CommonSecurityLog-Blacklisted-IPs",
+    "name": "AbuseIPDB - Network Device Logs with Blacklisted IPs",
+    "description": "Correlates AbuseIPDB blacklisted IPs with CommonSecurityLog (firewalls, proxies, IDS/IPS) to detect inbound and outbound network traffic involving known abusive IP addresses. Matches both SourceIP (inbound threats) and DestinationIP (C2/exfiltration).",
+    "severity": "High",
+    "tactics": ["CommandAndControl", "Exfiltration", "InitialAccess"],
+    "techniques": ["T1071", "T1041", "T1190"],
+    "query": "let BlacklistedIPs = AbuseIPDB_Blacklist_CL\n| where TimeGenerated > ago(1d)\n| where AbuseConfidenceScore >= 50\n| summarize AbuseScore = max(AbuseConfidenceScore), Country = any(CountryCode) by IpAddress;\nlet IPSet = toscalar(BlacklistedIPs | summarize make_set(IpAddress));\nCommonSecurityLog\n| where TimeGenerated > ago(14d)\n| where SourceIP in (IPSet) or DestinationIP in (IPSet)\n| extend MatchedIP = iff(set_has_element(IPSet, SourceIP), SourceIP, DestinationIP)\n| extend Direction = iff(SourceIP == MatchedIP, \"Inbound\", \"Outbound\")\n| join kind=inner BlacklistedIPs on $left.MatchedIP == $right.IpAddress\n| project TimeGenerated, DeviceVendor, DeviceProduct, Activity, MatchedIP, Direction, SourceIP, DestinationIP, DestinationPort, AbuseScore, Country, LogSeverity\n| order by AbuseScore desc, TimeGenerated desc",
+    "requiredDataConnectors": [
+        { "connectorId": "AbuseIPDBConnectorDefinition", "dataTypes": ["AbuseIPDB_Blacklist_CL"] },
+        { "connectorId": "CEF", "dataTypes": ["CommonSecurityLog"] }
+    ]
+}

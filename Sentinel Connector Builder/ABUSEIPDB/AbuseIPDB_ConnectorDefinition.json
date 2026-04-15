@@ -1,0 +1,108 @@
+{
+    "name": "AbuseIPDBConnectorDefinition",
+    "apiVersion": "2022-09-01-preview",
+    "type": "Microsoft.SecurityInsights/dataConnectorDefinitions",
+    "location": "{{location}}",
+    "kind": "Customizable",
+    "availability": {
+        "isPreview": true,
+        "status": 1
+    },
+    "properties": {
+        "connectorUiConfig": {
+            "id": "AbuseIPDBConnector",
+            "title": "AbuseIPDB Blacklist (using Sentinel Connector Builder Agent)",
+            "publisher": "Contoso Team",
+            "descriptionMarkdown": "The AbuseIPDB connector ingests blacklisted IP address data from the AbuseIPDB threat intelligence platform into Microsoft Sentinel. Data includes IP addresses, abuse confidence scores, country codes, and last reported timestamps.\n\nSupports API Key authentication.\n\nFor more information, visit [AbuseIPDB API Docs](https://docs.abuseipdb.com/#blacklist-endpoint).",
+            "graphQueriesTableName": "AbuseIPDB_Blacklist_CL",
+            "graphQueries": [
+                {
+                    "metricName": "Total blacklisted IPs received",
+                    "legend": "{{graphQueriesTableName}}",
+                    "baseQuery": "{{graphQueriesTableName}} | where TimeGenerated > ago(14d) | summarize count() by bin(TimeGenerated, 1d)"
+                }
+            ],
+            "dataTypes": [
+                {
+                    "name": "{{graphQueriesTableName}}",
+                    "lastDataReceivedQuery": "{{graphQueriesTableName}} | summarize Time = max(TimeGenerated) | where isnotempty(Time)"
+                }
+            ],
+            "connectivityCriteria": [
+                {
+                    "type": "HasDataConnectors"
+                }
+            ],
+            "permissions": {
+                "resourceProvider": [
+                    {
+                        "provider": "Microsoft.OperationalInsights/workspaces",
+                        "permissionsDisplayText": "read and write permissions are required.",
+                        "providerDisplayName": "Workspace",
+                        "scope": "Workspace",
+                        "requiredPermissions": {
+                            "write": true,
+                            "read": true,
+                            "delete": false
+                        }
+                    }
+                ],
+                "customs": [
+                    {
+                        "name": "AbuseIPDB API Key",
+                        "description": "An AbuseIPDB API Key is required. [See documentation](https://docs.abuseipdb.com/#blacklist-endpoint)"
+                    }
+                ]
+            },
+            "sampleQueries": [
+                {
+                    "description": "All blacklisted IPs from the last 24 hours",
+                    "query": "{{graphQueriesTableName}} | where TimeGenerated > ago(24h) | take 100"
+                },
+                {
+                    "description": "Top 10 countries by blacklisted IP count",
+                    "query": "{{graphQueriesTableName}} | where TimeGenerated > ago(7d) | summarize Count = count() by CountryCode | top 10 by Count"
+                },
+                {
+                    "description": "High confidence abusive IPs (score >= 90)",
+                    "query": "{{graphQueriesTableName}} | where TimeGenerated > ago(7d) | where AbuseConfidenceScore >= 90 | project TimeGenerated, IpAddress, AbuseConfidenceScore, CountryCode, LastReportedAt | order by AbuseConfidenceScore desc"
+                },
+                {
+                    "description": "Recently reported IPs sorted by last report time",
+                    "query": "{{graphQueriesTableName}} | where TimeGenerated > ago(7d) | project IpAddress, AbuseConfidenceScore, CountryCode, LastReportedAt | order by LastReportedAt desc | take 50"
+                }
+            ],
+            "instructionSteps": [
+                {
+                    "title": "Step 1 - Obtain your AbuseIPDB API Key",
+                    "description": "Log in to your [AbuseIPDB](https://www.abuseipdb.com/) account and navigate to **User Account > API**. Copy your API key."
+                },
+                {
+                    "title": "Step 2 - Enter credentials and connect",
+                    "description": "Provide your AbuseIPDB API key below to start ingesting blacklist data.",
+                    "instructions": [
+                        {
+                            "type": "Textbox",
+                            "parameters": {
+                                "label": "API Key",
+                                "placeholder": "Enter your AbuseIPDB API Key",
+                                "type": "password",
+                                "name": "apiKey",
+                                "validations": {
+                                    "required": true
+                                }
+                            }
+                        },
+                        {
+                            "type": "ConnectionToggleButton",
+                            "parameters": {
+                                "connectLabel": "connect",
+                                "name": "connect"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+}
