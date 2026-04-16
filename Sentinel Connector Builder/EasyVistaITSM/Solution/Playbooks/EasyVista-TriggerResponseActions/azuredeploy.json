@@ -1,0 +1,206 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "EasyVista - Trigger Response Actions",
+    "description": "Polls EasyVista for tickets tagged with security response action requests (isolate host, kill process, quarantine file). Executes the requested action via Microsoft Defender for Endpoint API, then updates the EasyVista ticket with the action result. Enables IT teams to trigger security responses directly from ITSM workflows.",
+    "prerequisites": ["EasyVista REST API Bearer token", "Microsoft Defender for Endpoint API permissions (Machine.Isolate, Machine.StopAndQuarantine)"],
+    "lastUpdateTime": "2026-04-16T00:00:00Z",
+    "support": { "tier": "community" },
+    "author": { "name": "CyberSOC" }
+  },
+  "parameters": {
+    "PlaybookName": { "defaultValue": "EasyVista-TriggerResponseActions", "type": "string" },
+    "EasyVistaHost": { "type": "string" },
+    "EasyVistaAccount": { "type": "string" },
+    "EasyVistaBearerToken": { "type": "securestring" },
+    "TenantId": { "type": "string", "metadata": { "description": "Azure AD Tenant ID for MDE API authentication" } },
+    "MDEClientId": { "type": "string", "metadata": { "description": "App registration Client ID with MDE permissions" } },
+    "MDEClientSecret": { "type": "securestring", "metadata": { "description": "App registration Client Secret" } }
+  },
+  "variables": {
+    "EasyVistaBaseUrl": "[concat('https://', parameters('EasyVistaHost'), '/api/v1/', parameters('EasyVistaAccount'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('PlaybookName')]",
+      "location": "[resourceGroup().location]",
+      "tags": {
+        "LogicAppsCategory": "security",
+        "hidden-SentinelTemplateName": "EasyVista-TriggerResponseActions",
+        "hidden-SentinelTemplateVersion": "1.0"
+      },
+      "identity": { "type": "SystemAssigned" },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "EasyVistaBaseUrl": { "type": "String" },
+            "EasyVistaBearerToken": { "type": "SecureString" },
+            "TenantId": { "type": "String" },
+            "MDEClientId": { "type": "String" },
+            "MDEClientSecret": { "type": "SecureString" }
+          },
+          "triggers": {
+            "Recurrence": {
+              "type": "Recurrence",
+              "recurrence": { "frequency": "Minute", "interval": 5 }
+            }
+          },
+          "actions": {
+            "Get_MDE_Token": {
+              "runAfter": {},
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "@{concat('https://login.microsoftonline.com/', parameters('TenantId'), '/oauth2/v2.0/token')}",
+                "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+                "body": "@{concat('client_id=', parameters('MDEClientId'), '&scope=https%3A%2F%2Fapi.securitycenter.microsoft.com%2F.default&client_secret=', parameters('MDEClientSecret'), '&grant_type=client_credentials')}"
+              }
+            },
+            "Poll_EV_Action_Requests": {
+              "runAfter": { "Get_MDE_Token": ["Succeeded"] },
+              "type": "Http",
+              "inputs": {
+                "method": "GET",
+                "uri": "@{concat(parameters('EasyVistaBaseUrl'), '/requests?search=description:##SECURITY_ACTION##%20AND%20status.status_en:Open&fields=rfc_number,request_id,title,description,external_reference,severity_id')}",
+                "headers": { "Authorization": "Bearer @{parameters('EasyVistaBearerToken')}" }
+              }
+            },
+            "Parse_Action_Requests": {
+              "runAfter": { "Poll_EV_Action_Requests": ["Succeeded"] },
+              "type": "ParseJson",
+              "inputs": {
+                "content": "@body('Poll_EV_Action_Requests')",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "record_count": { "type": "string" },
+                    "records": { "type": "array" }
+                  }
+                }
+              }
+            },
+            "For_Each_Action_Request": {
+              "runAfter": { "Parse_Action_Requests": ["Succeeded"] },
+              "type": "Foreach",
+              "foreach": "@body('Parse_Action_Requests')?['records']",
+              "actions": {
+                "Parse_Action_Type": {
+                  "runAfter": {},
+                  "type": "Compose",
+                  "inputs": "@if(contains(items('For_Each_Action_Request')?['DESCRIPTION'],'##ISOLATE_HOST##'),'IsolateHost',if(contains(items('For_Each_Action_Request')?['DESCRIPTION'],'##KILL_PROCESS##'),'StopAndQuarantine',if(contains(items('For_Each_Action_Request')?['DESCRIPTION'],'##QUARANTINE_FILE##'),'QuarantineFile','Unknown')))"
+                },
+                "Extract_Machine_Name": {
+                  "runAfter": {},
+                  "type": "Compose",
+                  "inputs": "@first(split(last(split(items('For_Each_Action_Request')?['DESCRIPTION'],'##HOSTNAME:')),'##'))"
+                },
+                "Lookup_MDE_Machine": {
+                  "runAfter": { "Extract_Machine_Name": ["Succeeded"] },
+                  "type": "Http",
+                  "inputs": {
+                    "method": "GET",
+                    "uri": "@{concat('https://api.securitycenter.microsoft.com/api/machines?$filter=computerDnsName eq ''', outputs('Extract_Machine_Name'), '''')}",
+                    "headers": { "Authorization": "Bearer @{body('Get_MDE_Token')?['access_token']}" }
+                  }
+                },
+                "Switch_Action_Type": {
+                  "runAfter": { "Lookup_MDE_Machine": ["Succeeded"], "Parse_Action_Type": ["Succeeded"] },
+                  "type": "Switch",
+                  "expression": "@outputs('Parse_Action_Type')",
+                  "cases": {
+                    "Isolate": {
+                      "case": "IsolateHost",
+                      "actions": {
+                        "Isolate_Machine": {
+                          "type": "Http",
+                          "inputs": {
+                            "method": "POST",
+                            "uri": "@{concat('https://api.securitycenter.microsoft.com/api/machines/', body('Lookup_MDE_Machine')?['value'][0]?['id'], '/isolate')}",
+                            "headers": {
+                              "Authorization": "Bearer @{body('Get_MDE_Token')?['access_token']}",
+                              "Content-Type": "application/json"
+                            },
+                            "body": {
+                              "Comment": "@{concat('Isolation requested via EasyVista ticket ', items('For_Each_Action_Request')?['RFC_NUMBER'])}",
+                              "IsolationType": "Full"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "StopAndQuarantine": {
+                      "case": "StopAndQuarantine",
+                      "actions": {
+                        "Stop_And_Quarantine": {
+                          "type": "Http",
+                          "inputs": {
+                            "method": "POST",
+                            "uri": "@{concat('https://api.securitycenter.microsoft.com/api/machines/', body('Lookup_MDE_Machine')?['value'][0]?['id'], '/StopAndQuarantineFile')}",
+                            "headers": {
+                              "Authorization": "Bearer @{body('Get_MDE_Token')?['access_token']}",
+                              "Content-Type": "application/json"
+                            },
+                            "body": {
+                              "Comment": "@{concat('Stop & quarantine requested via EasyVista ticket ', items('For_Each_Action_Request')?['RFC_NUMBER'])}",
+                              "Sha1": "@first(split(last(split(items('For_Each_Action_Request')?['DESCRIPTION'],'##SHA1:')),'##'))"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "default": { "actions": {} }
+                },
+                "Update_EV_Ticket_Result": {
+                  "runAfter": { "Switch_Action_Type": ["Succeeded", "Failed"] },
+                  "type": "Http",
+                  "inputs": {
+                    "method": "POST",
+                    "uri": "@{concat(parameters('EasyVistaBaseUrl'), '/requests/', items('For_Each_Action_Request')?['REQUEST_ID'], '/actions')}",
+                    "headers": {
+                      "Authorization": "Bearer @{parameters('EasyVistaBearerToken')}",
+                      "Content-Type": "application/json"
+                    },
+                    "body": {
+                      "DESCRIPTION": "@{concat('Security Response Action Executed\\nAction: ', outputs('Parse_Action_Type'), '\\nTarget: ', outputs('Extract_Machine_Name'), '\\nResult: ', if(equals(outputs('Switch_Action_Type')?['statusCode'], 200), 'SUCCESS', 'FAILED'), '\\nExecuted at: ', utcNow(), '\\nExecuted by: Sentinel SOAR Automation')}",
+                      "ACTION_TYPE": "Security Response"
+                    }
+                  }
+                },
+                "Close_Action_Ticket": {
+                  "runAfter": { "Update_EV_Ticket_Result": ["Succeeded"] },
+                  "type": "Http",
+                  "inputs": {
+                    "method": "PUT",
+                    "uri": "@{concat(parameters('EasyVistaBaseUrl'), '/requests/', items('For_Each_Action_Request')?['REQUEST_ID'])}",
+                    "headers": {
+                      "Authorization": "Bearer @{parameters('EasyVistaBearerToken')}",
+                      "Content-Type": "application/json"
+                    },
+                    "body": {
+                      "STATUS": { "STATUS_EN": "Resolved" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "EasyVistaBaseUrl": { "value": "[variables('EasyVistaBaseUrl')]" },
+          "EasyVistaBearerToken": { "value": "[parameters('EasyVistaBearerToken')]" },
+          "TenantId": { "value": "[parameters('TenantId')]" },
+          "MDEClientId": { "value": "[parameters('MDEClientId')]" },
+          "MDEClientSecret": { "value": "[parameters('MDEClientSecret')]" }
+        }
+      }
+    }
+  ]
+}

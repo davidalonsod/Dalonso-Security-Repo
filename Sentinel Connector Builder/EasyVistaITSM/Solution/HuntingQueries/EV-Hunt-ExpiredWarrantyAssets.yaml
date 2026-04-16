@@ -1,0 +1,26 @@
+id: f6a7b8c9-d0e1-4f2a-3b4c-5d6e7f809112
+name: EasyVista - Assets with Expired Warranty Linked to Incidents
+description: |
+  Hunts for assets that have expired warranties and have been involved in security incidents.
+  These assets may lack vendor support for patching and represent increased risk.
+requiredDataConnectors:
+  - connectorId: EasyVistaITSM
+    dataTypes:
+      - EasyVista_Assets_CL
+      - EasyVista_Tickets_CL
+tactics:
+  - Persistence
+relevantTechniques:
+  - T1190
+query: |
+  EasyVista_Assets_CL
+  | where TimeGenerated > ago(30d)
+  | where isnotempty(END_OF_WARANTY) and END_OF_WARANTY < now()
+  | join kind=inner (
+      EasyVista_Tickets_CL
+      | where TimeGenerated > ago(30d)
+      | where REQUEST_TYPE has_any ("Incident", "I")
+      | summarize IncidentCount = count(), LastIncident = max(SUBMIT_DATE_UT), Tickets = make_set(RFC_NUMBER, 5) by ASSET_TAG
+  ) on ASSET_TAG
+  | project ASSET_TAG, ASSET_LABEL, SERIAL_NUMBER, END_OF_WARANTY, EMPLOYEE_NAME, DEPARTMENT_PATH, LOCATION_PATH, IncidentCount, LastIncident, Tickets
+  | sort by IncidentCount desc

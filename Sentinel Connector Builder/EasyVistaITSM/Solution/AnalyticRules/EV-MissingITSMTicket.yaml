@@ -1,0 +1,46 @@
+id: e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8091
+name: EasyVista - Sentinel Incident Without ITSM Ticket
+description: |
+  Detects Sentinel incidents older than 1 hour that have no linked EasyVista ticket (no EV: tag).
+  Ensures all security incidents are tracked in the ITSM workflow for proper lifecycle management.
+severity: Informational
+requiredDataConnectors:
+  - connectorId: AzureSentinel
+    dataTypes:
+      - SecurityIncident
+queryFrequency: 1h
+queryPeriod: 4h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Impact
+query: |
+  SecurityIncident
+  | where TimeGenerated > ago(4h)
+  | where CreatedTime < ago(1h)
+  | where Status != "Closed"
+  | where not(Labels has "EV:")
+  | where Severity in ("High", "Medium")
+  | project
+      TimeGenerated,
+      IncidentNumber,
+      IncidentTitle = Title,
+      Severity,
+      Status,
+      CreatedTime,
+      AlertCount = AdditionalData.alertsCount,
+      Owner = tostring(Owner.assignedTo)
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: 4h
+    matchingMethod: AnyAlert
+customDetails:
+  IncidentId: IncidentNumber
+  IncidentSeverity: Severity
+  IncidentOwner: Owner
+alertDetailsOverride:
+  alertDisplayNameFormat: "Missing ITSM Ticket: Sentinel Incident #{{IncidentNumber}} - {{IncidentTitle}}"
+  alertDescriptionFormat: "Sentinel incident #{{IncidentNumber}} ({{Severity}}) has been open for over 1 hour without an EasyVista ticket. Owner: {{Owner}}"

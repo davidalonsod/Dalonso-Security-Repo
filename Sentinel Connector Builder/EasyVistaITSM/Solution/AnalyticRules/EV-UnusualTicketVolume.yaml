@@ -1,0 +1,50 @@
+id: c3d4e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f
+name: EasyVista - Unusual Volume of Security Tickets
+description: |
+  Detects when the number of security-related EasyVista tickets created in the last hour exceeds the historical baseline by 3 standard deviations.
+  May indicate a mass incident, phishing campaign, or automated ticket creation abuse.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: EasyVistaITSM
+    dataTypes:
+      - EasyVista_Tickets_CL
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Impact
+  - InitialAccess
+relevantTechniques:
+  - T1566
+query: |
+  let baseline = EasyVista_Tickets_CL
+  | where TimeGenerated between (ago(14d) .. ago(1h))
+  | where REQUEST_TYPE has_any ("Incident", "I")
+  | summarize HourlyCount = count() by bin(TimeGenerated, 1h)
+  | summarize AvgCount = avg(HourlyCount), StdDev = stdev(HourlyCount);
+  let current = EasyVista_Tickets_CL
+  | where TimeGenerated > ago(1h)
+  | where REQUEST_TYPE has_any ("Incident", "I")
+  | summarize CurrentCount = count();
+  baseline
+  | join kind=cross current
+  | where CurrentCount > AvgCount + (3 * StdDev)
+  | extend Threshold = round(AvgCount + (3 * StdDev), 0)
+  | project
+      TimeGenerated = now(),
+      CurrentCount,
+      BaselineAvg = round(AvgCount, 1),
+      BaselineStdDev = round(StdDev, 1),
+      Threshold,
+      Deviation = round((CurrentCount - AvgCount) / StdDev, 1)
+incidentConfiguration:
+  createIncident: true
+customDetails:
+  CurrentVolume: CurrentCount
+  BaselineAverage: BaselineAvg
+  Threshold: Threshold
+  StandardDeviations: Deviation
+alertDetailsOverride:
+  alertDisplayNameFormat: "Unusual EasyVista Ticket Volume: {{CurrentCount}} tickets in 1h (baseline: {{BaselineAvg}})"
+  alertDescriptionFormat: "{{CurrentCount}} security tickets created in the last hour, exceeding the baseline of {{BaselineAvg}} (threshold: {{Threshold}})."

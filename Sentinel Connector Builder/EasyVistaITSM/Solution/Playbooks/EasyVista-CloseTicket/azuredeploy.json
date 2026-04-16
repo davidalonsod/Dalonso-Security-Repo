@@ -1,0 +1,177 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "EasyVista - Close Ticket on Incident Resolution",
+    "description": "When a Sentinel incident is closed, this playbook closes the corresponding EasyVista ticket with resolution details, classification, and closure comments. Maintains bidirectional lifecycle sync.",
+    "prerequisites": ["EasyVista REST API Bearer token", "Microsoft Sentinel contributor role"],
+    "lastUpdateTime": "2026-04-16T00:00:00Z",
+    "support": { "tier": "community" },
+    "author": { "name": "CyberSOC" }
+  },
+  "parameters": {
+    "PlaybookName": { "defaultValue": "EasyVista-CloseTicket", "type": "string" },
+    "EasyVistaHost": { "type": "string" },
+    "EasyVistaAccount": { "type": "string" },
+    "EasyVistaBearerToken": { "type": "securestring" }
+  },
+  "variables": {
+    "AzureSentinelConnectionName": "[concat('azuresentinel-', parameters('PlaybookName'))]",
+    "EasyVistaBaseUrl": "[concat('https://', parameters('EasyVistaHost'), '/api/v1/', parameters('EasyVistaAccount'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "[variables('AzureSentinelConnectionName')]",
+      "location": "[resourceGroup().location]",
+      "kind": "V1",
+      "properties": {
+        "displayName": "[variables('AzureSentinelConnectionName')]",
+        "parameterValueType": "Alternative",
+        "api": {
+          "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('PlaybookName')]",
+      "location": "[resourceGroup().location]",
+      "tags": {
+        "LogicAppsCategory": "security",
+        "hidden-SentinelTemplateName": "EasyVista-CloseTicket",
+        "hidden-SentinelTemplateVersion": "1.0"
+      },
+      "identity": { "type": "SystemAssigned" },
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/connections', variables('AzureSentinelConnectionName'))]"
+      ],
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "$connections": { "type": "Object" },
+            "EasyVistaBaseUrl": { "type": "String" },
+            "EasyVistaBearerToken": { "type": "SecureString" }
+          },
+          "triggers": {
+            "Microsoft_Sentinel_incident_update": {
+              "type": "ApiConnectionWebhook",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['azuresentinel']['connectionId']" } },
+                "body": { "callback_url": "@{listCallbackUrl()}" },
+                "path": "/incident-update"
+              }
+            }
+          },
+          "actions": {
+            "Condition_Incident_Closed": {
+              "runAfter": {},
+              "type": "If",
+              "expression": {
+                "and": [{ "equals": ["@triggerBody()?['object']?['properties']?['status']", "Closed"] }]
+              },
+              "actions": {
+                "Filter_EV_Tag": {
+                  "runAfter": {},
+                  "type": "Query",
+                  "inputs": {
+                    "from": "@triggerBody()?['object']?['properties']?['labels']",
+                    "where": "@startsWith(item()?['labelName'], 'EV:')"
+                  }
+                },
+                "Condition_Has_EV_Tag": {
+                  "runAfter": { "Filter_EV_Tag": ["Succeeded"] },
+                  "type": "If",
+                  "expression": { "and": [{ "greater": ["@length(body('Filter_EV_Tag'))", 0] }] },
+                  "actions": {
+                    "Extract_RFC": {
+                      "runAfter": {},
+                      "type": "Compose",
+                      "inputs": "@replace(body('Filter_EV_Tag')[0]?['labelName'], 'EV:', '')"
+                    },
+                    "Lookup_Ticket": {
+                      "runAfter": { "Extract_RFC": ["Succeeded"] },
+                      "type": "Http",
+                      "inputs": {
+                        "method": "GET",
+                        "uri": "@{concat(parameters('EasyVistaBaseUrl'), '/requests?search=rfc_number:', outputs('Extract_RFC'))}",
+                        "headers": { "Authorization": "Bearer @{parameters('EasyVistaBearerToken')}" }
+                      }
+                    },
+                    "Parse_Ticket": {
+                      "runAfter": { "Lookup_Ticket": ["Succeeded"] },
+                      "type": "ParseJson",
+                      "inputs": {
+                        "content": "@body('Lookup_Ticket')",
+                        "schema": { "type": "object", "properties": { "records": { "type": "array" } } }
+                      }
+                    },
+                    "Build_Resolution": {
+                      "runAfter": { "Parse_Ticket": ["Succeeded"] },
+                      "type": "Compose",
+                      "inputs": "@concat('SENTINEL INCIDENT RESOLVED\\n\\n','Classification: ', triggerBody()?['object']?['properties']?['classification'], '\\n','Classification Reason: ', triggerBody()?['object']?['properties']?['classificationReason'], '\\n','Closing Comment: ', triggerBody()?['object']?['properties']?['classificationComment'], '\\n','Closed by: ', triggerBody()?['object']?['properties']?['owner']?['userPrincipalName'], '\\n','Closed at: ', utcNow(), '\\n','Sentinel Incident: ', triggerBody()?['object']?['properties']?['incidentUrl'])"
+                    },
+                    "Add_Resolution_Action": {
+                      "runAfter": { "Build_Resolution": ["Succeeded"] },
+                      "type": "Http",
+                      "inputs": {
+                        "method": "POST",
+                        "uri": "@{concat(parameters('EasyVistaBaseUrl'), '/requests/', body('Parse_Ticket')?['records'][0]?['REQUEST_ID'], '/actions')}",
+                        "headers": {
+                          "Authorization": "Bearer @{parameters('EasyVistaBearerToken')}",
+                          "Content-Type": "application/json"
+                        },
+                        "body": {
+                          "DESCRIPTION": "@{outputs('Build_Resolution')}",
+                          "ACTION_TYPE": "Incident Resolution"
+                        }
+                      }
+                    },
+                    "Close_EV_Ticket": {
+                      "runAfter": { "Add_Resolution_Action": ["Succeeded"] },
+                      "type": "Http",
+                      "inputs": {
+                        "method": "PUT",
+                        "uri": "@{concat(parameters('EasyVistaBaseUrl'), '/requests/', body('Parse_Ticket')?['records'][0]?['REQUEST_ID'])}",
+                        "headers": {
+                          "Authorization": "Bearer @{parameters('EasyVistaBearerToken')}",
+                          "Content-Type": "application/json"
+                        },
+                        "body": {
+                          "STATUS": { "STATUS_EN": "Resolved" },
+                          "COMMENT": "@{concat('Closed by Sentinel. Classification: ', triggerBody()?['object']?['properties']?['classification'])}"
+                        }
+                      }
+                    }
+                  },
+                  "else": { "actions": {} }
+                }
+              },
+              "else": { "actions": {} }
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "$connections": {
+            "value": {
+              "azuresentinel": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', variables('AzureSentinelConnectionName'))]",
+                "connectionName": "[variables('AzureSentinelConnectionName')]",
+                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]",
+                "connectionProperties": { "authentication": { "type": "ManagedServiceIdentity" } }
+              }
+            }
+          },
+          "EasyVistaBaseUrl": { "value": "[variables('EasyVistaBaseUrl')]" },
+          "EasyVistaBearerToken": { "value": "[parameters('EasyVistaBearerToken')]" }
+        }
+      }
+    }
+  ]
+}
