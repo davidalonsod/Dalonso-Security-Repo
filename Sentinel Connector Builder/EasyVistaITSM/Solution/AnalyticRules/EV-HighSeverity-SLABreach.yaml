@@ -1,0 +1,71 @@
+id: a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d
+name: EasyVista - High Severity Ticket SLA Breach
+description: |
+  Detects when a high-severity EasyVista security ticket has breached its SLA deadline while still open.
+  This indicates the SOC or IT team has not resolved a critical security issue within the agreed timeframe.
+  Bidirectional: triggers a Sentinel incident which can auto-update the EasyVista ticket severity.
+severity: High
+requiredDataConnectors:
+  - connectorId: EasyVistaITSM
+    dataTypes:
+      - EasyVista_Tickets_CL
+queryFrequency: 1h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Impact
+relevantTechniques:
+  - T1499
+query: |
+  EasyVista_Tickets_CL
+  | where TimeGenerated > ago(1d)
+  | where REQUEST_TYPE has_any ("Incident", "I")
+  | where SEVERITY_ID <= 2
+  | where STATUS_EN !in ("Closed", "Resolved")
+  | where isnotempty(MAX_RESOLUTION_DATE_UT)
+  | where MAX_RESOLUTION_DATE_UT < now()
+  | extend OverdueHours = datetime_diff('hour', now(), MAX_RESOLUTION_DATE_UT)
+  | project
+      TimeGenerated,
+      RFC_NUMBER,
+      ['TITLE'],
+      SEVERITY_ID,
+      STATUS_EN,
+      REQUESTOR_NAME,
+      REQUESTOR_EMAIL,
+      RECIPIENT_NAME,
+      DEPARTMENT_PATH,
+      LOCATION_PATH,
+      ASSET_TAG,
+      MAX_RESOLUTION_DATE_UT,
+      OverdueHours
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: REQUESTOR_NAME
+  - entityType: Mailbox
+    fieldMappings:
+      - identifier: MailboxPrimaryAddress
+        columnName: REQUESTOR_EMAIL
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: 4h
+    matchingMethod: Selected
+    groupByCustomDetails:
+      - RFC_NUMBER
+customDetails:
+  TicketNumber: RFC_NUMBER
+  TicketStatus: STATUS_EN
+  SeverityLevel: SEVERITY_ID
+  OverdueHours: OverdueHours
+  AssignedTo: RECIPIENT_NAME
+  Department: DEPARTMENT_PATH
+alertDetailsOverride:
+  alertDisplayNameFormat: "SLA Breach: {{RFC_NUMBER}} - {{TITLE}} ({{OverdueHours}}h overdue)"
+  alertDescriptionFormat: "EasyVista ticket {{RFC_NUMBER}} (severity {{SEVERITY_ID}}) has breached SLA by {{OverdueHours}} hours."
+  alertSeverityColumnName: SEVERITY_ID

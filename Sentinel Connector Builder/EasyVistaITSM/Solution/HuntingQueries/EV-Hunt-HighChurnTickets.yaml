@@ -1,0 +1,24 @@
+id: c9d0e1f2-a3b4-4c5d-6e7f-809112233445
+name: EasyVista - High Churn Tickets (Rapid Status Changes)
+description: |
+  Hunts for tickets with suspiciously rapid status changes, which may indicate automated loops,
+  sync issues between Sentinel and EasyVista, or ticket manipulation.
+requiredDataConnectors:
+  - connectorId: EasyVistaITSM
+    dataTypes:
+      - EasyVista_Tickets_CL
+tactics:
+  - DefenseEvasion
+query: |
+  EasyVista_Tickets_CL
+  | where TimeGenerated > ago(7d)
+  | where REQUEST_TYPE has_any ("Incident", "I")
+  | summarize
+      UpdateCount = count(),
+      StatusChanges = dcount(STATUS_EN),
+      Statuses = make_set(STATUS_EN),
+      TimeSpanMinutes = datetime_diff('minute', max(LAST_UPDATE), min(SUBMIT_DATE_UT))
+      by RFC_NUMBER, ['TITLE']
+  | where UpdateCount > 5 and TimeSpanMinutes < 60
+  | extend ChurnRate = round(toreal(UpdateCount) / iif(TimeSpanMinutes > 0, toreal(TimeSpanMinutes), 1.0), 2)
+  | sort by ChurnRate desc

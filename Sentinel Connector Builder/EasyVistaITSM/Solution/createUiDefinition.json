@@ -1,0 +1,182 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/0.1.2-preview/CreateUIDefinition.MultiVm.json#",
+  "handler": "Microsoft.Azure.CreateUIDef",
+  "version": "0.1.2-preview",
+  "parameters": {
+    "config": {
+      "isWizard": true,
+      "basics": {
+        "description": "**EasyVista ITSM Integration for Microsoft Sentinel**\n\nDeploys a complete bidirectional integration between Microsoft Sentinel and EasyVista ITSM including:\n- 6 Logic App playbooks for automated ticket lifecycle management\n- 5 analytic rules for ITSM-based threat detection\n- 5 hunting queries for proactive investigation\n- 1 CISO Dashboard workbook with 6 operational tabs\n- Content Hub solution metadata",
+        "location": {
+          "label": "Location",
+          "toolTip": "Location for all resources",
+          "resourceTypes": [ "Microsoft.OperationalInsights/workspaces" ]
+        }
+      }
+    },
+    "basics": [
+      {
+        "name": "workspace",
+        "type": "Microsoft.Solutions.ArmApiControl",
+        "toolTip": "The Log Analytics workspace where Microsoft Sentinel is deployed",
+        "condition": "[bool('true')]",
+        "request": {
+          "method": "GET",
+          "path": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.OperationalInsights/workspaces?api-version=2021-06-01')]"
+        }
+      },
+      {
+        "name": "workspaceDropdown",
+        "type": "Microsoft.Common.DropDown",
+        "label": "Sentinel Workspace",
+        "placeholder": "Select a workspace",
+        "toolTip": "Select the Log Analytics workspace where Microsoft Sentinel is deployed",
+        "constraints": {
+          "allowedValues": "[map(basics('workspace').value, (item) => parse(concat('{\"label\":\"', item.name, '\",\"value\":\"', item.name, '\"}')))]",
+          "required": true
+        },
+        "visible": true
+      }
+    ],
+    "steps": [
+      {
+        "name": "easyvista",
+        "label": "EasyVista Connection",
+        "elements": [
+          {
+            "name": "infoBox",
+            "type": "Microsoft.Common.InfoBox",
+            "visible": true,
+            "options": {
+              "text": "Provide your EasyVista ITSM API connection details. You need a Bearer token with access to the REST API v1.",
+              "style": "Info"
+            }
+          },
+          {
+            "name": "EasyVistaHost",
+            "type": "Microsoft.Common.TextBox",
+            "label": "EasyVista Server Host",
+            "placeholder": "your-company.easyvista.com",
+            "toolTip": "The hostname of your EasyVista server (without https:// prefix)",
+            "constraints": {
+              "required": true,
+              "validationMessage": "Please enter the EasyVista server hostname"
+            }
+          },
+          {
+            "name": "EasyVistaAccount",
+            "type": "Microsoft.Common.TextBox",
+            "label": "EasyVista Account ID",
+            "placeholder": "50004",
+            "toolTip": "The EasyVista account identifier used in API paths",
+            "constraints": {
+              "required": true,
+              "validationMessage": "Please enter the EasyVista account ID"
+            }
+          },
+          {
+            "name": "EasyVistaBearerToken",
+            "type": "Microsoft.Common.PasswordBox",
+            "label": {
+              "password": "EasyVista Bearer Token",
+              "confirmPassword": "Confirm Bearer Token"
+            },
+            "toolTip": "The Bearer token for authenticating to the EasyVista REST API",
+            "constraints": {
+              "required": true
+            },
+            "options": {
+              "hideConfirmation": false
+            }
+          }
+        ]
+      },
+      {
+        "name": "components",
+        "label": "Solution Components",
+        "elements": [
+          {
+            "name": "infoBox",
+            "type": "Microsoft.Common.InfoBox",
+            "visible": true,
+            "options": {
+              "text": "Choose which components to deploy. Analytic rules and hunting queries are always deployed.",
+              "style": "Info"
+            }
+          },
+          {
+            "name": "deployPlaybooks",
+            "type": "Microsoft.Common.CheckBox",
+            "label": "Deploy Logic App Playbooks (6 playbooks for bidirectional integration)",
+            "toolTip": "Deploys 6 Logic App playbooks: CreateIncident, UpdateTicketStatus, GetTicketInfo, TriggerResponseActions, SyncStatusToSentinel, CloseTicket",
+            "constraints": {
+              "required": false
+            },
+            "defaultValue": true
+          },
+          {
+            "name": "deployWorkbook",
+            "type": "Microsoft.Common.CheckBox",
+            "label": "Deploy CISO Dashboard Workbook",
+            "toolTip": "Deploys the CISO Dashboard workbook with 6 tabs: Executive Summary, Ticket Operations, SLA & Performance, Sync Health, Response Actions, Asset & Employee Intel",
+            "constraints": {
+              "required": false
+            },
+            "defaultValue": true
+          }
+        ]
+      },
+      {
+        "name": "responseActions",
+        "label": "Response Actions (Optional)",
+        "elements": [
+          {
+            "name": "infoBox",
+            "type": "Microsoft.Common.InfoBox",
+            "visible": true,
+            "options": {
+              "text": "The TriggerResponseActions playbook requires Microsoft Defender for Endpoint API access to execute isolation, process termination, and file quarantine actions from EasyVista. Leave blank to skip MDE integration.",
+              "style": "Warning"
+            }
+          },
+          {
+            "name": "MDEClientId",
+            "type": "Microsoft.Common.TextBox",
+            "label": "MDE App Registration Client ID",
+            "placeholder": "00000000-0000-0000-0000-000000000000",
+            "toolTip": "Azure AD App Registration Client ID with MDE Machine.Isolate and Machine.StopAndQuarantineFile permissions",
+            "constraints": {
+              "required": false
+            }
+          },
+          {
+            "name": "MDEClientSecret",
+            "type": "Microsoft.Common.PasswordBox",
+            "label": {
+              "password": "MDE App Registration Client Secret"
+            },
+            "toolTip": "Client Secret for the Azure AD App Registration",
+            "constraints": {
+              "required": false
+            },
+            "options": {
+              "hideConfirmation": true
+            }
+          }
+        ]
+      }
+    ],
+    "outputs": {
+      "workspace": "[basics('workspaceDropdown')]",
+      "location": "[location()]",
+      "EasyVistaHost": "[steps('easyvista').EasyVistaHost]",
+      "EasyVistaAccount": "[steps('easyvista').EasyVistaAccount]",
+      "EasyVistaBearerToken": "[steps('easyvista').EasyVistaBearerToken]",
+      "deployPlaybooks": "[steps('components').deployPlaybooks]",
+      "deployWorkbook": "[steps('components').deployWorkbook]",
+      "TenantId": "[subscription().tenantId]",
+      "MDEClientId": "[if(empty(steps('responseActions').MDEClientId), '', steps('responseActions').MDEClientId)]",
+      "MDEClientSecret": "[if(empty(steps('responseActions').MDEClientSecret), '', steps('responseActions').MDEClientSecret)]"
+    }
+  }
+}

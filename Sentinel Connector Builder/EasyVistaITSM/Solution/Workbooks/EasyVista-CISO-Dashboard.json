@@ -1,0 +1,497 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# EasyVista ITSM \u2194 Microsoft Sentinel \u2014 CISO Dashboard\n---\n\n## Solution Capabilities\n\nThis solution provides **full bidirectional integration** between Microsoft Sentinel (SecOps) and EasyVista ITSM (IT Service Management).\n\n| Direction | Capability | Automation |\n|---|---|---|\n| **Sentinel \u2192 EasyVista** | Create ITSM tickets from HIGH-CONFIDENCE incidents only (High/Medium severity) | Playbook: `EasyVista-CreateIncident` |\n| **Sentinel \u2192 EasyVista** | Sync incident status changes (New\u2192Open, Active\u2192Investigating, Closed\u2192Resolved) | Playbook: `EasyVista-UpdateTicketStatus` |\n| **Sentinel \u2192 EasyVista** | Close EasyVista ticket when incident resolved (with classification & comments) | Playbook: `EasyVista-CloseTicket` |\n| **EasyVista \u2192 Sentinel** | Sync ticket status back to Sentinel incidents (Open\u2192New, Resolved\u2192Closed) | Playbook: `EasyVista-SyncStatusToSentinel` |\n| **EasyVista \u2192 Sentinel** | Trigger security response actions from ITSM (isolate host, kill process, quarantine) | Playbook: `EasyVista-TriggerResponseActions` |\n| **Bidirectional** | Enrich Sentinel investigations with ticket info (owner, SLA, status, actions) | Playbook: `EasyVista-GetTicketInfo` |\n| **Data Connector** | Ingest tickets, assets, employees, and CIs into Sentinel for analytics | CCF REST API Poller |\n\n### EasyVista Ticket Content (Full Attack Story)\nEvery ticket created from Sentinel includes the **complete attack narrative**, not just a single alert:\n\n- \ud83d\udea8 **Confidence Gate**: Only High/Medium severity incidents are escalated to ITSM\n- \ud83d\udcdd **Full Attack Story**: All correlated alerts with descriptions, providers, and severity\n- \u23f0 **Chronological Timeline**: Events sorted oldest-to-newest as an HTML table\n- \ud83d\udd0d **Root Cause Analysis**: First-alert attribution, kill chain progression, and attack narrative\n- \ud83d\udcbb **Endpoint Telemetry**: Hostname, FQDN, IP address, OS family & version, Azure AD Device ID\n- \ud83d\udc64 **User Context**: Account name, UPN, AAD User ID, SID, account type\n- \ud83c\udfaf **MITRE ATT&CK Mapping**: Tactics + techniques per alert, and overall kill chain\n- \ud83d\udd17 **IOCs**: IP addresses, file hashes (SHA1/SHA256), URLs, and domain names\n- \ud83d\udccb **Recommended Actions**: Immediate response steps for the IT team\n\n### Status Lifecycle Mapping\n```\nSentinel          EasyVista\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nNew           \u2194    Open\nActive        \u2194    Investigating\nActive        \u2190    Contained\nClosed        \u2194    Resolved\n```\n\n### Low-Confidence Incidents\nIncidents with **Low** or **Informational** severity are NOT sent to EasyVista. They remain in Sentinel with an `EV:Skipped-LowConfidence` tag and a comment explaining why.\n\n---\n\u26a0\ufe0f *Select a tab below to explore operational KPIs and analytics.*"
+      },
+      "name": "overview"
+    },
+    {
+      "type": 11,
+      "content": {
+        "version": "LinkItem/1.0",
+        "style": "tabs",
+        "links": [
+          { "id": "tab-executive", "cellValue": "executive", "linkTarget": "parameter", "linkLabel": "Executive Summary", "preText": "\ud83d\udcca", "style": "link", "workbookContext": {}, "templateRunContext": { "componentIdSource": "cell" } },
+          { "id": "tab-tickets", "cellValue": "tickets", "linkTarget": "parameter", "linkLabel": "Ticket Operations", "preText": "\ud83c\udfab", "style": "link" },
+          { "id": "tab-sla", "cellValue": "sla", "linkTarget": "parameter", "linkLabel": "SLA & Performance", "preText": "\u23f1\ufe0f", "style": "link" },
+          { "id": "tab-sync", "cellValue": "sync", "linkTarget": "parameter", "linkLabel": "Sync Health", "preText": "\ud83d\udd04", "style": "link" },
+          { "id": "tab-response", "cellValue": "response", "linkTarget": "parameter", "linkLabel": "Response Actions", "preText": "\ud83d\udee1\ufe0f", "style": "link" },
+          { "id": "tab-assets", "cellValue": "assets", "linkTarget": "parameter", "linkLabel": "Asset & Employee Intel", "preText": "\ud83d\udcbb", "style": "link" }
+        ]
+      },
+      "name": "tabs"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "p-timerange",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "type": 4,
+            "typeSettings": { "selectableValues": [{"durationMs": 3600000}, {"durationMs": 14400000}, {"durationMs": 43200000}, {"durationMs": 86400000}, {"durationMs": 259200000}, {"durationMs": 604800000}, {"durationMs": 2592000000}], "allowCustom": true },
+            "value": { "durationMs": 604800000 }
+          },
+          {
+            "id": "p-tab",
+            "version": "KqlParameterItem/1.0",
+            "name": "selectedTab",
+            "type": 1,
+            "isHiddenWhenLocked": true,
+            "value": "executive"
+          }
+        ],
+        "style": "pills"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": { "json": "## Executive Summary \u2014 Security \u2194 ITSM Integration KPIs" },
+            "name": "exec-title"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| summarize\n    TotalTickets = count(),\n    OpenTickets = countif(STATUS_EN !in (\"Closed\", \"Resolved\")),\n    HighSeverity = countif(SEVERITY_ID <= 2),\n    AvgResolutionHours = round(avg(iff(isnotempty(END_DATE_UT), datetime_diff('hour', END_DATE_UT, SUBMIT_DATE_UT), real(null))), 1),\n    SLABreached = countif(isnotempty(MAX_RESOLUTION_DATE_UT) and MAX_RESOLUTION_DATE_UT < iif(isnotempty(END_DATE_UT), END_DATE_UT, now()))",
+              "size": 4,
+              "title": "Key Metrics",
+              "queryType": 0,
+              "visualization": "tiles",
+              "tileSettings": {
+                "titleContent": { "columnMatch": "Column1", "formatter": 1 },
+                "leftContent": { "columnMatch": "TotalTickets", "formatter": 12, "numberFormat": { "unit": 17, "options": { "style": "decimal" } } },
+                "showBorder": true
+              }
+            },
+            "name": "exec-tiles"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| summarize TicketCount = count() by bin(TimeGenerated, 1d), STATUS_EN\n| render timechart",
+              "size": 0,
+              "title": "Security Ticket Volume Trend (Daily)",
+              "queryType": 0,
+              "visualization": "timechart"
+            },
+            "name": "exec-trend"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| summarize Tickets = count() by SEVERITY_ID\n| extend Severity = case(SEVERITY_ID == 1, \"Critical\", SEVERITY_ID == 2, \"High\", SEVERITY_ID == 3, \"Medium\", \"Low\")\n| project Severity, Tickets\n| render piechart",
+              "size": 2,
+              "title": "Incidents by Severity",
+              "queryType": 0,
+              "visualization": "piechart"
+            },
+            "customWidth": "50",
+            "name": "exec-severity-pie"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| summarize Tickets = count() by DEPARTMENT_PATH\n| top 10 by Tickets\n| render barchart",
+              "size": 2,
+              "title": "Top 10 Affected Departments",
+              "queryType": 0,
+              "visualization": "barchart"
+            },
+            "customWidth": "50",
+            "name": "exec-dept-bar"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "SecurityIncident\n| where TimeGenerated {TimeRange}\n| where Labels has \"EV:\"\n| extend EVTicket = extract(@\"EV:([^,\\]]+)\", 1, tostring(Labels))\n| summarize\n    SentinelIncidents = dcount(IncidentNumber),\n    LinkedToEV = dcountif(IncidentNumber, isnotempty(EVTicket)),\n    UnlinkedIncidents = dcountif(IncidentNumber, isempty(EVTicket))\n| extend LinkageRate = round(100.0 * LinkedToEV / SentinelIncidents, 1)",
+              "size": 4,
+              "title": "Sentinel \u2194 EasyVista Linkage Rate",
+              "queryType": 0,
+              "visualization": "tiles"
+            },
+            "name": "exec-linkage"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| where isnotempty(END_DATE_UT)\n| extend ResolutionHours = datetime_diff('hour', END_DATE_UT, SUBMIT_DATE_UT)\n| summarize\n    P50 = percentile(ResolutionHours, 50),\n    P75 = percentile(ResolutionHours, 75),\n    P90 = percentile(ResolutionHours, 90),\n    P95 = percentile(ResolutionHours, 95)\n| extend P50=round(P50,1), P75=round(P75,1), P90=round(P90,1), P95=round(P95,1)",
+              "size": 4,
+              "title": "Resolution Time Percentiles (Hours)",
+              "queryType": 0,
+              "visualization": "tiles"
+            },
+            "name": "exec-resolution-percentiles"
+          }
+        ]
+      },
+      "conditionalVisibility": { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "executive" },
+      "name": "group-executive"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": { "json": "## Ticket Operations \u2014 Sentinel \u2194 EasyVista" },
+            "name": "tickets-title"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| where STATUS_EN !in (\"Closed\", \"Resolved\")\n| project TimeGenerated, RFC_NUMBER, ['TITLE'], STATUS_EN, SEVERITY_ID, REQUESTOR_NAME, REQUESTOR_EMAIL, RECIPIENT_NAME, LOCATION_PATH, DEPARTMENT_PATH, ASSET_TAG, LAST_UPDATE\n| sort by SEVERITY_ID asc, LAST_UPDATE desc\n| extend Severity = case(SEVERITY_ID == 1, \"\ud83d\udd34 Critical\", SEVERITY_ID == 2, \"\ud83d\udfe0 High\", SEVERITY_ID == 3, \"\ud83d\udfe1 Medium\", \"\ud83d\udfe2 Low\")\n| project RFC_NUMBER, Severity, ['TITLE'], STATUS_EN, REQUESTOR_NAME, RECIPIENT_NAME, LOCATION_PATH, DEPARTMENT_PATH, ASSET_TAG, LAST_UPDATE",
+              "size": 0,
+              "title": "Open Security Tickets (Active Investigation)",
+              "queryType": 0,
+              "visualization": "table",
+              "gridSettings": {
+                "sortBy": [{ "itemKey": "SEVERITY_ID", "sortOrder": 1 }]
+              }
+            },
+            "name": "tickets-open-table"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| summarize Tickets = count() by REQUEST_TYPE\n| render piechart",
+              "size": 2,
+              "title": "Tickets by Type",
+              "queryType": 0,
+              "visualization": "piechart"
+            },
+            "customWidth": "33",
+            "name": "tickets-type-pie"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| summarize Tickets = count() by ORIGIN\n| render piechart",
+              "size": 2,
+              "title": "Ticket Origin (API = Sentinel-created)",
+              "queryType": 0,
+              "visualization": "piechart"
+            },
+            "customWidth": "33",
+            "name": "tickets-origin-pie"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| summarize Tickets = count() by STATUS_EN\n| render piechart",
+              "size": 2,
+              "title": "Tickets by Status",
+              "queryType": 0,
+              "visualization": "piechart"
+            },
+            "customWidth": "33",
+            "name": "tickets-status-pie"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| where STATUS_EN in (\"Closed\", \"Resolved\")\n| project RFC_NUMBER, ['TITLE'], SEVERITY_ID, STATUS_EN, SUBMIT_DATE_UT, END_DATE_UT, REQUESTOR_NAME, DEPARTMENT_PATH,\n    ResolutionHours = round(datetime_diff('minute', END_DATE_UT, SUBMIT_DATE_UT) / 60.0, 1)\n| sort by END_DATE_UT desc\n| take 25",
+              "size": 0,
+              "title": "Recently Resolved Tickets",
+              "queryType": 0,
+              "visualization": "table"
+            },
+            "name": "tickets-resolved-table"
+          }
+        ]
+      },
+      "conditionalVisibility": { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "tickets" },
+      "name": "group-tickets"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": { "json": "## SLA Compliance & Performance" },
+            "name": "sla-title"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| where isnotempty(MAX_RESOLUTION_DATE_UT)\n| extend SLAStatus = iif(isnotempty(END_DATE_UT),\n    iif(END_DATE_UT <= MAX_RESOLUTION_DATE_UT, \"Met\", \"Breached\"),\n    iif(now() <= MAX_RESOLUTION_DATE_UT, \"On Track\", \"At Risk\"))\n| summarize Tickets = count() by SLAStatus\n| render piechart",
+              "size": 2,
+              "title": "SLA Compliance Overview",
+              "queryType": 0,
+              "visualization": "piechart",
+              "chartSettings": { "seriesLabelSettings": [{ "seriesName": "Met", "color": "green" }, { "seriesName": "Breached", "color": "red" }, { "seriesName": "On Track", "color": "blue" }, { "seriesName": "At Risk", "color": "orange" }] }
+            },
+            "customWidth": "40",
+            "name": "sla-compliance-pie"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| where isnotempty(MAX_RESOLUTION_DATE_UT)\n| where STATUS_EN !in (\"Closed\", \"Resolved\")\n| where MAX_RESOLUTION_DATE_UT < now()\n| project RFC_NUMBER, ['TITLE'], SEVERITY_ID, STATUS_EN, MAX_RESOLUTION_DATE_UT, RECIPIENT_NAME, DEPARTMENT_PATH,\n    OverdueHours = round(datetime_diff('hour', now(), MAX_RESOLUTION_DATE_UT), 0)\n| sort by OverdueHours desc",
+              "size": 0,
+              "title": "\u26a0\ufe0f SLA Breached \u2014 Open Tickets Past Deadline",
+              "queryType": 0,
+              "visualization": "table"
+            },
+            "customWidth": "60",
+            "name": "sla-breached-table"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| where isnotempty(END_DATE_UT)\n| extend ResolutionHours = datetime_diff('hour', END_DATE_UT, SUBMIT_DATE_UT)\n| extend Severity = case(SEVERITY_ID == 1, \"Critical\", SEVERITY_ID == 2, \"High\", SEVERITY_ID == 3, \"Medium\", \"Low\")\n| summarize AvgHours = round(avg(ResolutionHours), 1), MedianHours = round(percentile(ResolutionHours, 50), 1), Count = count() by Severity\n| sort by AvgHours asc",
+              "size": 0,
+              "title": "Mean Time to Resolve (MTTR) by Severity",
+              "queryType": 0,
+              "visualization": "table"
+            },
+            "name": "sla-mttr-table"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where REQUEST_TYPE has_any (\"Incident\", \"I\")\n| where isnotempty(END_DATE_UT) and isnotempty(MAX_RESOLUTION_DATE_UT)\n| extend SLAMet = END_DATE_UT <= MAX_RESOLUTION_DATE_UT\n| summarize SLARate = round(100.0 * countif(SLAMet) / count(), 1) by bin(TimeGenerated, 1d)\n| render timechart",
+              "size": 0,
+              "title": "SLA Compliance Rate Over Time (%)",
+              "queryType": 0,
+              "visualization": "timechart"
+            },
+            "name": "sla-trend"
+          }
+        ]
+      },
+      "conditionalVisibility": { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "sla" },
+      "name": "group-sla"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": { "json": "## Bidirectional Sync Health \u2014 Sentinel \u2194 EasyVista" },
+            "name": "sync-title"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "SecurityIncident\n| where TimeGenerated {TimeRange}\n| extend HasEVTag = Labels has \"EV:\"\n| summarize\n    TotalIncidents = count(),\n    LinkedToEV = countif(HasEVTag),\n    NotLinked = countif(not(HasEVTag))\n| extend LinkagePercent = round(100.0 * LinkedToEV / TotalIncidents, 1)",
+              "size": 4,
+              "title": "Incident-to-Ticket Linkage",
+              "queryType": 0,
+              "visualization": "tiles"
+            },
+            "name": "sync-linkage-tiles"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "SecurityIncident\n| where TimeGenerated {TimeRange}\n| where Labels has \"EV:\"\n| extend EVTicket = extract(@\"EV:([^,\\]]+)\", 1, tostring(Labels))\n| join kind=leftouter (\n    EasyVista_Tickets_CL\n    | where TimeGenerated {TimeRange}\n    | project RFC_NUMBER, EV_Status = STATUS_EN, EV_LastUpdate = LAST_UPDATE\n) on $left.EVTicket == $right.RFC_NUMBER\n| extend StatusMatch = case(\n    (Status == \"New\" and EV_Status == \"Open\"), \"\u2705 Synced\",\n    (Status == \"Active\" and EV_Status in (\"Investigating\", \"Contained\")), \"\u2705 Synced\",\n    (Status == \"Closed\" and EV_Status in (\"Resolved\", \"Closed\")), \"\u2705 Synced\",\n    \"\u274c Out of Sync\")\n| project IncidentNumber, Status, EVTicket, EV_Status, StatusMatch, LastModifiedTime, EV_LastUpdate\n| sort by StatusMatch asc, LastModifiedTime desc",
+              "size": 0,
+              "title": "Status Sync Verification (Sentinel vs EasyVista)",
+              "queryType": 0,
+              "visualization": "table"
+            },
+            "name": "sync-status-compare"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "SecurityIncident\n| where TimeGenerated {TimeRange}\n| where Labels has \"EV:\"\n| extend EVTicket = extract(@\"EV:([^,\\]]+)\", 1, tostring(Labels))\n| join kind=leftouter (\n    EasyVista_Tickets_CL\n    | where TimeGenerated {TimeRange}\n    | project RFC_NUMBER, EV_Status = STATUS_EN\n) on $left.EVTicket == $right.RFC_NUMBER\n| extend InSync = case(\n    (Status == \"New\" and EV_Status == \"Open\"), true,\n    (Status == \"Active\" and EV_Status in (\"Investigating\", \"Contained\")), true,\n    (Status == \"Closed\" and EV_Status in (\"Resolved\", \"Closed\")), true,\n    false)\n| summarize SyncRate = round(100.0 * countif(InSync) / count(), 1) by bin(TimeGenerated, 1d)\n| render timechart",
+              "size": 0,
+              "title": "Sync Rate Over Time (%)",
+              "queryType": 0,
+              "visualization": "timechart"
+            },
+            "name": "sync-rate-trend"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "SecurityIncident\n| where TimeGenerated {TimeRange}\n| where Status != \"Closed\"\n| extend HasEVTag = Labels has \"EV:\"\n| where not(HasEVTag)\n| project IncidentNumber, Title, Severity, Status, CreatedTime, Owner = tostring(Owner.assignedTo)\n| sort by Severity asc, CreatedTime desc\n| take 20",
+              "size": 0,
+              "title": "\u26a0\ufe0f Sentinel Incidents WITHOUT EasyVista Ticket",
+              "queryType": 0,
+              "visualization": "table"
+            },
+            "name": "sync-unlinked"
+          }
+        ]
+      },
+      "conditionalVisibility": { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "sync" },
+      "name": "group-sync"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": { "json": "## Security Response Actions \u2014 Triggered via EasyVista" },
+            "name": "response-title"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where DESCRIPTION has \"##SECURITY_ACTION##\"\n| extend ActionType = case(\n    DESCRIPTION has \"##ISOLATE_HOST##\", \"Isolate Host\",\n    DESCRIPTION has \"##KILL_PROCESS##\", \"Kill Process\",\n    DESCRIPTION has \"##QUARANTINE_FILE##\", \"Quarantine File\",\n    \"Other\")\n| summarize Actions = count() by ActionType\n| render piechart",
+              "size": 2,
+              "title": "Response Actions by Type",
+              "queryType": 0,
+              "visualization": "piechart"
+            },
+            "customWidth": "40",
+            "name": "response-type-pie"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where DESCRIPTION has \"##SECURITY_ACTION##\"\n| extend ActionType = case(\n    DESCRIPTION has \"##ISOLATE_HOST##\", \"Isolate Host\",\n    DESCRIPTION has \"##KILL_PROCESS##\", \"Kill Process\",\n    DESCRIPTION has \"##QUARANTINE_FILE##\", \"Quarantine File\",\n    \"Other\")\n| extend HostTarget = extract(@\"##HOSTNAME:([^#]+)##\", 1, DESCRIPTION)\n| project TimeGenerated, RFC_NUMBER, ActionType, HostTarget, STATUS_EN, REQUESTOR_NAME\n| sort by TimeGenerated desc",
+              "size": 0,
+              "title": "Response Action Log",
+              "queryType": 0,
+              "visualization": "table"
+            },
+            "customWidth": "60",
+            "name": "response-log-table"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Tickets_CL\n| where TimeGenerated {TimeRange}\n| where DESCRIPTION has \"##SECURITY_ACTION##\"\n| summarize Actions = count() by bin(TimeGenerated, 1d)\n| render timechart",
+              "size": 0,
+              "title": "Response Actions Over Time",
+              "queryType": 0,
+              "visualization": "timechart"
+            },
+            "name": "response-trend"
+          }
+        ]
+      },
+      "conditionalVisibility": { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "response" },
+      "name": "group-response"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": { "json": "## Asset & Employee Intelligence" },
+            "name": "assets-title"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Assets_CL\n| where TimeGenerated {TimeRange}\n| summarize TotalAssets = dcount(ASSET_ID), ExpiredWarranty = dcountif(ASSET_ID, END_OF_WARANTY < now()), NoEmployee = dcountif(ASSET_ID, isempty(EMPLOYEE_NAME))",
+              "size": 4,
+              "title": "Asset Overview",
+              "queryType": 0,
+              "visualization": "tiles"
+            },
+            "name": "assets-tiles"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Assets_CL\n| where TimeGenerated {TimeRange}\n| join kind=inner (\n    EasyVista_Tickets_CL\n    | where TimeGenerated {TimeRange}\n    | where REQUEST_TYPE has_any (\"Incident\", \"I\")\n    | summarize IncidentCount = count() by ASSET_TAG\n) on ASSET_TAG\n| project ASSET_TAG, ASSET_LABEL, SERIAL_NUMBER, EMPLOYEE_NAME, EMPLOYEE_EMAIL, DEPARTMENT_PATH, LOCATION_PATH, IncidentCount\n| sort by IncidentCount desc\n| take 20",
+              "size": 0,
+              "title": "Top 20 Assets by Security Incidents",
+              "queryType": 0,
+              "visualization": "table"
+            },
+            "name": "assets-top-incidents"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_Employees_CL\n| where TimeGenerated {TimeRange}\n| join kind=inner (\n    EasyVista_Tickets_CL\n    | where TimeGenerated {TimeRange}\n    | where REQUEST_TYPE has_any (\"Incident\", \"I\")\n    | summarize IncidentCount = count() by REQUESTOR_EMAIL\n) on $left.E_MAIL == $right.REQUESTOR_EMAIL\n| project LAST_NAME, E_MAIL, DEPARTMENT_PATH, LOCATION_PATH, IncidentCount\n| sort by IncidentCount desc\n| take 20",
+              "size": 0,
+              "title": "Top 20 Users by Security Incidents",
+              "queryType": 0,
+              "visualization": "table"
+            },
+            "name": "assets-top-users"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_CIs_CL\n| where TimeGenerated {TimeRange}\n| summarize CIs = count() by CI_STATUS_EN\n| render piechart",
+              "size": 2,
+              "title": "Configuration Items by Status",
+              "queryType": 0,
+              "visualization": "piechart"
+            },
+            "customWidth": "40",
+            "name": "ci-status-pie"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "EasyVista_CIs_CL\n| where TimeGenerated {TimeRange}\n| join kind=inner (\n    EasyVista_Tickets_CL\n    | where TimeGenerated {TimeRange}\n    | where REQUEST_TYPE has_any (\"Incident\", \"I\")\n    | summarize IncidentCount = count() by ASSET_TAG\n) on $left.CI_ASSET_TAG == $right.ASSET_TAG\n| project CI_NAME, CI_ASSET_TAG, CI_STATUS_EN, EMPLOYEE_NAME, LOCATION_PATH, IncidentCount\n| sort by IncidentCount desc\n| take 15",
+              "size": 0,
+              "title": "CIs Linked to Security Incidents",
+              "queryType": 0,
+              "visualization": "table"
+            },
+            "customWidth": "60",
+            "name": "ci-incidents-table"
+          }
+        ]
+      },
+      "conditionalVisibility": { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "assets" },
+      "name": "group-assets"
+    }
+  ],
+  "fallbackResourceIds": [],
+  "styleSettings": {},
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
