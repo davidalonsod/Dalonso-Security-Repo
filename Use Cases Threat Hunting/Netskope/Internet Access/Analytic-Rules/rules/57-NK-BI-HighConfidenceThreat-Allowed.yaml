@@ -1,0 +1,69 @@
+id: 6f7a8b9c-0d1e-4f2a-3b4c-5d6e7f8a9b03
+name: "Netskope (Built-in) - High-Confidence Threat Allowed Through"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects Netskope allowed traffic with high/critical threat severity or known malware
+  detections, indicating policy gaps or misconfigurations. Uses the built-in NetskopeEvents_CL table.
+  MITRE ATT&CK: T1071 (Application Layer Protocol), T1204 (User Execution)
+severity: High
+requiredDataConnectors:
+  - connectorId: NetskopeDataConnector
+    dataTypes:
+      - NetskopeEvents_CL
+queryFrequency: PT15M
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+  - Execution
+relevantTechniques:
+  - T1071
+  - T1204
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+  | where TimeGenerated > ago(1d)
+  | where action_s !in ("block", "Block", "blocked", "Blocked")
+  | where severity_s in ("high", "critical")
+      or isnotempty(malware_name_s)
+      or isnotempty(threat_name_s)
+  | where isnotempty(user_s)
+  | summarize
+      RequestCount     = count(),
+      UniqueUsers      = dcount(user_s),
+      UserList         = make_set(user_s, 20),
+      Domains          = make_set(domain_s, 10),
+      ThreatNames      = make_set(threat_name_s, 10),
+      MalwareNames     = make_set(malware_name_s, 10),
+      Categories       = make_set(category_s, 5),
+      Severities       = make_set(severity_s, 5),
+      TotalBytesRecv   = sum(todouble(bytes_downloaded_d)),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+    by domain_s, severity_s
+  | extend TotalMBRecv = round(toreal(TotalBytesRecv) / 1048576, 2)
+  | order by RequestCount desc
+entityMappings:
+  - entityType: DNS
+    fieldMappings:
+      - identifier: DomainName
+        columnName: domain_s
+customDetails:
+  RequestCount: RequestCount
+  Severity: severity_s
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope BI Threat Allowed - {{domain_s}} ({{severity_s}})"
+  alertDescriptionFormat: "{{RequestCount}} requests to {{domain_s}} allowed despite severity {{severity_s}}."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - DNS
+    groupByAlertDetails: []
+    groupByCustomDetails: []

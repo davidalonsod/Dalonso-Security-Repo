@@ -1,0 +1,70 @@
+id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e
+name: "Netskope (Built-in) - Blocked Request to Malicious / C2 Category"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects Netskope blocked web requests categorized as malware, phishing, botnet,
+  command-and-control, or other known-malicious destinations. Repeated blocked attempts
+  may indicate persistent malware on the endpoint attempting to reach C2 infrastructure.
+  Uses the built-in NetskopeEvents_CL table from the Netskope Content Hub data connector.
+  MITRE ATT&CK: T1071 (Application Layer Protocol)
+severity: High
+requiredDataConnectors:
+  - connectorId: NetskopeDataConnector
+    dataTypes:
+      - NetskopeEvents_CL
+queryFrequency: PT15M
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+relevantTechniques:
+  - T1071
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  let MaliciousCategories = dynamic([
+      "Malware", "Phishing", "Botnet", "Command and Control",
+      "Spyware/Adware", "Ransomware", "Cryptomining",
+      "Newly Observed Domain", "Newly Registered Domain"]);
+  union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+  | where TimeGenerated > ago(1d)
+  | where action_s in ("block", "Block", "blocked", "Blocked")
+  | where category_s in (MaliciousCategories)
+      or severity_s in ("high", "critical")
+      or isnotempty(malware_name_s)
+  | summarize
+      BlockCount       = count(),
+      UniqueUsers      = dcount(user_s),
+      UserList         = make_set(user_s, 20),
+      DestDomains      = make_set(domain_s, 20),
+      DestIPs          = make_set(dstip_s, 10),
+      Categories       = make_set(category_s, 10),
+      MalwareNames     = make_set(malware_name_s, 10),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+    by category_s, domain_s
+  | order by BlockCount desc
+entityMappings:
+  - entityType: DNS
+    fieldMappings:
+      - identifier: DomainName
+        columnName: domain_s
+customDetails:
+  BlockCount: BlockCount
+  UniqueUsers: UniqueUsers
+  Category: category_s
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope BI Malicious Block - {{category_s}} ({{BlockCount}} attempts)"
+  alertDescriptionFormat: "{{BlockCount}} Netskope requests blocked for malicious category {{category_s}} affecting {{UniqueUsers}} users."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: AnyAlert
+    groupByEntities: []
+    groupByAlertDetails: []
+    groupByCustomDetails:
+      - Category

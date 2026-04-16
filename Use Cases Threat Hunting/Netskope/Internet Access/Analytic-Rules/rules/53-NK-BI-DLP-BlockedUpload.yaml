@@ -1,0 +1,67 @@
+id: 2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6f
+name: "Netskope (Built-in) - DLP Policy Violation - Blocked Sensitive Data Upload"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects Netskope DLP policy violations where an upload or file transfer was blocked
+  or alerted. DLP violations indicate a user attempted to send sensitive or restricted
+  data to an external service. Uses the built-in NetskopeEvents_CL table.
+  MITRE ATT&CK: T1048 (Exfiltration Over Alternative Protocol), T1567 (Exfiltration Over Web Service)
+severity: High
+requiredDataConnectors:
+  - connectorId: NetskopeDataConnector
+    dataTypes:
+      - NetskopeEvents_CL
+queryFrequency: PT30M
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Exfiltration
+relevantTechniques:
+  - T1048
+  - T1567
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+  | where TimeGenerated > ago(1d)
+  | where action_s in ("block", "Block", "blocked", "alert", "Alert")
+  | where isnotempty(dlp_rule_s) or isnotempty(dlp_profile_s)
+      or activity_s has_any ("DLP", "Upload", "Share")
+  | where isnotempty(user_s)
+  | summarize
+      ViolationCount    = count(),
+      MBUploaded        = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),
+      UniqueDestDomains = dcount(domain_s),
+      DestDomains       = make_set(domain_s, 10),
+      DLPRules          = make_set(dlp_rule_s, 10),
+      DLPProfiles       = make_set(dlp_profile_s, 5),
+      FileTypes         = make_set(file_type_s, 10),
+      ObjectSamples     = make_set(object_s, 5),
+      FirstViolation    = min(TimeGenerated),
+      LastViolation     = max(TimeGenerated)
+    by user_s, dlp_profile_s
+  | order by ViolationCount desc, MBUploaded desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+customDetails:
+  ViolationCount: ViolationCount
+  MBUploaded: MBUploaded
+  DLPProfile: dlp_profile_s
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope BI DLP Violation - {{user_s}} ({{ViolationCount}} blocks)"
+  alertDescriptionFormat: "User {{user_s}} violated DLP policy {{ViolationCount}} times. Profile: {{dlp_profile_s}}."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

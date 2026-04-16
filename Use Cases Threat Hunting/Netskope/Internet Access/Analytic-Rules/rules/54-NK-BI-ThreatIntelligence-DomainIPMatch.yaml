@@ -1,0 +1,85 @@
+id: 3c4d5e6f-7a8b-4c9d-0e1f-2a3b4c5d6e70
+name: "Netskope (Built-in) - Threat Intelligence Domain/IP Correlation"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Correlates Netskope allowed traffic against Sentinel TI feed indicators to detect
+  connections to known-malicious infrastructure that bypassed block policies.
+  Uses the built-in NetskopeEvents_CL table.
+  MITRE ATT&CK: T1071 (Application Layer Protocol), T1568 (Dynamic Resolution)
+severity: High
+requiredDataConnectors:
+  - connectorId: NetskopeDataConnector
+    dataTypes:
+      - NetskopeEvents_CL
+queryFrequency: PT1H
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+relevantTechniques:
+  - T1071
+  - T1568
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  let TI_IOCs =
+      ThreatIntelIndicators
+      | where TimeGenerated > ago(30d)
+      | where isempty(ValidUntil) or ValidUntil > now()
+      | where (isnotnull(parse_ipv4(ObservableValue)) or ObservableKey has "domain")
+      | where isnotempty(ObservableValue)
+      | summarize
+          TI_ThreatTypes = make_set(Tags),
+          TI_Confidence  = max(Confidence),
+          TI_Tags        = make_set(Tags)
+        by IOC_Value = ObservableValue;
+  union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+  | where TimeGenerated > ago(1d)
+  | where action_s !in ("block", "Block", "blocked", "Blocked")
+  | where isnotempty(domain_s) or isnotempty(dstip_s)
+  | extend MatchKey = coalesce(domain_s, tostring(dstip_s))
+  | summarize
+      RequestCount     = count(),
+      UniqueUsers      = dcount(user_s),
+      UserList         = make_set(user_s, 10),
+      BytesRecv        = sum(todouble(bytes_downloaded_d)),
+      BytesSent        = sum(todouble(bytes_uploaded_d)),
+      Apps             = make_set(app_s, 5),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+    by MatchKey, domain_s, dstip_s
+  | join kind=inner TI_IOCs on $left.MatchKey == $right.IOC_Value
+  | project
+      MatchKey, domain_s, dstip_s,
+      RequestCount, UniqueUsers, UserList,
+      BytesRecv, BytesSent, Apps,
+      TI_ThreatTypes, TI_Confidence, TI_Tags,
+      FirstSeen, LastSeen
+  | order by TI_Confidence desc, RequestCount desc
+entityMappings:
+  - entityType: DNS
+    fieldMappings:
+      - identifier: DomainName
+        columnName: domain_s
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: dstip_s
+customDetails:
+  RequestCount: RequestCount
+  TI_Confidence: TI_Confidence
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope BI TI Match - {{domain_s}} (Confidence: {{TI_Confidence}})"
+  alertDescriptionFormat: "Allowed traffic to TI-listed {{domain_s}} with {{RequestCount}} requests. Confidence: {{TI_Confidence}}."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - DNS
+    groupByAlertDetails: []
+    groupByCustomDetails: []

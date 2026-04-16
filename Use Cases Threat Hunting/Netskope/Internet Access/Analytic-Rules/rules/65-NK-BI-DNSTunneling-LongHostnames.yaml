@@ -1,0 +1,65 @@
+id: 4b5c6d7e-8f9a-4b0c-1d2e-3f4a5b6c7d8b
+name: "Netskope (Built-in) - DNS Tunneling via Long Hostnames"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects DNS tunneling indicators by identifying requests to domains with unusually
+  long hostnames (>50 chars) or excessive subdomain depth (>5 levels).
+  Uses the built-in NetskopeEvents_CL table.
+  MITRE ATT&CK: T1071.004 (DNS Application Layer Protocol)
+severity: High
+requiredDataConnectors:
+  - connectorId: NetskopeDataConnector
+    dataTypes:
+      - NetskopeEvents_CL
+queryFrequency: PT1H
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+relevantTechniques:
+  - T1071
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+  | where TimeGenerated > ago(1d)
+  | where isnotempty(domain_s)
+  | extend
+      HostnameLength  = strlen(domain_s),
+      SubdomainParts  = countof(domain_s, ".")
+  | where HostnameLength > 50 or SubdomainParts > 5
+  | summarize
+      QueryCount       = count(),
+      UniqueSubdomains = dcount(domain_s),
+      LongestHostname  = max(HostnameLength),
+      SampleDomains    = make_set(domain_s, 10),
+      Users            = make_set(user_s, 10),
+      SourceIPs        = make_set(srcip_s, 10),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+    by srcip_s
+  | where QueryCount > 10
+  | order by LongestHostname desc, QueryCount desc
+entityMappings:
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: srcip_s
+customDetails:
+  QueryCount: QueryCount
+  LongestHostname: LongestHostname
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope BI DNS Tunneling - {{srcip_s}} ({{LongestHostname}} char hostnames)"
+  alertDescriptionFormat: "Source IP {{srcip_s}} generated {{QueryCount}} requests with long hostnames (max {{LongestHostname}} chars)."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - IP
+    groupByAlertDetails: []
+    groupByCustomDetails: []
