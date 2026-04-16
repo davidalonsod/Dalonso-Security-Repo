@@ -1,0 +1,70 @@
+id: d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f8a
+name: "Netskope - Off-Hours High-Volume Web Activity"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects users generating unusually high web traffic volume through Netskope during
+  off-business hours (weekends or 20:00–06:00 local). Off-hours exfiltration is a common
+  technique to avoid detection by security operations teams.
+  MITRE ATT&CK: T1029 (Scheduled Transfer), T1567 (Exfiltration Over Web Service)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: NetskopeWebTransactions
+    dataTypes:
+      - NetskopeWebTx_CL
+queryFrequency: PT1H
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Exfiltration
+relevantTechniques:
+  - T1029
+  - T1567
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];
+  union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL
+  | where TimeGenerated > ago(1d)
+  | where isnotempty(user_s)
+  | where action_s !in ("block", "Block", "blocked", "Blocked")
+  | extend
+      HourOfDay  = hourofday(TimeGenerated),
+      DayOfWeek  = dayofweek(TimeGenerated)
+  | where (HourOfDay >= 20 or HourOfDay < 6)
+      or (DayOfWeek == 6d or DayOfWeek == 0d)
+  | summarize
+      RequestCount    = count(),
+      TotalMBUploaded = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),
+      TotalMBDownload = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),
+      UniqueDomains   = dcount(domain_s),
+      TopDomains      = make_set(domain_s, 10),
+      TopApps         = make_set(app_s, 10),
+      SourceIPs       = make_set(srcip_s, 5),
+      FirstSeen       = min(TimeGenerated),
+      LastSeen        = max(TimeGenerated)
+    by user_s
+  | where TotalMBUploaded > 100 or TotalMBDownload > 500 or RequestCount > 5000
+  | order by TotalMBUploaded desc, RequestCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+customDetails:
+  RequestCount: RequestCount
+  TotalMBUploaded: TotalMBUploaded
+  TotalMBDownload: TotalMBDownload
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope Off-Hours Activity - {{user_s}} ({{TotalMBUploaded}} MB uploaded)"
+  alertDescriptionFormat: "User {{user_s}} generated {{RequestCount}} requests during off-hours. Upload: {{TotalMBUploaded}} MB, Download: {{TotalMBDownload}} MB."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

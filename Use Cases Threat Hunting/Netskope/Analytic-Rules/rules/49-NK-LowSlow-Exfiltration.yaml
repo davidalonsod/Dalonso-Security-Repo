@@ -1,0 +1,90 @@
+id: f2a3b4c5-d6e7-4f8a-9b0c-1d2e3f4a5b6c
+name: "Netskope - Low & Slow Multi-Channel Exfiltration"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects exfiltration spread across multiple cloud services over 7 days using statistical
+  Z-score peer-group deviation. Identifies users uploading data in many small sessions to
+  cloud storage, file sharing, and paste services in aggregate volumes exceeding peer norms.
+  MITRE ATT&CK: T1041 (Exfiltration Over C2 Channel), T1567.002 (Exfiltration to Cloud Storage)
+severity: High
+requiredDataConnectors:
+  - connectorId: NetskopeWebTransactions
+    dataTypes:
+      - NetskopeWebTx_CL
+queryFrequency: P1D
+queryPeriod: P7D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Exfiltration
+  - Collection
+relevantTechniques:
+  - T1041
+  - T1567
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];
+  let HuntWindow = 7d;
+  let ExfilCategories = dynamic([
+      "Cloud Storage", "File Sharing", "Online Storage and Backup",
+      "Personal Sites & Blogs", "Webmail", "Social Networking"]);
+  // Step 1: Daily upload per user to exfil-candidate categories
+  let Daily =
+      union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL
+      | where TimeGenerated > ago(HuntWindow)
+      | where action_s !in ("block", "Block", "blocked", "Blocked")
+      | where isnotempty(user_s)
+      | where category_s in (ExfilCategories) or activity_s == "Upload"
+      | summarize
+          DaySentBytes    = sum(todouble(bytes_uploaded_d)),
+          DayRequestCount = count(),
+          DayDestCount    = dcount(domain_s)
+        by user_s, Day = bin(TimeGenerated, 1d);
+  // Step 2: Aggregate per user
+  let Users =
+      Daily
+      | summarize
+          TotalMBSent   = round(toreal(sum(DaySentBytes)) / 1048576, 2),
+          ActiveDays    = dcount(Day),
+          TotalRequests = sum(DayRequestCount),
+          UniqueDestCnt = sum(DayDestCount)
+        by user_s;
+  // Step 3: Peer-group statistics
+  let globalAvg = toscalar(Users | summarize avg(TotalMBSent));
+  let globalStd = toscalar(Users | summarize stdev(TotalMBSent));
+  // Step 4: Flag statistical outliers
+  Users
+  | extend
+      Zscore = iff(globalStd > 0,
+                   round((TotalMBSent - globalAvg) / globalStd, 2),
+                   0.0)
+  | where Zscore >= 3.0
+      or (ActiveDays >= 5 and TotalMBSent > 100)
+  | project
+      user_s,
+      TotalMBSent, ActiveDays, TotalRequests, UniqueDestCnt,
+      Zscore
+  | order by Zscore desc, TotalMBSent desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+customDetails:
+  TotalMBSent: TotalMBSent
+  Zscore: Zscore
+  ActiveDays: ActiveDays
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope Slow Exfil - {{user_s}} (Z-score: {{Zscore}}, {{TotalMBSent}} MB)"
+  alertDescriptionFormat: "User {{user_s}} uploaded {{TotalMBSent}} MB across {{ActiveDays}} days with Z-score {{Zscore}} vs peers."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: P1D
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

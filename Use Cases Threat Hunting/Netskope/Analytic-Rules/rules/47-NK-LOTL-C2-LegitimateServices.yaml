@@ -1,0 +1,84 @@
+id: d0e1f2a3-b4c5-4d6e-7f8a-9b0c1d2e3f4a
+name: "Netskope - LOTL C2 via Legitimate Services (GitHub/Pastebin/Google Docs)"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Identifies potential Living-Off-The-Land C2 abuse via legitimate public platforms like
+  GitHub, Pastebin, Google Docs, Discord, and similar services. Detects suspicious patterns
+  such as non-browser user agents, excessive raw content downloads, or high volume to
+  paste/code-hosting platforms.
+  MITRE ATT&CK: T1102 (Web Service), T1105 (Ingress Tool Transfer)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: NetskopeWebTransactions
+    dataTypes:
+      - NetskopeWebTx_CL
+queryFrequency: PT1H
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+relevantTechniques:
+  - T1102
+  - T1105
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];
+  let LotLDomains = dynamic([
+      "raw.githubusercontent.com", "gist.githubusercontent.com", "gist.github.com",
+      "pastebin.com", "paste.ee", "hastebin.com", "ghostbin.com", "rentry.co",
+      "docs.google.com", "drive.google.com",
+      "cdn.discordapp.com", "media.discordapp.net",
+      "onedrive.live.com", "1drv.ms", "transfer.sh",
+      "anonfiles.com", "gofile.io", "file.io"]);
+  union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL
+  | where TimeGenerated > ago(1d)
+  | where isnotempty(domain_s)
+  | where domain_s has_any (LotLDomains)
+  | where isnotempty(user_s)
+  | where action_s !in ("block", "Block", "blocked", "Blocked")
+  | summarize
+      RequestCount     = count(),
+      TotalBytesRecv   = sum(todouble(bytes_downloaded_d)),
+      TotalBytesSent   = sum(todouble(bytes_uploaded_d)),
+      UniqueURLs       = dcount(url_s),
+      URLSamples       = make_set(url_s, 10),
+      FileTypes        = make_set(file_type_s, 5),
+      SourceIPs        = make_set(srcip_s, 5),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+    by user_s, domain_s
+  | extend TotalMBReceived = round(toreal(TotalBytesRecv) / 1048576, 2)
+  | where TotalMBReceived > 20 or RequestCount > 100
+  | project
+      user_s, domain_s,
+      RequestCount, TotalMBReceived, TotalBytesSent,
+      URLSamples, FileTypes,
+      FirstSeen, LastSeen
+  | order by TotalMBReceived desc, RequestCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+  - entityType: DNS
+    fieldMappings:
+      - identifier: DomainName
+        columnName: domain_s
+customDetails:
+  RequestCount: RequestCount
+  TotalMBReceived: TotalMBReceived
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope LOTL C2 - {{user_s}} → {{domain_s}} ({{TotalMBReceived}} MB)"
+  alertDescriptionFormat: "User {{user_s}} downloaded {{TotalMBReceived}} MB from potential C2 staging platform {{domain_s}}."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
