@@ -1,6 +1,6 @@
 # SigninLogs Threat Hunting Pack
 
-Production-ready Microsoft Sentinel hunting queries and analytic rules for
+Testing-ready Microsoft Sentinel hunting queries and analytic rules for
 Azure Active Directory / Entra ID sign-in telemetry.
 
 ---
@@ -10,9 +10,51 @@ Azure Active Directory / Entra ID sign-in telemetry.
 | File | Description |
 |---|---|
 | `SigninLogs-ThreatHunting.kql` | 28 hunting queries (KQL) |
-| `Analytic-Rules/azuredeploy.json` | ARM template — 22 scheduled analytic rules |
-| `Analytic-Rules/rules/*.yaml` | Individual rule definitions (YAML) |
-| `Analytic-Rules/deploy-signin-rules.ps1` | PowerShell deployment script |
+| `Analytic-Rules/azuredeploy.json` | **Unified ARM template — 52 resources**: 22 analytic rules + 28 hunting queries + 1 watchlist + 1 saved function |
+| `Analytic-Rules/rules/*.yaml` | Individual rule definitions (YAML) — each embeds the `_ExcludeAllowlistedIPs` tabular UDF |
+| `Analytic-Rules/deploy-signin-rules.ps1` | PowerShell deployment helper |
+| `Analytic-Rules/Watchlists/` | Standalone templates for the **`NetworkAllowlist`** watchlist + **`ExcludeAllowlistedIPs`** saved function. See [Watchlists/README.md](Analytic-Rules/Watchlists/README.md). |
+
+> **One-shot deployment.** `Analytic-Rules/azuredeploy.json` provisions everything in a single pass: the watchlist, the reusable `ExcludeAllowlistedIPs` function, all 22 scheduled analytic rules, and all 28 hunting queries (which appear in **Sentinel → Hunting → Queries**).
+
+---
+
+## False-Positive Suppression — IP / CIDR / Range Allowlist
+
+Every analytic rule and every hunting query pipes `SigninLogs` through the
+`ExcludeAllowlistedIPs` saved function, which filters out any `IPAddress`
+matching an entry in the **`NetworkAllowlist`** Sentinel watchlist.
+
+| Supported entry format | Example |
+|---|---|
+| Single IPv4 | `203.0.113.42` |
+| IPv4 CIDR | `163.116.0.0/16` |
+| IPv4 range (`start-end`) | `10.20.30.0-10.20.30.255` |
+
+Watchlist CSV columns: `IPAddress,Description,Owner,ExpiresOn`.
+
+### Managing allowlist entries
+
+**Option A — edit the baseline in the ARM template** (redeployable):
+open `Analytic-Rules/azuredeploy.json`, edit `variables.defaultWatchlistEntries`, redeploy.
+
+**Option B — override at deploy time** via the `watchlistRawContent` parameter
+(a single CSV string including header):
+
+```powershell
+$csv = @"
+IPAddress,Description,Owner,ExpiresOn
+203.0.113.0/24,Corporate egress,SOC,2027-01-01
+198.51.100.42,VPN concentrator,NetOps,2027-06-01
+"@
+New-AzResourceGroupDeployment `
+    -ResourceGroupName   RG_Sentinel `
+    -TemplateFile        Analytic-Rules/azuredeploy.json `
+    -workspace           lawsentinel `
+    -watchlistRawContent $csv
+```
+
+**Option C — maintain entries in the portal** (Sentinel → Watchlists → `NetworkAllowlist`) after the initial deployment. Subsequent ARM redeploys will overwrite the watchlist content unless `watchlistRawContent` is passed with the current state.
 
 ---
 
@@ -191,10 +233,18 @@ az deployment group create \
   --parameters workspace=sentinel-workspace
 ```
 
-### Option 4 — Import Hunting Queries
+### Template parameters
 
-In Sentinel > **Hunting** > **Queries** > **Import**,
-upload `SigninLogs-ThreatHunting.kql` (paste each query using the **+ New query** button).
+| Parameter | Default | Purpose |
+|---|---|---|
+| `workspace` | _(required)_ | Sentinel Log Analytics workspace name |
+| `watchlistAlias` | `NetworkAllowlist` | Alias of the allowlist watchlist |
+| `functionAlias` | `ExcludeAllowlistedIPs` | Alias of the saved function used by every rule/query |
+| `watchlistRawContent` | `""` | Optional CSV string overriding `variables.defaultWatchlistEntries` |
+
+### Hunting queries
+
+Hunting queries are deployed as `Microsoft.OperationalInsights/workspaces/savedSearches` with `category = "Hunting Queries"`. After deployment they appear in **Microsoft Sentinel → Hunting → Queries**, filterable by tag `createdBy = SigninLogs-ThreatHunting`. No manual import step is required.
 
 ---
 
