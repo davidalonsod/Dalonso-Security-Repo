@@ -1,0 +1,88 @@
+id: b6c7d8e9-f0a1-4b2c-3d4e-5f6a7b8c9d0e
+name: "SigninLogs — Privileged Account Under Attack (Low-Threshold Failures)"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects authentication failures against accounts with admin or privileged naming conventions. Uses a lower threshold (3 failures) than standard brute force rules because any attack against privileged accounts is high-priority. MITRE ATT&CK: T1110 (Brute Force), T1078 (Valid Accounts — Privileged).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - PrivilegeEscalation
+relevantTechniques:
+  - T1110
+  - T1078
+query: |
+    // ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+    let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+    let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+    let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+    let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+        T
+        | extend IPAddress = tostring(IPAddress)
+        | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+        | mv-apply _r = _allowRange to typeof(string) on (
+            extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+            | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+            | summarize _anyInRange = max(toint(_inRange)))
+        | where isnull(_anyInRange) or _anyInRange == 0
+        | project-away _anyInRange
+    };
+    // ---------------------------------------------------------------------------
+    let failureThreshold  = 3;
+    let privilegedKeywords = dynamic([
+        "admin", "administrator", "root", "global", "security",
+        "privileged", "svc", "elevated", "tier0",
+        "da-", "ea-", "ga-", "pa-"]);
+    SigninLogs
+    | invoke _ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(1h)
+    | where ResultType != "0"
+    | where UserPrincipalName has_any (privilegedKeywords)
+        or UserPrincipalName contains "_adm"
+        or UserPrincipalName startswith "adm"
+    | summarize
+        FailedAttempts = count(),
+        UniqueIPs      = dcount(IPAddress),
+        SourceIPs      = make_set(IPAddress, 20),
+        StartTime      = min(TimeGenerated),
+        EndTime        = max(TimeGenerated),
+        Locations      = make_set(Location, 5),
+        Apps           = make_set(AppDisplayName, 5),
+        FailureReasons = make_set(ResultDescription, 5)
+      by UserPrincipalName
+    | where FailedAttempts >= failureThreshold
+    | project
+        TimeGenerated = StartTime,
+        UserPrincipalName, FailedAttempts, UniqueIPs,
+        SourceIPs, Locations, Apps, FailureReasons, EndTime
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  FailedAttempts: FailedAttempts
+  UniqueIPs: UniqueIPs
+alertDetailsOverride:
+  alertDisplayNameFormat: "Privileged Account Attack — {{UserPrincipalName}}"
+  alertDescriptionFormat: "{{FailedAttempts}} sign-in failures from {{UniqueIPs}} IPs against privileged account."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT1H
+    matchingMethod: AllEntities
+    groupByEntities:
+  - Account
+
+
+

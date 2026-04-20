@@ -1,0 +1,82 @@
+id: f0a1b2c3-d4e5-4f6a-7b8c-9d0e1f2a3b4c
+name: "SigninLogs — MFA Fatigue Attack (Push Bombardment)"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects MFA fatigue attacks where an attacker repeatedly triggers MFA push notifications hoping the user approves one out of frustration. Identified by 5 or more MFA result codes (50074, 50076, 50079, 50158) in a 1-hour window for a single user. MITRE ATT&CK: T1621 (MFA Request Generation).
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+relevantTechniques:
+  - T1621
+query: |
+    // ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+    let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+    let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+    let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+    let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+        T
+        | extend IPAddress = tostring(IPAddress)
+        | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+        | mv-apply _r = _allowRange to typeof(string) on (
+            extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+            | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+            | summarize _anyInRange = max(toint(_inRange)))
+        | where isnull(_anyInRange) or _anyInRange == 0
+        | project-away _anyInRange
+    };
+    // ---------------------------------------------------------------------------
+    let mfaBombardThreshold = 5;
+    SigninLogs
+    | invoke _ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(1h)
+    | where ResultType in ("50074", "50076", "50079", "50158")
+    | summarize
+        MFAInterruptCount = count(),
+        FirstInterrupt    = min(TimeGenerated),
+        LastInterrupt     = max(TimeGenerated),
+        SourceIPs         = make_set(IPAddress, 10),
+        Locations         = make_set(Location, 5),
+        Apps              = make_set(AppDisplayName, 5)
+      by UserPrincipalName
+    | where MFAInterruptCount >= mfaBombardThreshold
+    | extend
+        InterruptDurationMin = datetime_diff("minute", LastInterrupt, FirstInterrupt)
+    | project
+        TimeGenerated         = FirstInterrupt,
+        UserPrincipalName,
+        MFAInterruptCount,
+        InterruptDurationMin,
+        SourceIPs, Locations, Apps,
+        LastInterrupt
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  MFAInterruptCount: MFAInterruptCount
+  InterruptDurationMin: InterruptDurationMin
+alertDetailsOverride:
+  alertDisplayNameFormat: "MFA Fatigue Attack — {{UserPrincipalName}} ({{MFAInterruptCount}} pushes)"
+  alertDescriptionFormat: "{{MFAInterruptCount}} MFA push notifications in 1 hour for {{UserPrincipalName}} — possible MFA bombardment."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT1H
+    matchingMethod: AllEntities
+    groupByEntities:
+  - Account
+
+
+

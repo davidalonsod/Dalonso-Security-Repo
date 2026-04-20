@@ -1,0 +1,95 @@
+id: b8c9d0e1-f2a3-4b4c-5d6e-7f8a9b0c1d2e
+name: "SigninLogs — Legacy Auth First Appearance for Modern-Only Account"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects accounts that used exclusively modern auth for the past 14 days but then suddenly appear using legacy protocols (IMAP4, POP3, SMTP Auth, Exchange ActiveSync). Legacy auth bypasses Conditional Access and MFA — this is a high-fidelity signal of credential theft or policy evasion. MITRE ATT&CK: T1550 (Use Alternate Auth Material), T1078 (Valid Accounts).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: PT6H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - DefenseEvasion
+  - CredentialAccess
+relevantTechniques:
+  - T1550
+  - T1078
+query: |
+    // ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+    let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+    let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+    let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+    let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+        T
+        | extend IPAddress = tostring(IPAddress)
+        | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+        | mv-apply _r = _allowRange to typeof(string) on (
+            extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+            | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+            | summarize _anyInRange = max(toint(_inRange)))
+        | where isnull(_anyInRange) or _anyInRange == 0
+        | project-away _anyInRange
+    };
+    // ---------------------------------------------------------------------------
+    let lookback       = 1d;
+    let baselinePeriod = 14d;
+    let legacyClients  = dynamic([
+        "Exchange ActiveSync", "IMAP4", "POP3",
+        "Authenticated SMTP", "MAPI over HTTP",
+        "Other clients; IMAP", "Other clients; POP",
+        "Other clients; SMTP"
+    ]);
+    let ModernOnlyAccounts =
+        SigninLogs
+        | invoke _ExcludeAllowlistedIPs()
+        | where TimeGenerated between (ago(baselinePeriod) .. ago(lookback))
+        | where ResultType == "0"
+        | summarize LegacyCount = countif(ClientAppUsed has_any (legacyClients))
+            by UserPrincipalName
+        | where LegacyCount == 0
+        | project UserPrincipalName;
+    SigninLogs
+    | invoke _ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(lookback)
+    | where ResultType == "0"
+    | where ClientAppUsed has_any (legacyClients)
+    | where isnotempty(UserPrincipalName)
+    | join kind=inner ModernOnlyAccounts on UserPrincipalName
+    | project
+        TimeGenerated, UserPrincipalName,
+        IPAddress, Location,
+        ClientAppUsed, AppDisplayName,
+        RiskLevelDuringSignIn, ConditionalAccessStatus
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  ClientAppUsed: ClientAppUsed
+  AppDisplayName: AppDisplayName
+alertDetailsOverride:
+  alertDisplayNameFormat: "Legacy Auth First Appearance — {{UserPrincipalName}} using {{ClientAppUsed}}"
+  alertDescriptionFormat: "Account {{UserPrincipalName}} authenticated via {{ClientAppUsed}} from {{IPAddress}} — account exclusively used modern auth in the prior 14 days. Possible CA bypass."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: AllEntities
+    groupByEntities:
+  - Account
+  - IP
+
+
+

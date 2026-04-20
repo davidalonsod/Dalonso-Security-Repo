@@ -1,0 +1,2448 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Microsoft Sentinel Log Analytics workspace name"
+      }
+    },
+    "watchlistAlias": {
+      "type": "string",
+      "defaultValue": "NetworkAllowlist",
+      "metadata": {
+        "description": "Watchlist alias referenced by every rule and hunting query."
+      }
+    },
+    "functionAlias": {
+      "type": "string",
+      "defaultValue": "ExcludeAllowlistedIPs",
+      "metadata": {
+        "description": "Saved-function alias: SigninLogs | invoke ExcludeAllowlistedIPs()."
+      }
+    },
+    "watchlistRawContent": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "(Optional) Fully-formed CSV (CRLF-separated) for the NetworkAllowlist watchlist. Leave blank to use the built-in 'defaultWatchlistEntries' variable defined in this template. Header row must be: IPOrRange,Description,Owner,AddedDate"
+      }
+    }
+  },
+  "variables": {
+    "defaultWatchlistEntries": [
+      "163.10.0.0/16,Corporate egress range,SOC,2026-04-20",
+      "10.0.0.0/8,RFC1918 private space,SOC,2026-04-20",
+      "172.16.0.0/12,RFC1918 private space,SOC,2026-04-20",
+      "192.168.0.0/16,RFC1918 private space,SOC,2026-04-20"
+    ],
+    "csvHeader": "IPOrRange,Description,Owner,AddedDate",
+    "crlf": "[json('\"\\r\\n\"')]",
+    "builtCsv": "[concat(variables('csvHeader'), variables('crlf'), join(variables('defaultWatchlistEntries'), variables('crlf')), variables('crlf'))]",
+    "effectiveRawContent": "[if(empty(parameters('watchlistRawContent')), variables('builtCsv'), parameters('watchlistRawContent'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "apiVersion": "2023-02-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/', parameters('watchlistAlias'))]",
+      "properties": {
+        "displayName": "Network Allowlist (Trusted IP / CIDR / Ranges)",
+        "source": "NetworkAllowlist.csv",
+        "sourceType": "Local file",
+        "provider": "SOC",
+        "description": "Trusted IPs, CIDR subnets and IPv4 ranges excluded from SigninLogs analytic rules and hunting queries to suppress false positives.",
+        "itemsSearchKey": "IPOrRange",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "[variables('effectiveRawContent')]"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', parameters('functionAlias'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "[parameters('functionAlias')]",
+        "category": "Security - Functions",
+        "functionAlias": "[parameters('functionAlias')]",
+        "functionParameters": "T:(IPAddress:string)",
+        "query": "let _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nT\n| extend IPAddress = tostring(IPAddress)\n| where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n| mv-apply _r = _allowRange to typeof(string) on (\n    extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n    | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n    | summarize _anyInRange = max(toint(_inRange)))\n| where isnull(_anyInRange) or _anyInRange == 0\n| project-away _anyInRange",
+        "version": 2,
+        "tags": [
+          {
+            "name": "Description",
+            "value": "Filters any table with an IPAddress column, excluding rows whose IPv4 matches the NetworkAllowlist watchlist (single IPs, CIDR subnets, IPv4 start-end ranges)."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Password Spray Attack (Single IP, Many Accounts)",
+        "description": "Detects password spray attacks where a single IP address targets 10 or more distinct user accounts with authentication failures within a 1-hour window. Attackers deliberately stay under per-user lockout thresholds. MITRE ATT&CK: T1110.003 (Password Spraying).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet timeframe = 1h;\nlet userThreshold = 10;\nlet failureThreshold = 5;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(timeframe)\n| where ResultType != \"0\"\n| summarize\n    FailedAttempts = count(),\n    UniqueUsers    = dcount(UserPrincipalName),\n    TargetedUsers  = make_set(UserPrincipalName, 50),\n    StartTime      = min(TimeGenerated),\n    EndTime        = max(TimeGenerated),\n    Apps           = make_set(AppDisplayName, 5),\n    Locations      = make_set(Location, 3)\n  by IPAddress\n| where UniqueUsers >= userThreshold and FailedAttempts >= failureThreshold\n| project\n    TimeGenerated  = StartTime,\n    IPAddress, UniqueUsers, FailedAttempts,\n    TargetedUsers, EndTime, Apps, Locations",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess"
+        ],
+        "techniques": [
+          "T1110"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "UniqueUsers": "UniqueUsers",
+          "FailedAttempts": "FailedAttempts"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Password Spray from {{IPAddress}} — {{UniqueUsers}} accounts targeted",
+          "alertDescriptionFormat": "{{FailedAttempts}} failures from {{IPAddress}} targeting {{UniqueUsers}} accounts in 1 hour."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','d2e3f4a5-b6c7-4d8e-9f0a-1b2c3d4e5f6a')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Brute Force Success Chain (Possible Account Breach)",
+        "description": "Detects a successful sign-in occurring within 30 minutes of 5 or more failed attempts from the same IP against the same user. This pattern is a strong indicator of a successful breach following a brute force attack. MITRE ATT&CK: T1110 (Brute Force), T1078 (Valid Accounts).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet timeframe        = 1h;\nlet failureThreshold = 5;\nlet successWindow    = 30m;\nlet FailedLogins =\n    SigninLogs\n    | invoke _ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(timeframe)\n    | where ResultType != \"0\"\n    | summarize\n        FailureCount   = count(),\n        LastFailure    = max(TimeGenerated),\n        FailureReasons = make_set(ResultDescription, 5)\n      by UserPrincipalName, IPAddress\n    | where FailureCount >= failureThreshold;\nlet SuccessfulLogins =\n    SigninLogs\n    | invoke _ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(timeframe)\n    | where ResultType == \"0\"\n    | project\n        UserPrincipalName, IPAddress,\n        SuccessTime = TimeGenerated,\n        Location, AppDisplayName,\n        RiskLevelDuringSignIn;\nFailedLogins\n| join kind=inner SuccessfulLogins on UserPrincipalName, IPAddress\n| where SuccessTime > LastFailure\n| where SuccessTime - LastFailure <= successWindow\n| extend\n    TimeSinceLastFailure = datetime_diff(\"minute\", SuccessTime, LastFailure)\n| project\n    TimeGenerated        = SuccessTime,\n    UserPrincipalName, IPAddress, Location,\n    AppDisplayName, FailureCount,\n    TimeSinceLastFailure, FailureReasons,\n    RiskLevelDuringSignIn",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess",
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1110",
+          "T1078"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "FailureCount": "FailureCount",
+          "TimeSinceLastFailure": "TimeSinceLastFailure"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Brute Force Breach — {{UserPrincipalName}} ({{FailureCount}} failures then success)",
+          "alertDescriptionFormat": "Sign-in from {{IPAddress}} succeeded after {{FailureCount}} failures — possible account compromise."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account",
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','e3f4a5b6-c7d8-4e9f-0a1b-2c3d4e5f6a7b')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Credential Stuffing Attack (High-Velocity Invalid Credentials)",
+        "description": "Detects credential stuffing attacks: a single IP generating 50 or more ResultType 50126 errors (invalid username or password) against multiple accounts. Attackers use credential lists from previous data breaches. MITRE ATT&CK: T1110.004 (Credential Stuffing).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet velocityThreshold = 50;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(7d)\n| where ResultType == \"50126\"\n| summarize\n    InvalidCredAttempts = count(),\n    UniqueUsers         = dcount(UserPrincipalName),\n    Users               = make_set(UserPrincipalName, 50),\n    StartTime           = min(TimeGenerated),\n    EndTime             = max(TimeGenerated),\n    Locations           = make_set(Location, 5)\n  by IPAddress\n| where InvalidCredAttempts >= velocityThreshold\n| project\n    TimeGenerated = StartTime,\n    IPAddress, InvalidCredAttempts, UniqueUsers,\n    Users, EndTime, Locations",
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess"
+        ],
+        "techniques": [
+          "T1110"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "InvalidCredAttempts": "InvalidCredAttempts",
+          "UniqueUsers": "UniqueUsers"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Credential Stuffing from {{IPAddress}} — {{InvalidCredAttempts}} attempts",
+          "alertDescriptionFormat": "{{UniqueUsers}} accounts targeted with invalid credentials (50126) from {{IPAddress}} over 7 days."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','f4a5b6c7-d8e9-4f0a-1b2c-3d4e5f6a7b8c')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Impossible Travel (3+ Countries in 1 Hour)",
+        "description": "Detects users authenticating from 3 or more distinct geographic locations within a 1-hour window — physically impossible travel. Indicates account compromise, credential sharing, or VPN/proxy abuse. MITRE ATT&CK: T1078 (Valid Accounts).",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(7d)\n| where isnotempty(Location) and isnotempty(IPAddress)\n| summarize\n    UniqueLocations = dcount(Location),\n    Locations       = make_set(Location),\n    IPs             = make_set(IPAddress),\n    FailedCount     = countif(ResultType != \"0\"),\n    SuccessCount    = countif(ResultType == \"0\"),\n    StartTime       = min(TimeGenerated),\n    EndTime         = max(TimeGenerated)\n  by UserPrincipalName\n| where UniqueLocations >= 3\n| project\n    TimeGenerated = StartTime,\n    UserPrincipalName, UniqueLocations,\n    Locations, IPs, FailedCount, SuccessCount, EndTime",
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1078"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "UniqueLocations": "UniqueLocations",
+          "FailedCount": "FailedCount"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Impossible Travel — {{UserPrincipalName}} across {{UniqueLocations}} countries",
+          "alertDescriptionFormat": "User authenticated from {{UniqueLocations}} distinct countries — impossible physical travel detected."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','a5b6c7d8-e9f0-4a1b-2c3d-4e5f6a7b8c9d')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Legacy Authentication Brute Force (IMAP/POP/SMTP)",
+        "description": "Detects brute force attacks using legacy authentication protocols (IMAP, POP3, SMTP, Exchange ActiveSync). Legacy auth bypasses MFA and Conditional Access — any sustained attack via these protocols warrants immediate investigation. MITRE ATT&CK: T1110 (Brute Force), T1550 (Use Alternate Authentication Material).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet failureThreshold = 10;\nlet legacyProtocols  = dynamic([\n    \"IMAP\", \"POP\", \"SMTP\", \"Authenticated SMTP\",\n    \"Exchange ActiveSync\", \"Other clients\"]);\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(1h)\n| where ClientAppUsed in (legacyProtocols)\n| where ResultType != \"0\"\n| summarize\n    FailedAttempts = count(),\n    UniqueUsers    = dcount(UserPrincipalName),\n    TargetedUsers  = make_set(UserPrincipalName, 50),\n    Protocols      = make_set(ClientAppUsed),\n    StartTime      = min(TimeGenerated),\n    EndTime        = max(TimeGenerated),\n    Locations      = make_set(Location, 5)\n  by IPAddress\n| where FailedAttempts >= failureThreshold\n| project\n    TimeGenerated = StartTime,\n    IPAddress, FailedAttempts, UniqueUsers,\n    TargetedUsers, Protocols, Locations, EndTime",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1110",
+          "T1550"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "FailedAttempts": "FailedAttempts",
+          "UniqueUsers": "UniqueUsers"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Legacy Auth Brute Force from {{IPAddress}} — {{UniqueUsers}} accounts",
+          "alertDescriptionFormat": "{{FailedAttempts}} failed legacy auth attempts (IMAP/POP/SMTP) from {{IPAddress}}."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','b6c7d8e9-f0a1-4b2c-3d4e-5f6a7b8c9d0e')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Privileged Account Under Attack (Low-Threshold Failures)",
+        "description": "Detects authentication failures against accounts with admin or privileged naming conventions. Uses a lower threshold (3 failures) than standard brute force rules because any attack against privileged accounts is high-priority. MITRE ATT&CK: T1110 (Brute Force), T1078 (Valid Accounts — Privileged).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet failureThreshold  = 3;\nlet privilegedKeywords = dynamic([\n    \"admin\", \"administrator\", \"root\", \"global\", \"security\",\n    \"privileged\", \"svc\", \"elevated\", \"tier0\",\n    \"da-\", \"ea-\", \"ga-\", \"pa-\"]);\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(1h)\n| where ResultType != \"0\"\n| where UserPrincipalName has_any (privilegedKeywords)\n    or UserPrincipalName contains \"_adm\"\n    or UserPrincipalName startswith \"adm\"\n| summarize\n    FailedAttempts = count(),\n    UniqueIPs      = dcount(IPAddress),\n    SourceIPs      = make_set(IPAddress, 20),\n    StartTime      = min(TimeGenerated),\n    EndTime        = max(TimeGenerated),\n    Locations      = make_set(Location, 5),\n    Apps           = make_set(AppDisplayName, 5),\n    FailureReasons = make_set(ResultDescription, 5)\n  by UserPrincipalName\n| where FailedAttempts >= failureThreshold\n| project\n    TimeGenerated = StartTime,\n    UserPrincipalName, FailedAttempts, UniqueIPs,\n    SourceIPs, Locations, Apps, FailureReasons, EndTime",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess",
+          "PrivilegeEscalation"
+        ],
+        "techniques": [
+          "T1110",
+          "T1078"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "FailedAttempts": "FailedAttempts",
+          "UniqueIPs": "UniqueIPs"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Privileged Account Attack — {{UserPrincipalName}}",
+          "alertDescriptionFormat": "{{FailedAttempts}} sign-in failures from {{UniqueIPs}} IPs against privileged account."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','c7d8e9f0-a1b2-4c3d-4e5f-6a7b8c9d0e1f')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Nation State IP Sign-In Detected",
+        "description": "Detects sign-ins where Azure AD Identity Protection tagged the source IP as affiliated with a nation-state threat actor (estsNationStateIP risk event type). Requires Entra ID P2 and Microsoft Defender for Identity. MITRE ATT&CK: T1078 (Valid Accounts).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(7d)\n| extend V2Risk = tostring(RiskEventTypes_V2)\n| where V2Risk contains \"estsNationStateIP\"\n| project\n    TimeGenerated,\n    UserPrincipalName, IPAddress,\n    Location, AppDisplayName,\n    ResultType, ResultDescription,\n    RiskLevel = RiskLevelDuringSignIn,\n    RiskEventTypes_V2",
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1078"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "Location": "Location",
+          "RiskLevel": "RiskLevel"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Nation State IP Sign-In — {{UserPrincipalName}} from {{IPAddress}}",
+          "alertDescriptionFormat": "Sign-in from {{IPAddress}} flagged as nation-state IP — {{RiskLevel}} risk level."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account",
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','d8e9f0a1-b2c3-4d4e-5f6a-7b8c9d0e1f2a')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Attacker in the Middle (AiTM) Token Theft Detected",
+        "description": "Detects AiTM proxy attacks (Evilginx, Modlishka) that steal session cookies after MFA. Correlates SecurityAlert 'Anomalous Token' events with AADUserRiskEvents where RiskEventType == attackerinTheMiddle. Requires Entra ID P2. MITRE ATT&CK: T1557 (Adversary-in-the-Middle), T1539 (Steal Web Session Cookie).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet AnomalousTokenRequestIds =\n    SecurityAlert\n    | where TimeGenerated > ago(7d)\n    | where AlertName == \"Anomalous Token\"\n    | mv-expand todynamic(Entities)\n    | project Entities\n    | extend RequestId = tostring(Entities.RequestId)\n    | distinct RequestId;\nAADUserRiskEvents\n| where TimeGenerated > ago(7d)\n| where RequestId has_any (AnomalousTokenRequestIds)\n| where RiskEventType == \"attackerinTheMiddle\"\n| join kind=leftouter (\n    SigninLogs\n    | invoke _ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(7d)\n    | project\n        UserPrincipalName, CorrelationId,\n        Location, AppDisplayName, IPAddress,\n        RiskLevelDuringSignIn\n  ) on $left.CorrelationId == $right.CorrelationId\n| project\n    TimeGenerated,\n    UserPrincipalName,\n    RiskEventType, IPAddress,\n    Location, AppDisplayName,\n    RiskLevelDuringSignIn",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess",
+          "Collection"
+        ],
+        "techniques": [
+          "T1557",
+          "T1539"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "AppDisplayName": "AppDisplayName",
+          "RiskEventType": "RiskEventType"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "AiTM Token Theft — {{UserPrincipalName}} from {{IPAddress}}",
+          "alertDescriptionFormat": "Attacker-in-the-Middle session hijack detected — {{AppDisplayName}} session token stolen post-MFA."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account",
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','e9f0a1b2-c3d4-4e5f-6a7b-8c9d0e1f2a3b')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Distributed Coordinated Attack (Botnet, 10+ IPs per User)",
+        "description": "Detects highly distributed attacks where a single user is targeted from 10 or more unique IP addresses over 30 days. This pattern indicates botnet infrastructure or a coordinated campaign targeting high-value accounts. MITRE ATT&CK: T1110 (Brute Force).",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet ipThreshold = 10;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(14d)\n| where ResultType != \"0\"\n| summarize\n    UniqueIPs      = dcount(IPAddress),\n    FailedAttempts = count(),\n    SourceIPs      = make_set(IPAddress, 100),\n    StartTime      = min(TimeGenerated),\n    EndTime        = max(TimeGenerated),\n    Locations      = make_set(Location, 20)\n  by UserPrincipalName\n| where UniqueIPs >= ipThreshold\n| project\n    TimeGenerated  = StartTime,\n    UserPrincipalName, UniqueIPs,\n    FailedAttempts, SourceIPs,\n    EndTime, Locations",
+        "queryFrequency": "PT12H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess"
+        ],
+        "techniques": [
+          "T1110"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "UniqueIPs": "UniqueIPs",
+          "FailedAttempts": "FailedAttempts"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Coordinated Attack — {{UserPrincipalName}} targeted from {{UniqueIPs}} IPs",
+          "alertDescriptionFormat": "{{FailedAttempts}} failures from {{UniqueIPs}} distinct IPs — botnet or coordinated campaign."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','f0a1b2c3-d4e5-4f6a-7b8c-9d0e1f2a3b4c')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — MFA Fatigue Attack (Push Bombardment)",
+        "description": "Detects MFA fatigue attacks where an attacker repeatedly triggers MFA push notifications hoping the user approves one out of frustration. Identified by 5 or more MFA result codes (50074, 50076, 50079, 50158) in a 1-hour window for a single user. MITRE ATT&CK: T1621 (MFA Request Generation).",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet mfaBombardThreshold = 5;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(1h)\n| where ResultType in (\"50074\", \"50076\", \"50079\", \"50158\")\n| summarize\n    MFAInterruptCount = count(),\n    FirstInterrupt    = min(TimeGenerated),\n    LastInterrupt     = max(TimeGenerated),\n    SourceIPs         = make_set(IPAddress, 10),\n    Locations         = make_set(Location, 5),\n    Apps              = make_set(AppDisplayName, 5)\n  by UserPrincipalName\n| where MFAInterruptCount >= mfaBombardThreshold\n| extend\n    InterruptDurationMin = datetime_diff(\"minute\", LastInterrupt, FirstInterrupt)\n| project\n    TimeGenerated         = FirstInterrupt,\n    UserPrincipalName,\n    MFAInterruptCount,\n    InterruptDurationMin,\n    SourceIPs, Locations, Apps,\n    LastInterrupt",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess"
+        ],
+        "techniques": [
+          "T1621"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "MFAInterruptCount": "MFAInterruptCount",
+          "InterruptDurationMin": "InterruptDurationMin"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "MFA Fatigue Attack — {{UserPrincipalName}} ({{MFAInterruptCount}} pushes)",
+          "alertDescriptionFormat": "{{MFAInterruptCount}} MFA push notifications in 1 hour for {{UserPrincipalName}} — possible MFA bombardment."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Slow & Low Password Spray (Multi-Day Evasion)",
+        "description": "Detects password spray campaigns deliberately spread over multiple days to evade per-hour detection thresholds. Identifies a single IP targeting 3+ distinct accounts per day across 3+ separate days. Classic TTP from adversary groups using purchased credential lists at low throttle rates. MITRE ATT&CK: T1110.003 (Password Spraying).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet lookback          = 7d;\nlet minAccountsPerDay = 3;\nlet minActiveDays     = 3;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(lookback)\n| where ResultType != \"0\"\n| where isnotempty(IPAddress)\n| extend Day = bin(TimeGenerated, 1d)\n| summarize\n    AccountsOnDay = dcount(UserPrincipalName),\n    FailuresOnDay = count()\n  by IPAddress, Day\n| where AccountsOnDay >= minAccountsPerDay\n| summarize\n    DaysActive    = dcount(Day),\n    TotalAccounts = sum(AccountsOnDay),\n    TotalFailures = sum(FailuresOnDay),\n    ActiveDays    = make_set(Day, 10),\n    StartDay      = min(Day),\n    EndDay        = max(Day)\n  by IPAddress\n| where DaysActive >= minActiveDays\n| project\n    TimeGenerated = EndDay,\n    IPAddress,\n    DaysActive,\n    TotalAccounts,\n    TotalFailures,\n    StartDay,\n    EndDay,\n    ActiveDays",
+        "queryFrequency": "P1D",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess"
+        ],
+        "techniques": [
+          "T1110"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "DaysActive": "DaysActive",
+          "TotalAccounts": "TotalAccounts",
+          "TotalFailures": "TotalFailures"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Slow & Low Spray from {{IPAddress}} — {{DaysActive}} active days, {{TotalAccounts}} accounts",
+          "alertDescriptionFormat": "IP {{IPAddress}} spread {{TotalAccounts}} targeted accounts across {{DaysActive}} active days — multi-day evasion of per-hour spray detection."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "P1D",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Account Enumeration via Error Code Fingerprinting",
+        "description": "Detects attackers performing user enumeration by analysing sign-in error codes. Error 50034 (UserNotFound) reveals non-existent accounts; error 50126 confirms the account exists. A high ratio of 50034 errors indicates systematic enumeration of valid users before a targeted spray. MITRE ATT&CK: T1087.002 (Domain Account Discovery), T1110 (Brute Force).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet lookback      = 6h;\nlet minAttempts   = 20;\nlet enumRatioMin  = 0.40;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(lookback)\n| where ResultType in (\"50034\", \"50126\", \"50057\", \"70011\")\n| where isnotempty(IPAddress)\n| summarize\n    TotalAttempts   = count(),\n    UserNotFound    = countif(ResultType == \"50034\"),\n    InvalidPassword = countif(ResultType == \"50126\"),\n    AccountDisabled = countif(ResultType == \"50057\"),\n    UniqueTargets   = dcount(UserPrincipalName),\n    TargetedUsers   = make_set(UserPrincipalName, 30),\n    Locations       = make_set(Location, 3),\n    FirstAttempt    = min(TimeGenerated),\n    LastAttempt     = max(TimeGenerated)\n  by IPAddress\n| where TotalAttempts >= minAttempts\n| extend EnumRatio = round(todouble(UserNotFound) / TotalAttempts, 2)\n| where EnumRatio >= enumRatioMin\n| project\n    TimeGenerated   = FirstAttempt,\n    IPAddress,\n    TotalAttempts,\n    UserNotFound,\n    InvalidPassword,\n    UniqueTargets,\n    EnumRatio,\n    TargetedUsers,\n    Locations,\n    LastAttempt",
+        "queryFrequency": "PT6H",
+        "queryPeriod": "PT6H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Discovery",
+          "CredentialAccess"
+        ],
+        "techniques": [
+          "T1087",
+          "T1110"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "TotalAttempts": "TotalAttempts",
+          "UserNotFound": "UserNotFound",
+          "EnumRatio": "EnumRatio"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Account Enumeration from {{IPAddress}} — {{EnumRatio}} UserNotFound ratio ({{TotalAttempts}} probes)",
+          "alertDescriptionFormat": "IP {{IPAddress}} probed accounts with {{EnumRatio}} UserNotFound ratio — user enumeration pattern before a targeted spray attack."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','c3d4e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Service Account Interactive Browser Sign-In",
+        "description": "Detects service accounts and non-human identities performing interactive browser-based sign-ins. Service accounts should only authenticate via client credentials or managed identity flows. Interactive sessions indicate credential theft or an attacker manually leveraging stolen service account creds. MITRE ATT&CK: T1078 (Valid Accounts), T1078.004 (Cloud Accounts).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet serviceAccountKeywords = dynamic([\n    \"svc\", \"svc-\", \"svc.\", \"-svc\", \"_svc\",\n    \"app-\", \"app_\", \"api-\", \"api_\",\n    \"bot-\", \"bot_\", \"sys-\", \"sys_\",\n    \"func-\", \"func_\", \"daemon\", \"automation\",\n    \"robot\", \"service_\", \"service-\", \"noreply\",\n    \"pipeline\", \"cicd\", \"ci-\", \"cd-\"\n]);\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(4h)\n| where ResultType == \"0\"\n| where IsInteractive == true\n| where ClientAppUsed == \"Browser\"\n| where UserPrincipalName has_any (serviceAccountKeywords)\n| project\n    TimeGenerated,\n    UserPrincipalName,\n    IPAddress,\n    Location,\n    AppDisplayName,\n    RiskLevel = RiskLevelDuringSignIn,\n    CAStatus = ConditionalAccessStatus,\n    UserAgent",
+        "queryFrequency": "PT4H",
+        "queryPeriod": "PT4H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "Persistence"
+        ],
+        "techniques": [
+          "T1078"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "AppDisplayName": "AppDisplayName",
+          "CAStatus": "CAStatus"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Service Account Interactive Login — {{UserPrincipalName}} from {{IPAddress}}",
+          "alertDescriptionFormat": "Service account {{UserPrincipalName}} used a browser session from {{IPAddress}} — service accounts should never authenticate interactively. Possible credential theft."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account",
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f8a')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Password Reset Followed by New-Country Sign-In (Account Takeover)",
+        "description": "Detects a high-confidence account takeover pattern: a password reset followed within 2 hours by a successful sign-in from a country not seen in the prior 30 days. This chain strongly indicates an attacker reset the victim password via a phishing-obtained session and immediately used the new credential. MITRE ATT&CK: T1078 (Valid Accounts), T1098 (Account Manipulation).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet lookback       = 2h;\nlet baselinePeriod = 30d;\nlet resetWindow    = 2h;\nlet ResetEvents =\n    AuditLogs\n    | where TimeGenerated > ago(lookback + resetWindow)\n    | where OperationName in (\n          \"Reset password (self-service)\",\n          \"Reset user password\",\n          \"Admin reset user password\"\n      )\n    | extend TargetUPN = tolower(tostring(TargetResources[0].userPrincipalName))\n    | where isnotempty(TargetUPN)\n    | project ResetTime = TimeGenerated, TargetUPN;\nlet KnownLocations =\n    SigninLogs\n    | invoke _ExcludeAllowlistedIPs()\n    | where TimeGenerated between (ago(baselinePeriod) .. ago(lookback))\n    | where ResultType == \"0\"\n    | where isnotempty(Location) and Location != \"Unknown\"\n    | distinct UserPrincipalName, Location;\nResetEvents\n| join kind=inner (\n    SigninLogs\n    | invoke _ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(lookback + resetWindow)\n    | where ResultType == \"0\"\n    | where isnotempty(Location) and Location != \"Unknown\"\n    | extend UserPrincipalName = tolower(UserPrincipalName)\n    | project\n        UserPrincipalName, SignInTime = TimeGenerated,\n        IPAddress, Location, AppDisplayName,\n        RiskLevelDuringSignIn\n  ) on $left.TargetUPN == $right.UserPrincipalName\n| where SignInTime > ResetTime\n| where SignInTime - ResetTime <= resetWindow\n| join kind=leftanti KnownLocations on UserPrincipalName, Location\n| extend MinutesSinceReset = datetime_diff(\"minute\", SignInTime, ResetTime)\n| project\n    TimeGenerated        = SignInTime,\n    UserPrincipalName, IPAddress, Location,\n    AppDisplayName, RiskLevelDuringSignIn,\n    ResetTime, MinutesSinceReset",
+        "queryFrequency": "PT2H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "Persistence"
+        ],
+        "techniques": [
+          "T1078",
+          "T1098"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "Location": "Location",
+          "MinutesSinceReset": "MinutesSinceReset"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Account Takeover — {{UserPrincipalName}} signed in from {{Location}} {{MinutesSinceReset}}m after reset",
+          "alertDescriptionFormat": "Account {{UserPrincipalName}} authenticated from a new country ({{Location}}) only {{MinutesSinceReset}} minutes after a password reset — strong indicator of account takeover."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account",
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8a9b')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Off-Hours Sign-In by Privileged Account",
+        "description": "Detects privileged accounts signing in between 22:00 and 05:00 UTC. Off-hours admin access is a key hunting signal for insider threats, living-off-the-land attackers, and compromised admin credentials. Investigate alongside concurrent AuditLogs activity. MITRE ATT&CK: T1078 (Valid Accounts), T1098 (Account Manipulation).",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet privilegedKeywords = dynamic([\n    \"admin\", \"adm-\", \"adm.\", \"-adm\", \"_adm\",\n    \"da-\", \"ea-\", \"ga-\", \"pa-\",\n    \"tier0\", \"tier-0\", \"t0-\",\n    \"priv\", \"svc.adm\", \"svc-adm\",\n    \"globaladmin\", \"secadmin\", \"cloudadmin\"\n]);\nlet offHoursStart = 22;\nlet offHoursEnd   = 5;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(1h)\n| where ResultType == \"0\"\n| where UserPrincipalName has_any (privilegedKeywords)\n| extend HourOfDay = hourofday(TimeGenerated)\n| where HourOfDay >= offHoursStart or HourOfDay < offHoursEnd\n| project\n    TimeGenerated, UserPrincipalName,\n    IPAddress, Location,\n    AppDisplayName, HourOfDay,\n    RiskLevelDuringSignIn, ConditionalAccessStatus,\n    IsInteractive",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "Persistence"
+        ],
+        "techniques": [
+          "T1078",
+          "T1098"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "HourOfDay": "HourOfDay",
+          "AppDisplayName": "AppDisplayName"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Off-Hours Privileged Sign-In — {{UserPrincipalName}} at {{HourOfDay}}:00 UTC from {{Location}}",
+          "alertDescriptionFormat": "Privileged account {{UserPrincipalName}} signed in at {{HourOfDay}}:00 UTC outside business hours. Investigate for unauthorized admin activity."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','f6a7b8c9-d0e1-4f2a-3b4c-5d6e7f8a9b0c')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Concurrent Sessions from Multiple Countries (Same User)",
+        "description": "Detects a single user successfully signing in from 2 or more distinct countries within a 30-minute window. Unlike ML-based impossible travel this is deterministic, requires no Entra ID P2, and catches concurrent attacker + victim sessions running in parallel from different geos. MITRE ATT&CK: T1078 (Valid Accounts).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet lookback   = 1h;\nlet maxWindowM = 30;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(lookback)\n| where ResultType == \"0\"\n| where isnotempty(Location) and Location != \"Unknown\"\n| summarize\n    UniqueCountries = dcount(Location),\n    Countries       = make_set(Location, 10),\n    SourceIPs       = make_set(IPAddress, 10),\n    Apps            = make_set(AppDisplayName, 5),\n    FirstSignIn     = min(TimeGenerated),\n    LastSignIn      = max(TimeGenerated)\n  by UserPrincipalName\n| where UniqueCountries >= 2\n| extend WindowMinutes = datetime_diff(\"minute\", LastSignIn, FirstSignIn)\n| where WindowMinutes <= maxWindowM\n| project\n    TimeGenerated = FirstSignIn,\n    UserPrincipalName, UniqueCountries,\n    Countries, SourceIPs, WindowMinutes,\n    Apps, LastSignIn",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "CredentialAccess"
+        ],
+        "techniques": [
+          "T1078"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "UniqueCountries": "UniqueCountries",
+          "Countries": "Countries",
+          "WindowMinutes": "WindowMinutes"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Concurrent Multi-Country Sessions — {{UserPrincipalName}} in {{UniqueCountries}} countries ({{WindowMinutes}}min)",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} authenticated from {{UniqueCountries}} different countries within {{WindowMinutes}} minutes — possible concurrent attacker session."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','a7b8c9d0-e1f2-4a3b-4c5d-6e7f8a9b0c1d')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Device Code Flow Authentication (Phishing Vector)",
+        "description": "Detects successful device code flow authentications where one IP collects tokens for 2 or more accounts. Attackers phish victims to device.microsoft.com to enter a code the attacker generated — bypassing password and MFA. Actively used by Storm-0539 and Midnight Blizzard. MITRE ATT&CK: T1566 (Phishing), T1528 (Steal Application Access Token).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet lookback      = 4h;\nlet multiUserMin  = 2;\nlet highVolumeMin = 5;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(lookback)\n| where AuthenticationProtocol == \"deviceCode\"\n| where ResultType == \"0\"\n| summarize\n    SuccessCount  = count(),\n    UniqueUsers   = dcount(UserPrincipalName),\n    TargetedUsers = make_set(UserPrincipalName, 20),\n    Locations     = make_set(Location, 5),\n    Apps          = make_set(AppDisplayName, 5),\n    FirstSeen     = min(TimeGenerated),\n    LastSeen      = max(TimeGenerated)\n  by IPAddress\n| where UniqueUsers >= multiUserMin or SuccessCount >= highVolumeMin\n| project\n    TimeGenerated = FirstSeen,\n    IPAddress, SuccessCount, UniqueUsers,\n    TargetedUsers, Locations, Apps, LastSeen",
+        "queryFrequency": "PT4H",
+        "queryPeriod": "PT4H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "CredentialAccess"
+        ],
+        "techniques": [
+          "T1566",
+          "T1528"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "SuccessCount": "SuccessCount",
+          "UniqueUsers": "UniqueUsers"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Device Code Phishing — {{IPAddress}} collected tokens for {{UniqueUsers}} accounts",
+          "alertDescriptionFormat": "IP {{IPAddress}} obtained {{SuccessCount}} device code flow tokens for {{UniqueUsers}} users — classic device-code phishing pattern (Storm-0539, Midnight Blizzard TTP)."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','b8c9d0e1-f2a3-4b4c-5d6e-7f8a9b0c1d2e')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Legacy Auth First Appearance for Modern-Only Account",
+        "description": "Detects accounts that used exclusively modern auth for the past 14 days but then suddenly appear using legacy protocols (IMAP4, POP3, SMTP Auth, Exchange ActiveSync). Legacy auth bypasses Conditional Access and MFA — this is a high-fidelity signal of credential theft or policy evasion. MITRE ATT&CK: T1550 (Use Alternate Auth Material), T1078 (Valid Accounts).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet lookback       = 1d;\nlet baselinePeriod = 14d;\nlet legacyClients  = dynamic([\n    \"Exchange ActiveSync\", \"IMAP4\", \"POP3\",\n    \"Authenticated SMTP\", \"MAPI over HTTP\",\n    \"Other clients; IMAP\", \"Other clients; POP\",\n    \"Other clients; SMTP\"\n]);\nlet ModernOnlyAccounts =\n    SigninLogs\n    | invoke _ExcludeAllowlistedIPs()\n    | where TimeGenerated between (ago(baselinePeriod) .. ago(lookback))\n    | where ResultType == \"0\"\n    | summarize LegacyCount = countif(ClientAppUsed has_any (legacyClients))\n        by UserPrincipalName\n    | where LegacyCount == 0\n    | project UserPrincipalName;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(lookback)\n| where ResultType == \"0\"\n| where ClientAppUsed has_any (legacyClients)\n| where isnotempty(UserPrincipalName)\n| join kind=inner ModernOnlyAccounts on UserPrincipalName\n| project\n    TimeGenerated, UserPrincipalName,\n    IPAddress, Location,\n    ClientAppUsed, AppDisplayName,\n    RiskLevelDuringSignIn, ConditionalAccessStatus",
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "DefenseEvasion",
+          "CredentialAccess"
+        ],
+        "techniques": [
+          "T1550",
+          "T1078"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "ClientAppUsed": "ClientAppUsed",
+          "AppDisplayName": "AppDisplayName"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Legacy Auth First Appearance — {{UserPrincipalName}} using {{ClientAppUsed}}",
+          "alertDescriptionFormat": "Account {{UserPrincipalName}} authenticated via {{ClientAppUsed}} from {{IPAddress}} — account exclusively used modern auth in the prior 14 days. Possible CA bypass."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account",
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','c9d0e1f2-a3b4-4c5d-6e7f-8a9b0c1d2e3f')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — High-Frequency Repeated Sign-Ins (Automated Credential Abuse)",
+        "description": "Detects accounts producing 10+ successful sign-in events per hour from the same IP. At that frequency, activity is almost certainly generated by an automated tool, a script, or a C2 framework maintaining stolen token freshness. MITRE ATT&CK: T1078 (Valid Accounts), T1539 (Steal Web Session Cookie).",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet loginMinimum = 10;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(1h)\n| where ResultType == \"0\"\n| where isnotempty(IPAddress) and isnotempty(UserPrincipalName)\n| summarize\n    LoginCount  = count(),\n    UniqueApps  = dcount(AppDisplayName),\n    Apps        = make_set(AppDisplayName, 10),\n    Locations   = make_set(Location, 3),\n    FirstLogin  = min(TimeGenerated),\n    LastLogin   = max(TimeGenerated)\n  by UserPrincipalName, IPAddress\n| where LoginCount >= loginMinimum\n| extend\n    WindowMinutes   = datetime_diff(\"minute\", LastLogin, FirstLogin),\n    LoginFreqPerMin = round(\n        todouble(LoginCount) /\n        (todouble(datetime_diff(\"second\", LastLogin, FirstLogin)) / 60.0 + 1.0), 2)\n| project\n    TimeGenerated = FirstLogin,\n    UserPrincipalName, IPAddress,\n    LoginCount, UniqueApps,\n    LoginFreqPerMin, WindowMinutes,\n    Apps, Locations, LastLogin",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess",
+          "Persistence"
+        ],
+        "techniques": [
+          "T1078",
+          "T1539",
+          "T1528"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "LoginCount": "LoginCount",
+          "LoginFreqPerMin": "LoginFreqPerMin"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Automated Sign-Ins — {{UserPrincipalName}} from {{IPAddress}} — {{LoginCount}} logins/hr",
+          "alertDescriptionFormat": "Account {{UserPrincipalName}} produced {{LoginCount}} successful sign-ins/hour from {{IPAddress}} — automated tooling or C2 token refresh pattern."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT1H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account",
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','d0e1f2a3-b4c5-4d6e-7f8a-9b0c1d2e3f4a')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — First New Country Sign-In for Privileged Account (Deterministic)",
+        "description": "Detects privileged accounts signing in from a country not seen in their 30-day history. Unlike the ML-based Unfamiliar Sign-in Properties rule this is deterministic, requires no Entra ID P2, and specifically targets privileged identities where the risk of compromise is highest. MITRE ATT&CK: T1078 (Valid Accounts), T1078.004 (Cloud Accounts).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet lookback           = 6h;\nlet baselinePeriod     = 14d;\nlet privilegedKeywords = dynamic([\n    \"admin\", \"adm-\", \"adm.\", \"-adm\", \"_adm\",\n    \"da-\", \"ea-\", \"ga-\", \"pa-\",\n    \"tier0\", \"tier-0\", \"t0-\",\n    \"priv\", \"svc.adm\", \"svc-adm\",\n    \"globaladmin\", \"secadmin\", \"cloudadmin\"\n]);\nlet KnownAdminLocations =\n    SigninLogs\n    | invoke _ExcludeAllowlistedIPs()\n    | where TimeGenerated between (ago(baselinePeriod) .. ago(lookback))\n    | where ResultType == \"0\"\n    | where UserPrincipalName has_any (privilegedKeywords)\n    | where isnotempty(Location) and Location != \"Unknown\"\n    | distinct UserPrincipalName, Location;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(lookback)\n| where ResultType == \"0\"\n| where UserPrincipalName has_any (privilegedKeywords)\n| where isnotempty(Location) and Location != \"Unknown\"\n| join kind=leftanti KnownAdminLocations on UserPrincipalName, Location\n| project\n    TimeGenerated, UserPrincipalName,\n    IPAddress, Location, AppDisplayName,\n    RiskLevel = RiskLevelDuringSignIn, ConditionalAccessStatus,\n    IsInteractive",
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "PrivilegeEscalation"
+        ],
+        "techniques": [
+          "T1078"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "Location": "Location",
+          "RiskLevel": "RiskLevel"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "New Country Admin Sign-In — {{UserPrincipalName}} from {{Location}} (first time in 14d)",
+          "alertDescriptionFormat": "Privileged account {{UserPrincipalName}} authenticated from {{Location}} — country not in 14-day history. Investigate for compromised admin credentials."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT6H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Conditional Access Policy Blocked then Successful Bypass",
+        "description": "Detects a user blocked by Conditional Access (ResultType 53003) who then achieves a successful sign-in within 4 hours — possibly via a legacy auth client that bypasses CA, an unmanaged device, or a CA policy gap. MITRE ATT&CK: T1078 (Valid Accounts), T1562.001 (Disable or Modify Tools).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet lookback     = 4h;\nlet bypassWindow = 4h;\nlet CABlockedUsers =\n    SigninLogs\n    | invoke _ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(lookback)\n    | where ResultType == \"53003\"\n    | summarize\n        BlockedCount = count(),\n        LastBlocked  = max(TimeGenerated),\n        BlockedIPs   = make_set(IPAddress, 5),\n        BlockedApps  = make_set(AppDisplayName, 5)\n      by UserPrincipalName;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(lookback)\n| where ResultType == \"0\"\n| join kind=inner CABlockedUsers on UserPrincipalName\n| where TimeGenerated > LastBlocked\n| where TimeGenerated - LastBlocked <= bypassWindow\n| extend MinutesAfterBlock = datetime_diff(\"minute\", TimeGenerated, LastBlocked)\n| project\n    TimeGenerated, UserPrincipalName,\n    IPAddress, Location, AppDisplayName,\n    ClientAppUsed, ConditionalAccessStatus,\n    RiskLevelDuringSignIn, BlockedCount,\n    BlockedIPs, LastBlocked, MinutesAfterBlock",
+        "queryFrequency": "PT4H",
+        "queryPeriod": "PT4H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "DefenseEvasion",
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1078",
+          "T1562"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "BlockedCount": "BlockedCount",
+          "MinutesAfterBlock": "MinutesAfterBlock"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "CA Policy Bypass — {{UserPrincipalName}} succeeded {{MinutesAfterBlock}}m after {{BlockedCount}} CA blocks",
+          "alertDescriptionFormat": "User {{UserPrincipalName}} was CA-blocked {{BlockedCount}} times then authenticated successfully {{MinutesAfterBlock}} minutes later — possible legacy auth or unmanaged device bypass."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT4H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "Account",
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','f2a3b4c5-d6e7-4f8a-9b0c-1d2e3f4a5b6c')]",
+      "kind": "Scheduled",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "displayName": "SigninLogs — Fresh IP Authenticating Multiple Accounts (Compromised Proxy)",
+        "description": "Detects an IP not seen in the prior 14 days that successfully authenticates 5 or more distinct user accounts within 2 hours. Indicates a newly-provisioned attack proxy or relay used with a purchased credential list. Complements the spray rule (failures) by catching pre-validated or successful spray runs. MITRE ATT&CK: T1110.003 (Password Spraying), T1078 (Valid Accounts).",
+        "severity": "High",
+        "enabled": true,
+        "query": "// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) ----\nlet _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nlet _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {\n    T\n    | extend IPAddress = tostring(IPAddress)\n    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n    | mv-apply _r = _allowRange to typeof(string) on (\n        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n        | summarize _anyInRange = max(toint(_inRange)))\n    | where isnull(_anyInRange) or _anyInRange == 0\n    | project-away _anyInRange\n};\nlet lookback      = 2h;\nlet baselineDays  = 14d;\nlet minUsers      = 5;\nlet KnownIPs =\n    SigninLogs\n    | invoke _ExcludeAllowlistedIPs()\n    | where TimeGenerated between (ago(baselineDays) .. ago(lookback))\n    | where ResultType == \"0\"\n    | distinct IPAddress;\nSigninLogs\n| invoke _ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(lookback)\n| where ResultType == \"0\"\n| where isnotempty(IPAddress)\n| join kind=leftanti KnownIPs on IPAddress\n| summarize\n    UniqueUsers        = dcount(UserPrincipalName),\n    AuthenticatedUsers = make_set(UserPrincipalName, 30),\n    TotalLogins        = count(),\n    Apps               = make_set(AppDisplayName, 5),\n    Locations          = make_set(Location, 3),\n    ClientTypes        = make_set(ClientAppUsed, 5),\n    FirstSeen          = min(TimeGenerated),\n    LastSeen           = max(TimeGenerated)\n  by IPAddress\n| where UniqueUsers >= minUsers\n| project\n    TimeGenerated = FirstSeen,\n    IPAddress, UniqueUsers, TotalLogins,\n    AuthenticatedUsers, Apps,\n    Locations, ClientTypes, LastSeen",
+        "queryFrequency": "PT2H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess",
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1110",
+          "T1078"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "UniqueUsers": "UniqueUsers",
+          "TotalLogins": "TotalLogins"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Fresh IP Mass Auth — {{IPAddress}} authenticated {{UniqueUsers}} accounts (not seen in 14d)",
+          "alertDescriptionFormat": "IP {{IPAddress}} (first seen in a 2h window — not in 14d baseline) successfully authenticated {{UniqueUsers}} distinct accounts — strong indicator of a newly-deployed attack proxy."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT2H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [
+              "IP"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/01-password-spray-single-ip-targeting-many-accounts')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 01 - PASSWORD SPRAY — SINGLE IP TARGETING MANY ACCOUNTS",
+        "category": "Hunting Queries",
+        "query": "let timeframe = 1h;\nlet userThreshold = 10;\nlet failureThreshold = 5;\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(timeframe)\n| where ResultType != \"0\"\n| summarize\n    FailedAttempts   = count(),\n    UniqueUsers      = dcount(UserPrincipalName),\n    TargetedUsers    = make_set(UserPrincipalName, 50),\n    StartTime        = min(TimeGenerated),\n    EndTime          = max(TimeGenerated),\n    Apps             = make_set(AppDisplayName, 5),\n    Locations        = make_set(Location, 3)\n  by IPAddress\n| where UniqueUsers >= userThreshold and FailedAttempts >= failureThreshold\n| extend Severity = case(\n    UniqueUsers >= 50, \"Critical\",\n    UniqueUsers >= 25, \"High\",\n    \"Medium\")\n| order by UniqueUsers desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "One source IP generates authentication failures against ≥10 unique users in a 1-hour window. Classic spray pattern — low attempts per user to stay under lockout thresholds."
+          },
+          {
+            "name": "tactics",
+            "value": "T1110.003 (Password Spraying) → CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/02-brute-force-single-account-targeted-from-many-ips')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 02 - BRUTE FORCE — SINGLE ACCOUNT TARGETED FROM MANY IPs",
+        "category": "Hunting Queries",
+        "query": "let timeframe = 1h;\nlet failureThreshold = 10;\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(timeframe)\n| where ResultType != \"0\"\n| summarize\n    FailedAttempts   = count(),\n    UniqueIPs        = dcount(IPAddress),\n    SourceIPs        = make_set(IPAddress, 20),\n    StartTime        = min(TimeGenerated),\n    EndTime          = max(TimeGenerated),\n    Locations        = make_set(Location, 5),\n    FailureReasons   = make_set(ResultDescription, 5),\n    Apps             = make_set(AppDisplayName, 5)\n  by UserPrincipalName\n| where FailedAttempts >= failureThreshold\n| extend AttackType = case(\n    UniqueIPs >= 5, \"Distributed Brute Force\",\n    UniqueIPs >= 2, \"Multi-Source Brute Force\",\n    \"Single-Source Brute Force\")\n| extend Severity = case(\n    FailedAttempts >= 50, \"High\",\n    FailedAttempts >= 25, \"Medium\",\n    \"Low\")\n| order by FailedAttempts desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "One UPN accumulating ≥10 failures in 1h. Classify as single-source, multi-source, or distributed to prioritize response."
+          },
+          {
+            "name": "tactics",
+            "value": "T1110.001 (Password Guessing) → CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/03-credential-stuffing-high-velocity-invalid-credentials')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 03 - CREDENTIAL STUFFING — HIGH-VELOCITY INVALID CREDENTIALS",
+        "category": "Hunting Queries",
+        "query": "let timeframe = 20d;\nlet velocityThreshold = 50;\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(timeframe)\n| where ResultType == \"50126\"\n| summarize\n    InvalidCredAttempts  = count(),\n    UniqueUsers          = dcount(UserPrincipalName),\n    Users                = make_set(UserPrincipalName, 100),\n    StartTime            = min(TimeGenerated),\n    EndTime              = max(TimeGenerated),\n    Locations            = make_set(Location, 5)\n  by IPAddress\n| where InvalidCredAttempts >= velocityThreshold\n| extend Severity = case(\n    InvalidCredAttempts >= 200, \"Critical\",\n    InvalidCredAttempts >= 100, \"High\",\n    \"Medium\")\n| order by InvalidCredAttempts desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Single IP generating ≥50 ResultType 50126 errors (invalid credentials) against many users. Indicates credential lists from data breaches."
+          },
+          {
+            "name": "tactics",
+            "value": "T1110.004 (Credential Stuffing) → CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/04-legacy-authentication-brute-force-imap-pop-smtp-eas')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 04 - LEGACY AUTHENTICATION BRUTE FORCE (IMAP, POP, SMTP, EAS)",
+        "category": "Hunting Queries",
+        "query": "let timeframe = 1h;\nlet failureThreshold = 10;\nlet legacyProtocols = dynamic([\n    \"IMAP\", \"POP\", \"SMTP\", \"Authenticated SMTP\",\n    \"Exchange ActiveSync\", \"Other clients\"]);\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(timeframe)\n| where ClientAppUsed in (legacyProtocols)\n| where ResultType != \"0\"\n| summarize\n    FailedAttempts   = count(),\n    UniqueUsers      = dcount(UserPrincipalName),\n    TargetedUsers    = make_set(UserPrincipalName, 50),\n    Protocols        = make_set(ClientAppUsed),\n    StartTime        = min(TimeGenerated),\n    EndTime          = max(TimeGenerated),\n    Locations        = make_set(Location, 5)\n  by IPAddress\n| where FailedAttempts >= failureThreshold\n| extend Severity = case(\n    UniqueUsers >= 20, \"High\",\n    FailedAttempts >= 50, \"High\",\n    \"Medium\")\n| order by FailedAttempts desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Failures via legacy protocols. Legacy auth bypasses MFA and CA policies — any attack via these protocols warrants elevated alerting."
+          },
+          {
+            "name": "tactics",
+            "value": "T1110 (Brute Force), T1550 (Use Alternate Authentication Material)"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/05-privileged-account-under-attack-low-threshold-failures')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 05 - PRIVILEGED ACCOUNT UNDER ATTACK — LOW-THRESHOLD FAILURES",
+        "category": "Hunting Queries",
+        "query": "let timeframe = 1h;\nlet failureThreshold = 3;\nlet privilegedKeywords = dynamic([\n    \"admin\", \"administrator\", \"root\", \"global\", \"security\",\n    \"privileged\", \"service\", \"svc\", \"elevated\", \"tier0\",\n    \"da-\", \"ea-\", \"ga-\", \"pa-\"]);\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(timeframe)\n| where ResultType != \"0\"\n| where UserPrincipalName has_any (privilegedKeywords)\n    or UserPrincipalName contains \"_adm\"\n    or UserPrincipalName startswith \"adm\"\n| summarize\n    FailedAttempts   = count(),\n    UniqueIPs        = dcount(IPAddress),\n    SourceIPs        = make_set(IPAddress, 20),\n    StartTime        = min(TimeGenerated),\n    EndTime          = max(TimeGenerated),\n    Locations        = make_set(Location, 5),\n    Apps             = make_set(AppDisplayName, 10),\n    FailureReasons   = make_set(ResultDescription, 5)\n  by UserPrincipalName\n| where FailedAttempts >= failureThreshold\n| extend\n    Severity   = \"Critical\",\n    AttackType = case(\n        UniqueIPs >= 5, \"Distributed Attack on Privileged Account\",\n        UniqueIPs >= 2, \"Multi-Source Attack on Privileged Account\",\n        \"Focused Attack on Privileged Account\")\n| order by FailedAttempts desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "≥3 failures against accounts with admin/privileged naming conventions. Lower threshold because any attack against privileged accounts is high-priority regardless of volume."
+          },
+          {
+            "name": "tactics",
+            "value": "T1110 (Brute Force), T1078 (Valid Accounts — Privileged)"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/06-continuous-login-failures-per-user-sliding-window')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 06 - CONTINUOUS LOGIN FAILURES PER USER (SLIDING WINDOW)",
+        "category": "Hunting Queries",
+        "query": "let threshold = 10;\nlet unit = 10m;\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where ResultType !in (\"0\", \"50125\", \"50140\")\n| summarize\n    LoginFailures    = count(),\n    UniqueIPs        = dcount(IPAddress),\n    SourceIPs        = make_set(IPAddress, 10),\n    Apps             = make_set(AppDisplayName, 5),\n    FailureReasons   = make_set(ResultDescription, 5)\n  by UserPrincipalName, bin(TimeGenerated, unit)\n| where LoginFailures > threshold\n| extend Severity = case(\n    LoginFailures >= 50, \"High\",\n    LoginFailures >= 25, \"Medium\",\n    \"Low\")\n| order by LoginFailures desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "More than 10 failures in any 10-minute bucket for the same user. Catches sustained automated attacks and credential guessing tools."
+          },
+          {
+            "name": "tactics",
+            "value": "T1110.001 (Password Guessing) → CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/07-low-and-slow-spray-victim-scoring-dashboard-30-days')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 07 - LOW-AND-SLOW SPRAY — VICTIM SCORING DASHBOARD (30 DAYS)",
+        "category": "Hunting Queries",
+        "query": "let lookback         = 30d;\nlet spray_window     = 24h;\nlet spray_threshold  = 10;\nlet sprayIPs =\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated >= ago(lookback) and ResultType != \"0\"\n    | extend IPAddress = coalesce(column_ifexists(\"IPAddress\",\"\"), column_ifexists(\"ClientIP\",\"\"))\n    | where isnotempty(IPAddress)\n    | summarize DistinctFailedUsers = dcount(UserPrincipalName)\n        by IPAddress, bin(TimeGenerated, spray_window)\n    | where DistinctFailedUsers >= spray_threshold\n    | distinct IPAddress;\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated >= ago(lookback)\n| extend\n    IPAddress = coalesce(column_ifexists(\"IPAddress\",\"\"), column_ifexists(\"ClientIP\",\"\")),\n    IsFailed  = iif(ResultType != \"0\", 1, 0),\n    IsSuccess = iif(ResultType == \"0\", 1, 0)\n| where isnotempty(IPAddress) and isnotempty(UserPrincipalName) and IPAddress in (sprayIPs)\n| summarize\n    FailedFromSprayIPs   = sum(IsFailed),\n    SuccessfulAttempts   = sum(IsSuccess),\n    DistinctSprayIPs     = dcount(IPAddress),\n    SprayIPList          = make_set(IPAddress, 20),\n    Countries            = make_set(Location, 10),\n    Apps                 = make_set(AppDisplayName, 10),\n    FirstSeen            = min(TimeGenerated),\n    LastFailed           = maxif(TimeGenerated, IsFailed == 1),\n    LastSeen             = max(TimeGenerated)\n  by UserPrincipalName\n| extend SuccessAfterFailures = iif(SuccessfulAttempts > 0\n    and FailedFromSprayIPs > 0\n    and LastFailed < LastSeen, 1, 0)\n| extend Score = todouble(FailedFromSprayIPs)\n    + 20.0 * todouble(DistinctSprayIPs)\n    + 50.0 * todouble(SuccessAfterFailures)\n| order by Score desc\n| take 100\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identify users targeted by spray IPs (≥10 distinct victims/day). Score users by failure volume, spray IP count, and whether a success followed the spray. Prioritises the most likely breach victims."
+          },
+          {
+            "name": "tactics",
+            "value": "T1110.003 (Password Spraying) → CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/08-spray-sign-in-row-export-30-days')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 08 - SPRAY SIGN-IN ROW EXPORT (30 days)",
+        "category": "Hunting Queries",
+        "query": "let lookback        = 30d;\nlet spray_window    = 24h;\nlet spray_threshold = 10;\nlet sprayIPs =\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated >= ago(lookback) and ResultType != \"0\"\n    | where isnotempty(IPAddress)\n    | summarize DistinctFailedUsers = dcount(UserPrincipalName)\n        by IPAddress, bin(TimeGenerated, spray_window)\n    | where DistinctFailedUsers >= spray_threshold\n    | distinct IPAddress;\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated >= ago(lookback) and IPAddress in (sprayIPs)\n| where isnotempty(UserPrincipalName)\n| project\n    TimeGenerated,\n    UserPrincipalName,\n    IPAddress,\n    Location,\n    AppDisplayName,\n    ResultType,\n    ResultDescription,\n    ClientAppUsed,\n    DeviceDetail,\n    RiskLevelDuringSignIn\n| order by TimeGenerated desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Exportable flat rows for all sign-ins from identified spray IPs. Use for investigation handoffs, SOAR playbook input, or SIEM export."
+          },
+          {
+            "name": "tactics",
+            "value": "T1110.003 → CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/09-brute-force-success-chain-critical-breach-indicator')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 09 - BRUTE FORCE → SUCCESS CHAIN — CRITICAL BREACH INDICATOR",
+        "category": "Hunting Queries",
+        "query": "let timeframe        = 1h;\nlet failureThreshold = 5;\nlet successWindow    = 30m;\nlet FailedLogins =\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(timeframe)\n    | where ResultType != \"0\"\n    | summarize\n        FailureCount    = count(),\n        LastFailure     = max(TimeGenerated),\n        FailureReasons  = make_set(ResultDescription, 5)\n      by UserPrincipalName, IPAddress\n    | where FailureCount >= failureThreshold;\nlet SuccessfulLogins =\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(timeframe)\n    | where ResultType == \"0\"\n    | project\n        UserPrincipalName, IPAddress,\n        SuccessTime           = TimeGenerated,\n        Location,\n        AppDisplayName,\n        DeviceDetail,\n        UserAgent,\n        RiskLevelDuringSignIn;\nFailedLogins\n| join kind=inner SuccessfulLogins on UserPrincipalName, IPAddress\n| where SuccessTime > LastFailure\n| where SuccessTime - LastFailure <= successWindow\n| extend TimeSinceLastFailure = datetime_diff(\"minute\", SuccessTime, LastFailure)\n| extend\n    Severity             = \"Critical\",\n    BreachLikelihood     = case(\n        TimeSinceLastFailure <= 5,  \"Very High — Immediate Success\",\n        TimeSinceLastFailure <= 15, \"High — Quick Success\",\n        \"Medium — Delayed Success\")\n| project\n    TimeGenerated = SuccessTime,\n    UserPrincipalName, IPAddress, Location,\n    AppDisplayName, FailureCount, TimeSinceLastFailure,\n    BreachLikelihood, FailureReasons,\n    RiskLevelDuringSignIn, Severity\n| order by TimeSinceLastFailure asc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "User accumulates ≥5 failures from an IP, then succeeds from the same IP within 30 minutes. The success window and short gap strongly indicate the attacker found the correct password."
+          },
+          {
+            "name": "tactics",
+            "value": "T1110 (Brute Force), T1078 (Valid Accounts) → CredentialAccess, InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/10-ti-enriched-brute-force-success')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 10 - TI-ENRICHED BRUTE FORCE → SUCCESS",
+        "category": "Hunting Queries",
+        "query": "let TI_IPs =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where IsActive == true\n    | where ObservableKey == \"ipv4-addr:value\"\n    | where isnotempty(ObservableValue)\n    | distinct Value = tostring(ObservableValue);\nlet FailedLogins =\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(1h)\n    | where ResultType in (\"50126\", \"50053\")\n    | summarize\n        FailedCount         = count(),\n        FirstFailed         = min(TimeGenerated),\n        LastFailed          = max(TimeGenerated),\n        FailedAttemptsIn10m = count()\n      by UserPrincipalName, IPAddress, AppDisplayName, bin(TimeGenerated, 10m)\n    | where FailedAttemptsIn10m > 10;\nlet SuccessfulLogins =\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(1h)\n    | where ResultType == \"0\"\n    | project UserPrincipalName, IPAddress, AppDisplayName, SuccessTime = TimeGenerated;\nFailedLogins\n| join kind=inner SuccessfulLogins on UserPrincipalName, IPAddress, AppDisplayName\n| where SuccessTime between (LastFailed .. LastFailed + 5m)\n| where IPAddress in (TI_IPs)\n| project\n    UserPrincipalName, IPAddress, AppDisplayName,\n    FailedAttemptsIn10m, SuccessTime,\n    ThreatLevel = \"Critical — TI-Confirmed Success After Brute Force\"\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Same breach indicator as Q09, but the IP must also appear in the Sentinel Threat Intelligence feed. Two-signal confirmation. Correlates with: ThreatIntelIndicators"
+          },
+          {
+            "name": "tactics",
+            "value": "T1110, T1078 → CredentialAccess, InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/11-blocked-users-analysis-50053-smart-lockout-malicious-ip')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 11 - BLOCKED USERS ANALYSIS (50053 — SMART LOCKOUT / MALICIOUS IP)",
+        "category": "Hunting Queries",
+        "query": "SigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where ResultType == \"50053\"\n| summarize\n    BlockCount       = count(),\n    UniqueIPs        = dcount(IPAddress),\n    IPList           = make_set(IPAddress, 20),\n    Locations        = make_set(Location, 10),\n    Apps             = make_set(AppDisplayName, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by UserPrincipalName, ResultDescription, ClientAppUsed\n| order by BlockCount desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "ResultType 50053 = sign-in blocked because IP flagged as malicious OR account locked due to too many failed attempts. Surface attack origin countries and targeted users."
+          },
+          {
+            "name": "tactics",
+            "value": "T1110 → CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/12-nation-state-ip-sign-ins-estsnationstateip-risk-tag')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 12 - NATION STATE IP SIGN-INS (estsNationStateIP RISK TAG)",
+        "category": "Hunting Queries",
+        "query": "SigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(90d)\n| extend V2Risk = tostring(RiskEventTypes_V2)\n| where V2Risk contains \"estsNationStateIP\"\n| project\n    TimeGenerated,\n    UserPrincipalName,\n    IPAddress,\n    Location,\n    AppDisplayName,\n    ResultType,\n    ResultDescription,\n    RiskLevelDuringSignIn,\n    RiskEventTypes_V2,\n    DeviceDetail\n| order by TimeGenerated desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surface sign-ins where Azure AD Identity Protection tagged the IP as affiliated with a nation-state threat actor. Entra P2 provides risk events that appear in RiskEventTypes_V2."
+          },
+          {
+            "name": "tactics",
+            "value": "T1078 → InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/13-impossible-travel-3-countries-in-1-hour')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 13 - IMPOSSIBLE TRAVEL — 3+ COUNTRIES IN 1 HOUR",
+        "category": "Hunting Queries",
+        "query": "let timeframe = 30d;\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(timeframe)\n| where isnotempty(Location) and isnotempty(IPAddress)\n| summarize\n    UniqueLocations  = dcount(Location),\n    Locations        = make_set(Location),\n    IPs              = make_set(IPAddress),\n    FailedCount      = countif(ResultType != \"0\"),\n    SuccessCount     = countif(ResultType == \"0\"),\n    StartTime        = min(TimeGenerated),\n    EndTime          = max(TimeGenerated)\n  by UserPrincipalName\n| where UniqueLocations >= 3\n| extend Severity = case(\n    FailedCount >= 10, \"High\",\n    UniqueLocations >= 5, \"High\",\n    \"Medium\")\n| order by UniqueLocations desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Genuine users can't be in 3+ countries in 60 minutes. Covers both successful and failed sign-ins to catch probing + successful abuse."
+          },
+          {
+            "name": "tactics",
+            "value": "T1078 → InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/14-location-based-sign-in-summary-country-ip-breakdown')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 14 - LOCATION-BASED SIGN-IN SUMMARY (COUNTRY + IP BREAKDOWN)",
+        "category": "Hunting Queries",
+        "query": "let failureCodes = dynamic([50053, 50126, 50055]);\nlet successCodes = dynamic([0, 50057, 50155, 50105, 50133, 50076, 50079, 50173]);\nlet RiskCountries = dynamic([\"CN\",\"RU\",\"KP\",\"IR\",\"SY\",\"CU\",\"BY\",\"NG\",\"IQ\",\"UA\"]);\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(90d)\n| where Location in (RiskCountries)\n| extend FullLocation = strcat(\n    tostring(LocationDetails.countryOrRegion), \"|\",\n    tostring(LocationDetails.state), \"|\",\n    tostring(LocationDetails.city))\n| where ResultType in (successCodes) or ResultType in (failureCodes)\n| summarize\n    DistinctSuccessUsers = dcountif(UserPrincipalName, ResultType in (successCodes)),\n    SuccessUsers         = make_set_if(UserPrincipalName, ResultType in (successCodes)),\n    SuccessResultCodes   = make_set_if(ResultType, ResultType in (successCodes)),\n    DistinctFailedUsers  = dcountif(UserPrincipalName, ResultType in (failureCodes)),\n    FailedUsers          = make_set_if(UserPrincipalName, ResultType in (failureCodes)),\n    FailedResultCodes    = make_set_if(ResultType, ResultType in (failureCodes))\n  by FullLocation, IPAddress\n| order by DistinctSuccessUsers desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Full breakdown of sign-ins from high-risk countries over 90 days. Surfaces both successful and failed sign-ins with user lists. Adjust the Location filter to match your org's risk posture."
+          },
+          {
+            "name": "tactics",
+            "value": "T1078, T1133 → InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/15-impossible-travel-daily-country-count-trending')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 15 - IMPOSSIBLE TRAVEL — DAILY COUNTRY COUNT TRENDING",
+        "category": "Hunting Queries",
+        "query": "SigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(24h)\n| where ResultType == \"0\"\n| summarize\n    CountriesVisited = make_set(Location),\n    IPs              = make_set(IPAddress)\n  by UserPrincipalName\n| extend CountryCount = array_length(CountriesVisited)\n| where CountryCount > 2\n| project UserPrincipalName, CountryCount, CountriesVisited, IPs\n| order by CountryCount desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Quick chart-ready summary — distinct countries per user per day over 7 days. Useful for dashboards and trend visualization."
+          },
+          {
+            "name": "tactics",
+            "value": "T1078 → InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/16-attacker-in-the-middle-aitm-detection')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 16 - ATTACKER IN THE MIDDLE (AiTM) DETECTION",
+        "category": "Hunting Queries",
+        "query": "let AnomalousTokenRequestIds =\n    SecurityAlert\n    | where AlertName == \"Anomalous Token\"\n    | mv-expand todynamic(Entities)\n    | project Entities\n    | extend RequestId = tostring(Entities.RequestId)\n    | distinct RequestId;\nAADUserRiskEvents\n| where RequestId has_any (AnomalousTokenRequestIds)\n| where RiskEventType == \"attackerinTheMiddle\"\n| join kind=leftouter (\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(7d)\n    | project\n        UserPrincipalName,\n        CorrelationId,\n        Location,\n        AppDisplayName,\n        IPAddress,\n        DeviceDetail,\n        RiskLevelDuringSignIn\n  ) on $left.CorrelationId == $right.CorrelationId\n| project\n    TimeGenerated,\n    UserPrincipalName,\n    RiskEventType,\n    IPAddress,\n    Location,\n    AppDisplayName,\n    RiskLevelDuringSignIn,\n    DeviceDetail,\n    Severity = \"Critical\"\n| order by TimeGenerated desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Correlates SecurityAlert \"Anomalous Token\" events with AADUserRiskEvents where RiskEventType == \"attackerinTheMiddle\". AiTM proxies (Evilginx, Modlishka) steal session cookies post-MFA. Requires Entra ID P2 + Microsoft Defender for Identity. Correlates..."
+          },
+          {
+            "name": "tactics",
+            "value": "T1557 (AiTM), T1539 (Steal Web Session Cookie) → CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/17-mfa-fatigue-push-bombardment-detection')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 17 - MFA FATIGUE / PUSH BOMBARDMENT DETECTION",
+        "category": "Hunting Queries",
+        "query": "let window = 1h;\nlet mfaBombardThreshold = 5;\nlet MFAInterrupts =\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(window)\n    | where ResultType in (\"50074\", \"50076\", \"50079\", \"50158\")\n    | summarize\n        MFAInterruptCount = count(),\n        MFASuccessCount   = countif(ResultType == \"0\"),\n        FirstInterrupt    = min(TimeGenerated),\n        LastInterrupt     = max(TimeGenerated),\n        SourceIPs         = make_set(IPAddress, 10),\n        Locations         = make_set(Location, 5),\n        Apps              = make_set(AppDisplayName, 5)\n      by UserPrincipalName;\nMFAInterrupts\n| where MFAInterruptCount >= mfaBombardThreshold\n| extend\n    InterruptDurationMin = datetime_diff(\"minute\", LastInterrupt, FirstInterrupt),\n    Severity = case(\n        MFAInterruptCount >= 20, \"High\",\n        MFAInterruptCount >= 10, \"Medium\",\n        \"Low\")\n| order by MFAInterruptCount desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detect repeated MFA interrupts (push notifications) in a short window. ResultType 50074 = MFA required; 50076 = MFA completed. A high ratio of 50074 without 50076 or repeated 50074 bursts = fatigue attempt. Correlates with: AADUserRiskEvents (optional ..."
+          },
+          {
+            "name": "tactics",
+            "value": "T1621 (MFA Request Generation) → CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/18-token-replay-ni-sign-ins-continuing-after-password-reset')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 18 - TOKEN REPLAY — NI SIGN-INS CONTINUING AFTER PASSWORD RESET",
+        "category": "Hunting Queries",
+        "query": "let window = 30m;\nlet PasswordResets =\n    AuditLogs\n    | where TimeGenerated > ago(7d)\n    | where OperationName in (\"Reset user password\", \"Change user password\",\n        \"Admin updated - Password changed\", \"Update user\")\n    | extend TargetUPN = tostring(TargetResources[0].userPrincipalName)\n    | where isnotempty(TargetUPN)\n    | project ResetTime = TimeGenerated, TargetUPN;\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(7d)\n| where ResultType == \"0\"\n| join kind=inner PasswordResets on $left.UserPrincipalName == $right.TargetUPN\n| where TimeGenerated between (ResetTime .. ResetTime + window)\n| project\n    TimeGenerated,\n    UserPrincipalName,\n    IPAddress,\n    Location,\n    AppDisplayName,\n    ResourceDisplayName,\n    CorrelationId,\n    ResetTime,\n    MinutesSinceReset = datetime_diff(\"minute\", TimeGenerated, ResetTime),\n    Severity = \"High\"\n| order by MinutesSinceReset asc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Azure AD Non-Interactive sign-ins are token refreshes — they continue even after a password reset until the refresh token expires or is revoked. Detect users with successful NI sign-ins within 30 minutes of a confirmed password change event in AuditLog..."
+          },
+          {
+            "name": "tactics",
+            "value": "T1528 (Steal Application Access Token), T1550 → CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/19-asim-authentication-behavioral-baseline-timing-analysis')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 19 - ASIM AUTHENTICATION — BEHAVIORAL BASELINE & TIMING ANALYSIS",
+        "category": "Hunting Queries",
+        "query": "let LowerPercentile  = 5;\nlet MiddlePercentile = 50;\nlet HigherPercentile = 95;\nlet UserAgentSample  = 5;\nlet GeoSample        = 5;\n_ASim_Authentication()\n| sort by TimeGenerated asc\n| extend\n    EventDuration = datetime_diff(\"millisecond\", EventStartTime, EventEndTime),\n    TimeDelta     = datetime_diff(\"second\", next(EventStartTime), EventEndTime),\n    Src           = coalesce(Src, SrcIpAddr)\n| extend Region = coalesce(SrcGeoRegion, SrcGeoCountry)\n| summarize\n    FirstSeen         = min(EventStartTime),\n    LastSeen          = max(EventEndTime),\n    TargetUsers       = dcount(TargetUserId),\n    TargetApps        = dcount(TargetAppId),\n    UserAgents        = dcount(HttpUserAgent),\n    UserAgentSet      = make_set(HttpUserAgent, UserAgentSample),\n    Geos              = dcount(Region),\n    GeoSet            = make_set(Region, GeoSample),\n    DeltaStdev        = stdev(TimeDelta),\n    DeltaPercentiles  = percentiles_array(TimeDelta, LowerPercentile, MiddlePercentile, HigherPercentile),\n    DeltaVariance     = variance(TimeDelta),\n    DeltaAvg          = avg(TimeDelta),\n    DeltaMin          = min(TimeDelta),\n    DeltaMax          = max(TimeDelta)\n  by Src, EventResultDetails, EventSubType\n| where DeltaStdev < 5 and DeltaAvg < 30  // very regular timing = suspicious\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "ASIM-normalized view across all authentication sources. Computes inter-event timing statistics (delta, variance, stdev) per source IP. Low-variance, low-interval patterns indicate automated or scripted activity (bots, C2 checkins, credential spray tools)."
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/20-conditional-access-failure-spike-ca-policy-bypass-attempt')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 20 - CONDITIONAL ACCESS FAILURE SPIKE — CA POLICY BYPASS ATTEMPTS",
+        "category": "Hunting Queries",
+        "query": "let caFailureCodes = dynamic([\"53003\", \"530034\", \"53000\", \"53001\", \"53004\",\n    \"50158\", \"50105\", \"50173\", \"50072\", \"50074\"]);\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(24h)\n| where ResultType in (caFailureCodes)\n| summarize\n    CAFailureCount   = count(),\n    UniqueUsers      = dcount(UserPrincipalName),\n    UserList         = make_set(UserPrincipalName, 20),\n    FailureCodes     = make_set(ResultType, 10),\n    FailureReasons   = make_set(ResultDescription, 10),\n    Apps             = make_set(AppDisplayName, 10),\n    Locations        = make_set(Location, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by IPAddress, ClientAppUsed\n| where CAFailureCount > 10\n| order by CAFailureCount desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "A surge of CA-related failure codes from the same IP or user suggests an attacker probing for gaps in CA policy (wrong device, wrong app, legacy auth, location not covered). Result codes covered: 53003 (CA block), 530034, 53000, 53001 (grant ctrl failu..."
+          },
+          {
+            "name": "tactics",
+            "value": "T1078 → InitialAccess, DefenseEvasion"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/21-sign-in-privileged-audit-action-correlation')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 21 - SIGN-IN → PRIVILEGED AUDIT ACTION CORRELATION",
+        "category": "Hunting Queries",
+        "query": "let window   = 60m;\nlet lookback = 24h;\nlet PrivilegedOps = dynamic([\n    \"Add member to role\", \"Remove member from role\",\n    \"Update user\", \"Reset user password\",\n    \"Delete user\", \"Add application\",\n    \"Add service principal credentials\", \"Update application\",\n    \"Add delegated permission grant\", \"Consent to application\",\n    \"Update role\", \"Add role assignment to role definition\"]);\nlet Signins =\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(lookback)\n    | where ResultType == \"0\"\n    | project\n        UPN           = UserPrincipalName,\n        SignInTime    = TimeGenerated,\n        SignInIP      = IPAddress,\n        SignInCountry = Location,\n        App           = AppDisplayName,\n        RiskLevel     = RiskLevelDuringSignIn;\nAuditLogs\n| where TimeGenerated > ago(lookback)\n| where OperationName in (PrivilegedOps)\n| extend\n    ActorUPN     = tostring(InitiatedBy.user.userPrincipalName),\n    ActorIP      = tostring(InitiatedBy.user.ipAddress),\n    TargetObject = tostring(TargetResources[0].displayName)\n| where isnotempty(ActorUPN)\n| join kind=inner Signins on $left.ActorUPN == $right.UPN\n| where TimeGenerated between (SignInTime .. SignInTime + window)\n| project\n    TimeGenerated,\n    ActorUPN, OperationName, TargetObject,\n    ActorIP, SignInIP, SignInCountry,\n    App, RiskLevel, SignInTime,\n    MinutesSinceSignIn = datetime_diff(\"minute\", TimeGenerated, SignInTime),\n    Severity = iff(RiskLevel in (\"high\", \"medium\"), \"High\", \"Medium\")\n| order by MinutesSinceSignIn asc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "User sign-in (success) from an anomalous IP or country, followed by a privileged operation in AuditLogs within 60 minutes. Detects the \"authenticate then act\" pattern of initial access → privilege abuse. Correlates with: AuditLogs"
+          },
+          {
+            "name": "tactics",
+            "value": "T1078 → InitialAccess; T1098 → PrivilegeEscalation"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/22-risky-sign-in-m365-data-access-officeactivity')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 22 - RISKY SIGN-IN → M365 DATA ACCESS (OFFICEACTIVITY)",
+        "category": "Hunting Queries",
+        "query": "let window   = 2h;\nlet lookback = 24h;\nlet RiskySignins =\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(lookback)\n    | where ResultType == \"0\"\n    | where RiskLevelDuringSignIn in (\"high\", \"medium\")\n    | project\n        UPN        = tolower(UserPrincipalName),\n        SignInTime = TimeGenerated,\n        IPAddress,\n        Location,\n        RiskLevel  = RiskLevelDuringSignIn,\n        RiskEvents = tostring(RiskEventTypes_V2);\nOfficeActivity\n| where TimeGenerated > ago(lookback)\n| where Operation in (\n    \"FileDownloaded\", \"FileSyncDownloadedFull\",\n    \"AnonymousLinkUsed\", \"FileAccessed\", \"FolderCopied\",\n    \"SearchQueryInitiatedSharePoint\", \"SearchQueryInitiatedExchange\")\n| where isnotempty(UserId)\n| summarize\n    O365_OpCount  = count(),\n    O365_Ops      = make_set(Operation, 10),\n    O365_Items    = make_set(OfficeObjectId, 20),\n    O365_First    = min(TimeGenerated)\n  by UPN = tolower(UserId)\n| join kind=inner RiskySignins on UPN\n| where O365_First between (SignInTime .. SignInTime + window)\n| project\n    UPN, RiskLevel, RiskEvents,\n    IPAddress, Location,\n    O365_OpCount, O365_Ops,\n    SignInTime, O365_First,\n    MinutesBetween = datetime_diff(\"minute\", O365_First, SignInTime)\n| order by RiskLevel asc, O365_OpCount desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "A sign-in flagged as risky (RiskLevelDuringSignIn = high/medium) is followed within 2h by bulk file access or download in O365. Combines Identity Protection signals with data access activity. Correlates with: OfficeActivity"
+          },
+          {
+            "name": "tactics",
+            "value": "T1078 → InitialAccess; T1213 (Data from Information Repositories) → Collection"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/23-new-device-registration-immediate-privileged-access')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 23 - NEW DEVICE REGISTRATION + IMMEDIATE PRIVILEGED ACCESS",
+        "category": "Hunting Queries",
+        "query": "let window = 30m;\nlet NewDevices =\n    AuditLogs\n    | where TimeGenerated > ago(7d)\n    | where OperationName in (\n        \"Register device\", \"Create device\",\n        \"Add registered owner to device\", \"Add device\")\n    | extend\n        ActorUPN  = tostring(InitiatedBy.user.userPrincipalName),\n        DeviceName = tostring(TargetResources[0].displayName)\n    | where isnotempty(ActorUPN)\n    | project RegisterTime = TimeGenerated, ActorUPN, DeviceName;\nlet PrivilegedActions =\n    AuditLogs\n    | where TimeGenerated > ago(7d)\n    | where OperationName has_any (\n        \"Add member to role\", \"Consent to application\",\n        \"Add application\", \"Reset user password\",\n        \"Add service principal credentials\")\n    | extend\n        ActorUPN     = tostring(InitiatedBy.user.userPrincipalName),\n        TargetObject = tostring(TargetResources[0].displayName)\n    | project ActionTime = TimeGenerated, ActorUPN, OperationName, TargetObject;\nNewDevices\n| join kind=inner PrivilegedActions on ActorUPN\n| where ActionTime between (RegisterTime .. RegisterTime + window)\n| project\n    ActorUPN, DeviceName,\n    RegisterTime, ActionTime, OperationName, TargetObject,\n    MinutesAfterRegister = datetime_diff(\"minute\", ActionTime, RegisterTime),\n    Severity = \"High\"\n| order by MinutesAfterRegister asc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "A user registers a new device (AuditLogs) and within 30 minutes performs a privileged operation or accesses sensitive resources. Attackers register adversary devices to establish persistence post-MFA. Correlates with: AuditLogs"
+          },
+          {
+            "name": "tactics",
+            "value": "T1098 (Account Manipulation) → PrivilegeEscalation, Persistence"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/24-sign-in-from-ti-flagged-ip-active-sentinel-alert')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 24 - SIGN-IN FROM TI-FLAGGED IP + ACTIVE SENTINEL ALERT",
+        "category": "Hunting Queries",
+        "query": "let TI_IPs =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where IsActive == true\n    | where ObservableKey == \"ipv4-addr:value\"\n    | where isnotempty(ObservableValue)\n    | extend TI_IP = tostring(ObservableValue)\n    | summarize ThreatTypes = make_set(Tags), Confidence = max(Confidence)\n        by TI_IP;\nlet AlertIPs =\n    SecurityAlert\n    | where TimeGenerated > ago(7d)\n    | where AlertSeverity in (\"High\", \"Medium\")\n    | mv-expand todynamic(Entities)\n    | where Entities.Type == \"ip\"\n    | extend AlertIP = tostring(Entities.Address)\n    | where isnotempty(AlertIP)\n    | summarize AlertNames = make_set(AlertName, 5), Products = make_set(ProductName, 3)\n        by AlertIP;\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(24h)\n| where isnotempty(IPAddress)\n| join kind=inner TI_IPs on $left.IPAddress == $right.TI_IP\n| join kind=inner AlertIPs on $left.IPAddress == $right.AlertIP\n| project\n    TimeGenerated, UserPrincipalName, IPAddress,\n    Location, AppDisplayName, ResultType, ResultDescription,\n    RiskLevelDuringSignIn, ThreatTypes, Confidence,\n    AlertNames, Products,\n    Severity = \"High\"\n| order by Confidence desc, TimeGenerated desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Two-control confirmation: a user signs in (success or failure) from an IP that is BOTH in the TI feed AND linked to an active Sentinel alert. This maximises fidelity and cuts through noisy single-source alerts. Correlates with: ThreatIntelIndicators, S..."
+          },
+          {
+            "name": "tactics",
+            "value": "T1078 → InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/25-user-sign-in-behavioral-baseline-country-app-deviation')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 25 - USER SIGN-IN BEHAVIORAL BASELINE — COUNTRY/APP DEVIATION",
+        "category": "Hunting Queries",
+        "query": "let recentWindow   = 24h;\nlet baselineWindow = 30d;\nlet Baseline =\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n    | where ResultType == \"0\"\n    | summarize\n        BaselineCountries = make_set(Location, 50),\n        BaselineApps      = make_set(AppDisplayName, 50)\n      by UserPrincipalName;\nlet Recent =\n    SigninLogs\n    | invoke ExcludeAllowlistedIPs()\n    | where TimeGenerated > ago(recentWindow)\n    | where ResultType == \"0\"\n    | summarize\n        RecentCountries = make_set(Location, 20),\n        RecentApps      = make_set(AppDisplayName, 20),\n        SignInCount     = count(),\n        SourceIPs       = make_set(IPAddress, 10)\n      by UserPrincipalName;\nRecent\n| join kind=leftouter Baseline on UserPrincipalName\n| extend\n    NewCountries = set_difference(RecentCountries, BaselineCountries),\n    NewApps      = set_difference(RecentApps, BaselineApps)\n| where array_length(NewCountries) > 0 or array_length(NewApps) > 0\n| project\n    UserPrincipalName,\n    NewCountries, NewApps,\n    RecentCountries, RecentApps,\n    SignInCount, SourceIPs\n| order by array_length(NewCountries) desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Compare each user's last 24h sign-in countries and apps against their 30-day baseline. Surface users accessing new countries or new apps not seen in their history. Pure behavioral hunting — no TI required."
+          },
+          {
+            "name": "tactics",
+            "value": "T1078 → InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/26-service-principal-sign-in-from-anomalous-country')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 26 - SERVICE PRINCIPAL SIGN-IN FROM ANOMALOUS COUNTRY",
+        "category": "Hunting Queries",
+        "query": "let baselineWindow = 14d;\nlet recentWindow   = 1d;\nlet SPBaseline =\n    AADServicePrincipalSignInLogs\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n    | where ResultType == \"0\"\n    | summarize BaselineCountries = make_set(Location, 30)\n        by ServicePrincipalName;\nAADServicePrincipalSignInLogs\n| where TimeGenerated > ago(recentWindow)\n| where ResultType == \"0\"\n| summarize\n    RecentCountries = make_set(Location, 10),\n    SignInCount     = count(),\n    SourceIPs       = make_set(IPAddress, 10),\n    Resources       = make_set(ResourceDisplayName, 10)\n  by ServicePrincipalName\n| join kind=inner SPBaseline on ServicePrincipalName\n| extend NewCountries = set_difference(RecentCountries, BaselineCountries)\n| where array_length(NewCountries) > 0\n| project\n    ServicePrincipalName,\n    NewCountries, BaselineCountries,\n    SignInCount, SourceIPs, Resources\n| order by array_length(NewCountries) desc\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Service principals (apps) should have predictable, static sign-in locations (datacenter ranges, known geos). A service principal signing in from an unexpected country indicates compromised credentials or a rogue application using the SP's client secret."
+          },
+          {
+            "name": "tactics",
+            "value": "T1078.004 (Valid Accounts: Cloud Accounts) → InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/27-multi-signal-risk-scoring-dashboard-top-25-highest-risk-u')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 27 - MULTI-SIGNAL RISK SCORING DASHBOARD (TOP 25 HIGHEST-RISK USERS)",
+        "category": "Hunting Queries",
+        "query": "let lookback = 30d;\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(lookback)\n| extend\n    IsFailed  = iif(ResultType != \"0\", 1, 0),\n    IsSuccess = iif(ResultType == \"0\", 1, 0),\n    IsRisk    = iif(RiskLevelDuringSignIn in (\"high\",\"medium\"), 1, 0),\n    IsLocked  = iif(ResultType == \"50053\", 1, 0)\n| summarize\n    TotalFailed         = sum(IsFailed),\n    TotalSucceeded      = sum(IsSuccess),\n    DistinctSourceIPs   = dcount(IPAddress),\n    DistinctCountries   = dcount(Location),\n    RiskySignins        = sum(IsRisk),\n    LockedEvents        = sum(IsLocked),\n    Apps                = make_set(AppDisplayName, 10),\n    Countries           = make_set(Location, 10),\n    SourceIPs           = make_set(IPAddress, 10),\n    FirstSeen           = min(TimeGenerated),\n    LastSeen            = max(TimeGenerated)\n  by UserPrincipalName\n| extend Score =\n    todouble(TotalFailed)\n    + 10.0  * todouble(DistinctSourceIPs)\n    + 15.0  * todouble(DistinctCountries)\n    + 30.0  * todouble(RiskySignins)\n    + 20.0  * todouble(LockedEvents)\n    + 50.0  * iif(TotalSucceeded > 0 and TotalFailed > 5, 1.0, 0.0)\n| order by Score desc\n| take 25\n| project\n    UserPrincipalName, Score,\n    TotalFailed, TotalSucceeded, DistinctSourceIPs,\n    DistinctCountries, RiskySignins, LockedEvents,\n    Apps, Countries, SourceIPs, FirstSeen, LastSeen\n\n\n// =============================================================================",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Score each user across 6 signals: failures, spray IPs, risky sign-ins, impossible travel, locked accounts, and successful post-spray logins. Composite risk score surfaces the most likely compromised users."
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/28-distributed-coordinated-attack-same-user-10-ips-4h-window')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "etag": "*",
+        "displayName": "SigninLogs Hunt 28 - DISTRIBUTED COORDINATED ATTACK — SAME USER, 10+ IPs, 4h WINDOW",
+        "category": "Hunting Queries",
+        "query": "let timeframe    = 30d;\nlet ipThreshold  = 10;\nSigninLogs\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(timeframe)\n| where ResultType != \"0\"\n| summarize\n    UniqueIPs        = dcount(IPAddress),\n    FailedAttempts   = count(),\n    SourceIPs        = make_set(IPAddress, 100),\n    StartTime        = min(TimeGenerated),\n    EndTime          = max(TimeGenerated),\n    Locations        = make_set(Location, 20),\n    Apps             = make_set(AppDisplayName, 10)\n  by UserPrincipalName\n| where UniqueIPs >= ipThreshold\n| extend\n    Severity     = \"Critical\",\n    AttackSpanDays = datetime_diff(\"day\", EndTime, StartTime)\n| order by UniqueIPs desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Highly distributed attacks using botnet or coordinated infrastructure. Same user targeted from 10+ unique IPs over 30 days. Indicates high- value account under sustained, professional attack campaign."
+          },
+          {
+            "name": "tactics",
+            "value": "T1110 (Brute Force) → CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": "SigninLogs-ThreatHunting"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-04-20T00:00:00Z"
+          }
+        ]
+      }
+    }
+  ]
+}

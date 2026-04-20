@@ -1,0 +1,84 @@
+id: f6a7b8c9-d0e1-4f2a-3b4c-5d6e7f8a9b0c
+name: "SigninLogs — Concurrent Sessions from Multiple Countries (Same User)"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects a single user successfully signing in from 2 or more distinct countries within a 30-minute window. Unlike ML-based impossible travel this is deterministic, requires no Entra ID P2, and catches concurrent attacker + victim sessions running in parallel from different geos. MITRE ATT&CK: T1078 (Valid Accounts).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078
+query: |
+    // ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+    let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+    let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+    let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+    let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+        T
+        | extend IPAddress = tostring(IPAddress)
+        | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+        | mv-apply _r = _allowRange to typeof(string) on (
+            extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+            | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+            | summarize _anyInRange = max(toint(_inRange)))
+        | where isnull(_anyInRange) or _anyInRange == 0
+        | project-away _anyInRange
+    };
+    // ---------------------------------------------------------------------------
+    let lookback   = 1h;
+    let maxWindowM = 30;
+    SigninLogs
+    | invoke _ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(lookback)
+    | where ResultType == "0"
+    | where isnotempty(Location) and Location != "Unknown"
+    | summarize
+        UniqueCountries = dcount(Location),
+        Countries       = make_set(Location, 10),
+        SourceIPs       = make_set(IPAddress, 10),
+        Apps            = make_set(AppDisplayName, 5),
+        FirstSignIn     = min(TimeGenerated),
+        LastSignIn      = max(TimeGenerated)
+      by UserPrincipalName
+    | where UniqueCountries >= 2
+    | extend WindowMinutes = datetime_diff("minute", LastSignIn, FirstSignIn)
+    | where WindowMinutes <= maxWindowM
+    | project
+        TimeGenerated = FirstSignIn,
+        UserPrincipalName, UniqueCountries,
+        Countries, SourceIPs, WindowMinutes,
+        Apps, LastSignIn
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  UniqueCountries: UniqueCountries
+  Countries: Countries
+  WindowMinutes: WindowMinutes
+alertDetailsOverride:
+  alertDisplayNameFormat: "Concurrent Multi-Country Sessions — {{UserPrincipalName}} in {{UniqueCountries}} countries ({{WindowMinutes}}min)"
+  alertDescriptionFormat: "User {{UserPrincipalName}} authenticated from {{UniqueCountries}} different countries within {{WindowMinutes}} minutes — possible concurrent attacker session."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT1H
+    matchingMethod: AllEntities
+    groupByEntities:
+  - Account
+
+
+
