@@ -11,7 +11,7 @@ etc.).
 
 | Column       | Example              | Notes                                                       |
 |--------------|----------------------|-------------------------------------------------------------|
-| `IPOrRange`  | `163.116.0.0/16`     | **Required.** Single IP, CIDR or `start-end` hyphen range.  |
+| `IPOrRange`  | `163.10.0.0/16`     | **Required.** Single IP, CIDR or `start-end` hyphen range.  |
 | `Description`| `Corporate egress`   | Free text — who/what this represents.                       |
 | `Owner`      | `SOC`                | Accountable team.                                           |
 | `AddedDate`  | `2026-04-20`         | ISO date the entry was added.                               |
