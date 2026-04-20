@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Secure Score Leadership Report — LAWSentinel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root{
+    --bg:#0b1020; --bg-2:#111736; --panel:#141a33; --panel-2:#1a2148;
+    --grid:#1f2a55; --border:#2a355f; --text:#e6ecff; --muted:#9aa4c7;
+    --accent:#7aa2ff; --accent-2:#b18cff;
+    --crit:#ff4d6d; --high:#ff8a3d; --med:#ffd166; --low:#7aa2ff; --ok:#4ade80;
+    --mono:'Cascadia Code','JetBrains Mono','Consolas',monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;color:var(--text);
+    background:radial-gradient(1200px 600px at 10% -20%,#1a2466 0%,transparent 60%),
+               radial-gradient(900px 500px at 110% 20%,#3a1a66 0%,transparent 55%),
+               var(--bg);min-height:100vh}
+  .wrap{max-width:1400px;margin:0 auto;padding:32px 28px 80px}
+  header{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;
+    border-bottom:1px solid var(--border);padding-bottom:20px;margin-bottom:28px}
+  h1{margin:0;font-size:28px;letter-spacing:.2px}
+  h1 .tag{font-size:12px;color:var(--muted);font-weight:500;margin-left:10px;
+    padding:3px 10px;border:1px solid var(--border);border-radius:999px;vertical-align:middle}
+  .sub{color:var(--muted);font-size:14px;margin-top:6px}
+  .meta{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+  .meta b{color:var(--text);font-weight:600}
+  .chip{padding:4px 10px;border:1px solid var(--border);border-radius:999px;background:rgba(255,255,255,.02)}
+  .grid{display:grid;gap:18px}
+  .cols-5{grid-template-columns:repeat(5,minmax(0,1fr))}
+  .cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  @media (max-width:1100px){.cols-5,.cols-4{grid-template-columns:repeat(2,1fr)}.cols-3,.cols-2{grid-template-columns:1fr}}
+  .card{background:linear-gradient(180deg,var(--panel) 0%,var(--panel-2) 100%);
+    border:1px solid var(--border);border-radius:14px;padding:18px;
+    box-shadow:0 10px 30px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.03)}
+  .card h3{margin:0 0 10px 0;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  .kpi .num{font-size:30px;font-weight:700;line-height:1.1}
+  .kpi .lbl{color:var(--muted);font-size:12px;margin-top:4px}
+  .kpi.crit .num{color:var(--crit)} .kpi.high .num{color:var(--high)}
+  .kpi.med .num{color:var(--med)} .kpi.ok .num{color:var(--ok)} .kpi.info .num{color:var(--accent)}
+  .delta{font-size:12px;margin-top:4px}
+  .delta.up{color:var(--ok)} .delta.down{color:var(--crit)}
+  section{margin-top:28px}
+  section > h2{font-size:18px;margin:0 0 14px 0;display:flex;align-items:center;gap:10px}
+  section > h2 .dot{width:10px;height:10px;border-radius:50%;background:var(--accent)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:10px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:11px;letter-spacing:.08em;text-transform:uppercase;background:rgba(255,255,255,.02)}
+  tr:hover td{background:rgba(122,162,255,.05)}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:.04em}
+  .pill.crit{background:rgba(255,77,109,.12);color:#ff8599;border:1px solid rgba(255,77,109,.3)}
+  .pill.high{background:rgba(255,138,61,.12);color:#ffa96a;border:1px solid rgba(255,138,61,.3)}
+  .pill.med{background:rgba(255,209,102,.12);color:#ffdb87;border:1px solid rgba(255,209,102,.3)}
+  .pill.low{background:rgba(122,162,255,.12);color:#a9c2ff;border:1px solid rgba(122,162,255,.3)}
+  .pill.ok{background:rgba(74,222,128,.12);color:#8cf2b1;border:1px solid rgba(74,222,128,.3)}
+  .mono{font-family:var(--mono);font-size:12px;color:#c9d4ff;background:rgba(0,0,0,.25);padding:12px;border-radius:8px;border:1px solid var(--border);white-space:pre-wrap;overflow:auto}
+  .bar{height:10px;background:rgba(255,255,255,.06);border-radius:6px;overflow:hidden;margin-top:6px}
+  .bar > span{display:block;height:100%;border-radius:6px}
+  .footer{margin-top:40px;color:var(--muted);font-size:12px;border-top:1px solid var(--border);padding-top:16px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div>
+    <h1>📈 Secure Score Leadership Report <span class="tag">LAWSentinel · Defender for Cloud</span></h1>
+    <div class="sub">Executive posture view · ASC score trend · control scorecard · remediation backlog · 90-day window</div>
+  </div>
+  <div class="meta">
+    <span class="chip">Workspace: <b>LAWSentinel</b></span>
+    <span class="chip">Window: <b>Last 90 days</b></span>
+    <span class="chip">Generated: <b>2026-04-20</b></span>
+    <span class="chip">Tables: <b>SecureScores</b>, <b>SecureScoreControls</b>, <b>SecurityRecommendation</b></span>
+  </div>
+</header>
+
+<!-- HERO METRICS -->
+<div class="grid cols-5">
+  <div class="card kpi ok">
+    <h3>Current ASC Score</h3>
+    <div class="num">60.0%</div>
+    <div class="lbl">25.78 / 43 points</div>
+    <div class="delta up">▲ +2.0 pts vs start of window</div>
+  </div>
+  <div class="card kpi info">
+    <h3>Score Change</h3>
+    <div class="num">+0.85</div>
+    <div class="lbl">Raw points in window</div>
+    <div class="delta up">▲ +3.4% relative</div>
+  </div>
+  <div class="card kpi high">
+    <h3>Unhealthy Controls</h3>
+    <div class="num">18</div>
+    <div class="lbl">Resources across 3 control families</div>
+  </div>
+  <div class="card kpi crit">
+    <h3>High-Severity Backlog</h3>
+    <div class="num">20+</div>
+    <div class="lbl">Distinct unhealthy recommendations (7d)</div>
+  </div>
+  <div class="card kpi med">
+    <h3>Biggest Gap</h3>
+    <div class="num">Vulns</div>
+    <div class="lbl">Remediate vulnerabilities · 18.2%</div>
+  </div>
+</div>
+
+<!-- SCORE TREND -->
+<section>
+  <h2><span class="dot" style="background:var(--ok)"></span>Secure Score Trend · ASC Score (90d)</h2>
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+      <div>
+        <div style="font-size:22px;font-weight:700">60.0% <span style="font-size:13px;color:var(--muted);font-weight:400">· 25.78 / 43</span></div>
+        <div style="color:var(--muted);font-size:12px">Apr 18 · 58.0% → Apr 19 · 60.0% · trending up</div>
+      </div>
+      <div style="font-size:12px;color:var(--muted)">Only 3 non-snapshot data points observed in window</div>
+    </div>
+    <svg viewBox="0 0 1200 260" width="100%" height="260" preserveAspectRatio="none" style="display:block">
+      <defs>
+        <linearGradient id="g1" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stop-color="#4ade80" stop-opacity=".45"/>
+          <stop offset="100%" stop-color="#4ade80" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <!-- grid -->
+      <g stroke="#1f2a55" stroke-width="1">
+        <line x1="60" y1="20"  x2="1180" y2="20"/>
+        <line x1="60" y1="75"  x2="1180" y2="75"/>
+        <line x1="60" y1="130" x2="1180" y2="130"/>
+        <line x1="60" y1="185" x2="1180" y2="185"/>
+        <line x1="60" y1="240" x2="1180" y2="240"/>
+      </g>
+      <!-- y labels (percentage) -->
+      <g fill="#9aa4c7" font-size="11" font-family="Segoe UI,sans-serif">
+        <text x="10" y="24">70%</text>
+        <text x="10" y="79">65%</text>
+        <text x="10" y="134">60%</text>
+        <text x="10" y="189">55%</text>
+        <text x="10" y="244">50%</text>
+      </g>
+      <!-- area & line: 58.0 → 59.5 → 60.0  mapped 50-70% -> y 240..20 -->
+      <!-- 58% -> y = 240 - ((58-50)/20)*220 = 240-88 = 152 ; 59.5% -> y = 240-((9.5/20)*220) = 240-104.5 = 135.5 ; 60% -> y = 240-((10/20)*220) = 240-110 = 130 -->
+      <path d="M 120,152 L 620,135.5 L 1120,130 L 1120,240 L 120,240 Z" fill="url(#g1)"/>
+      <path d="M 120,152 L 620,135.5 L 1120,130" fill="none" stroke="#4ade80" stroke-width="3" stroke-linejoin="round"/>
+      <g fill="#4ade80">
+        <circle cx="120"  cy="152"   r="5"/>
+        <circle cx="620"  cy="135.5" r="5"/>
+        <circle cx="1120" cy="130"   r="6" stroke="#e6ecff" stroke-width="2"/>
+      </g>
+      <g fill="#e6ecff" font-size="12" font-family="Segoe UI,sans-serif">
+        <text x="120"  y="172" text-anchor="middle">58.0%</text>
+        <text x="620"  y="123" text-anchor="middle">59.5%</text>
+        <text x="1120" y="118" text-anchor="middle">60.0%</text>
+      </g>
+      <g fill="#9aa4c7" font-size="11" font-family="Segoe UI,sans-serif">
+        <text x="120"  y="258" text-anchor="middle">Apr 18 · 11:42</text>
+        <text x="620"  y="258" text-anchor="middle">Apr 18 · 19:42</text>
+        <text x="1120" y="258" text-anchor="middle">Apr 19 · 11:43</text>
+      </g>
+    </svg>
+  </div>
+</section>
+
+<!-- CONTROL SCORECARD -->
+<section>
+  <h2><span class="dot" style="background:var(--accent)"></span>Control Scorecard · Current State</h2>
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>Control Family</th>
+          <th>Status</th>
+          <th>Score</th>
+          <th>Coverage</th>
+          <th>Healthy</th>
+          <th>Unhealthy</th>
+          <th>Weight</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b>Remediate vulnerabilities</b><div style="color:var(--muted);font-size:11px">Biggest score gap — CVE/patch remediation</div></td>
+          <td><span class="pill high">Weak</span></td>
+          <td>1.09 / 6</td>
+          <td>
+            <div>18.2%</div>
+            <div class="bar"><span style="width:18.2%;background:linear-gradient(90deg,#ff4d6d,#ff8a3d)"></span></div>
+          </td>
+          <td><span class="pill ok">2</span></td>
+          <td><span class="pill crit">9</span></td>
+          <td>11</td>
+        </tr>
+        <tr>
+          <td><b>Remediate security configurations</b><div style="color:var(--muted);font-size:11px">Hardening baselines · misconfig</div></td>
+          <td><span class="pill med">Partial</span></td>
+          <td>2.00 / 4</td>
+          <td>
+            <div>50.0%</div>
+            <div class="bar"><span style="width:50%;background:linear-gradient(90deg,#ff8a3d,#ffd166)"></span></div>
+          </td>
+          <td><span class="pill ok">1</span></td>
+          <td><span class="pill high">1</span></td>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td><b>Enable auditing and logging</b><div style="color:var(--muted);font-size:11px">Diagnostic settings · log ingestion coverage</div></td>
+          <td><span class="pill ok">Strong</span></td>
+          <td>0.75 / 1</td>
+          <td>
+            <div>75.0%</div>
+            <div class="bar"><span style="width:75%;background:linear-gradient(90deg,#ffd166,#4ade80)"></span></div>
+          </td>
+          <td><span class="pill ok">24</span></td>
+          <td><span class="pill med">8</span></td>
+          <td>32</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- BACKLOG + DONUT -->
+<section>
+  <h2><span class="dot" style="background:var(--crit)"></span>Unhealthy Backlog · High-Severity Recommendations</h2>
+  <div class="grid cols-2">
+    <div class="card" style="grid-column:span 1">
+      <h3>Severity Mix</h3>
+      <div style="display:flex;align-items:center;gap:20px;margin-top:6px">
+        <svg viewBox="0 0 160 160" width="180" height="180">
+          <circle cx="80" cy="80" r="64" fill="none" stroke="#1f2a55" stroke-width="24"/>
+          <!-- High = ~85% of visible top-20 (all 20 high) → show 100% high; circumference = 2πr = 402 -->
+          <circle cx="80" cy="80" r="64" fill="none" stroke="#ff4d6d" stroke-width="24"
+                  stroke-dasharray="402 402" stroke-dashoffset="0" transform="rotate(-90 80 80)"/>
+          <text x="80" y="76" text-anchor="middle" fill="#e6ecff" font-size="28" font-weight="700" font-family="Segoe UI,sans-serif">20+</text>
+          <text x="80" y="96" text-anchor="middle" fill="#9aa4c7" font-size="11" font-family="Segoe UI,sans-serif">High-sev items</text>
+        </svg>
+        <div style="font-size:13px;line-height:1.8">
+          <div><span class="pill crit">High</span> &nbsp; 20 shown (top-N cap)</div>
+          <div style="color:var(--muted);font-size:12px;margin-top:6px">Medium / Low severity rows<br/>not pulled in this snapshot.</div>
+          <div style="color:var(--muted);font-size:12px;margin-top:6px">Unique affected resources: <b style="color:var(--text)">~45</b> (sum of top 20)</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="grid-column:span 1">
+      <h3>Remediation Theme</h3>
+      <div style="font-size:13px;line-height:1.9">
+        <div>🟥 <b>OS / application patching</b> — 16 of 20 items are <span class="mono" style="padding:0;background:none;border:0">Update *</span> advisories (Windows Server 2016/2022/2025, Edge Chromium, OpenSSL, .NET Framework, Apache2, Perl, nghttp2, libgd2, tiff, icu, file, wheel, jaraco.context, azure_connected_machine_agent).</div>
+        <div>🟧 <b>Server hardening</b> — Windows servers should use secure communication protocols (4 resources).</div>
+        <div>🟨 <b>Identity governance</b> — Service Principals should not be assigned administrative roles at subscription / RG scope (1 resource).</div>
+        <div>🟦 <b>Data &amp; container security</b> — SQL DB vuln findings unresolved (1); Azure Container Registry images with unresolved CVEs (1).</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TOP 20 BACKLOG TABLE -->
+<section>
+  <h2><span class="dot" style="background:var(--high)"></span>Top 20 Unhealthy Recommendations (7d)</h2>
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>#</th><th>Recommendation</th><th>Severity</th><th>Affected<br/>Resources</th><th>Latest Seen (UTC)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td>Update edge_chromium-based</td><td><span class="pill crit">High</span></td><td>4</td><td>2026-04-19 22:01</td></tr>
+        <tr><td>2</td><td>Windows servers should be configured to use secure communication protocols</td><td><span class="pill crit">High</span></td><td>4</td><td>2026-04-17 07:57</td></tr>
+        <tr><td>3</td><td>Update windows_server_2022</td><td><span class="pill crit">High</span></td><td>3</td><td>2026-04-20 05:56</td></tr>
+        <tr><td>4</td><td>Update openssl</td><td><span class="pill crit">High</span></td><td>3</td><td>2026-04-20 05:36</td></tr>
+        <tr><td>5</td><td>Update jaraco.context</td><td><span class="pill crit">High</span></td><td>2</td><td>2026-04-19 18:41</td></tr>
+        <tr><td>6</td><td>Update wheel</td><td><span class="pill crit">High</span></td><td>2</td><td>2026-04-19 18:41</td></tr>
+        <tr><td>7</td><td>Update .net_framework</td><td><span class="pill crit">High</span></td><td>2</td><td>2026-04-20 05:35</td></tr>
+        <tr><td>8</td><td>Update nghttp2</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-19 04:15</td></tr>
+        <tr><td>9</td><td>Service Principals should not be assigned with administrative roles at the subscription and resource group level</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-20 04:10</td></tr>
+        <tr><td>10</td><td>Update icu</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-19 04:15</td></tr>
+        <tr><td>11</td><td>Update tiff</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-19 04:15</td></tr>
+        <tr><td>12</td><td>Update libgd2</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-19 04:15</td></tr>
+        <tr><td>13</td><td>SQL databases should have vulnerability findings resolved</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-17 00:16</td></tr>
+        <tr><td>14</td><td>Azure registry container images should have vulnerabilities resolved</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-16 06:13</td></tr>
+        <tr><td>15</td><td>Update file</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-17 21:21</td></tr>
+        <tr><td>16</td><td>Update windows_server_2025</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-20 05:36</td></tr>
+        <tr><td>17</td><td>Update azure_connected_machine_agent</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-20 05:36</td></tr>
+        <tr><td>18</td><td>Update windows_server_2016</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-20 05:36</td></tr>
+        <tr><td>19</td><td>Update perl</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-19 04:15</td></tr>
+        <tr><td>20</td><td>Update apache2</td><td><span class="pill crit">High</span></td><td>1</td><td>2026-04-19 04:15</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- LEADERSHIP TALKING POINTS -->
+<section>
+  <h2><span class="dot" style="background:var(--accent-2)"></span>Leadership Talking Points</h2>
+  <div class="grid cols-3">
+    <div class="card">
+      <h3>✅ Wins</h3>
+      <ul style="padding-left:18px;line-height:1.7;font-size:13px">
+        <li>ASC score <b>up 2.0 points</b> (+3.4%) in the reporting window — consistent upward trend across all 3 observations.</li>
+        <li>Auditing &amp; Logging is <b>Strong (75%)</b> — diagnostic settings coverage is the best-performing control family.</li>
+        <li>No regressions observed — every snapshot in the window is at or above the prior one.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>⚠️ Risks</h3>
+      <ul style="padding-left:18px;line-height:1.7;font-size:13px">
+        <li><b>Vulnerability remediation is the worst control family (18.2%)</b> — 9 of 11 resources still unhealthy.</li>
+        <li>Heavy concentration of <b>missing OS / library patches</b> (Windows Server, OpenSSL, .NET Framework, Edge, Apache2).</li>
+        <li>Service principal with <b>admin role at subscription/RG scope</b> — identity blast-radius risk.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>🎯 Next 30 Days</h3>
+      <ul style="padding-left:18px;line-height:1.7;font-size:13px">
+        <li>Sponsor a <b>patch push</b> targeting the top 10 <span class="mono" style="padding:0;background:none;border:0">Update *</span> recommendations → largest score lift for lowest effort.</li>
+        <li>Enforce <b>TLS-only / secure comms</b> on the 4 flagged Windows servers.</li>
+        <li>Remove admin role from the flagged service principal; replace with scoped, time-bound PIM assignment.</li>
+        <li>Schedule weekly non-snapshot trend pull for executive review.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- HUNTING QUERIES -->
+<section>
+  <h2><span class="dot" style="background:var(--accent)"></span>KQL Queries Behind This Report</h2>
+  <div class="grid cols-2">
+    <div class="card">
+      <h3>1 · 90-day Score Trend</h3>
+<pre class="mono">SecureScores
+| where TimeGenerated &gt; ago(90d)
+| where DisplayName == "ASC score"
+| where IsSnapshot == false
+| project TimeGenerated, CurrentScore, MaxScore,
+          PercentageScore = round(PercentageScore * 100, 1)
+| order by TimeGenerated asc</pre>
+    </div>
+    <div class="card">
+      <h3>2 · Current Control Scorecard</h3>
+<pre class="mono">SecureScoreControls
+| where IsSnapshot == false
+| summarize arg_max(TimeGenerated, *) by ControlName
+| where Weight &gt; 0
+| extend Status = case(
+    PercentageScore == 1.0, "Complete",
+    PercentageScore &gt;= 0.7, "Strong",
+    PercentageScore &gt;= 0.4, "Partial",
+    PercentageScore &gt; 0,   "Weak",
+                           "Not Started")
+| project ControlName, Status, CurrentScore, MaxScore,
+          HealthyResources, UnhealthyResources, Weight
+| order by PercentageScore asc</pre>
+    </div>
+    <div class="card">
+      <h3>3 · Unhealthy Backlog (7d)</h3>
+<pre class="mono">SecurityRecommendation
+| where TimeGenerated &gt; ago(7d)
+| where RecommendationState == "Unhealthy"
+| summarize AffectedResources = dcount(AssessedResourceId),
+            LatestSeen = max(TimeGenerated)
+          by RecommendationDisplayName, RecommendationSeverity
+| extend SevOrder = case(RecommendationSeverity == "High", 1,
+                         RecommendationSeverity == "Medium", 2,
+                         RecommendationSeverity == "Low", 3, 4)
+| order by SevOrder asc, AffectedResources desc</pre>
+    </div>
+    <div class="card">
+      <h3>4 · Remediated Items (Unhealthy → Healthy, 14d)</h3>
+<pre class="mono">SecurityRecommendation
+| where TimeGenerated &gt; ago(14d)
+| summarize States = make_set(RecommendationState),
+            First = min(TimeGenerated), Last = max(TimeGenerated)
+          by AssessedResourceId, RecommendationDisplayName, RecommendationSeverity
+| where States has "Unhealthy" and States has "Healthy"
+| summarize Remediated = count() by RecommendationSeverity
+| order by Remediated desc</pre>
+    </div>
+  </div>
+</section>
+
+<div class="footer">
+  <div>Source playbook: <b>security-investigator / queries / cloud / secure_score_leadership_reporting.md</b></div>
+  <div>Workspace: <b>LAWSentinel</b> · ID <span class="mono" style="padding:2px 6px;background:rgba(0,0,0,.25)">c7c481b6-2b4e-482e-8b25-842f04bafb89</span></div>
+</div>
+
+</div>
+</body>
+</html>

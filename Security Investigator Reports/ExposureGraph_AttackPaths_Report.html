@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ExposureGraph Critical Assets &amp; Attack Paths Report</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --red: #f85149; --orange: #d29922; --green: #3fb950; --purple: #bc8cff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; line-height: 1.6; padding: 24px; }
+  .container { max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 28px; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; }
+  h1 .icon { font-size: 32px; }
+  .subtitle { color: var(--muted); margin-bottom: 32px; font-size: 14px; }
+  .meta { display: flex; gap: 24px; margin-bottom: 32px; flex-wrap: wrap; }
+  .meta-item { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 20px; }
+  .meta-item .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .meta-item .value { font-size: 14px; font-weight: 600; color: var(--accent); }
+  .section { margin-bottom: 40px; }
+  .section-title { font-size: 20px; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+  .section-desc { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .kpi { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; text-align: center; }
+  .kpi .number { font-size: 36px; font-weight: 700; }
+  .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; margin-top: 4px; }
+  .kpi.critical .number { color: var(--red); }
+  .kpi.warning .number { color: var(--orange); }
+  .kpi.info .number { color: var(--accent); }
+  .kpi.good .number { color: var(--green); }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 8px; overflow: hidden; border: 1px solid var(--border); margin-bottom: 16px; }
+  thead th { background: #1c2128; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  tbody td { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #1c2128; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .badge-critical { background: rgba(248,81,73,0.15); color: var(--red); }
+  .badge-high { background: rgba(210,153,34,0.15); color: var(--orange); }
+  .badge-medium { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .badge-low { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge-purple { background: rgba(188,140,255,0.15); color: var(--purple); }
+  .bar-container { background: #21262d; border-radius: 4px; height: 20px; overflow: hidden; position: relative; }
+  .bar { height: 100%; border-radius: 4px; display: flex; align-items: center; padding-left: 6px; font-size: 10px; font-weight: 600; min-width: 30px; }
+  .bar-red { background: linear-gradient(90deg, var(--red), #da3633); }
+  .bar-orange { background: linear-gradient(90deg, var(--orange), #bb8009); }
+  .bar-blue { background: linear-gradient(90deg, var(--accent), #1f6feb); }
+  .bar-green { background: linear-gradient(90deg, var(--green), #238636); }
+  .truncate { max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .risk-indicator { display: inline-flex; align-items: center; gap: 6px; }
+  .risk-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .risk-dot.crit { background: var(--red); }
+  .risk-dot.high { background: var(--orange); }
+  .risk-dot.med { background: var(--accent); }
+  .risk-dot.low { background: var(--green); }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+  .alert-box { background: rgba(248,81,73,0.08); border: 1px solid rgba(248,81,73,0.3); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .alert-box .title { color: var(--red); font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+  .alert-box .body { color: var(--muted); font-size: 13px; }
+  .tag-list { display: flex; flex-wrap: wrap; gap: 4px; }
+  .tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; background: #21262d; color: var(--muted); border: 1px solid var(--border); }
+  .footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1><span class="icon">&#x1F6E1;</span> ExposureGraph Critical Assets &amp; Attack Paths Report</h1>
+<p class="subtitle">Automated security assessment generated from Microsoft Defender XDR Advanced Hunting queries &mdash; CyberSOC Workspace</p>
+
+<div class="meta">
+  <div class="meta-item"><div class="label">Generated</div><div class="value">April 20, 2026 08:25 UTC</div></div>
+  <div class="meta-item"><div class="label">Workspace</div><div class="value">CyberSOC</div></div>
+  <div class="meta-item"><div class="label">Data Source</div><div class="value">ExposureGraphNodes &amp; ExposureGraphEdges</div></div>
+  <div class="meta-item"><div class="label">Queries Executed</div><div class="value">12 hunting queries</div></div>
+  <div class="meta-item"><div class="label">MITRE</div><div class="value">T1068, T1190, T1078, T1539, T1550.004</div></div>
+</div>
+
+<!-- ============ EXECUTIVE SUMMARY ============ -->
+<div class="section">
+  <h2 class="section-title">&#x1F4CA; Executive Summary</h2>
+  <div class="kpi-grid">
+    <div class="kpi critical"><div class="number">87</div><div class="label">Critical Devices</div></div>
+    <div class="kpi critical"><div class="number">8</div><div class="label">Criticality Level 0</div></div>
+    <div class="kpi warning"><div class="number">44</div><div class="label">VMs w/ High-Risk Vulns</div></div>
+    <div class="kpi critical"><div class="number">21</div><div class="label">CVSS 10.0 VMs</div></div>
+    <div class="kpi info"><div class="number">1,033,442</div><div class="label">Total Graph Edges</div></div>
+    <div class="kpi warning"><div class="number">857,443</div><div class="label">Permission Edges</div></div>
+    <div class="kpi critical"><div class="number">15</div><div class="label">Choke-Point Users</div></div>
+    <div class="kpi warning"><div class="number">624</div><div class="label">Max Blast Radius</div></div>
+  </div>
+</div>
+
+<!-- ============ CRITICAL DEVICES BY CRITICALITY ============ -->
+<div class="section">
+  <h2 class="section-title">&#x1F3AF; Critical Devices by Criticality Level (Q1)</h2>
+  <p class="section-desc">All devices with criticality level &lt; 4 (lower = more critical). Level 0-1 assets are highest priority.</p>
+  
+  <div class="grid-2">
+    <div>
+      <table>
+        <thead><tr><th>Criticality</th><th>Count</th><th>Distribution</th></tr></thead>
+        <tbody>
+          <tr><td><span class="badge badge-critical">Level 0 - Critical</span></td><td>8</td><td><div class="bar-container"><div class="bar bar-red" style="width:9%">9%</div></div></td></tr>
+          <tr><td><span class="badge badge-high">Level 1 - High</span></td><td>13</td><td><div class="bar-container"><div class="bar bar-orange" style="width:15%">15%</div></div></td></tr>
+          <tr><td><span class="badge badge-medium">Level 2 - Medium</span></td><td>64</td><td><div class="bar-container"><div class="bar bar-blue" style="width:74%">74%</div></div></td></tr>
+          <tr><td><span class="badge badge-low">Level 3 - Standard</span></td><td>2</td><td><div class="bar-container"><div class="bar bar-green" style="width:2%">2%</div></div></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <table>
+        <thead><tr><th>Level 0 Assets (Highest Priority)</th></tr></thead>
+        <tbody>
+          <tr><td><span class="risk-indicator"><span class="risk-dot crit"></span>eng-ws-motors.vnevado.alpineskihouse.co</span></td></tr>
+          <tr><td><span class="risk-indicator"><span class="risk-dot crit"></span>ashtravel-dc.ashtravel.alpineskihouse.co</span></td></tr>
+          <tr><td><span class="risk-indicator"><span class="risk-dot crit"></span>mb-dc1.internal.niseko.alpineskihouse.co</span></td></tr>
+          <tr><td><span class="risk-indicator"><span class="risk-dot crit"></span>vnevado-dc.vnevado.alpineskihouse.co</span></td></tr>
+          <tr><td><span class="risk-indicator"><span class="risk-dot crit"></span>mb-adfs.internal.niseko.alpineskihouse.co</span></td></tr>
+          <tr><td><span class="risk-indicator"><span class="risk-dot crit"></span>alpine-srv1</span></td></tr>
+          <tr><td><span class="risk-indicator"><span class="risk-dot crit"></span>vmzavawindows01</span></td></tr>
+          <tr><td><span class="risk-indicator"><span class="risk-dot crit"></span>main-dc.zava-corp.com</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ============ CRITICAL CLOUD ASSETS ============ -->
+<div class="section">
+  <h2 class="section-title">&#x2601; Critical Cloud Assets Summary (Q10)</h2>
+  <p class="section-desc">Critical assets across cloud providers with criticality levels.</p>
+  <table>
+    <thead><tr><th>Provider</th><th>Criticality</th><th>Count</th><th>Sample Assets</th></tr></thead>
+    <tbody>
+      <tr><td><span class="badge badge-purple">Azure</span></td><td><span class="badge badge-critical">Level 0</span></td><td>6</td><td class="truncate">ashtravel-dc, mb-adfs, mb-dc1, vnevado-dc, alpine-srv1, vmzavawindows01</td></tr>
+      <tr><td><span class="badge badge-purple">Azure</span></td><td><span class="badge badge-high">Level 1</span></td><td>10</td><td class="truncate">main-dc.zava-corp.com, alpine-sql, alpine-vm, devops-vm, rayt-pc...</td></tr>
+      <tr><td><span class="badge badge-purple">Azure</span></td><td><span class="badge badge-medium">Level 2</span></td><td>31</td><td class="truncate">ashtravel-apps, vnevado-proxy, D4IoT, sap-ash, test, assembly-line-p...</td></tr>
+      <tr><td><span class="badge badge-purple">Azure</span></td><td><span class="badge badge-low">Level 3</span></td><td>2</td><td class="truncate">vnevado-win10s, vnevado-win11t</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============ MULTI-CLOUD INVENTORY ============ -->
+<div class="section">
+  <h2 class="section-title">&#x1F310; Multi-Cloud Resource Inventory (Q9)</h2>
+  <p class="section-desc">Resources discovered across Azure, AWS, and GCP providers.</p>
+  <table>
+    <thead><tr><th>Provider</th><th>Resource Type</th><th>Count</th><th>Samples</th></tr></thead>
+    <tbody>
+      <tr><td><span class="badge badge-purple">Azure</span></td><td>VM Extensions</td><td>290</td><td class="truncate">MDE.Windows, ChangeTracking-Windows, MDE.Linux</td></tr>
+      <tr><td><span class="badge badge-purple">Azure</span></td><td>Virtual Machines</td><td>108</td><td class="truncate">w11-gsa, vnevado-linux, VNEVADO-Jump</td></tr>
+      <tr><td><span class="badge badge-purple">Azure</span></td><td>VM Scale Sets</td><td>12</td><td class="truncate">aks-agentpool-83456106-vmss, aks-agentpool-33159543-vmss</td></tr>
+      <tr><td><span class="badge badge-medium">GCP</span></td><td>Service Accounts</td><td>91</td><td class="truncate">mdc-containers-k8s-operator@mdc-demo.iam...</td></tr>
+      <tr><td><span class="badge badge-medium">GCP</span></td><td>Users</td><td>6</td><td>&mdash;</td></tr>
+      <tr><td><span class="badge badge-medium">GCP</span></td><td>Groups</td><td>3</td><td>&mdash;</td></tr>
+      <tr><td><span class="badge badge-medium">GCP</span></td><td>Domains</td><td>3</td><td>&mdash;</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============ GRAPH TOPOLOGY ============ -->
+<div class="section">
+  <h2 class="section-title">&#x1F517; Graph Topology - Node &amp; Edge Distribution (Q13, Q14)</h2>
+  <div class="grid-2">
+    <div>
+      <h3 style="font-size:14px; margin-bottom:12px; color:var(--muted)">Top Node Types</h3>
+      <table>
+        <thead><tr><th>Node Type</th><th>Count</th></tr></thead>
+        <tbody>
+          <tr><td>mdcSecurityRecommendation</td><td>500,725</td></tr>
+          <tr><td>Cve</td><td>346,037</td></tr>
+          <tr><td>serviceprincipal</td><td>52,353</td></tr>
+          <tr><td>user</td><td>9,297</td></tr>
+          <tr><td>baseModel</td><td>997</td></tr>
+          <tr><td>K8s-serviceaccount</td><td>722</td></tr>
+          <tr><td>Microsoft Entra OAuth App</td><td>713</td></tr>
+          <tr><td>group</td><td>617</td></tr>
+          <tr><td>copilot-studio-ai-agent</td><td>604</td></tr>
+          <tr><td>container-image</td><td>676</td></tr>
+          <tr><td>managedidentity</td><td>429</td></tr>
+          <tr><td>device</td><td>46</td></tr>
+          <tr><td>entra-userCookie</td><td>25</td></tr>
+          <tr><td>microsoft.keyvault/vaults</td><td>21</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3 style="font-size:14px; margin-bottom:12px; color:var(--muted)">Edge Types (Relationships)</h3>
+      <table>
+        <thead><tr><th>Edge Type</th><th>Count</th></tr></thead>
+        <tbody>
+          <tr><td>has permissions to</td><td>857,443</td></tr>
+          <tr><td>affecting</td><td>108,203</td></tr>
+          <tr><td>member of</td><td>31,658</td></tr>
+          <tr><td>has role on</td><td>21,184</td></tr>
+          <tr><td>contains</td><td>6,636</td></tr>
+          <tr><td>can authenticate as</td><td>1,950</td></tr>
+          <tr><td>runs on</td><td>1,401</td></tr>
+          <tr><td>grants access to</td><td>867</td></tr>
+          <tr><td>routes traffic to</td><td>583</td></tr>
+          <tr><td>has credentials of</td><td>24</td></tr>
+          <tr><td>frequently logged in by</td><td>16</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ============ VMs WITH HIGH-RISK VULNS ============ -->
+<div class="section">
+  <h2 class="section-title">&#x1F525; VMs with High-Risk Vulnerabilities (Q3)</h2>
+  <p class="section-desc">Virtual machines with high-risk vulnerability insights. <strong>44 VMs detected</strong> - 21 with CVSS 10.0.</p>
+  
+  <div class="alert-box">
+    <div class="title">&#x26A0; 21 VMs have maximum CVSS score of 10.0</div>
+    <div class="body">These VMs have the most severe vulnerabilities and should be patched or isolated immediately. Includes domain controllers and critical infrastructure.</div>
+  </div>
+
+  <table>
+    <thead><tr><th>VM Name</th><th>CVSS</th><th>High/Critical</th><th>Environment</th></tr></thead>
+    <tbody>
+      <tr><td>vnevado-win11t.vnevado.alpineskihouse.co</td><td><span class="badge badge-critical">10.0</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>i-03d3b053d3daaeacd</td><td><span class="badge badge-critical">10.0</span></td><td>&#x2705;</td><td><span class="tag">AWS EC2</span></td></tr>
+      <tr><td>davidp-pc.zava-corp.com</td><td><span class="badge badge-critical">10.0</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>aaronb-pc.zava-corp.com</td><td><span class="badge badge-critical">10.0</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>sap-ash</td><td><span class="badge badge-critical">10.0</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>vnevado-proxy</td><td><span class="badge badge-critical">10.0</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>vnevado-dc.vnevado.alpineskihouse.co</td><td><span class="badge badge-critical">10.0</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>vmzavawindows01</td><td><span class="badge badge-high">9.9</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>vm-srv19-1</td><td><span class="badge badge-high">9.9</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>alpine-srv1</td><td><span class="badge badge-high">9.9</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>main-entra.zava-corp.com</td><td><span class="badge badge-high">9.8</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>alpine-sql</td><td><span class="badge badge-high">9.8</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>secretsvm</td><td><span class="badge badge-high">9.8</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>mb-wap.internal.niseko.alpineskihouse.co</td><td><span class="badge badge-high">8.8</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>mb-dc1.internal.niseko.alpineskihouse.co</td><td><span class="badge badge-high">8.8</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>D4IoT</td><td><span class="badge badge-medium">7.5</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+      <tr><td>assembly-line-p</td><td><span class="badge badge-medium">7.3</span></td><td>&#x2705;</td><td><span class="tag">Azure VM</span></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============ CVEs ON CRITICAL DEVICES ============ -->
+<div class="section">
+  <h2 class="section-title">&#x1F41B; CVEs Affecting Critical Devices - Top 20 (Q12)</h2>
+  <p class="section-desc">Critical devices ranked by total CVE count. Higher counts = larger attack surface.</p>
+  <table>
+    <thead><tr><th>Device</th><th>Criticality</th><th>CVE Count</th><th>Severity Bar</th><th>Sample CVEs</th></tr></thead>
+    <tbody>
+      <tr><td>sap-ash</td><td><span class="badge badge-medium">2</span></td><td><strong>2,628</strong></td><td><div class="bar-container"><div class="bar bar-red" style="width:100%">2,628</div></div></td><td class="truncate">CVE-2024-12718, CVE-2025-69225, CVE-2026-23088</td></tr>
+      <tr><td>ds-zava</td><td><span class="badge badge-medium">2</span></td><td><strong>1,735</strong></td><td><div class="bar-container"><div class="bar bar-red" style="width:66%">1,735</div></div></td><td class="truncate">CVE-2024-7979, CVE-2025-8882, CVE-2025-11709</td></tr>
+      <tr><td>alpine-srv1</td><td><span class="badge badge-critical">0</span></td><td><strong>1,709</strong></td><td><div class="bar-container"><div class="bar bar-red" style="width:65%">1,709</div></div></td><td class="truncate">CVE-2025-55325, CVE-2025-54101, CVE-2024-43487</td></tr>
+      <tr><td>desktop-i70bh3g</td><td><span class="badge badge-medium">2</span></td><td><strong>1,616</strong></td><td><div class="bar-container"><div class="bar bar-orange" style="width:62%">1,616</div></div></td><td class="truncate">CVE-2021-30611, CVE-2019-5815, CVE-2019-13716</td></tr>
+      <tr><td>desktop-e2v661g</td><td><span class="badge badge-medium">2</span></td><td><strong>1,565</strong></td><td><div class="bar-container"><div class="bar bar-orange" style="width:60%">1,565</div></div></td><td class="truncate">CVE-2025-11715, CVE-2024-11708, CVE-2022-2608</td></tr>
+      <tr><td>zavavm556</td><td><span class="badge badge-medium">2</span></td><td><strong>1,403</strong></td><td><div class="bar-container"><div class="bar bar-orange" style="width:53%">1,403</div></div></td><td class="truncate">CVE-2026-5280, CVE-2026-5288, CVE-2026-4726</td></tr>
+      <tr><td>vnevado-srv2016</td><td><span class="badge badge-medium">2</span></td><td><strong>968</strong></td><td><div class="bar-container"><div class="bar bar-blue" style="width:37%">968</div></div></td><td class="truncate">CVE-2025-21300, CVE-2025-69421, CVE-2024-12797</td></tr>
+      <tr><td>vmzavawindows01</td><td><span class="badge badge-critical">0</span></td><td><strong>945</strong></td><td><div class="bar-container"><div class="bar bar-blue" style="width:36%">945</div></div></td><td class="truncate">CVE-2025-58715, CVE-2025-21306, CVE-2022-2601</td></tr>
+      <tr><td>vnevado-win10r</td><td><span class="badge badge-medium">2</span></td><td><strong>889</strong></td><td><div class="bar-container"><div class="bar bar-blue" style="width:34%">889</div></div></td><td class="truncate">CVE-2026-0385, CVE-2024-10468, CVE-2026-3923</td></tr>
+      <tr><td>field-694635</td><td><span class="badge badge-high">1</span></td><td><strong>687</strong></td><td><div class="bar-container"><div class="bar bar-blue" style="width:26%">687</div></div></td><td class="truncate">CVE-2026-20921, CVE-2025-13223, CVE-2026-20811</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============ BLAST RADIUS ============ -->
+<div class="section">
+  <h2 class="section-title">&#x1F4A5; Top Entry-Point Devices by Blast Radius (Q29)</h2>
+  <p class="section-desc">Vulnerable devices ranked by how many unique Azure resources an attacker could reach via cookie chain attack paths. Pattern: Device &#x2192; entra-userCookie &#x2192; User &#x2192; Azure Resource.</p>
+
+  <div class="alert-box">
+    <div class="title">&#x1F534; mb-dc1.internal.niseko.alpineskihouse.co can reach 624 unique targets</div>
+    <div class="body">Compromising this single domain controller gives access to 21 Key Vaults, 42 Storage Accounts, 15 Cognitive Services, and hundreds of other resources via a single user's cached cookie.</div>
+  </div>
+
+  <table>
+    <thead><tr><th>Device</th><th>CVSS</th><th>Unique Targets</th><th>Users</th><th>Key Vaults</th><th>OpenAI</th><th>Storage</th></tr></thead>
+    <tbody>
+      <tr><td><strong>mb-dc1.internal.niseko</strong></td><td><span class="badge badge-high">8.8</span></td><td><span class="badge badge-critical">624</span></td><td>1</td><td>21</td><td>15</td><td>42</td></tr>
+      <tr><td><strong>alpineskihouse-u411</strong></td><td><span class="badge badge-critical">10.0</span></td><td><span class="badge badge-critical">196</span></td><td>1</td><td>13</td><td>0</td><td>18</td></tr>
+      <tr><td><strong>win11-ash-u3968</strong></td><td><span class="badge badge-critical">10.0</span></td><td><span class="badge badge-high">109</span></td><td>1</td><td>6</td><td>0</td><td>4</td></tr>
+      <tr><td><strong>zavavm556</strong></td><td><span class="badge badge-critical">10.0</span></td><td><span class="badge badge-high">108</span></td><td>1</td><td>6</td><td>0</td><td>2</td></tr>
+      <tr><td><strong>desktop-k561uoc</strong></td><td><span class="badge badge-critical">10.0</span></td><td><span class="badge badge-high">108</span></td><td>1</td><td>6</td><td>0</td><td>2</td></tr>
+      <tr><td><strong>ds-zava</strong></td><td><span class="badge badge-critical">10.0</span></td><td><span class="badge badge-high">107</span></td><td>1</td><td>6</td><td>0</td><td>2</td></tr>
+      <tr><td><strong>desktop-u475</strong></td><td><span class="badge badge-critical">10.0</span></td><td><span class="badge badge-high">105</span></td><td>1</td><td>5</td><td>0</td><td>2</td></tr>
+      <tr><td><strong>desktop-e2v661g</strong></td><td><span class="badge badge-critical">10.0</span></td><td><span class="badge badge-high">105</span></td><td>1</td><td>5</td><td>0</td><td>2</td></tr>
+      <tr><td><strong>desktop-8ec56gb</strong></td><td><span class="badge badge-critical">10.0</span></td><td><span class="badge badge-high">105</span></td><td>1</td><td>6</td><td>0</td><td>2</td></tr>
+      <tr><td><strong>win-babqrmgreo5</strong></td><td><span class="badge badge-high">8.8</span></td><td><span class="badge badge-high">98</span></td><td>1</td><td>6</td><td>0</td><td>2</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============ CHOKE POINTS ============ -->
+<div class="section">
+  <h2 class="section-title">&#x1F3AF; Choke Point Detection - Users in Most Attack Paths (Q30)</h2>
+  <p class="section-desc">Users who serve as identity pivots in the most attack paths. Locking down these accounts blocks the most attack chains. All top users are <span class="badge badge-critical">Criticality 0</span>.</p>
+
+  <table>
+    <thead><tr><th>User</th><th>Criticality</th><th>Roles</th><th>Unique Targets</th><th>Devices</th><th>Total Paths</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Claudine Irwin</strong></td>
+        <td><span class="badge badge-critical">0</span></td>
+        <td><div class="tag-list"><span class="tag">Billing Admin</span><span class="tag">Security Reader</span><span class="tag">Security Operator</span><span class="tag">Global Reader</span></div></td>
+        <td><span class="badge badge-critical">624</span></td><td>1</td><td>655</td>
+      </tr>
+      <tr>
+        <td><strong>Denise Charron</strong></td>
+        <td><span class="badge badge-critical">0</span></td>
+        <td><div class="tag-list"><span class="tag">Windows 365 Admin</span><span class="tag">Teams Admin</span><span class="tag">Compliance Admin</span><span class="tag">SharePoint Admin</span></div></td>
+        <td><span class="badge badge-critical">196</span></td><td>1</td><td>199</td>
+      </tr>
+      <tr>
+        <td><strong>Sam Mukeshimana</strong></td>
+        <td><span class="badge badge-critical">0</span></td>
+        <td><div class="tag-list"><span class="tag">Security Reader</span><span class="tag">Security Operator</span><span class="tag">Global Reader</span></div></td>
+        <td><span class="badge badge-high">109</span></td><td>1</td><td>109</td>
+      </tr>
+      <tr>
+        <td><strong>Amey Keomany</strong></td>
+        <td><span class="badge badge-critical">0</span></td>
+        <td><div class="tag-list"><span class="tag">Security Reader</span><span class="tag">Security Operator</span><span class="tag">Global Reader</span></div></td>
+        <td><span class="badge badge-high">108</span></td><td>1</td><td>109</td>
+      </tr>
+      <tr>
+        <td><strong>Begli Lewis</strong></td>
+        <td><span class="badge badge-critical">0</span></td>
+        <td><div class="tag-list"><span class="tag">Security Reader</span><span class="tag">Security Operator</span><span class="tag">Global Reader</span></div></td>
+        <td><span class="badge badge-high">108</span></td><td>1</td><td>109</td>
+      </tr>
+      <tr>
+        <td><strong>Jawid Jaunzema</strong></td>
+        <td><span class="badge badge-critical">0</span></td>
+        <td><div class="tag-list"><span class="tag">Security Reader</span><span class="tag">Security Operator</span><span class="tag">Global Reader</span></div></td>
+        <td><span class="badge badge-high">107</span></td><td>1</td><td>108</td>
+      </tr>
+      <tr>
+        <td><strong>Nikica Nilsson</strong></td>
+        <td><span class="badge badge-critical">0</span></td>
+        <td><div class="tag-list"><span class="tag">Security Reader</span><span class="tag">Security Operator</span><span class="tag">Global Reader</span></div></td>
+        <td><span class="badge badge-high">105</span></td><td>1</td><td>107</td>
+      </tr>
+      <tr>
+        <td><strong>Rinaldo Laukaitiene</strong></td>
+        <td><span class="badge badge-critical">0</span></td>
+        <td><div class="tag-list"><span class="tag">Compliance Admin</span><span class="tag">Security Reader</span><span class="tag">Security Operator</span><span class="tag">Global Reader</span></div></td>
+        <td><span class="badge badge-high">105</span></td><td>1</td><td>105</td>
+      </tr>
+      <tr>
+        <td><strong>Kamal Endemann</strong></td>
+        <td><span class="badge badge-critical">0</span></td>
+        <td><div class="tag-list"><span class="tag">Security Reader</span><span class="tag">Security Operator</span><span class="tag">Global Reader</span></div></td>
+        <td><span class="badge badge-high">98</span></td><td>1</td><td>98</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============ COOKIE CHAIN ATTACK PATHS ============ -->
+<div class="section">
+  <h2 class="section-title">&#x1F36A; Cookie Chain Attack Paths by Target Type (Q22)</h2>
+  <p class="section-desc">Direct attack paths from vulnerable devices through cached Entra cookies to Azure resources. Pattern: <code>Device &#x2192; entra-userCookie &#x2192; User &#x2192; Target</code> (MITRE: T1539, T1550.004)</p>
+  <table>
+    <thead><tr><th>Target Resource Type</th><th>Unique Targets</th><th>Total Paths</th><th>Devices</th><th>Users</th></tr></thead>
+    <tbody>
+      <tr><td>microsoft.network/networkinterfaces</td><td><strong>80</strong></td><td>371</td><td>10</td><td>10</td></tr>
+      <tr><td>microsoft.network/networksecuritygroups</td><td><strong>43</strong></td><td>126</td><td>10</td><td>10</td></tr>
+      <tr><td><span style="color:var(--red)">microsoft.storage/storageaccounts</span></td><td><strong>42</strong></td><td>78</td><td>10</td><td>10</td></tr>
+      <tr><td>microsoft.compute/virtualmachines</td><td><strong>38</strong></td><td>252</td><td>10</td><td>10</td></tr>
+      <tr><td>microsoft.operationalinsights/workspaces</td><td><strong>24</strong></td><td>64</td><td>10</td><td>10</td></tr>
+      <tr><td><span style="color:var(--red)">microsoft.keyvault/vaults</span></td><td><strong>21</strong></td><td>80</td><td>10</td><td>10</td></tr>
+      <tr><td>microsoft.logic/workflows</td><td><strong>18</strong></td><td>87</td><td>10</td><td>10</td></tr>
+      <tr><td>microsoft.web/sites_webapp</td><td><strong>17</strong></td><td>26</td><td>10</td><td>10</td></tr>
+      <tr><td><span style="color:var(--red)">microsoft.cognitiveservices/accounts</span></td><td><strong>15</strong></td><td>15</td><td>1</td><td>1</td></tr>
+      <tr><td>microsoft.containerservice/managedclusters</td><td><strong>12</strong></td><td>21</td><td>10</td><td>10</td></tr>
+      <tr><td>microsoft.cognitiveservices/accounts_openai</td><td><strong>3</strong></td><td>3</td><td>1</td><td>1</td></tr>
+      <tr><td>microsoft.documentdb/databaseaccounts</td><td><strong>3</strong></td><td>3</td><td>1</td><td>1</td></tr>
+      <tr><td>microsoft.network/azurefirewalls</td><td><strong>2</strong></td><td>20</td><td>10</td><td>10</td></tr>
+      <tr><td>microsoft.sqlvirtualmachine/sqlvirtualmachines</td><td><strong>2</strong></td><td>2</td><td>1</td><td>1</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============ RECOMMENDATIONS ============ -->
+<div class="section">
+  <h2 class="section-title">&#x1F4CB; Remediation Recommendations</h2>
+  <table>
+    <thead><tr><th>Priority</th><th>Action</th><th>Impact</th></tr></thead>
+    <tbody>
+      <tr><td><span class="badge badge-critical">P0</span></td><td>Patch CVSS 10.0 VMs immediately (21 VMs including DCs)</td><td>Removes entry points for 21+ devices with maximum severity vulns</td></tr>
+      <tr><td><span class="badge badge-critical">P0</span></td><td>Enforce phishing-resistant MFA (FIDO2) for all 10 choke-point users</td><td>Blocks cookie theft attack paths to 624+ Azure resources</td></tr>
+      <tr><td><span class="badge badge-critical">P0</span></td><td>Enable token protection / CAE for privileged accounts</td><td>Prevents T1539 cookie replay attacks</td></tr>
+      <tr><td><span class="badge badge-high">P1</span></td><td>Isolate Level 0 assets (DCs: vnevado-dc, mb-dc1, ashtravel-dc) into dedicated segments</td><td>Reduces lateral movement from compromised VMs to DCs</td></tr>
+      <tr><td><span class="badge badge-high">P1</span></td><td>Review Claudine Irwin's permissions - 624 reachable targets via single cookie</td><td>Reduce blast radius by converting to PIM-eligible roles</td></tr>
+      <tr><td><span class="badge badge-high">P1</span></td><td>Remediate sap-ash (2,628 CVEs) and alpine-srv1 (1,709 CVEs, Level 0)</td><td>Largest vulnerability surfaces on critical assets</td></tr>
+      <tr><td><span class="badge badge-medium">P2</span></td><td>Apply Conditional Access policies requiring compliant devices for admin access</td><td>Prevents unmanaged device cookie extraction</td></tr>
+      <tr><td><span class="badge badge-medium">P2</span></td><td>Audit 857K+ permission edges - review Owner/Contributor assignments</td><td>Identifies over-provisioned identities</td></tr>
+      <tr><td><span class="badge badge-low">P3</span></td><td>Monitor choke-point users with custom Sentinel analytics for anomalous sign-ins</td><td>Early detection of identity compromise</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="footer">
+  <p>Generated by Copilot CLI &bull; Source: <a href="https://github.com/SCStelz/security-investigator" style="color:var(--accent)">SCStelz/security-investigator</a> ExposureGraph Attack Paths Query Library</p>
+  <p>Queries: Q1, Q3, Q9, Q10, Q12, Q13, Q14, Q21, Q22, Q29, Q30 &bull; Workspace: CyberSOC (e34d562e-ef12-4c4e-9bc0-7c6ae357c015)</p>
+</div>
+
+</div>
+</body>
+</html>

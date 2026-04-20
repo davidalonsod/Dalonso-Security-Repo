@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>AiTM Threat Detection — CyberSOC Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root{
+    --bg:#0b1020;
+    --bg-2:#111736;
+    --panel:#141a33;
+    --panel-2:#1a2148;
+    --grid:#1f2a55;
+    --border:#2a355f;
+    --text:#e6ecff;
+    --muted:#9aa4c7;
+    --accent:#7aa2ff;
+    --accent-2:#b18cff;
+    --crit:#ff4d6d;
+    --high:#ff8a3d;
+    --med:#ffd166;
+    --low:#7aa2ff;
+    --ok:#4ade80;
+    --mono:'Cascadia Code','JetBrains Mono','Consolas',monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;color:var(--text);
+    background:radial-gradient(1200px 600px at 10% -20%,#1a2466 0%,transparent 60%),
+               radial-gradient(900px 500px at 110% 20%,#3a1a66 0%,transparent 55%),
+               var(--bg);min-height:100vh}
+  .wrap{max-width:1400px;margin:0 auto;padding:32px 28px 80px}
+  header{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;
+    border-bottom:1px solid var(--border);padding-bottom:20px;margin-bottom:28px}
+  h1{margin:0;font-size:28px;letter-spacing:.2px}
+  h1 .tag{font-size:12px;color:var(--muted);font-weight:500;margin-left:10px;
+    padding:3px 10px;border:1px solid var(--border);border-radius:999px;vertical-align:middle}
+  .sub{color:var(--muted);font-size:14px;margin-top:6px}
+  .meta{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+  .meta b{color:var(--text);font-weight:600}
+  .chip{padding:4px 10px;border:1px solid var(--border);border-radius:999px;background:rgba(255,255,255,.02)}
+  .grid{display:grid;gap:18px}
+  .cols-5{grid-template-columns:repeat(5,minmax(0,1fr))}
+  .cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  @media (max-width:1100px){.cols-5{grid-template-columns:repeat(2,1fr)}.cols-3{grid-template-columns:1fr}.cols-2{grid-template-columns:1fr}}
+  .card{background:linear-gradient(180deg,var(--panel) 0%,var(--panel-2) 100%);
+    border:1px solid var(--border);border-radius:14px;padding:18px;
+    box-shadow:0 10px 30px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.03)}
+  .card h3{margin:0 0 10px 0;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  .kpi .num{font-size:30px;font-weight:700;line-height:1.1}
+  .kpi .lbl{color:var(--muted);font-size:12px;margin-top:4px}
+  .kpi.crit .num{color:var(--crit)}
+  .kpi.high .num{color:var(--high)}
+  .kpi.med .num{color:var(--med)}
+  .kpi.ok .num{color:var(--ok)}
+  .kpi.info .num{color:var(--accent)}
+  section{margin-top:28px}
+  section > h2{font-size:18px;margin:0 0 14px 0;display:flex;align-items:center;gap:10px}
+  section > h2 .dot{width:10px;height:10px;border-radius:50%;background:var(--accent)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:10px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:11px;letter-spacing:.08em;text-transform:uppercase;background:rgba(255,255,255,.02)}
+  tr:hover td{background:rgba(122,162,255,.05)}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:.04em}
+  .pill.crit{background:rgba(255,77,109,.12);color:#ff8599;border:1px solid rgba(255,77,109,.3)}
+  .pill.high{background:rgba(255,138,61,.12);color:#ffa96a;border:1px solid rgba(255,138,61,.3)}
+  .pill.med{background:rgba(255,209,102,.12);color:#ffdb87;border:1px solid rgba(255,209,102,.3)}
+  .pill.low{background:rgba(122,162,255,.12);color:#a9c2ff;border:1px solid rgba(122,162,255,.3)}
+  .pill.ok{background:rgba(74,222,128,.12);color:#8cf2b1;border:1px solid rgba(74,222,128,.3)}
+  .mono{font-family:var(--mono);font-size:12px;color:#c9d4ff}
+  .cc{display:inline-flex;align-items:center;gap:4px;padding:2px 6px;border-radius:6px;background:rgba(122,162,255,.08);border:1px solid var(--border);font-size:11px;margin:1px 2px;color:#cfd9ff;font-family:var(--mono)}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend i{width:10px;height:10px;display:inline-block;border-radius:2px}
+  .flow{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
+  .flow .step{background:var(--panel-2);border:1px solid var(--border);border-radius:10px;padding:10px;text-align:center;font-size:12px;color:var(--muted)}
+  .flow .step b{display:block;color:var(--text);font-size:13px;margin-bottom:4px}
+  @media (max-width:900px){.flow{grid-template-columns:repeat(2,1fr)}}
+  .footer{margin-top:40px;color:var(--muted);font-size:12px;border-top:1px solid var(--border);padding-top:16px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
+  .tri-legend{display:flex;gap:10px;font-size:11px;color:var(--muted)}
+  .tri-legend i{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:4px;vertical-align:middle}
+  .hdr-note{color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div>
+    <h1>🛡️ AiTM Threat Detection Dashboard <span class="tag">CyberSOC · Sentinel Data Lake</span></h1>
+    <div class="sub">Adversary-in-the-Middle token replay hunt · same-session cross-country correlation · 30-day window</div>
+  </div>
+  <div class="meta">
+    <span class="chip">Workspace: <b>CyberSOC</b></span>
+    <span class="chip">Window: <b>Last 30 days</b></span>
+    <span class="chip">Generated: <b>2026-04-20</b></span>
+    <span class="chip">Tables: <b>SigninLogs</b>, <b>SecurityAlert</b></span>
+  </div>
+</header>
+
+<!-- HERO METRICS -->
+<div class="grid cols-5">
+  <div class="card kpi info">
+    <h3>Sign-ins analysed</h3>
+    <div class="num">296,213</div>
+    <div class="lbl">SigninLogs · 30d</div>
+  </div>
+  <div class="card kpi crit">
+    <h3>Flagged sessions</h3>
+    <div class="num">571</div>
+    <div class="lbl">SessionId with ≥2 countries</div>
+  </div>
+  <div class="card kpi high">
+    <h3>Users affected</h3>
+    <div class="num">436</div>
+    <div class="lbl">Distinct UPNs</div>
+  </div>
+  <div class="card kpi crit">
+    <h3>Worst session</h3>
+    <div class="num">7</div>
+    <div class="lbl">Countries in one SessionId</div>
+  </div>
+  <div class="card kpi high">
+    <h3>AiTM-related alerts</h3>
+    <div class="num">14</div>
+    <div class="lbl">MicrosoftThreatProtection · IPC</div>
+  </div>
+</div>
+
+<!-- ATTACK FLOW -->
+<section>
+  <h2><span class="dot" style="background:var(--accent-2)"></span> AiTM Attack Anatomy</h2>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><b>1 · Phish</b>Email with AiTM link delivered</div>
+      <div class="step"><b>2 · Proxy</b>Evilginx / Tycoon2FA clone</div>
+      <div class="step"><b>3 · Creds</b>Credentials relayed to MS</div>
+      <div class="step"><b>4 · MFA</b>User approves — bypassed</div>
+      <div class="step"><b>5 · Cookie</b>Session cookie captured</div>
+      <div class="step"><b>6 · Replay</b>Attacker reuses cookie</div>
+      <div class="step"><b>7 · Persist</b>Inbox rules, new MFA, BEC</div>
+    </div>
+    <div class="hdr-note" style="margin-top:12px">
+      Detection primitive in this dashboard: <b>same <code class="mono">SessionId</code> seen from multiple countries within the retention window</b>.
+      Complementary signals: <code class="mono">RiskEventTypes_V2</code> (<code class="mono">anonymizedIPAddress</code>, <code class="mono">unfamiliarFeatures</code>) and Defender alerts tagging known AiTM infrastructure.
+    </div>
+  </div>
+</section>
+
+<!-- CHARTS -->
+<section>
+  <h2><span class="dot"></span> Timeline &amp; Geography</h2>
+  <div class="grid cols-2">
+    <!-- TIMELINE -->
+    <div class="card">
+      <h3>Flagged sessions per day</h3>
+      <svg viewBox="0 0 720 260" width="100%" height="260" role="img" aria-label="Daily flagged sessions timeline">
+        <defs>
+          <linearGradient id="areaGrad" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="#ff4d6d" stop-opacity="0.55"/>
+            <stop offset="100%" stop-color="#ff4d6d" stop-opacity="0.02"/>
+          </linearGradient>
+        </defs>
+        <!-- grid -->
+        <g stroke="#1f2a55" stroke-width="1">
+          <line x1="50" y1="30"  x2="700" y2="30"/>
+          <line x1="50" y1="80"  x2="700" y2="80"/>
+          <line x1="50" y1="130" x2="700" y2="130"/>
+          <line x1="50" y1="180" x2="700" y2="180"/>
+          <line x1="50" y1="220" x2="700" y2="220"/>
+        </g>
+        <!-- y labels (max=88) -->
+        <g fill="#9aa4c7" font-size="10" font-family="Segoe UI">
+          <text x="42" y="34"  text-anchor="end">90</text>
+          <text x="42" y="84"  text-anchor="end">70</text>
+          <text x="42" y="134" text-anchor="end">45</text>
+          <text x="42" y="184" text-anchor="end">22</text>
+          <text x="42" y="224" text-anchor="end">0</text>
+        </g>
+        <!-- data: 26 days, max 88 → scale x: 50..700 (650/25=26), y: 220 - v/88*190 -->
+        <!-- day pts: [10,19,88,78,43,42,27,8,28,32,31,29,9,1,32,22,17,9,1,1,11,16,6,7,2,2] -->
+        <polygon fill="url(#areaGrad)" stroke="none"
+          points="50,198.4 76,179.0 102,30 128,51.6 154,127.2 180,129.4 206,161.7 232,202.7 258,159.5 284,150.9 310,153.1 336,157.4 362,200.5 388,217.8 414,150.9 440,172.5 466,183.3 492,200.5 518,217.8 544,217.8 570,196.3 596,185.4 622,207.0 648,204.9 674,215.7 700,215.7 700,220 50,220"/>
+        <polyline fill="none" stroke="#ff4d6d" stroke-width="2"
+          points="50,198.4 76,179.0 102,30 128,51.6 154,127.2 180,129.4 206,161.7 232,202.7 258,159.5 284,150.9 310,153.1 336,157.4 362,200.5 388,217.8 414,150.9 440,172.5 466,183.3 492,200.5 518,217.8 544,217.8 570,196.3 596,185.4 622,207.0 648,204.9 674,215.7 700,215.7"/>
+        <!-- peak annotation -->
+        <circle cx="102" cy="30" r="4" fill="#ff4d6d"/>
+        <text x="108" y="24" fill="#ff8599" font-size="11" font-family="Segoe UI" font-weight="600">Peak · 23 Mar · 88 sessions</text>
+        <!-- x labels -->
+        <g fill="#9aa4c7" font-size="10" font-family="Segoe UI" text-anchor="middle">
+          <text x="50"  y="245">Mar 21</text>
+          <text x="206" y="245">Mar 27</text>
+          <text x="362" y="245">Apr 02</text>
+          <text x="518" y="245">Apr 09</text>
+          <text x="674" y="245">Apr 17</text>
+        </g>
+      </svg>
+    </div>
+
+    <!-- COUNTRIES BAR -->
+    <div class="card">
+      <h3>Top countries appearing in flagged sessions</h3>
+      <svg viewBox="0 0 720 260" width="100%" height="260" role="img" aria-label="Top countries">
+        <!-- bars: NL 268, GB 199, US 109, IE 107, AU 105, DE 71, JP 67, IN 56, SG 51, FR 21  -->
+        <!-- max=268; bar width = 430 max, x start=150 ; y: 20 + i*22 -->
+        <g font-family="Segoe UI" font-size="11">
+          <!-- row template: rect + label + value -->
+          <text x="140" y="32" fill="#e6ecff" text-anchor="end" font-weight="600">🇳🇱 NL</text>
+          <rect x="150" y="22" width="430" height="14" fill="url(#bgG)" opacity=".1"/>
+          <rect x="150" y="22" width="430" height="14" fill="#ff4d6d" rx="3"/>
+          <text x="590" y="32" fill="#ffc7d1">268</text>
+
+          <text x="140" y="54" fill="#e6ecff" text-anchor="end" font-weight="600">🇬🇧 GB</text>
+          <rect x="150" y="44" width="319" height="14" fill="#ff4d6d" opacity=".85" rx="3"/>
+          <text x="479" y="54" fill="#ffa4b3">199</text>
+
+          <text x="140" y="76" fill="#e6ecff" text-anchor="end" font-weight="600">🇺🇸 US</text>
+          <rect x="150" y="66" width="175" height="14" fill="#ff8a3d" rx="3"/>
+          <text x="335" y="76" fill="#ffa96a">109</text>
+
+          <text x="140" y="98" fill="#e6ecff" text-anchor="end" font-weight="600">🇮🇪 IE</text>
+          <rect x="150" y="88" width="172" height="14" fill="#ff8a3d" opacity=".9" rx="3"/>
+          <text x="332" y="98" fill="#ffa96a">107</text>
+
+          <text x="140" y="120" fill="#e6ecff" text-anchor="end" font-weight="600">🇦🇺 AU</text>
+          <rect x="150" y="110" width="169" height="14" fill="#ffd166" rx="3"/>
+          <text x="329" y="120" fill="#ffdb87">105</text>
+
+          <text x="140" y="142" fill="#e6ecff" text-anchor="end" font-weight="600">🇩🇪 DE</text>
+          <rect x="150" y="132" width="114" height="14" fill="#ffd166" opacity=".8" rx="3"/>
+          <text x="274" y="142" fill="#ffdb87">71</text>
+
+          <text x="140" y="164" fill="#e6ecff" text-anchor="end" font-weight="600">🇯🇵 JP</text>
+          <rect x="150" y="154" width="108" height="14" fill="#7aa2ff" rx="3"/>
+          <text x="268" y="164" fill="#a9c2ff">67</text>
+
+          <text x="140" y="186" fill="#e6ecff" text-anchor="end" font-weight="600">🇮🇳 IN</text>
+          <rect x="150" y="176" width="90" height="14" fill="#7aa2ff" opacity=".9" rx="3"/>
+          <text x="250" y="186" fill="#a9c2ff">56</text>
+
+          <text x="140" y="208" fill="#e6ecff" text-anchor="end" font-weight="600">🇸🇬 SG</text>
+          <rect x="150" y="198" width="82" height="14" fill="#7aa2ff" opacity=".75" rx="3"/>
+          <text x="242" y="208" fill="#a9c2ff">51</text>
+
+          <text x="140" y="230" fill="#e6ecff" text-anchor="end" font-weight="600">🇫🇷 FR</text>
+          <rect x="150" y="220" width="34" height="14" fill="#b18cff" rx="3"/>
+          <text x="194" y="230" fill="#cdb7ff">21</text>
+        </g>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<!-- RISK EVENTS DONUT + ALERTS -->
+<section>
+  <h2><span class="dot" style="background:var(--crit)"></span> Risk Signals &amp; Alerts</h2>
+  <div class="grid cols-3">
+
+    <div class="card">
+      <h3>Identity Protection risk events</h3>
+      <svg viewBox="0 0 220 220" width="100%" height="220" role="img" aria-label="Risk events donut">
+        <!-- total = 181; anonymizedIPAddress=102 (56.35%) ; unfamiliarFeatures=79 (43.65%) -->
+        <!-- circumference = 2*pi*70 ≈ 439.82 ; 102/181*439.82 ≈ 247.9 ; 79/181*439.82 ≈ 191.9 -->
+        <g transform="translate(110 110)">
+          <circle r="70" fill="none" stroke="#1f2a55" stroke-width="22"/>
+          <circle r="70" fill="none" stroke="#ff4d6d" stroke-width="22"
+            stroke-dasharray="247.9 439.82" transform="rotate(-90)"/>
+          <circle r="70" fill="none" stroke="#ff8a3d" stroke-width="22"
+            stroke-dasharray="191.9 439.82" stroke-dashoffset="-247.9" transform="rotate(-90)"/>
+          <text text-anchor="middle" dy="-2" font-size="26" font-weight="700" fill="#e6ecff" font-family="Segoe UI">181</text>
+          <text text-anchor="middle" dy="18" font-size="11" fill="#9aa4c7" font-family="Segoe UI">risk events</text>
+        </g>
+      </svg>
+      <div class="legend" style="justify-content:center;margin-top:6px">
+        <span><i style="background:#ff4d6d"></i> anonymizedIPAddress <b style="color:#ffc7d1">102</b></span>
+        <span><i style="background:#ff8a3d"></i> unfamiliarFeatures <b style="color:#ffa96a">79</b></span>
+      </div>
+    </div>
+
+    <div class="card" style="grid-column:span 2">
+      <h3>AiTM-related alerts — last 30d</h3>
+      <table>
+        <thead>
+          <tr><th>Alert</th><th>Provider</th><th style="text-align:center">Severity</th><th style="text-align:right">Count</th><th>First → Last seen</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>Malicious sign in from an IP address associated with recognized AiTM attack infrastructure</b></td>
+            <td class="mono">MicrosoftThreatProtection</td>
+            <td style="text-align:center"><span class="pill crit">High</span></td>
+            <td style="text-align:right"><b>6</b></td>
+            <td class="mono">2026-03-28 → 2026-04-02</td>
+          </tr>
+          <tr>
+            <td><b>Malicious sign-in from a known AiTM attack infrastructure</b></td>
+            <td class="mono">MicrosoftThreatProtection</td>
+            <td style="text-align:center"><span class="pill high">Medium</span></td>
+            <td style="text-align:right"><b>6</b></td>
+            <td class="mono">2026-03-28 → 2026-04-02</td>
+          </tr>
+          <tr>
+            <td><b>Anomalous Token</b></td>
+            <td class="mono">IPC (Identity Protection)</td>
+            <td style="text-align:center"><span class="pill low">Low</span></td>
+            <td style="text-align:right"><b>2</b></td>
+            <td class="mono">2026-04-13 → 2026-04-15</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="hdr-note" style="margin-top:10px">
+        These fire in addition to the session-level correlation — use the tables below to pivot onto
+        impacted users and revoke sessions before the attacker establishes persistence.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TOP USERS -->
+<section>
+  <h2><span class="dot" style="background:var(--high)"></span> Most-impacted users</h2>
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>User</th>
+          <th style="text-align:center">Threat</th>
+          <th style="text-align:center">Flagged sessions</th>
+          <th style="text-align:center">Max countries / session</th>
+          <th style="text-align:center">Distinct IPs</th>
+          <th>Countries</th>
+          <th>Top apps</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono"><b>cameronv@vnevado.alpineskihouse.co</b></td>
+          <td style="text-align:center"><span class="pill crit">🔴 CRITICAL</span></td>
+          <td style="text-align:center"><b>4</b></td>
+          <td style="text-align:center"><b style="color:#ff8599">7</b></td>
+          <td style="text-align:center">29</td>
+          <td>
+            <span class="cc">🇩🇪 DE</span><span class="cc">🇳🇱 NL</span><span class="cc">🇸🇪 SE</span>
+            <span class="cc">🇺🇸 US</span><span class="cc">🇫🇷 FR</span><span class="cc">🇳🇴 NO</span>
+            <span class="cc">🇮🇹 IT</span><span class="cc">🇦🇹 AT</span>
+          </td>
+          <td class="mono">Azure Portal · SAP BTP · KeyVault · Outlook Web · M365 Copilot</td>
+        </tr>
+        <tr>
+          <td class="mono"><b>u101@ops.zava-corp.com</b></td>
+          <td style="text-align:center"><span class="pill crit">🔴 CRITICAL</span></td>
+          <td style="text-align:center"><b>4</b></td>
+          <td style="text-align:center"><b style="color:#ffa96a">5</b></td>
+          <td style="text-align:center">36</td>
+          <td>
+            <span class="cc">🇳🇱 NL</span><span class="cc">🇬🇧 GB</span><span class="cc">🇺🇸 US</span>
+            <span class="cc">🇩🇪 DE</span><span class="cc">🇫🇷 FR</span>
+          </td>
+          <td class="mono">Dataverse · Power Apps · Azure Portal · Teams Admin · Teams Web</td>
+        </tr>
+        <tr>
+          <td class="mono"><b>u421@int.zava-corp.com</b></td>
+          <td style="text-align:center"><span class="pill high">🟠 HIGH</span></td>
+          <td style="text-align:center">1</td>
+          <td style="text-align:center"><b>4</b></td>
+          <td style="text-align:center">7</td>
+          <td><span class="cc">🇫🇷 FR</span><span class="cc">🇬🇧 GB</span><span class="cc">🇳🇱 NL</span><span class="cc">🇺🇸 US</span></td>
+          <td class="mono">Azure Portal · M365 Security &amp; Compliance · Office Shell</td>
+        </tr>
+        <tr>
+          <td class="mono"><b>u2044@int.zava-corp.com</b></td>
+          <td style="text-align:center"><span class="pill high">🟠 HIGH</span></td>
+          <td style="text-align:center">1</td>
+          <td style="text-align:center"><b>4</b></td>
+          <td style="text-align:center">6</td>
+          <td><span class="cc">🇹🇼 TW</span><span class="cc">🇯🇵 JP</span><span class="cc">🇸🇬 SG</span><span class="cc">🇦🇺 AU</span></td>
+          <td class="mono">M365 Security &amp; Compliance · Office Shell · M365 Copilot extension</td>
+        </tr>
+        <tr>
+          <td class="mono"><b>u720@int.zava-corp.com</b></td>
+          <td style="text-align:center"><span class="pill high">🟠 HIGH</span></td>
+          <td style="text-align:center">4</td>
+          <td style="text-align:center">3</td>
+          <td style="text-align:center">10</td>
+          <td><span class="cc">🇮🇪 IE</span><span class="cc">🇳🇱 NL</span><span class="cc">🇬🇧 GB</span><span class="cc">🇧🇷 BR</span></td>
+          <td class="mono">Azure Portal · M365 S&amp;C · AAD RegisteredApps · M365 Admin · Security Copilot</td>
+        </tr>
+        <tr>
+          <td class="mono"><b>u113@int.zava-corp.com</b></td>
+          <td style="text-align:center"><span class="pill high">🟠 HIGH</span></td>
+          <td style="text-align:center">4</td>
+          <td style="text-align:center">3</td>
+          <td style="text-align:center">10</td>
+          <td><span class="cc">🇳🇱 NL</span><span class="cc">🇬🇧 GB</span><span class="cc">🇫🇷 FR</span><span class="cc">🇩🇪 DE</span></td>
+          <td class="mono">Office Shell · Power Apps · M365 S&amp;C · Sentinel CLI · Azure Portal</td>
+        </tr>
+        <tr>
+          <td class="mono"><b>u4050@int.zava-corp.com</b></td>
+          <td style="text-align:center"><span class="pill high">🟠 HIGH</span></td>
+          <td style="text-align:center">3</td>
+          <td style="text-align:center">3</td>
+          <td style="text-align:center">20</td>
+          <td><span class="cc">🇨🇳 CN</span><span class="cc">🇸🇬 SG</span><span class="cc">🇯🇵 JP</span></td>
+          <td class="mono">M365 S&amp;C · Office Shell · Azure Portal · Security Copilot</td>
+        </tr>
+        <tr>
+          <td class="mono"><b>u2502@int.zava-corp.com</b></td>
+          <td style="text-align:center"><span class="pill med">🟡 MEDIUM</span></td>
+          <td style="text-align:center">3</td>
+          <td style="text-align:center">3</td>
+          <td style="text-align:center">7</td>
+          <td><span class="cc">🇬🇧 GB</span><span class="cc">🇮🇪 IE</span><span class="cc">🇳🇱 NL</span></td>
+          <td class="mono">Office Shell · M365 S&amp;C · Security Copilot · M365 Admin · Azure Portal</td>
+        </tr>
+        <tr>
+          <td class="mono"><b>u3183@int.zava-corp.com</b></td>
+          <td style="text-align:center"><span class="pill med">🟡 MEDIUM</span></td>
+          <td style="text-align:center">3</td>
+          <td style="text-align:center">3</td>
+          <td style="text-align:center">7</td>
+          <td><span class="cc">🇳🇱 NL</span><span class="cc">🇮🇪 IE</span><span class="cc">🇪🇸 ES</span></td>
+          <td class="mono">Azure Portal · M365 S&amp;C · Office Shell · Cascade Authentication</td>
+        </tr>
+        <tr>
+          <td class="mono"><b>u19550@int.zava-corp.com</b></td>
+          <td style="text-align:center"><span class="pill med">🟡 MEDIUM</span></td>
+          <td style="text-align:center">3</td>
+          <td style="text-align:center">3</td>
+          <td style="text-align:center">7</td>
+          <td><span class="cc">🇦🇺 AU</span><span class="cc">🇬🇧 GB</span><span class="cc">🇸🇰 SK</span></td>
+          <td class="mono">M365 Copilot · Office Shell · Security Copilot · VS Code · M365 S&amp;C</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="hdr-note" style="margin-top:10px">
+      <b>cameronv@vnevado.alpineskihouse.co</b> has a single <code class="mono">SessionId</code> touching <b>7 countries</b> across <b>29 IPs</b> — classic EvilGinx-style cookie replay.
+      Prioritise session revocation + FIDO2 reset.
+    </div>
+  </div>
+</section>
+
+<!-- SESSIONS DETAIL -->
+<section>
+  <h2><span class="dot" style="background:var(--crit)"></span> Top flagged sessions (same SessionId, multiple countries)</h2>
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>SessionId</th>
+          <th style="text-align:center">Countries</th>
+          <th style="text-align:center">IPs</th>
+          <th style="text-align:center">Sign-ins</th>
+          <th>Window</th>
+          <th>Geography</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono">cameronv@vnevado…</td>
+          <td class="mono" style="font-size:11px">0032628a-67e9-e2af-a4dc-4b32702877b1</td>
+          <td style="text-align:center"><span class="pill crit">7</span></td>
+          <td style="text-align:center">12</td>
+          <td style="text-align:center">61</td>
+          <td class="mono">Mar 30 → Apr 10</td>
+          <td><span class="cc">NO</span><span class="cc">NL</span><span class="cc">SE</span><span class="cc">US</span><span class="cc">DE</span><span class="cc">IT</span><span class="cc">FR</span></td>
+        </tr>
+        <tr>
+          <td class="mono">cameronv@vnevado…</td>
+          <td class="mono" style="font-size:11px">0031c64a-c3c2-831c-9292-8464f646132f</td>
+          <td style="text-align:center"><span class="pill crit">6</span></td>
+          <td style="text-align:center">9</td>
+          <td style="text-align:center">45</td>
+          <td class="mono">Mar 26 → Mar 30</td>
+          <td><span class="cc">FR</span><span class="cc">NO</span><span class="cc">AT</span><span class="cc">SE</span><span class="cc">DE</span><span class="cc">NL</span></td>
+        </tr>
+        <tr>
+          <td class="mono">u101@ops.zava-corp.com</td>
+          <td class="mono" style="font-size:11px">003d5f0a-4595-723c-940f-f729e451a087</td>
+          <td style="text-align:center"><span class="pill high">5</span></td>
+          <td style="text-align:center">12</td>
+          <td style="text-align:center">459</td>
+          <td class="mono">Apr 02 → Apr 15</td>
+          <td><span class="cc">NL</span><span class="cc">GB</span><span class="cc">FR</span><span class="cc">DE</span><span class="cc">US</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="hdr-note" style="margin-top:10px">
+      Full list (25 rows) retrievable by replaying the hunting query against <code class="mono">SigninLogs</code> in Sentinel Data Lake — see query box below.
+    </div>
+  </div>
+</section>
+
+<!-- HUNTING QUERIES -->
+<section>
+  <h2><span class="dot" style="background:var(--accent)"></span> Hunting queries used</h2>
+  <div class="grid cols-2">
+    <div class="card">
+      <h3>Q7 · Token replay — same SessionId across countries</h3>
+<pre class="mono" style="margin:0;white-space:pre-wrap;line-height:1.55;color:#cfd9ff">SigninLogs
+| where TimeGenerated &gt; ago(30d)
+| where ResultType == 0
+| extend Country = tostring(parse_json(tostring(LocationDetails)).countryOrRegion)
+| where isnotempty(SessionId)
+| summarize
+    DistinctIPs = dcount(IPAddress),
+    DistinctCountries = dcount(Country),
+    Countries = make_set(Country),
+    SignIns = count()
+  by UserPrincipalName, SessionId
+| where DistinctCountries &gt; 1
+| order by DistinctCountries desc, DistinctIPs desc</pre>
+    </div>
+    <div class="card">
+      <h3>Q12 · AiTM-related alert roll-up</h3>
+<pre class="mono" style="margin:0;white-space:pre-wrap;line-height:1.55;color:#cfd9ff">SecurityAlert
+| where TimeGenerated &gt; ago(30d)
+| where AlertName has_any (
+    "AiTM","adversary-in-the-middle",
+    "Anomalous Token","Stolen session cookie",
+    "Attacker in the Middle",
+    "cookie theft","phishing attack")
+| summarize AlertCount = count(),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+  by AlertName, ProviderName, AlertSeverity
+| order by AlertCount desc</pre>
+    </div>
+  </div>
+</section>
+
+<!-- RESPONSE -->
+<section>
+  <h2><span class="dot" style="background:var(--ok)"></span> Response playbook — confirmed AiTM compromise</h2>
+  <div class="grid cols-3">
+    <div class="card">
+      <h3>Immediate · 0–30 min</h3>
+      <ol style="margin:0;padding-left:18px;line-height:1.7;font-size:13px">
+        <li>Revoke all sessions (invalidates refresh tokens)</li>
+        <li>Force password reset</li>
+        <li>Disable account if attack is active</li>
+        <li>Review &amp; remove attacker-registered MFA methods</li>
+        <li>Block attacker IPs in Named Locations / MDE indicators</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>Investigation · 30–120 min</h3>
+      <ol style="margin:0;padding-left:18px;line-height:1.7;font-size:13px">
+        <li>Review inbox rules (Forward/Redirect/MoveToFolder)</li>
+        <li>Audit OAuth app consents for the user</li>
+        <li>Verify no PIM activations under stolen session</li>
+        <li>Check mail &amp; file access in CloudAppEvents</li>
+        <li>Enrich attacker IPs with TI (domain age, AiTM feeds)</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>Remediation · 2–24 h</h3>
+      <ol style="margin:0;padding-left:18px;line-height:1.7;font-size:13px">
+        <li>Delete malicious inbox rules</li>
+        <li>Revoke rogue OAuth consents</li>
+        <li>Block phishing domains (Tenant Allow/Block + MDE)</li>
+        <li>Re-enable account behind FIDO2/passkey CA policy</li>
+        <li>Submit phishing URLs to Microsoft</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<div class="footer">
+  <div>
+    Dashboard modeled after <a style="color:var(--accent)" href="https://github.com/SCStelz/security-investigator/blob/main/queries/identity/aitm_threat_detection.md" target="_blank" rel="noopener">SCStelz/security-investigator · aitm_threat_detection.md</a>
+    · Data from <b>CyberSOC</b> Sentinel workspace.
+  </div>
+  <div>MITRE ATT&amp;CK · T1557 · T1539 · T1528 · T1550.004 · T1114.003 · T1098</div>
+</div>
+
+</div>
+</body>
+</html>
