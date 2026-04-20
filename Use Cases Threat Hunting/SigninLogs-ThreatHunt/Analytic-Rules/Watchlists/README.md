@@ -19,7 +19,7 @@ etc.).
 Supported `IPOrRange` formats:
 
 - Single IPv4          → `203.0.113.45`
-- CIDR subnet          → `10.0.0.0/8`, `163.116.0.0/16`
+- CIDR subnet          → `10.0.0.0/8`, `163.10.0.0/16`
 - Hyphenated range     → `10.20.30.1-10.20.30.50`
 
 IPv6 entries are passed through unchanged (the KQL filter only suppresses IPv4
