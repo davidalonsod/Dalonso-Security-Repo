@@ -1,0 +1,106 @@
+// Rule    : Workload Identity - OAuth App Mass Access Confirmed Across CloudAppEvents and OfficeActivity
+// Severity: Medium
+// Tactics : Collection, Discovery, Exfiltration
+// MITRE   : T1530 (Data from Cloud Storage), T1213 (Data from Information Repositories), T1087.004
+// Freq    : PT1H   Period: PT1H
+// Tables  : CloudAppEvents, AADServicePrincipalSignInLogs, OfficeActivity
+// Built-in differentiation: MDCA built-in anomaly policies alert per-user session. This rule
+// aggregates CloudAppEvents by OAuth ApplicationId and corroborates the M365 data plane
+// impact in OfficeActivity (via AppAccessContext.ClientAppId), providing dual-source
+// confirmation that the same app is generating high-volume access in both telemetry streams.
+//==========================================================================================
+// An attacker using SP credentials performs bulk data access across many users' content.
+// CloudAppEvents captures this at the MDCA layer; OfficeActivity captures the same actions
+// at the M365 audit layer. Seeing an app exceed the volume threshold in CloudAppEvents AND
+// appear simultaneously in OfficeActivity confirms real M365 workload impact rather than
+// telemetry noise, while AADServicePrincipalSignInLogs confirms active authentication.
+
+// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+    T
+    | extend IPAddress = tostring(IPAddress)
+    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+    | mv-apply _r = _allowRange to typeof(string) on (
+        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+        | summarize _anyInRange = max(toint(_inRange)))
+    | where isnull(_anyInRange) or _anyInRange == 0
+    | project-away _anyInRange
+};
+// ---------------------------------------------------------------------------
+let LookbackWindow     = 1h;
+let ActionThreshold    = 50;
+
+let SuspiciousActions = dynamic([
+    "FileDownloaded", "FileRead", "FilePreviewed", "FileCopied",
+    "FolderListed", "SearchQueried",
+    "MailItemsAccessed", "MessageRead", "Send",
+    "TeamsMessageRead", "MeetingParticipant"
+]);
+
+// Aggregate anomalous application-scoped actions in CloudAppEvents
+let AnomalousApps = (CloudAppEvents | invoke _ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(LookbackWindow)
+    | where ActionType in~ (SuspiciousActions)
+    | where isnotempty(tostring(ApplicationId))
+    | extend AppIdStr   = tostring(ApplicationId)
+    | extend AppName    = tostring(Application)
+    | extend ObjName    = tostring(ObjectName)
+    | extend ActorUpn   = tostring(AccountUpn)
+    | summarize
+        CloudActionCount  = count(),
+        UniqueObjects     = dcount(ObjName),
+        UniqueUsers       = dcount(ActorUpn),
+        CloudActionTypes  = make_set(ActionType, 10),
+        SampleObjects     = make_set(ObjName, 5),
+        CloudCountries    = make_set(CountryCode, 5),
+        AppName           = any(AppName),
+        FirstSeen         = min(TimeGenerated),
+        LastSeen          = max(TimeGenerated)
+        by AppIdStr
+    | where CloudActionCount >= ActionThreshold;
+
+// OfficeActivity confirmation: same app accessing M365 via AppAccessContext
+let OfficeImpact = OfficeActivity
+    | where TimeGenerated > ago(LookbackWindow)
+    | where isnotempty(AppAccessContext)
+    | extend AppCtx       = parse_json(AppAccessContext)
+    | extend OfficeAppId  = tostring(AppCtx.ClientAppId)
+    | where isnotempty(OfficeAppId)
+    | summarize
+        OfficeActionCount = count(),
+        OfficeOperations  = make_set(Operation, 10),
+        OfficeWorkloads   = make_set(OfficeWorkload, 5),
+        OfficeResources   = make_set(OfficeObjectId, 5),
+        OfficeUsers       = dcount(UserId)
+        by OfficeAppId;
+
+// SP sign-in confirmation
+let SPSignins = (AADServicePrincipalSignInLogs | invoke _ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(LookbackWindow)
+    | where ResultType == "0"
+    | summarize
+        SigninCount   = count(),
+        SigninIPs     = dcount(IPAddress),
+        IPList        = make_set(IPAddress, 5),
+        CredTypes     = make_set(ClientCredentialType, 3)
+        by AppId, ServicePrincipalName, ServicePrincipalId;
+
+AnomalousApps
+| join kind=leftouter OfficeImpact on $left.AppIdStr == $right.OfficeAppId
+| join kind=leftouter SPSignins    on $left.AppIdStr == $right.AppId
+| extend AlertSeverity = case(
+    CloudActionCount > 500 and isnotempty(OfficeActionCount) and OfficeActionCount > 0, "High",
+    CloudActionCount > 200 and isnotempty(OfficeActionCount) and OfficeActionCount > 0, "Medium",
+    CloudActionCount > 500,                                                              "Medium",
+    "Low")
+| project
+    AppIdStr, AppName, ServicePrincipalId, ServicePrincipalName,
+    CloudActionCount, UniqueObjects, UniqueUsers, CloudActionTypes, CloudCountries,
+    OfficeActionCount, OfficeOperations, OfficeWorkloads, OfficeResources, OfficeUsers,
+    SigninCount, SigninIPs, IPList, CredTypes,
+    AlertSeverity, FirstSeen, LastSeen
+| order by CloudActionCount desc

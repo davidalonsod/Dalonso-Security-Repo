@@ -1,0 +1,91 @@
+// Rule    : Workload Identity - Newly Registered OAuth App with Immediate M365 Data Access
+// Severity: High
+// Tactics : InitialAccess, Persistence, Collection
+// MITRE   : T1566.002 (Phishing: Spearphishing Link), T1078.004, T1098.003, T1530
+// Freq    : PT1H   Period: PT24H
+// Tables  : AuditLogs, OfficeActivity
+// Built-in differentiation: No Sentinel built-in correlates a freshly registered Entra ID
+// application with immediate OfficeActivity data access from that same application. This
+// rule surfaces illicit consent grant outcomes: the phishing app is already accessing
+// Exchange, SharePoint, or Teams data within hours of registration — proof that at least
+// one user clicked and granted consent. The registration-to-access time delta is the
+// primary severity driver.
+//==========================================================================================
+// Illicit OAuth consent grant attacks: attacker registers a new app → delivers phishing
+// link to victims containing a Microsoft OAuth2 consent URL for that app → victim clicks
+// and grants delegated permissions. This rule detects the post-consent outcome by finding
+// apps registered within the past 24 hours that already appear in OfficeActivity via
+// AppAccessContext.ClientAppId — confirming consent was granted and the app is active.
+
+// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+    T
+    | extend IPAddress = tostring(IPAddress)
+    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+    | mv-apply _r = _allowRange to typeof(string) on (
+        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+        | summarize _anyInRange = max(toint(_inRange)))
+    | where isnull(_anyInRange) or _anyInRange == 0
+    | project-away _anyInRange
+};
+// ---------------------------------------------------------------------------
+let LookbackWindow   = 24h;
+let NewAppLookback   = 24h;
+let RapidAccessHours = 6;     // access within 6 hours of registration = highly suspicious
+
+// Recently registered applications and service principals
+let NewApps = AuditLogs
+    | where TimeGenerated > ago(NewAppLookback)
+    | where OperationName in~ ("Add application", "Add service principal")
+    | where Result =~ "success"
+    | extend AppId      = tostring(TargetResources[0].id)
+    | extend AppName    = tostring(TargetResources[0].displayName)
+    | extend CreatedBy  = tostring(InitiatedBy.user.userPrincipalName)
+    | extend CreatorIP  = tostring(InitiatedBy.user.ipAddress)
+    | summarize
+        AppName   = any(AppName),
+        CreatedBy = any(CreatedBy),
+        CreatorIP = any(CreatorIP),
+        CreatedAt = min(TimeGenerated)
+        by AppId;
+
+// OfficeActivity by the new apps via AppAccessContext.ClientAppId
+let AppM365Access = OfficeActivity
+    | where TimeGenerated > ago(LookbackWindow)
+    | where isnotempty(AppAccessContext)
+    | extend AppCtx      = parse_json(AppAccessContext)
+    | extend OfficeAppId = tostring(AppCtx.ClientAppId)
+    | where isnotempty(OfficeAppId)
+    | summarize
+        M365AccessCount  = count(),
+        M365Operations   = make_set(Operation, 10),
+        M365Workloads    = make_set(OfficeWorkload, 5),
+        AffectedUsers    = dcount(UserId),
+        SampleUsers      = make_set(UserId, 10),
+        M365Resources    = make_set(OfficeObjectId, 5),
+        M365ClientIPs    = make_set(ClientIP, 5),
+        FirstAccess      = min(TimeGenerated)
+        by OfficeAppId;
+
+// Only surfaces apps that are BOTH newly registered AND already accessing M365
+NewApps
+| join kind=inner AppM365Access on $left.AppId == $right.OfficeAppId
+| where FirstAccess > CreatedAt
+| extend HoursToFirstAccess = datetime_diff("hour", FirstAccess, CreatedAt)
+| extend AlertSeverity = case(
+    HoursToFirstAccess <= RapidAccessHours and AffectedUsers > 5, "Critical",
+    HoursToFirstAccess <= RapidAccessHours,                        "High",
+    AffectedUsers > 10,                                             "High",
+    "Medium")
+| project
+    AppId, AppName, CreatedBy, CreatorIP, CreatedAt,
+    HoursToFirstAccess, FirstAccess,
+    M365AccessCount, M365Operations, M365Workloads,
+    AffectedUsers, SampleUsers, M365Resources, M365ClientIPs,
+    AlertSeverity
+| order by HoursToFirstAccess asc, AffectedUsers desc
+

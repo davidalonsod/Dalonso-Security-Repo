@@ -1,0 +1,63 @@
+// Rule    : Workload Identity - Managed Identity Lateral Movement (High Resource Spread)
+// Severity: High
+// Tactics : LateralMovement, CredentialAccess, Discovery
+// MITRE   : T1550, T1552.001, T1087
+// Freq    : PT1H   Period: PT1H
+//==========================================================================================
+
+// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+    T
+    | extend IPAddress = tostring(IPAddress)
+    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+    | mv-apply _r = _allowRange to typeof(string) on (
+        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+        | summarize _anyInRange = max(toint(_inRange)))
+    | where isnull(_anyInRange) or _anyInRange == 0
+    | project-away _anyInRange
+};
+// ---------------------------------------------------------------------------
+let SensitiveResourceKeywords = dynamic([
+    "Key Vault", "Storage", "SQL", "Cognitive", "OpenAI", "Synapse",
+    "Service Bus", "Event Hub", "Container Registry", "Kubernetes"
+]);
+
+// --- isfuzzy=true + datatable fallback: deployment succeeds even if AADManagedIdentitySignInLogs is not yet enabled ---
+let MILogs = union isfuzzy=true
+    (AADManagedIdentitySignInLogs | invoke _ExcludeAllowlistedIPs()),
+    (datatable(TimeGenerated:datetime, ServicePrincipalId:string, ServicePrincipalName:string,
+               ResourceDisplayName:string, SourceAppClientId:string, ResultType:string)[]);
+// --- Baseline: max unique sensitive resources accessed per MI per hour (14d) ---
+let Baseline = MILogs
+    | where TimeGenerated between (ago(14d) .. ago(1h))
+    | where ResultType == "0"
+    | where ResourceDisplayName has_any (SensitiveResourceKeywords)
+    | summarize HourlyResources = dcount(ResourceDisplayName)
+        by ServicePrincipalId, bin(TimeGenerated, 1h)
+    | summarize
+        MaxHourlyResources = max(HourlyResources),
+        AvgHourlyResources = avg(HourlyResources)
+        by ServicePrincipalId;
+
+MILogs
+| where TimeGenerated > ago(1h)
+| where ResultType == "0"
+| where ResourceDisplayName has_any (SensitiveResourceKeywords)
+| summarize
+    AuthCount        = count(),
+    UniqueResources  = dcount(ResourceDisplayName),
+    Resources        = make_set(ResourceDisplayName, 20),
+    SourceApps       = make_set(SourceAppClientId, 10),
+    UniqueSourceApps = dcount(SourceAppClientId),
+    FirstActivity    = min(TimeGenerated),
+    LastActivity     = max(TimeGenerated)
+    by ServicePrincipalName, ServicePrincipalId
+| where UniqueResources >= 5 or AuthCount > 200
+| join kind=leftouter Baseline on ServicePrincipalId
+| extend
+    ExceedsBaseline  = UniqueResources > MaxHourlyResources * 1.5,
+    SpreadScore      = UniqueResources

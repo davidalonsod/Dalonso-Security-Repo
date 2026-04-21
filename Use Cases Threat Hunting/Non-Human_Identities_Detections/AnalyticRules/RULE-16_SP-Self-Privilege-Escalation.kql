@@ -1,0 +1,127 @@
+// Rule    : Workload Identity - SP Self-Privilege Escalation via App Role Assignment
+// Severity: High
+// Tactics : PrivilegeEscalation, Persistence
+// MITRE   : T1098.003 (Account Manipulation: Additional Cloud Roles)
+// Freq    : PT1H   Period: PT1H
+// Tables  : AuditLogs
+// Built-in differentiation: Sentinel built-in "Service Principal assigned privileged role"
+// (id: 9fb57458...) detects Azure RBAC role assignments from a user to an SP. This rule
+// specifically detects an SP acting AS THE INITIATOR to add app role assignments to itself
+// or grant itself delegated permissions — self-elevation via app registration manipulation,
+// a distinct and more stealthy vector. Also fires when an SP grants roles to OTHER SPs
+// it controls (lateral privilege spread), which is not covered by any known built-in.
+//==========================================================================================
+// A compromised SP can call Microsoft Graph to assign itself (or a sibling app) high-value
+// app roles like Directory.ReadWrite.All or RoleManagement.ReadWrite.Directory, bypassing
+// normal IAM workflows. This is the cloud-native equivalent of a process elevating its own
+// token privilege.
+
+// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+    T
+    | extend IPAddress = tostring(IPAddress)
+    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+    | mv-apply _r = _allowRange to typeof(string) on (
+        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+        | summarize _anyInRange = max(toint(_inRange)))
+    | where isnull(_anyInRange) or _anyInRange == 0
+    | project-away _anyInRange
+};
+// ---------------------------------------------------------------------------
+let DangerousAppRoles = dynamic([
+    // Microsoft Graph high-value app roles
+    "RoleManagement.ReadWrite.Directory",
+    "Application.ReadWrite.All",
+    "AppRoleAssignment.ReadWrite.All",
+    "Directory.ReadWrite.All",
+    "User.ReadWrite.All",
+    "Group.ReadWrite.All",
+    "Mail.ReadWrite",
+    "MailboxSettings.ReadWrite",
+    "full_access_as_app",
+    "Exchange.ManageAsApp",
+    // Azure AD roles (via role assignment)
+    "Global Administrator",
+    "Application Administrator",
+    "Cloud Application Administrator",
+    "Privileged Role Administrator",
+    "Privileged Authentication Administrator"
+]);
+
+// --- Find app role assignment and permission grant operations where initiator is an SP ---
+AuditLogs
+| where TimeGenerated > ago(1h)
+| where OperationName in (
+    "Add app role assignment to service principal",
+    "Add delegated permission grant",
+    "Add app role assignment grant",
+    "Add member to role",
+    "Grant consent to application"
+)
+| where Result =~ "success"
+// Initiator must be a service principal (non-human escalation)
+| extend InitiatorSPId   = tostring(InitiatedBy.app.servicePrincipalId)
+| extend InitiatorSPName = tostring(InitiatedBy.app.displayName)
+| where isnotempty(InitiatorSPId)
+// Target of the role grant
+| extend TargetObjectId   = tostring(TargetResources[0].id)
+| extend TargetObjectName = tostring(TargetResources[0].displayName)
+| extend TargetType       = tostring(TargetResources[0].type)
+// Determine the actual permission/role granted from modifiedProperties
+| mv-expand ModProp = TargetResources[0].modifiedProperties
+| where tostring(ModProp.displayName) in (
+    "AppRole.Value",
+    "DelegatedPermissionGrant.Scope",
+    "ServicePrincipal.OAuth2PermissionGrants",
+    "Role.DisplayName",
+    "Role.TemplateId"
+)
+| extend GrantedPermission = tostring(ModProp.newValue)
+// Filter for dangerous permissions only OR self-assignment regardless of permission
+| extend IsSelfGrant      = InitiatorSPId == TargetObjectId
+| extend IsDangerousPerm  = GrantedPermission has_any (DangerousAppRoles)
+| where IsSelfGrant or IsDangerousPerm
+// --- Summarize per initiator SP ---
+| summarize
+    EscalationCount      = count(),
+    GrantedPermissions   = make_set(GrantedPermission, 20),
+    TargetObjects        = make_set(TargetObjectName, 10),
+    TargetObjectIds      = make_set(TargetObjectId, 10),
+    Operations           = make_set(OperationName, 5),
+    SelfGrantCount       = countif(IsSelfGrant),
+    DangerousPermCount   = countif(IsDangerousPerm),
+    FirstEscalation      = min(TimeGenerated),
+    LastEscalation       = max(TimeGenerated)
+    by InitiatorSPName, InitiatorSPId
+// --- Corroborate: was this SP recently created or had credentials added? ---
+| join kind=leftouter (
+    AuditLogs
+    | where TimeGenerated > ago(7d)
+    | where OperationName in (
+        "Add service principal",
+        "Add service principal credentials",
+        "Update service principal"
+    )
+    | where Result =~ "success"
+    | extend SPId = tostring(TargetResources[0].id)
+    | summarize IsRecentlySeen = count(), RecentOps = make_set(OperationName, 5)
+        by SPId
+    | extend IsNewOrModified = true
+) on $left.InitiatorSPId == $right.SPId
+| extend IsNewOrModified = coalesce(IsNewOrModified, false)
+| extend SeverityLevel = case(
+    SelfGrantCount > 0 and DangerousPermCount > 0, "Critical — SP granted itself dangerous permission",
+    SelfGrantCount > 0,                            "High — SP self-grant (any permission)",
+    DangerousPermCount > 0 and IsNewOrModified,    "Critical — New/modified SP granting dangerous permissions",
+    DangerousPermCount > 0,                        "High — SP granting dangerous permissions to other SP",
+    "Medium")
+| project
+    InitiatorSPName, InitiatorSPId,
+    EscalationCount, SelfGrantCount, DangerousPermCount,
+    GrantedPermissions, TargetObjects,
+    Operations, IsNewOrModified,
+    SeverityLevel, FirstEscalation, LastEscalation

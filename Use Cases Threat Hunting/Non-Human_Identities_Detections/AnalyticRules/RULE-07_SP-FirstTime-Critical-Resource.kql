@@ -1,0 +1,78 @@
+// Rule    : Workload Identity - SP First-Time Access to Critical Resource Correlated with AuditLogs
+// Severity: High
+// Tactics : CredentialAccess, Discovery
+// MITRE   : T1552.001, T1087.004
+// Freq    : PT6H   Period: P14D
+//==========================================================================================
+
+// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+    T
+    | extend IPAddress = tostring(IPAddress)
+    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+    | mv-apply _r = _allowRange to typeof(string) on (
+        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+        | summarize _anyInRange = max(toint(_inRange)))
+    | where isnull(_anyInRange) or _anyInRange == 0
+    | project-away _anyInRange
+};
+// ---------------------------------------------------------------------------
+let CriticalResources = dynamic([
+    "Microsoft Graph", "Azure Key Vault", "Azure Active Directory",
+    "Windows Azure Active Directory", "Azure Resource Manager",
+    "Office 365 Exchange Online", "Office 365 SharePoint Online"
+]);
+let PrivateRanges = dynamic(["10.", "192.168.", "172.16.", "172.17.", "172.18.",
+    "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+    "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
+    "127.", "169.254.", "168.63."]);
+
+// --- Baseline: which SPs have historically accessed each critical resource ---
+let HistoricalAccess = (AADServicePrincipalSignInLogs | invoke _ExcludeAllowlistedIPs())
+    | where TimeGenerated between (ago(14d) .. ago(6h))
+    | where ResultType == "0"
+    | where ResourceDisplayName in (CriticalResources)
+    | distinct ServicePrincipalId, ResourceDisplayName;
+
+// --- New accesses in current window not seen historically ---
+let NewAccesses = (AADServicePrincipalSignInLogs | invoke _ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(6h)
+    | where ResultType == "0"
+    | where ResourceDisplayName in (CriticalResources)
+    | where isnotempty(IPAddress)
+    | where not(IPAddress has_any (PrivateRanges))
+    | extend GeoInfo = geo_info_from_ip_address(IPAddress)
+    | extend Country = tostring(GeoInfo.country_iso_code)
+    | join kind=leftanti HistoricalAccess on ServicePrincipalId, ResourceDisplayName
+    | summarize
+        AccessCount      = count(),
+        UniqueIPs        = dcount(IPAddress),
+        IPList           = make_set(IPAddress, 5),
+        Countries        = make_set(Country, 5),
+        CredTypes        = make_set(ClientCredentialType, 5),
+        FirstAccess      = min(TimeGenerated),
+        LastAccess       = max(TimeGenerated)
+        by ServicePrincipalName, ServicePrincipalId, AppId, ResourceDisplayName;
+
+// --- Corroborate: was this SP recently created or had credentials added? ---
+let RecentSPChanges = AuditLogs
+    | where TimeGenerated > ago(14d)
+    | where OperationName has_any (
+        "Add service principal", "Add service principal credentials",
+        "Update application – Certificates and secrets management",
+        "Add application")
+    | where Result =~ "success"
+    | extend SPName    = tostring(TargetResources[0].displayName)
+    | extend SPId      = tostring(TargetResources[0].id)
+    | extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+        tostring(InitiatedBy.app.displayName))
+    | project ChangeTime = TimeGenerated, SPName, SPId, ChangeType = OperationName, Initiator;
+
+NewAccesses
+| join kind=leftouter RecentSPChanges on $left.ServicePrincipalId == $right.SPId
+| extend IsRecentlyModified = isnotempty(ChangeTime)
+| project-away SPName, SPId

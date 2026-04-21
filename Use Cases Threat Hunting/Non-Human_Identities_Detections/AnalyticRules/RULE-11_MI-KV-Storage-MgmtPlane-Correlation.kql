@@ -1,0 +1,68 @@
+// Rule    : Workload Identity - MI Accessing Key Vault or Storage Correlated with AzureActivity Write
+// Severity: Medium
+// Tactics : CredentialAccess, Exfiltration
+// MITRE   : T1552.001 (Credentials in Files), T1530
+// Freq    : PT1H   Period: PT2H
+//==========================================================================================
+// A Managed Identity that accesses Key Vault or Storage AND triggers write/delete
+// operations via the management plane may indicate a compromised workload abusing
+// its identity to exfiltrate secrets or data. Correlates AADManagedIdentitySignInLogs
+// with AzureActivity to link data-plane auth to management-plane impact.
+
+// --- isfuzzy=true + datatable fallback: deployment succeeds even if AADManagedIdentitySignInLogs is not yet enabled ---
+// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+    T
+    | extend IPAddress = tostring(IPAddress)
+    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+    | mv-apply _r = _allowRange to typeof(string) on (
+        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+        | summarize _anyInRange = max(toint(_inRange)))
+    | where isnull(_anyInRange) or _anyInRange == 0
+    | project-away _anyInRange
+};
+// ---------------------------------------------------------------------------
+let MILogs = union isfuzzy=true
+    (AADManagedIdentitySignInLogs | invoke _ExcludeAllowlistedIPs()),
+    (datatable(TimeGenerated:datetime, ServicePrincipalId:string, ServicePrincipalName:string,
+               ResourceDisplayName:string, SourceAppClientId:string, ResultType:string)[]);
+// --- isfuzzy=true + datatable fallback: deployment succeeds even if AzureActivity connector is not yet enabled ---
+let AzAct  = union isfuzzy=true
+    AzureActivity,
+    (datatable(TimeGenerated:datetime, ActivityStatusValue:string, OperationNameValue:string,
+               Caller:string, ResourceId:string, ResourceGroup:string, SubscriptionId:string)[]);
+// --- MI sign-ins to sensitive data-plane resources ---
+let MIDataPlaneAccess = MILogs
+    | where TimeGenerated > ago(2h)
+    | where ResultType == "0"
+    | where ResourceDisplayName has_any ("Key Vault", "Storage", "Blob")
+    | project SigninTime = TimeGenerated, ServicePrincipalId, ServicePrincipalName,
+        Resource = ResourceDisplayName, SourceAppClientId;
+
+// --- Management plane write/delete operations by the same identity ---
+let MgmtPlaneOps = AzAct
+    | where TimeGenerated > ago(2h)
+    | where ActivityStatusValue =~ "Success"
+    | where OperationNameValue has_any ("WRITE", "DELETE")
+    | where not(OperationNameValue has_any ("READ", "LIST", "GET"))
+    | project OpTime = TimeGenerated, Caller, OperationNameValue,
+        ResourceId, ResourceGroup, SubscriptionId;
+
+// --- Correlate by Caller matching ServicePrincipalId or ServicePrincipalName ---
+MIDataPlaneAccess
+| join kind=inner MgmtPlaneOps on $left.ServicePrincipalId == $right.Caller
+| where OpTime >= SigninTime and OpTime <= SigninTime + 1h
+| summarize
+    DataPlaneAccesses = count(),
+    MgmtPlaneOps      = count(),
+    Resources         = make_set(Resource, 5),
+    Operations        = make_set(OperationNameValue, 10),
+    AffectedResources = make_set(ResourceId, 10),
+    SubscriptionIds   = make_set(SubscriptionId, 5),
+    FirstEvent        = min(SigninTime),
+    LastEvent         = max(OpTime)
+    by ServicePrincipalName, ServicePrincipalId, ResourceGroup
