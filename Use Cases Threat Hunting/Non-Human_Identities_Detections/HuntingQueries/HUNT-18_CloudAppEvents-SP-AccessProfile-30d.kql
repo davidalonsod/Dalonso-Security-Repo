@@ -1,0 +1,84 @@
+// Hunt    : Workload Identity - CloudAppEvents SP/OAuth App Access Anomaly Profile (30d)
+// Purpose : Profiles all service principals and OAuth applications visible in CloudAppEvents
+//           over 30 days, ranked by volume, object diversity, and unique user spread. Joins
+//           with AADServicePrincipalSignInLogs to add authentication metadata (IPs, cred types,
+//           countries). Identifies applications performing broad collection, mass enumeration,
+//           or cross-user access patterns that exceed normal operational behaviour. Use to
+//           baseline legitimate automation and surface abnormal data-access footprints.
+// Tables  : CloudAppEvents, AADServicePrincipalSignInLogs
+// Period  : P30D
+// Tactics : Collection, Discovery, Exfiltration
+// MITRE   : T1530, T1213, T1087.004
+//==========================================================================================
+
+let LookbackDays      = 30d;
+let HighVolumeActions = dynamic([
+    "FileDownloaded", "FileRead", "FilePreviewed", "FileCopied", "FileSyncUploadedFull",
+    "FolderListed", "SearchQueried",
+    "MailItemsAccessed", "MessageRead", "Send",
+    "TeamsMessageRead"
+]);
+let LowVolumeActions  = dynamic([
+    "FileCreated", "FileModified", "FileUploaded",
+    "MeetingParticipant", "UserLoggedIn"
+]);
+
+// Per-app profile from CloudAppEvents
+let AppProfile = (CloudAppEvents | invoke ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(LookbackDays)
+    | where isnotempty(tostring(ApplicationId))
+    | extend AppIdStr    = tostring(ApplicationId)
+    | extend AppName     = tostring(Application)
+    | extend IPAddr      = tostring(IPAddress)
+    | extend Country     = tostring(CountryCode)
+    | extend ObjName     = tostring(ObjectName)
+    | extend ActorUpn    = tostring(AccountUpn)
+    | summarize
+        TotalActions       = count(),
+        HighVolumeActions  = countif(ActionType in~ (HighVolumeActions)),
+        LowVolumeActions   = countif(ActionType in~ (LowVolumeActions)),
+        UniqueObjects      = dcount(ObjName),
+        UniqueUsers        = dcount(ActorUpn),
+        UniqueIPs          = dcount(IPAddr),
+        ActionTypes        = make_set(ActionType, 15),
+        TopObjects         = make_set(ObjName, 10),
+        Countries          = make_set(Country, 5),
+        AppName            = any(AppName),
+        FirstSeen          = min(TimeGenerated),
+        LastSeen           = max(TimeGenerated)
+        by AppIdStr;
+
+// SP sign-in metadata from AADServicePrincipalSignInLogs
+let SPSigninProfile = (AADServicePrincipalSignInLogs | invoke ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(LookbackDays)
+    | where ResultType == "0"
+    | summarize
+        SigninCount        = count(),
+        SigninIPs          = dcount(IPAddress),
+        SigninIPList       = make_set(IPAddress, 10),
+        CredTypes          = make_set(ClientCredentialType, 5),
+        Resources          = make_set(ResourceDisplayName, 10),
+        SigninCountries    = make_set(Location, 5),
+        FailedSignins      = countif(ResultType != "0"),
+        FirstSignin        = min(TimeGenerated),
+        LastSignin         = max(TimeGenerated)
+        by AppId, ServicePrincipalName, ServicePrincipalId;
+
+// Join profiles
+AppProfile
+| join kind=leftouter SPSigninProfile on $left.AppIdStr == $right.AppId
+| extend HighVolumeRatio   = round(todouble(HighVolumeActions) / iff(TotalActions > 0, todouble(TotalActions), 1.0), 2)
+| extend UserSpreadRatio   = round(todouble(UniqueUsers) / iff(UniqueObjects > 0, todouble(UniqueObjects), 1.0), 2)
+| extend AnomalyScore      = case(
+    HighVolumeRatio > 0.8 and UniqueUsers > 20,  "Critical",
+    HighVolumeRatio > 0.6 and UniqueObjects > 50, "High",
+    HighVolumeRatio > 0.4,                         "Medium",
+    "Low")
+| project
+    AppIdStr, AppName, ServicePrincipalId, ServicePrincipalName,
+    TotalActions, HighVolumeActions, HighVolumeRatio,
+    UniqueObjects, UniqueUsers, UniqueIPs, UserSpreadRatio,
+    ActionTypes, TopObjects, Countries,
+    SigninCount, SigninIPs, SigninIPList, CredTypes, Resources, SigninCountries,
+    AnomalyScore, FirstSeen, LastSeen
+| order by TotalActions desc

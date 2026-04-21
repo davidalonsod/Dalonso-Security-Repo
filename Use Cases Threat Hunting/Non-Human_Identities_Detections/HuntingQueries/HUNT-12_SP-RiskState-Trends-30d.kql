@@ -1,0 +1,100 @@
+// Hunt     : Workload Identity - SP Risk State Trends and Dismissed-without-Remediation (30d)
+// Tactics  : InitialAccess, CredentialAccess
+// MITRE    : T1078.004
+// Purpose  : Full 30-day view of SP risk state history from RiskyServicePrincipals.
+//            Surfaces SPs that were dismissed or remediated without a preceding
+//            confirmedCompromised investigation — a pattern consistent with alert
+//            suppression or incomplete triage. Correlates each risky SP with concurrent
+//            AuditLogs changes to detect privilege escalations or backdoor staging during
+//            the risk window.
+//==========================================================================================
+
+// --- isfuzzy=true: tables only exist when Identity Protection for Workload Identities is licensed ---
+let _RiskyPrincipals = union isfuzzy=true
+    RiskyServicePrincipals,
+    (datatable(TimeGenerated:datetime, ServicePrincipalId:string, ServicePrincipalDisplayName:string,
+               AppId:string, RiskLevel:string, RiskState:string, RiskDetail:string,
+               RiskLastUpdatedDateTime:datetime)[]);
+let _SPRiskEvents = union isfuzzy=true
+    ServicePrincipalRiskEvents,
+    (datatable(TimeGenerated:datetime, ServicePrincipalId:string, ServicePrincipalDisplayName:string,
+               AppId:string, RiskEventType:string, RiskLevel:string, DetectedDateTime:datetime)[]);
+
+// --- Full risk state history per SP over 30 days with risk scoring ---
+let RiskHistory = _RiskyPrincipals
+    | where TimeGenerated > ago(30d)
+    | extend RiskScore = case(
+        RiskLevel == "high",   3,
+        RiskLevel == "medium", 2,
+        RiskLevel == "low",    1,
+        0)
+    | summarize
+        AllStates               = make_set(RiskState, 10),
+        MaxRiskScore            = max(RiskScore),
+        FirstAtRiskTime         = minif(TimeGenerated, RiskState =~ "atRisk"),
+        LastAtRiskTime          = maxif(TimeGenerated, RiskState =~ "atRisk"),
+        WasConfirmedCompromised = countif(RiskState =~ "confirmedCompromised") > 0,
+        WasDismissed            = countif(RiskState =~ "dismissed") > 0,
+        WasRemediated           = countif(RiskState =~ "remediated") > 0,
+        RecordCount             = count()
+        by ServicePrincipalId, ServicePrincipalDisplayName, AppId;
+
+// --- Risk events per SP for the same period ---
+let RiskEventSummary = _SPRiskEvents
+    | where TimeGenerated > ago(30d)
+    | summarize
+        EventTypes         = make_set(RiskEventType, 15),
+        UniqueEventTypes   = dcount(RiskEventType),
+        TotalEvents        = count(),
+        HighSeverityEvents = countif(RiskEventType in (dynamic([
+            "investigationsThreatIntelligence", "anomalousToken",
+            "maliciousIPAddress", "suspiciousAPITraffic"
+        ]))),
+        LatestEvent        = max(DetectedDateTime)
+        by ServicePrincipalId;
+
+// --- Audit log changes (credentials, roles, permissions) during the risk window ---
+let AuditChanges = AuditLogs
+    | where TimeGenerated > ago(30d)
+    | where OperationName in (
+        "Add service principal credentials",
+        "Update service principal",
+        "Add app role assignment to service principal",
+        "Add delegated permission grant",
+        "Delete service principal")
+    | where Result =~ "success"
+    | extend SPId = tostring(TargetResources[0].id)
+    | summarize
+        AuditOps        = count(),
+        AuditOpTypes    = make_set(OperationName, 5),
+        LastAuditChange = max(TimeGenerated)
+        by SPId;
+
+RiskHistory
+| join kind=leftouter RiskEventSummary on ServicePrincipalId
+| join kind=leftouter AuditChanges on $left.ServicePrincipalId == $right.SPId
+| extend DismissedWithoutConfirm = WasDismissed and not(WasConfirmedCompromised)
+| extend DaysAtRisk = case(
+    isnotempty(FirstAtRiskTime) and isnotempty(LastAtRiskTime),
+    datetime_diff("day", LastAtRiskTime, FirstAtRiskTime),
+    0)
+| extend MaxRiskLevel = case(
+    MaxRiskScore == 3, "high",
+    MaxRiskScore == 2, "medium",
+    MaxRiskScore == 1, "low",
+    "none")
+| extend InvestigationPriority = case(
+    WasConfirmedCompromised,                                         "1-Critical — Confirmed compromised SP",
+    DismissedWithoutConfirm and coalesce(AuditOps, 0) > 0,         "2-High — Dismissed risk with concurrent audit changes",
+    DismissedWithoutConfirm and DaysAtRisk > 7,                     "3-High — Dismissed after 7+ days at risk without confirmation",
+    DaysAtRisk > 14,                                                  "4-High — SP at risk 14+ days without remediation",
+    WasRemediated and coalesce(AuditOps, 0) > 0,                   "5-Medium — Remediated with concurrent audit activity — verify",
+    "6-Low — Risk state tracked for baselining")
+| project
+    ServicePrincipalDisplayName, ServicePrincipalId, AppId,
+    MaxRiskLevel, AllStates, DaysAtRisk,
+    WasConfirmedCompromised, WasDismissed, WasRemediated, DismissedWithoutConfirm,
+    EventTypes, UniqueEventTypes, TotalEvents, HighSeverityEvents,
+    AuditOps, AuditOpTypes, LastAuditChange,
+    InvestigationPriority, FirstAtRiskTime, LastAtRiskTime
+| order by InvestigationPriority asc, DaysAtRisk desc

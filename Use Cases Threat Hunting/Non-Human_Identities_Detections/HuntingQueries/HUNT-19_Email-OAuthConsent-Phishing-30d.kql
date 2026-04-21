@@ -1,0 +1,118 @@
+// Hunt    : Workload Identity - OAuth Consent Phishing Email and App Correlation (30d)
+// Purpose : Hunts for phishing campaigns targeting OAuth consent grants by correlating:
+//           (1) EmailUrlInfo URLs matching Microsoft OAuth2 / consent patterns,
+//           (2) EmailEvents delivery metadata for recipient and delivery status,
+//           (3) AuditLogs for application registrations matching extracted client_id values,
+//           (4) EmailPostDeliveryEvents for remediation actions (ZAP, moved to junk).
+//           Surfaces multi-stage illicit consent grant attempts where attackers register
+//           a new app then deliver phishing emails containing the consent URL to target users.
+// Tables  : EmailUrlInfo, EmailEvents, EmailAttachmentInfo, EmailPostDeliveryEvents, AuditLogs
+// Period  : P30D
+// Tactics : InitialAccess, Persistence
+// MITRE   : T1566.002, T1078.004, T1098.003
+//==========================================================================================
+
+let LookbackDays   = 30d;
+let NewAppLookback = 14d;
+
+// Pattern matches both v1 and v2 OAuth endpoints and admin consent flows
+let OAuth2Pattern  = @"(?i)(login\.microsoftonline\.com|login\.microsoft\.com)[^?]*\?(.*&)?client_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})";
+let ConsentPattern = @"(?i)(adminConsent=true|prompt=consent|response_type=code|scope=.*\.all)";
+
+// New app registrations
+let NewApps = AuditLogs
+    | where TimeGenerated > ago(NewAppLookback)
+    | where OperationName in~ ("Add application", "Add service principal")
+    | where Result =~ "success"
+    | extend AppId      = tostring(TargetResources[0].id)
+    | extend AppName    = tostring(TargetResources[0].displayName)
+    | extend CreatedBy  = tostring(InitiatedBy.user.userPrincipalName)
+    | extend CreatorIP  = tostring(InitiatedBy.user.ipAddress)
+    | summarize
+        AppName   = any(AppName),
+        CreatedBy = any(CreatedBy),
+        CreatorIP = any(CreatorIP),
+        CreatedAt = min(TimeGenerated)
+        by AppId;
+
+// URLs matching OAuth2 consent patterns in defender email telemetry
+let ConsentUrls = union isfuzzy=true
+    EmailUrlInfo,
+    (datatable(NetworkMessageId:string, Url:string, UrlDomain:string,
+               TimeGenerated:datetime)[])
+    | where TimeGenerated > ago(LookbackDays)
+    | where Url matches regex OAuth2Pattern
+    | extend ExtractedClientId  = extract(OAuth2Pattern, 3, Url)
+    | extend HasConsentSignal   = Url matches regex ConsentPattern
+    | where isnotempty(ExtractedClientId)
+    | project NetworkMessageId, Url, ExtractedClientId, HasConsentSignal,
+              UrlSeen = TimeGenerated;
+
+// Email delivery metadata
+let EmailMeta = union isfuzzy=true
+    EmailEvents,
+    (datatable(NetworkMessageId:string, RecipientEmailAddress:string,
+               SenderFromAddress:string, SenderFromDomain:string,
+               Subject:string, DeliveryAction:string,
+               DeliveryLocation:string, Timestamp:datetime)[])
+    | where TimeGenerated > ago(LookbackDays)
+    | project NetworkMessageId, RecipientEmailAddress, SenderFromAddress,
+              SenderFromDomain, Subject, DeliveryAction, DeliveryLocation,
+              EmailTime = Timestamp;
+
+// Post-delivery remediation (ZAP, quarantine, moved to junk)
+let PostDelivery = union isfuzzy=true
+    EmailPostDeliveryEvents,
+    (datatable(NetworkMessageId:string, ActionType:string,
+               ActionResult:string, Timestamp:datetime)[])
+    | where TimeGenerated > ago(LookbackDays)
+    | summarize
+        RemediationActions  = make_set(ActionType, 5),
+        RemediationResults  = make_set(ActionResult, 5),
+        Remediated          = countif(ActionResult =~ "Success")
+        by NetworkMessageId;
+
+// Attachment analysis for context
+let Attachments = union isfuzzy=true
+    EmailAttachmentInfo,
+    (datatable(NetworkMessageId:string, FileName:string,
+               FileType:string, SHA256:string)[])
+    | where TimeGenerated > ago(LookbackDays)
+    | summarize
+        AttachmentFiles  = make_set(FileName, 5),
+        AttachmentTypes  = make_set(FileType, 5)
+        by NetworkMessageId;
+
+// Combine everything
+ConsentUrls
+| join kind=leftouter EmailMeta      on NetworkMessageId
+| join kind=leftouter PostDelivery   on NetworkMessageId
+| join kind=leftouter Attachments    on NetworkMessageId
+| join kind=leftouter NewApps on $left.ExtractedClientId == $right.AppId
+| extend AppRegistered    = isnotempty(AppName)
+| extend DaysSinceCreated = iff(AppRegistered, datetime_diff("day", UrlSeen, CreatedAt), int(null))
+| summarize
+    TotalEmails       = dcount(NetworkMessageId),
+    Recipients        = make_set(RecipientEmailAddress, 30),
+    RecipientCount    = dcount(RecipientEmailAddress),
+    Senders           = make_set(SenderFromAddress, 5),
+    SenderDomains     = make_set(SenderFromDomain, 5),
+    Subjects          = make_set(Subject, 5),
+    DeliveryActions   = make_set(DeliveryAction, 5),
+    Remediated        = sum(Remediated),
+    RemediationActions = make_set(RemediationActions, 5),
+    ConsentUrls       = make_set(Url, 3),
+    HasConsentSignal  = any(HasConsentSignal),
+    AppName           = any(AppName),
+    CreatedBy         = any(CreatedBy),
+    DaysSinceCreated  = any(DaysSinceCreated),
+    FirstSeen         = min(UrlSeen),
+    LastSeen          = max(UrlSeen)
+    by ExtractedClientId, AppRegistered
+| extend Severity = case(
+    AppRegistered and DaysSinceCreated <= 1 and RecipientCount > 5,  "Critical",
+    AppRegistered and DaysSinceCreated <= 7,                          "High",
+    AppRegistered,                                                     "Medium",
+    HasConsentSignal and RecipientCount > 10,                          "Medium",
+    "Low")
+| order by Severity asc, RecipientCount desc

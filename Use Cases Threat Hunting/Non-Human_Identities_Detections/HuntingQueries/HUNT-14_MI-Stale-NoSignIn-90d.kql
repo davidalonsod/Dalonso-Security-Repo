@@ -1,0 +1,160 @@
+// Hunt    : Workload Identity - Stale Managed Identities (No Sign-In 90d)
+// Purpose : Surface system-assigned and user-assigned Managed Identities that have not
+//           authenticated in 90+ days but remain enabled in the directory. A stale MI
+//           with active role assignments is an under-monitored attack surface: if the
+//           underlying compute resource or its MSI endpoint is compromised, the identity
+//           can be silently abused without triggering velocity-based detections.
+//           Correlates with AzureActivity to detect management-plane calls from stale MIs.
+// Tables  : AADManagedIdentitySignInLogs, AuditLogs, AzureActivity (isfuzzy)
+// Period  : P180D (activity baseline), P90D (stale threshold)
+// Tactics : Defense Evasion, Persistence
+// MITRE   : T1078.004, T1098.001
+//==========================================================================================
+
+let LookbackDays   = 180d;
+let StaleThreshold = 90d;
+
+// --- All MI sign-in activity in window ---
+let AllMIActivity = (AADManagedIdentitySignInLogs | invoke ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(LookbackDays)
+    | where ResultType == 0
+    | summarize
+        TotalSignins         = count(),
+        LastSignin           = max(TimeGenerated),
+        UniqueResources      = dcount(ResourceDisplayName),
+        LastResource         = arg_max(TimeGenerated, ResourceDisplayName),
+        IPAddresses          = make_set(IPAddress, 5),
+        ServicePrincipalId   = any(ServicePrincipalId),
+        ServicePrincipalName = any(ServicePrincipalName)
+        by ServicePrincipalId, ServicePrincipalName;
+
+// --- Stale MIs: last sign-in was >90 days ago ---
+let StaleMIs = AllMIActivity
+    | where LastSignin < ago(StaleThreshold)
+    | project
+        ServicePrincipalId,
+        ServicePrincipalName,
+        TotalSignins,
+        LastSignin,
+        UniqueResources,
+        LastResource = tostring(LastResource),
+        IPAddresses,
+        DaysSinceSignin = datetime_diff("day", now(), LastSignin);
+
+// --- MIs that have NEVER signed in (no record in the table at all) ---
+// These are detected only if AuditLogs has them as created objects
+let MICreations = AuditLogs
+    | where TimeGenerated > ago(LookbackDays)
+    | where OperationName in (
+        "Add service principal",
+        "Update managed identity")
+    | extend SPId     = tostring(TargetResources[0].id)
+    | extend SPName   = tostring(TargetResources[0].displayName)
+    | extend SPType   = tostring(TargetResources[0].type)
+    | extend Initiator = coalesce(
+        tostring(InitiatedBy.user.userPrincipalName),
+        tostring(InitiatedBy.app.displayName))
+    | where AdditionalDetails has_any (
+        "managedIdentity", "ManagedIdentity",
+        "SystemAssigned", "UserAssigned")
+        or SPName has_any ("managed", "identity", "-mi", "-msi")
+    | summarize
+        CreatedAt      = min(TimeGenerated),
+        CreatedBy      = any(Initiator)
+        by SPId, SPName;
+
+let NeverSignedIn = MICreations
+    | join kind=leftanti AllMIActivity on $left.SPId == $right.ServicePrincipalId
+    | extend
+        ServicePrincipalId   = SPId,
+        ServicePrincipalName = SPName,
+        TotalSignins         = 0,
+        LastSignin           = datetime(null),
+        UniqueResources      = 0,
+        LastResource         = "",
+        IPAddresses          = dynamic([]),
+        DaysSinceSignin      = datetime_diff("day", now(), CreatedAt)
+    | project
+        ServicePrincipalId,
+        ServicePrincipalName,
+        TotalSignins,
+        LastSignin,
+        UniqueResources,
+        LastResource,
+        IPAddresses,
+        DaysSinceSignin;
+
+// --- Combine stale + never-signed-in MIs ---
+let StaleInventory = union StaleMIs, NeverSignedIn;
+
+// --- Check for recent role assignments or scope changes (AuditLogs) ---
+let RecentRoleChanges = AuditLogs
+    | where TimeGenerated > ago(90d)
+    | where OperationName has_any (
+        "Add app role assignment",
+        "Remove app role assignment",
+        "Update service principal",
+        "Add service principal credentials")
+    | extend SPId      = tostring(TargetResources[0].id)
+    | extend Initiator = coalesce(
+        tostring(InitiatedBy.user.userPrincipalName),
+        tostring(InitiatedBy.app.displayName))
+    | summarize
+        RecentChanges   = count(),
+        ChangeTypes     = make_set(OperationName, 5),
+        LastChange      = max(TimeGenerated),
+        ChangedBy       = make_set(Initiator, 3)
+        by SPId;
+
+// --- Check for recent AzureActivity calls despite no MI sign-in ---
+let RecentAzureOps = union isfuzzy=true AzureActivity
+    | where TimeGenerated > ago(90d)
+    | where CategoryValue in~ ("Administrative", "Action")
+    | extend Caller = tostring(parse_json(Authorization).evidence.principalId)
+    | where isnotempty(Caller)
+    | summarize
+        AzureOpsCount   = count(),
+        LastAzureOp     = max(TimeGenerated),
+        AzureResources  = make_set(Resource, 5)
+        by Caller;
+
+// --- Final output ---
+StaleInventory
+| join kind=leftouter RecentRoleChanges
+    on $left.ServicePrincipalId == $right.SPId
+| join kind=leftouter RecentAzureOps
+    on $left.ServicePrincipalId == $right.Caller
+| extend StalenessCategory = case(
+    isempty(LastSignin),              "NeverSignedIn",
+    DaysSinceSignin >= 180,           "Abandoned (180d+)",
+    DaysSinceSignin >= 90,            "Stale (90-179d)",
+    "Active")
+| extend RiskSignal = case(
+    isnotempty(RecentChanges) and StalenessCategory != "Active",
+        "CredOrRoleChangeOnStaleIdentity",
+    isnotempty(AzureOpsCount) and StalenessCategory != "Active",
+        "AzureActivityWithoutSignIn",
+    StalenessCategory == "NeverSignedIn" and isnotempty(RecentChanges),
+        "CreatedAndModifiedButNeverUsed",
+    "")
+| project
+    ServicePrincipalId,
+    ServicePrincipalName,
+    StalenessCategory,
+    DaysSinceSignin,
+    LastSignin,
+    TotalSignins,
+    UniqueResources,
+    LastResource,
+    RecentChanges        = coalesce(RecentChanges, 0),
+    ChangeTypes,
+    LastChange,
+    ChangedBy,
+    AzureOpsCount        = coalesce(AzureOpsCount, 0),
+    LastAzureOp,
+    AzureResources,
+    RiskSignal,
+    IPAddresses
+| sort by
+    iif(isnotempty(RiskSignal), 0, 1) asc,
+    DaysSinceSignin desc

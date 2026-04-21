@@ -1,0 +1,87 @@
+// Hunt    : Workload Identity - All SP Lifecycle Changes by Currently Risky Users (30d)
+// Purpose : Scans 30 days of Entra ID AuditLogs for any SP or application lifecycle event
+//           (create, delete, credential add/remove, owner add, consent grant, role assignment)
+//           initiated by users who currently have an active risk state in AADRiskyUsers.
+//           Surfaces the full blast radius: every workload identity that a currently
+//           compromised user has touched, ordered by operation impact.
+// Tables  : AADRiskyUsers, AuditLogs
+// Period  : P30D
+// Tactics : Persistence, CredentialAccess, PrivilegeEscalation
+// MITRE   : T1098.001, T1078.004, T1098.003, T1548
+//==========================================================================================
+
+let LookbackDays = 30d;
+
+let SPLifecycleOps = dynamic([
+    "Add application",
+    "Delete application",
+    "Add service principal",
+    "Delete service principal",
+    "Add service principal credentials",
+    "Remove service principal credentials",
+    "Add password to service principal",
+    "Add key credential to service principal",
+    "Remove password from service principal",
+    "Remove key credential from service principal",
+    "Add owner to service principal",
+    "Add owner to application",
+    "Remove owner from service principal",
+    "Add app role assignment to service principal",
+    "Add delegated permission grant",
+    "Consent to application",
+    "Add OAuth2PermissionGrant",
+    "Add member to role"
+]);
+
+// All currently risky users (regardless of when risk was detected)
+let RiskyUsers = union isfuzzy=true
+    AADRiskyUsers,
+    (datatable(Id:string, UserPrincipalName:string, RiskLevel:string,
+               RiskState:string, RiskDetail:string,
+               RiskLastUpdatedDateTime:datetime)[])
+    | where RiskState in ("atRisk", "confirmedCompromised")
+    | project
+        UserId          = Id,
+        UserPrincipalName,
+        RiskLevel,
+        RiskState,
+        RiskDetail,
+        RiskLastUpdated = RiskLastUpdatedDateTime;
+
+// SP lifecycle events by risky users
+AuditLogs
+| where TimeGenerated > ago(LookbackDays)
+| where OperationName has_any (SPLifecycleOps)
+| where Result =~ "success"
+| where isnotempty(tostring(InitiatedBy.user.id))
+| extend InitiatorUserId  = tostring(InitiatedBy.user.id)
+| extend InitiatorUPN     = tostring(InitiatedBy.user.userPrincipalName)
+| extend InitiatorIP      = tostring(InitiatedBy.user.ipAddress)
+| extend TargetId         = tostring(TargetResources[0].id)
+| extend TargetName       = tostring(TargetResources[0].displayName)
+| extend TargetType       = tostring(TargetResources[0].type)
+| join kind=inner RiskyUsers on $left.InitiatorUserId == $right.UserId
+| extend OperationRisk = case(
+    OperationName has_any ("credentials", "password", "key"),     "CredentialAccess",
+    OperationName has_any ("owner", "role", "permission", "consent"), "PrivilegeEscalation",
+    OperationName has_any ("Add application", "Add service principal"),  "AppRegistration",
+    OperationName has_any ("Delete"),                              "Destruction",
+    "Other")
+| summarize
+    TotalEvents      = count(),
+    Operations       = make_set(OperationName, 20),
+    OperationRisks   = make_set(OperationRisk, 5),
+    TargetApps       = make_set(TargetName, 20),
+    TargetIds        = make_set(TargetId, 20),
+    InitiatorIPs     = make_set(InitiatorIP, 10),
+    FirstActivity    = min(TimeGenerated),
+    LastActivity     = max(TimeGenerated)
+    by InitiatorUPN, InitiatorUserId, RiskLevel, RiskState, RiskDetail, RiskLastUpdated
+| extend DaysSinceLastActivity = datetime_diff("day", now(), LastActivity)
+| extend ImpactScore = case(
+    OperationRisks has "CredentialAccess" and OperationRisks has "PrivilegeEscalation", 5,
+    OperationRisks has "CredentialAccess",                                               4,
+    OperationRisks has "PrivilegeEscalation",                                            3,
+    OperationRisks has "AppRegistration",                                                2,
+    1)
+| order by ImpactScore desc, TotalEvents desc

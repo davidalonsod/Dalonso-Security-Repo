@@ -1,0 +1,63 @@
+// Hunt     : Workload Identity - Service Principals Created But Never Used (30 days)
+// Tactics  : Persistence
+// MITRE    : T1136.003 (Create Cloud Account), T1098.001
+// Purpose  : Surfaces Service Principals created in the last 30 days that have had ZERO
+//            successful sign-in activity. Ghost SPs are a persistence risk — attackers
+//            create them as backdoors that sit dormant until needed, making them invisible
+//            to activity-based alerting. Also catches misconfigured or abandoned SPs.
+//            Correlates AuditLogs (creation) with AADServicePrincipalSignInLogs (usage).
+//==========================================================================================
+
+// --- All SPs created in the last 30 days ---
+let CreatedSPs = AuditLogs
+    | where TimeGenerated > ago(30d)
+    | where OperationName =~ "Add service principal"
+    | where Result =~ "success"
+    | extend SPId        = tostring(TargetResources[0].id)
+    | extend SPName      = tostring(TargetResources[0].displayName)
+    | extend Creator     = coalesce(
+        tostring(InitiatedBy.user.userPrincipalName),
+        tostring(InitiatedBy.app.displayName))
+    | extend CreatorId   = coalesce(
+        tostring(InitiatedBy.user.id),
+        tostring(InitiatedBy.app.servicePrincipalId))
+    | extend CreatorType = iff(isnotempty(InitiatedBy.user.id), "User", "Application")
+    | project CreatedTime = TimeGenerated, SPId, SPName, Creator, CreatorId,
+        CreatorType, CorrelationId;
+
+// --- SPs that have signed in at least once ---
+let UsedSPs = (AADServicePrincipalSignInLogs | invoke ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(30d)
+    | where ResultType == "0"
+    | distinct ServicePrincipalId;
+
+// --- SPs created but never used ---
+CreatedSPs
+| join kind=leftanti UsedSPs on $left.SPId == $right.ServicePrincipalId
+// Also check for credential additions (SP may have been prepared for future use)
+| join kind=leftouter (
+    AuditLogs
+    | where TimeGenerated > ago(30d)
+    | where OperationName has_any (
+        "Add service principal credentials",
+        "Update application – Certificates and secrets management")
+    | where Result =~ "success"
+    | extend SPId = tostring(TargetResources[0].id)
+    | summarize
+        CredentialAdditions = count(),
+        CredAddTypes        = make_set(OperationName, 3),
+        LastCredAdd         = max(TimeGenerated)
+        by SPId
+) on SPId
+| extend DaysSinceCreation   = datetime_diff("day", now(), CreatedTime)
+| extend HasCredentials       = CredentialAdditions > 0
+| extend RiskAssessment = case(
+    HasCredentials == true and DaysSinceCreation > 14, "High — Credentialed but Dormant",
+    HasCredentials == false and DaysSinceCreation > 14, "Medium — No Credentials, Abandoned",
+    HasCredentials == true,                              "Medium — New, Credentialed, Unused",
+                                                         "Low — New, No Credentials Yet")
+| project
+    CreatedTime, SPId, SPName, Creator, CreatorType,
+    DaysSinceCreation, HasCredentials, CredentialAdditions,
+    LastCredAdd, CredAddTypes, RiskAssessment
+| order by DaysSinceCreation desc

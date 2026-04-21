@@ -1,0 +1,37 @@
+// Hunt     : Workload Identity - Service Principal Brute Force History (30d)
+// Tactics  : CredentialAccess
+// MITRE    : T1110.003, T1078.004
+// Purpose  : Full 30-day brute force / credential stuffing history against SPs.
+//            Shows per-SP failure volume, error code distribution, IP diversity,
+//            and whether any failures were followed by a success (spray succeeded).
+//            Use to investigate incidents and baseline normal auth failure rates.
+//==========================================================================================
+
+let SuccessfulSignins = (AADServicePrincipalSignInLogs | invoke ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(30d)
+    | where ResultType == "0"
+    | summarize SuccessCount = count(), LastSuccess = max(TimeGenerated)
+        by ServicePrincipalId;
+(AADServicePrincipalSignInLogs | invoke ExcludeAllowlistedIPs())
+| where TimeGenerated > ago(30d)
+| where ResultType != "0"
+| where ResultType !in ("50076", "50079", "50058", "70044")
+| extend GeoInfo  = geo_info_from_ip_address(IPAddress)
+| extend Country  = tostring(GeoInfo.country_iso_code)
+| summarize
+    FailedAttempts   = count(),
+    UniqueIPs        = dcount(IPAddress),
+    UniqueCountries  = dcount(Country),
+    IPList           = make_set(IPAddress, 20),
+    Countries        = make_set(Country, 10),
+    ErrorCodes       = make_set(ResultType, 10),
+    ErrorDescriptions = make_set(ResultDescription, 5),
+    Resources        = make_set(ResourceDisplayName, 10),
+    FirstAttempt     = min(TimeGenerated),
+    LastAttempt      = max(TimeGenerated)
+    by ServicePrincipalName, ServicePrincipalId, AppId
+| where FailedAttempts > 20 or UniqueIPs > 5
+| join kind=leftouter SuccessfulSignins on ServicePrincipalId
+| extend SpraySucceeded = SuccessCount > 0
+| project-away ServicePrincipalId1
+| order by FailedAttempts desc

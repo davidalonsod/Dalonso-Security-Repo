@@ -1,0 +1,145 @@
+// Hunt    : Workload Identity - Cross-Table Risky SP Comprehensive Profile (30d)
+// Purpose : Unified cross-table investigation view aggregating evidence from ALL available
+//           risk and Defender telemetry sources for every service principal / OAuth app.
+//           For each SP, joins: (1) Entra ID SP risk events (ServicePrincipalRiskEvents),
+//           (2) User risk events for the SP's owners (AADUserRiskEvents),
+//           (3) CloudAppEvents mass-access indicators, (4) Defender email threats targeting
+//           owners (EmailEvents), and (5) SP sign-in metadata. Assigns a composite
+//           RiskScore to triage the highest-risk workload identities across the full kill chain.
+// Tables  : ServicePrincipalRiskEvents, AADUserRiskEvents, AuditLogs,
+//           CloudAppEvents, EmailEvents, AADServicePrincipalSignInLogs
+// Period  : P30D
+// Tactics : InitialAccess, CredentialAccess, Persistence, LateralMovement, Collection
+// MITRE   : T1078.004, T1098.001, T1530, T1213, T1566.002
+//==========================================================================================
+
+let LookbackDays = 30d;
+
+// ── 1. SP-level risk events from Identity Protection ──────────────────────────────────────
+let SPRisk = union isfuzzy=true
+    ServicePrincipalRiskEvents,
+    (datatable(ServicePrincipalId:string, ServicePrincipalDisplayName:string,
+               AppId:string, RiskEventType:string, RiskLevel:string,
+               DetectedDateTime:datetime)[])
+    | where DetectedDateTime > ago(LookbackDays)
+    | summarize
+        SPRiskEventCount  = count(),
+        SPRiskLevel       = max(RiskLevel),
+        SPRiskTypes       = make_set(RiskEventType, 10),
+        SPFirstRisk       = min(DetectedDateTime)
+        by ServicePrincipalId, ServicePrincipalDisplayName, AppId;
+
+// ── 2. SP owners from AuditLogs ───────────────────────────────────────────────────────────
+let SPOwners = AuditLogs
+    | where TimeGenerated > ago(LookbackDays)
+    | where OperationName in~ (
+        "Add owner to service principal",
+        "Add owner to application",
+        "Add service principal",
+        "Add application")
+    | where Result =~ "success"
+    | where isnotempty(tostring(InitiatedBy.user.id))
+    | extend OwnerId   = tostring(InitiatedBy.user.id)
+    | extend OwnerUPN  = tostring(InitiatedBy.user.userPrincipalName)
+    | extend SPId      = tostring(TargetResources[0].id)
+    | project SPId, OwnerId, OwnerUPN;
+
+// ── 3. Owner user risk events ─────────────────────────────────────────────────────────────
+let OwnerRisk = union isfuzzy=true
+    AADUserRiskEvents,
+    (datatable(UserId:string, UserPrincipalName:string, RiskEventType:string,
+               RiskLevel:string, DetectedDateTime:datetime)[])
+    | where DetectedDateTime > ago(LookbackDays)
+    | summarize
+        OwnerRiskCount    = count(),
+        OwnerRiskLevel    = max(RiskLevel),
+        OwnerRiskTypes    = make_set(RiskEventType, 10),
+        OwnerFirstRisk    = min(DetectedDateTime)
+        by UserId;
+
+let SPOwnerRisk = SPOwners
+    | join kind=leftouter OwnerRisk on $left.OwnerId == $right.UserId
+    | summarize
+        RiskyOwners       = countif(isnotempty(UserId)),
+        OwnerRiskLevel    = max(OwnerRiskLevel),
+        OwnerRiskTypes    = make_set(OwnerRiskTypes, 10),
+        OwnerFirstRisk    = min(OwnerFirstRisk),
+        Owners            = make_set(OwnerUPN, 5)
+        by SPId;
+
+// ── 4. CloudAppEvents anomalous access ───────────────────────────────────────────────────
+let CloudAppRisk = (CloudAppEvents | invoke ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(LookbackDays)
+    | where isnotempty(tostring(ApplicationId))
+    | extend AppIdStr = tostring(ApplicationId)
+    | summarize
+        CloudActionCount  = count(),
+        CloudUniqueObjs   = dcount(ObjectName),
+        CloudUniqueUsers  = dcount(AccountUpn),
+        CloudActionTypes  = make_set(ActionType, 10)
+        by AppIdStr;
+
+// ── 5. Defender email threats to owners ──────────────────────────────────────────────────
+let OwnerEmailThreats = union isfuzzy=true
+    EmailEvents,
+    (datatable(NetworkMessageId:string, RecipientEmailAddress:string,
+               ThreatTypes:string, Timestamp:datetime)[])
+    | where TimeGenerated > ago(LookbackDays)
+    | where ThreatTypes has_any (dynamic(["Malware", "Phish", "HighConfidencePhish"]))
+    | extend RecipientLower = tolower(RecipientEmailAddress)
+    | summarize ThreatEmailCount = count() by RecipientLower;
+
+let SPOwnerThreats = SPOwners
+    | extend OwnerLower = tolower(OwnerUPN)
+    | join kind=leftouter OwnerEmailThreats on $left.OwnerLower == $right.RecipientLower
+    | summarize OwnerThreatEmails = sum(ThreatEmailCount) by SPId;
+
+// ── 6. SP sign-in baseline ───────────────────────────────────────────────────────────────
+let SPSignins = (AADServicePrincipalSignInLogs | invoke ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(LookbackDays)
+    | summarize
+        SigninCount       = count(),
+        SuccessSignins    = countif(ResultType == "0"),
+        FailedSignins     = countif(ResultType != "0"),
+        UniqueIPs         = dcount(IPAddress),
+        CredTypes         = make_set(ClientCredentialType, 5),
+        Resources         = make_set(ResourceDisplayName, 10),
+        Countries         = make_set(Location, 5),
+        LastSignin        = max(TimeGenerated)
+        by ServicePrincipalId, ServicePrincipalName, AppId;
+
+// ── Assemble composite view ───────────────────────────────────────────────────────────────
+SPSignins
+| join kind=leftouter SPRisk         on ServicePrincipalId
+| join kind=leftouter SPOwnerRisk    on $left.ServicePrincipalId == $right.SPId
+| join kind=leftouter CloudAppRisk   on $left.AppId == $right.AppIdStr
+| join kind=leftouter SPOwnerThreats on $left.ServicePrincipalId == $right.SPId
+| extend RiskScore = 0
+    + iff(isnotempty(SPRiskLevel) and SPRiskLevel in ("high", "medium"), 3, 0)
+    + iff(isnotempty(OwnerRiskLevel) and OwnerRiskLevel in ("high", "medium"), 2, 0)
+    + iff(isnotempty(CloudActionCount) and CloudActionCount > 200, 2, 0)
+    + iff(isnotempty(OwnerThreatEmails) and OwnerThreatEmails > 0, 1, 0)
+    + iff(FailedSignins > 50, 1, 0)
+    + iff(UniqueIPs > 10, 1, 0)
+| extend RiskTier = case(
+    RiskScore >= 6, "Critical",
+    RiskScore >= 4, "High",
+    RiskScore >= 2, "Medium",
+    "Low")
+| where RiskScore > 0
+| project
+    ServicePrincipalId, ServicePrincipalName, AppId,
+    // SP Identity Protection
+    SPRiskEventCount, SPRiskLevel, SPRiskTypes,
+    // Owner risk
+    RiskyOwners, OwnerRiskLevel, OwnerRiskTypes, Owners,
+    // Cloud app access
+    CloudActionCount, CloudUniqueObjs, CloudUniqueUsers,
+    // Email threats to owners
+    OwnerThreatEmails,
+    // Sign-in telemetry
+    SigninCount, SuccessSignins, FailedSignins, UniqueIPs,
+    CredTypes, Resources, Countries, LastSignin,
+    // Composite
+    RiskScore, RiskTier
+| order by RiskScore desc, SigninCount desc

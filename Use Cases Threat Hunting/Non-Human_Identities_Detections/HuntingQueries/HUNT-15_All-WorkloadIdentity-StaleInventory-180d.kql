@@ -1,0 +1,130 @@
+// Hunt    : Workload Identity - All SP & MI Stale Identity Inventory (180d)
+// Purpose : A single consolidated inventory of all Service Principals and Managed
+//           Identities sorted by last authentication date. Categorises each identity
+//           into Active / Aging / Stale / Abandoned / NeverSignedIn buckets.
+//           Designed as a periodic governance sweep — run quarterly to identify
+//           workload identities that have outlived their usefulness and should be
+//           reviewed for disablement or deletion.
+// Tables  : AADServicePrincipalSignInLogs, AADManagedIdentitySignInLogs, AuditLogs
+// Period  : P180D
+// Tactics : Defense Evasion, Persistence, Initial Access
+// MITRE   : T1078.004, T1098.001
+//==========================================================================================
+
+let LookbackDays = 180d;
+
+// ============================================================
+// SERVICE PRINCIPAL sign-in activity
+// ============================================================
+let SPActivity = (AADServicePrincipalSignInLogs | invoke ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(LookbackDays)
+    | where ResultType == 0
+    | summarize
+        TotalSignins         = count(),
+        LastSignin           = max(TimeGenerated),
+        FirstSignin          = min(TimeGenerated),
+        UniqueResources      = dcount(ResourceDisplayName),
+        IPAddresses          = make_set(IPAddress, 3),
+        CredentialTypes      = make_set(ServicePrincipalCredentialType, 5)
+        by ServicePrincipalId, ServicePrincipalName, AppId
+    | extend IdentityType = "ServicePrincipal";
+
+// ============================================================
+// MANAGED IDENTITY sign-in activity
+// ============================================================
+let MIActivity = (AADManagedIdentitySignInLogs | invoke ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(LookbackDays)
+    | where ResultType == 0
+    | summarize
+        TotalSignins         = count(),
+        LastSignin           = max(TimeGenerated),
+        FirstSignin          = min(TimeGenerated),
+        UniqueResources      = dcount(ResourceDisplayName),
+        IPAddresses          = make_set(IPAddress, 3),
+        CredentialTypes      = dynamic([])
+        by ServicePrincipalId, ServicePrincipalName, AppId
+    | extend IdentityType = "ManagedIdentity";
+
+// ============================================================
+// COMBINE and add governance metadata from AuditLogs
+// ============================================================
+let AllIdentities = union SPActivity, MIActivity;
+
+// Recent group/role changes for any workload identity
+let RoleChanges = AuditLogs
+    | where TimeGenerated > ago(90d)
+    | where OperationName has_any (
+        "Add app role assignment",
+        "Remove app role assignment",
+        "Add service principal credentials",
+        "Update service principal",
+        "Remove service principal credentials")
+    | extend SPId      = tostring(TargetResources[0].id)
+    | extend Initiator = coalesce(
+        tostring(InitiatedBy.user.userPrincipalName),
+        tostring(InitiatedBy.app.displayName))
+    | summarize
+        RecentChanges   = count(),
+        ChangeTypes     = make_set(OperationName, 5),
+        LastChange      = max(TimeGenerated),
+        ChangedBy       = make_set(Initiator, 3)
+        by SPId;
+
+// Owner information from AuditLogs
+let OwnerInfo = AuditLogs
+    | where TimeGenerated > ago(lookbackDays)    // reuse lookbackDays variable
+    | where OperationName in (
+        "Add owner to service principal",
+        "Add owner to application")
+    | extend SPId   = tostring(TargetResources[0].id)
+    | extend Owner  = tostring(TargetResources[1].userPrincipalName)
+    | summarize Owners = make_set(Owner, 5) by SPId;
+
+// ============================================================
+// FINAL ROLL-UP
+// ============================================================
+AllIdentities
+| join kind=leftouter RoleChanges
+    on $left.ServicePrincipalId == $right.SPId
+| join kind=leftouter OwnerInfo
+    on $left.ServicePrincipalId == $right.SPId
+| extend
+    DaysSinceLastSignin  = datetime_diff("day", now(), LastSignin),
+    ActiveDays           = datetime_diff("day", LastSignin, FirstSignin)
+| extend StalenessCategory = case(
+    DaysSinceLastSignin < 30,    "Active (<30d)",
+    DaysSinceLastSignin < 90,    "Aging (30-89d)",
+    DaysSinceLastSignin < 180,   "Stale (90-179d)",
+    "Abandoned (180d+)")
+| extend RiskSignal = case(
+    StalenessCategory in ("Stale (90-179d)", "Abandoned (180d+)")
+        and isnotempty(RecentChanges),   "ActiveChangesOnStaleIdentity",
+    DaysSinceLastSignin >= 90
+        and TotalSignins == 0,           "NeverAuthenticated",
+    StalenessCategory == "Abandoned (180d+)"
+        and UniqueResources >= 3,        "AbandonedHighPrivilege",
+    "")
+| project
+    IdentityType,
+    ServicePrincipalId,
+    ServicePrincipalName,
+    AppId,
+    StalenessCategory,
+    DaysSinceLastSignin,
+    LastSignin,
+    FirstSignin,
+    TotalSignins,
+    UniqueResources,
+    CredentialTypes,
+    RecentChanges        = coalesce(RecentChanges, 0),
+    ChangeTypes,
+    LastChange,
+    ChangedBy,
+    Owners,
+    RiskSignal
+| sort by
+    iif(StalenessCategory == "Abandoned (180d+)",  0,
+    iif(StalenessCategory == "Stale (90-179d)",    1,
+    iif(StalenessCategory == "Aging (30-89d)",     2, 3))) asc,
+    iif(isnotempty(RiskSignal), 0, 1) asc,
+    DaysSinceLastSignin desc
