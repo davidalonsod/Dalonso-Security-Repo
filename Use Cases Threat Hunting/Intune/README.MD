@@ -47,7 +47,7 @@ IntuneLogs/
    - `Devices`
    - *(optional)* `Windows365AuditLogs`
 4. Under **Destination details** check **Send to Log Analytics workspace** and
-   select your Sentinel-enabled workspace (e.g. `lawsentinel`).
+   select your Sentinel-enabled workspace .
 5. Save. Data appears in ~15 minutes.
 
 ### Enable the Graph API CCF connector (optional)
@@ -156,11 +156,11 @@ SigninLogs
 ### Option A — Full ARM template (recommended)
 
 ```powershell
-cd C:\Users\dalonso\SentinelSolutions\IntuneLogs
+cd C:\Users\USEER\SentinelSolutions\IntuneLogs
 az deployment group create `
   --resource-group RG_Sentinel `
   --template-file .\Package\mainTemplate.json `
-  --parameters workspace=lawsentinel
+  --parameters workspace=xxxx
 ```
 
 Deploys **37 resources**: 15 analytic rules, 15 hunting queries, 1 workbook,
