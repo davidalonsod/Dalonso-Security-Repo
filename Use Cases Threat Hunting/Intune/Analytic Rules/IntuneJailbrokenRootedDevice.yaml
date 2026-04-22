@@ -1,0 +1,57 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d513
+name: Intune - Jailbroken or rooted device accessing corporate resources
+description: |
+  Identifies devices reported by Intune as jailbroken (iOS) or rooted (Android) — either directly
+  via the JailBroken field or via compliance states indicating such. These devices have had their
+  security model broken and should not be allowed to hold corporate tokens. Excludes trusted IP
+  ranges via the NetworkAllowlist watchlist.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneDevices
+      - IntuneDeviceComplianceOrg
+queryFrequency: 1h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - InitialAccess
+  - DefenseEvasion
+relevantTechniques:
+  - T1078
+  - T1562
+query: |
+  let risky =
+      IntuneDevices
+      | where TimeGenerated > ago(1d)
+      | extend Jail = tostring(column_ifexists("JailBroken", ""))
+      | where Jail =~ "True" or Jail =~ "Yes" or Jail =~ "Unknown"
+      | summarize arg_max(TimeGenerated, *) by DeviceId = tostring(DeviceId)
+      | project DeviceId, DeviceName = tostring(DeviceName),
+                UPN = tolower(tostring(UPN)), OS = tostring(OS),
+                OSVersion = tostring(OSVersion), Jail;
+  let compRisky =
+      IntuneDeviceComplianceOrg
+      | where TimeGenerated > ago(1d)
+      | where ComplianceState in~ ("Jailbroken","Rooted")
+      | summarize arg_max(TimeGenerated, *) by DeviceId = tostring(DeviceId)
+      | project DeviceId, DeviceName = tostring(DeviceName),
+                UPN = tolower(tostring(column_ifexists("UPN", column_ifexists("UserPrincipalName", "")))),
+                OS = tostring(OSDescription), OSVersion = "",
+                Jail = ComplianceState;
+  union isfuzzy=true risky, compRisky
+  | summarize arg_max(DeviceName, *) by DeviceId
+  | extend AccountCustomEntity = UPN, HostCustomEntity = DeviceName
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: HostCustomEntity
+version: 1.0.0
+kind: Scheduled

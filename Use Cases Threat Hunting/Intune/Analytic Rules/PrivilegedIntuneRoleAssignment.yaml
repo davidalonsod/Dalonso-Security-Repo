@@ -1,0 +1,47 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d506
+name: Intune - Privileged role assignment (Intune Administrator / Endpoint Privilege Manager)
+description: |
+  Detects new assignments of sensitive Intune / endpoint-management directory roles
+  (Intune Administrator, Endpoint Security Manager, Cloud Device Administrator,
+  Windows 365 Administrator). Frequently abused for lateral movement from identity
+  compromise into device-control planes.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+relevantTechniques:
+  - T1098
+  - T1078.004
+query: |
+  let sensitiveRoles = dynamic([
+      "Intune Administrator","Intune Service Administrator",
+      "Endpoint Security Manager","Cloud Device Administrator",
+      "Windows 365 Administrator","Security Administrator","Global Administrator"
+  ]);
+  AuditLogs
+  | where TimeGenerated > ago(1h)
+  | where OperationName has_any ("Add member to role","Add eligible member to role")
+  | mv-expand TargetResources
+  | extend RoleName = tostring(parse_json(tostring(TargetResources.modifiedProperties))[1].newValue)
+  | extend RoleName = trim('"', RoleName)
+  | where RoleName has_any (sensitiveRoles)
+  | extend TargetUser = tostring(TargetResources.userPrincipalName)
+  | extend Initiator = tostring(InitiatedBy.user.userPrincipalName)
+  | project TimeGenerated, OperationName, RoleName, TargetUser, Initiator, Result
+  | extend AccountCustomEntity = TargetUser
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+version: 1.0.0
+kind: Scheduled

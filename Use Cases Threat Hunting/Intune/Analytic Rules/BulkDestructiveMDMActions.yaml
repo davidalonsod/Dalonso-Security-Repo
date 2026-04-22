@@ -1,0 +1,44 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d509
+name: Intune - Bulk device wipe, retire, or delete operations
+description: |
+  Detects bulk destructive MDM actions (Wipe, Retire, Delete, FreshStart, AutopilotReset)
+  issued by a single actor in a short window. Used by ransomware/extortion actors with
+  Intune admin rights to cause impact, or during account takeover of privileged identities.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneAuditLogs
+queryFrequency: 30m
+queryPeriod: 30m
+triggerOperator: gt
+triggerThreshold: 4
+status: Available
+tactics:
+  - Impact
+relevantTechniques:
+  - T1485
+  - T1531
+query: |
+  let destructiveOps = dynamic([
+      "wipeManagedDevice","retireManagedDevice","deleteManagedDevice",
+      "cleanWindowsDevice","autopilotReset","freshStart","wipe","retire","delete"
+  ]);
+  IntuneAuditLogs
+  | where TimeGenerated > ago(30m)
+  | where OperationName has_any (destructiveOps)
+  | extend Props = parse_json(tostring(Properties))
+  | extend Target = tostring(Props.TargetObjectName)
+  | summarize Count = count(), Targets = make_set(Target, 100),
+              Ops = make_set(OperationName, 20),
+              FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+            by Identity=tostring(Identity)
+  | where Count >= 5
+  | extend AccountCustomEntity = Identity
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+version: 1.0.0
+kind: Scheduled

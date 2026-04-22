@@ -1,0 +1,27 @@
+id: 7b8c9d10-aaaa-4001-8001-00000000000F
+name: HUNT - Recent Intune policy assignment / unassignment changes
+description: |
+  Surfaces recent Intune policy assignment changes from IntuneAuditLogs — Compliance, Configuration,
+  App Protection and App Configuration policies. Scoping changes are a common precursor to
+  compliance bypass because they exclude target groups/devices from enforcement.
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneAuditLogs
+tactics:
+  - DefenseEvasion
+relevantTechniques:
+  - T1562
+query: |
+  IntuneAuditLogs
+  | where TimeGenerated > ago(7d)
+  | where Category in~ ("Compliance","DeviceConfiguration","ApplicationManagement")
+  | where OperationName has_any ("assign","Assignment","unassign","Scope","GroupAssignment")
+  | extend Props = parse_json(tostring(Properties))
+  | extend Actor       = tostring(Identity)
+  | extend PolicyName  = tostring(Props.TargetDisplayName)
+  | extend PolicyType  = tostring(Props.TargetObjectType)
+  | extend Modified    = tostring(Props.ModifiedProperties)
+  | project TimeGenerated, Actor, OperationName, Category, PolicyType, PolicyName, Modified
+  | order by TimeGenerated desc
+version: 1.0.0

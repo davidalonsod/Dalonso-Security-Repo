@@ -1,0 +1,44 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d512
+name: Intune - App Protection / Configuration Policy tampered
+description: |
+  Detects creation, deletion, or modification of Intune App Protection (MAM), Configuration,
+  or Compliance policies. Attackers with Intune Administrator rights modify policies to weaken
+  Conditional Access postures, relax jailbreak/rooted restrictions, or remove data-loss-prevention
+  requirements before exfiltrating data from managed apps.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneAuditLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - DefenseEvasion
+  - Impact
+relevantTechniques:
+  - T1562
+  - T1484
+query: |
+  IntuneAuditLogs
+  | where TimeGenerated > ago(1h)
+  | where Category in~ ("Compliance","DeviceConfiguration","ApplicationManagement","Enrollment")
+  | where OperationName has_any ("Policy","Configuration","Protection","ManagedAppPolicy","assignment","Assign")
+  | where OperationName has_any ("create","update","delete","patch","assign","remove")
+  | extend Props = parse_json(tostring(Properties))
+  | extend Actor       = tostring(Identity)
+  | extend TargetName  = tostring(Props.TargetDisplayName)
+  | extend PolicyType  = tostring(Props.TargetObjectType)
+  | extend Modified    = tostring(Props.ModifiedProperties)
+  | where isnotempty(Actor)
+  | project TimeGenerated, Actor, OperationName, Category, PolicyType, TargetName, Modified
+  | extend AccountCustomEntity = Actor
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+version: 1.0.0
+kind: Scheduled

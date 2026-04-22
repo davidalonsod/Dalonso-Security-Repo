@@ -1,0 +1,28 @@
+id: 7b8c9d10-aaaa-4001-8001-000000000004
+name: HUNT - Device registered from cloud / hosting ASN
+description: |
+  Surfaces device registrations / enrollments where the origin IP belongs to cloud / hosting
+  providers (Azure, AWS, GCP, DigitalOcean, OVH) — a classic footprint of ROADtools / AADInternals
+  running from attacker VPS.
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+tactics:
+  - Persistence
+relevantTechniques:
+  - T1098.005
+query: |
+  let NetworkAllowlist = _GetWatchlist('NetworkAllowlist') | project IPRange = tostring(SearchKey);
+  let AllowedRanges = toscalar(NetworkAllowlist | summarize make_list(IPRange));
+  let hostingKeywords = dynamic(["amazon","aws","azure","microsoft","google","digitalocean","ovh","hetzner","linode","vultr","contabo"]);
+  SigninLogs
+  | where TimeGenerated > ago(7d) and ResultType == 0
+  | where AppDisplayName has_any ("Device Registration","Microsoft Intune","Microsoft Authentication Broker")
+  | where not(ipv4_is_in_any_range(tostring(IPAddress), AllowedRanges))
+  | extend ISP = tostring(NetworkLocationDetails)
+  | where ISP has_any (hostingKeywords) or UserAgent has_any (hostingKeywords)
+  | project TimeGenerated, UserPrincipalName, AppDisplayName, IPAddress, ISP, UserAgent,
+            Location = tostring(parse_json(tostring(LocationDetails)).countryOrRegion)
+  | order by TimeGenerated desc
+version: 1.0.0

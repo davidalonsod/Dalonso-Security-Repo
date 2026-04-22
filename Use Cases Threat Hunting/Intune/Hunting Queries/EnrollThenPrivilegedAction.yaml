@@ -1,0 +1,39 @@
+id: 7b8c9d10-aaaa-4001-8001-000000000006
+name: HUNT - Device enrolled and privileged action within 24h
+description: |
+  Finds identities that registered a new device and, within 24 hours, performed
+  privileged actions (role assignment, policy modification, admin-portal access).
+  Classic device-trust → privilege-escalation chain.
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneAuditLogs
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+relevantTechniques:
+  - T1098
+  - T1098.005
+query: |
+  let enrollments =
+      IntuneAuditLogs
+      | where TimeGenerated > ago(7d)
+      | where OperationName has_any ("enroll","Create Device","register")
+      | project EnrollTime = TimeGenerated, UPN = tolower(tostring(Identity)),
+                Device = tostring(parse_json(tostring(Properties)).TargetObjectName);
+  let priv =
+      AuditLogs
+      | where TimeGenerated > ago(7d)
+      | where OperationName has_any ("Add member to role","Update policy","Update conditional access policy",
+                                    "Delete policy","Consent to application")
+      | project PrivTime = TimeGenerated, UPN = tolower(tostring(InitiatedBy.user.userPrincipalName)),
+                PrivOp = OperationName;
+  enrollments
+  | join kind=inner priv on UPN
+  | where PrivTime between (EnrollTime .. EnrollTime + 24h)
+  | project UPN, Device, EnrollTime, PrivTime, PrivOp
+  | order by PrivTime desc
+version: 1.0.0

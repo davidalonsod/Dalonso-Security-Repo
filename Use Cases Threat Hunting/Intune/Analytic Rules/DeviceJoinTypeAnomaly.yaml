@@ -1,0 +1,56 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d507
+name: Intune - Device join type anomaly for user
+description: |
+  Detects a user whose new device registers with a join type (AzureAD Joined / Hybrid /
+  Registered / BYOD) not previously observed for that user in the last 30 days. Useful for
+  catching unauthorized BYO/registered devices injected into the tenant.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - Persistence
+relevantTechniques:
+  - T1098.005
+query: |
+  let NetworkAllowlist = _GetWatchlist('NetworkAllowlist') | project IPRange = tostring(SearchKey);
+  let AllowedRanges = toscalar(NetworkAllowlist | summarize make_list(IPRange));
+  let baseline =
+      SigninLogs
+      | where TimeGenerated between (ago(30d) .. ago(1h))
+      | extend TrustType = tostring(DeviceDetail.trustType), UPN = tolower(UserPrincipalName)
+      | where isnotempty(TrustType)
+      | summarize KnownTypes = make_set(TrustType, 10) by UPN;
+  SigninLogs
+  | where TimeGenerated > ago(1h)
+  | extend TrustType = tostring(DeviceDetail.trustType),
+           DeviceId = tostring(DeviceDetail.deviceId),
+           DeviceName = tostring(DeviceDetail.displayName),
+           UPN = tolower(UserPrincipalName)
+  | where isnotempty(TrustType) and ResultType == 0
+  | where not(ipv4_is_in_any_range(tostring(IPAddress), AllowedRanges))
+  | join kind=leftouter baseline on UPN
+  | where isnull(KnownTypes) or not(set_has_element(KnownTypes, TrustType))
+  | project TimeGenerated, UPN, TrustType, KnownTypes, DeviceId, DeviceName, IPAddress, AppDisplayName
+  | extend AccountCustomEntity = UPN, HostCustomEntity = DeviceName, IPCustomEntity = IPAddress
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: HostCustomEntity
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPCustomEntity
+version: 1.0.0
+kind: Scheduled

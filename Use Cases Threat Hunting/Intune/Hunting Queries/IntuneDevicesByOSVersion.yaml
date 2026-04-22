@@ -1,0 +1,29 @@
+id: 7b8c9d10-aaaa-4001-8001-00000000000D
+name: HUNT - Intune devices by outdated OS version
+description: |
+  Ranks IntuneDevices by OS and OS version to surface estate that is running old or unsupported
+  builds. These devices are more likely to hold vulnerable agents or to fail Conditional Access
+  version-check grace periods and become compliance-bypass candidates.
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneDevices
+tactics:
+  - InitialAccess
+relevantTechniques:
+  - T1078
+query: |
+  IntuneDevices
+  | where TimeGenerated > ago(1d)
+  | summarize arg_max(TimeGenerated, *) by DeviceId = tostring(DeviceId)
+  | extend OS = tostring(OS), OSVersion = tostring(OSVersion),
+           UPN = tolower(tostring(UPN)),
+           LastSeen = todatetime(LastContact)
+  | summarize Devices = count(),
+              UniqueUsers = dcount(UPN),
+              Sample = make_set(DeviceName, 25),
+              OldestContact = min(LastSeen),
+              NewestContact = max(LastSeen)
+            by OS, OSVersion
+  | order by OS asc, OSVersion asc
+version: 1.0.0

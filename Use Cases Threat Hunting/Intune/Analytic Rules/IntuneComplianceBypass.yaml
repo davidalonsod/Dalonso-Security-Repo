@@ -1,0 +1,60 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d501
+name: Intune - Device marked compliant shortly after non-compliant state
+description: |
+  Detects a device that transitioned from non-compliant (or error/unknown) to compliant within a short
+  window without a corresponding remediation event. This can indicate compliance-bypass techniques
+  (AADInternals `Set-AADIntDeviceCompliant`, manual policy exclusion, or tampering with the Intune
+  management extension) used to satisfy Conditional Access device-compliance requirements.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneDeviceComplianceOrg
+      - IntuneAuditLogs
+queryFrequency: 1h
+queryPeriod: 6h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - DefenseEvasion
+  - Persistence
+relevantTechniques:
+  - T1562
+  - T1556
+query: |
+  let lookback = 6h;
+  let flips =
+      IntuneDeviceComplianceOrg
+      | where TimeGenerated > ago(lookback)
+      | where isnotempty(ComplianceState)
+      | project TimeGenerated, DeviceId=tostring(DeviceId), DeviceName=tostring(DeviceName),
+                UserPrincipalName=tostring(column_ifexists("UPN", column_ifexists("UserPrincipalName", ""))),
+                OSDescription=tostring(OSDescription),
+                ComplianceState=tostring(ComplianceState)
+      | order by DeviceId, TimeGenerated asc
+      | extend prevState = prev(ComplianceState), prevTime = prev(TimeGenerated), prevDevice = prev(DeviceId)
+      | where DeviceId == prevDevice
+      | where prevState in ("NonCompliant","Error","Unknown","InGracePeriod","ConfigManager")
+      | where ComplianceState == "Compliant"
+      | where datetime_diff('minute', TimeGenerated, prevTime) between (0 .. 30)
+      | project TimeGenerated, DeviceId, DeviceName, UserPrincipalName, OSDescription, prevState, ComplianceState;
+  let remediations =
+      IntuneAuditLogs
+      | where TimeGenerated > ago(lookback)
+      | where OperationName has_any ("remediate","Sync","wipe","retire")
+      | project RemTime=TimeGenerated, DeviceId=tostring(parse_json(tostring(Properties)).TargetObjectId);
+  flips
+  | join kind=leftanti remediations on DeviceId
+  | extend AccountCustomEntity = UserPrincipalName, HostCustomEntity = DeviceName
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: HostCustomEntity
+version: 1.0.0
+kind: Scheduled

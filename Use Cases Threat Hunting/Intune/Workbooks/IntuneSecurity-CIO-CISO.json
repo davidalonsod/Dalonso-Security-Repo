@@ -1,0 +1,222 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# Intune Security — CIO / CISO KPI Dashboard\n\nExecutive view of Microsoft Intune / MDM risk posture: device trust, compliance, enrollment activity, privileged role exposure, and active threats.\n\n- **CIO view:** device health, compliance %, enrollment throughput.\n- **CISO view:** attack surface, suspicious registrations, privileged-role changes, policy tampering.\n\n> IP exclusions use the `NetworkAllowlist` watchlist (CIDR)."
+      },
+      "name": "header"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "p-range",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "type": 4,
+            "isRequired": true,
+            "value": { "durationMs": 2592000000 },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 86400000 },
+                { "durationMs": 604800000 },
+                { "durationMs": 2592000000 },
+                { "durationMs": 7776000000 }
+              ]
+            }
+          }
+        ]
+      },
+      "name": "params"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Executive KPIs" },
+      "name": "kpi-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let total = toscalar(IntuneDevices | where TimeGenerated {TimeRange} | summarize dcount(tostring(DeviceId)));\nlet compliant = toscalar(IntuneDeviceComplianceOrg | where TimeGenerated {TimeRange} | summarize arg_max(TimeGenerated, ComplianceState) by tostring(DeviceId) | where ComplianceState == 'Compliant' | count);\nlet nonComp = toscalar(IntuneDeviceComplianceOrg | where TimeGenerated {TimeRange} | summarize arg_max(TimeGenerated, ComplianceState) by tostring(DeviceId) | where ComplianceState in ('NonCompliant','Error','Unknown','InGracePeriod') | count);\nlet enroll = toscalar(IntuneAuditLogs | where TimeGenerated {TimeRange} | where OperationName has 'enroll' | count);\nlet wipes  = toscalar(IntuneAuditLogs | where TimeGenerated {TimeRange} | where OperationName has_any ('wipe','retire','delete') | count);\nprint TotalDevices=total, Compliant=compliant, NonCompliant=nonComp, Enrollments=enroll, DestructiveActions=wipes\n| extend CompliancePct = round(100.0 * Compliant / iif(TotalDevices==0,1,TotalDevices), 1)",
+        "size": 3,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "tiles",
+        "tileSettings": {
+          "titleContent": { "columnMatch": "", "formatter": 1 },
+          "leftContent": { "columnMatch": "TotalDevices", "formatter": 12, "formatOptions": { "palette": "blue" } },
+          "showBorder": true
+        }
+      },
+      "name": "tiles-kpi"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Device compliance trend" },
+      "name": "compliance-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "IntuneDeviceComplianceOrg\n| where TimeGenerated {TimeRange}\n| summarize arg_max(TimeGenerated, ComplianceState) by tostring(DeviceId), bin(TimeGenerated, 1d)\n| summarize Devices = count() by bin(TimeGenerated, 1d), ComplianceState\n| order by TimeGenerated asc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "compliance-trend"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "IntuneDeviceComplianceOrg\n| where TimeGenerated {TimeRange}\n| summarize arg_max(TimeGenerated, *) by tostring(DeviceId)\n| summarize Devices = count() by OS = tostring(OSDescription), ComplianceState\n| order by Devices desc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "compliance-os"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Enrollment activity" },
+      "name": "enroll-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "IntuneAuditLogs\n| where TimeGenerated {TimeRange}\n| where OperationName has 'enroll'\n| summarize Enrollments = count() by bin(TimeGenerated, 1h)\n| order by TimeGenerated asc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "enroll-trend"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "IntuneAuditLogs\n| where TimeGenerated {TimeRange}\n| where OperationName has 'enroll'\n| summarize Enrollments = count(), LastEnroll = max(TimeGenerated) by User = tostring(Identity)\n| top 15 by Enrollments desc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "Enrollments", "formatter": 8, "formatOptions": { "palette": "red" } }
+          ]
+        }
+      },
+      "name": "enroll-top-users"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Suspicious registrations (CISO view)" },
+      "name": "susp-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let NetworkAllowlist = _GetWatchlist('NetworkAllowlist') | project IPRange = tostring(column_ifexists('IPRange', SearchKey));\nlet AllowedRanges = toscalar(NetworkAllowlist | summarize make_list(IPRange));\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where AppDisplayName has_any ('Device Registration','Microsoft Intune','Microsoft Authentication Broker')\n| where not(ipv4_is_in_any_range(IPAddress, AllowedRanges))\n| summarize Events = count(), Users = dcount(UserPrincipalName), IPs = dcount(IPAddress)\n           by Country = tostring(LocationDetails.countryOrRegion)\n| order by Events desc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "map",
+        "mapSettings": {
+          "locInfo": "CountryRegion",
+          "locInfoColumn": "Country",
+          "sizeSettings": "Events"
+        }
+      },
+      "name": "susp-geo"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "SigninLogs\n| where TimeGenerated {TimeRange}\n| extend TrustType = tostring(DeviceDetail.trustType)\n| where isnotempty(TrustType)\n| summarize Devices = dcount(tostring(DeviceDetail.deviceId)) by TrustType\n| order by Devices desc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "piechart"
+      },
+      "name": "trust-types"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Privileged role exposure" },
+      "name": "roles-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let sensitiveRoles = dynamic(['Intune Administrator','Intune Service Administrator','Endpoint Security Manager','Cloud Device Administrator','Windows 365 Administrator','Security Administrator','Global Administrator']);\nAuditLogs\n| where TimeGenerated {TimeRange}\n| where OperationName has_any ('Add member to role','Add eligible member to role')\n| mv-expand TargetResources\n| extend RoleName = trim('\"', tostring(parse_json(tostring(TargetResources.modifiedProperties))[1].newValue))\n| where RoleName has_any (sensitiveRoles)\n| summarize Assignments = count(), LastChange = max(TimeGenerated) by RoleName\n| order by Assignments desc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "role-assignments"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Policy tampering & destructive actions" },
+      "name": "tamper-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "IntuneAuditLogs\n| where TimeGenerated {TimeRange}\n| where OperationName has_any ('Delete','Patch')\n| where OperationName has_any ('Compliance','Configuration','ConditionalAccess')\n| summarize Changes = count(), LastChange = max(TimeGenerated),\n            TopOps = make_set(OperationName, 10)\n          by Actor = tostring(Identity)\n| top 20 by Changes desc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      },
+      "name": "policy-tamper"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "IntuneAuditLogs\n| where TimeGenerated {TimeRange}\n| where OperationName has_any ('wipe','retire','delete','autopilotReset','freshStart','cleanWindowsDevice')\n| summarize Actions = count() by Op = OperationName\n| order by Actions desc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "destructive"
+    },
+    {
+      "type": 1,
+      "content": { "json": "## Active Sentinel incidents from this solution" },
+      "name": "inc-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "SecurityIncident\n| where TimeGenerated {TimeRange}\n| where Title has_any ('Intune','MDM','Device Registration','Compliance','Conditional Access')\n| summarize arg_max(TimeGenerated, *) by IncidentNumber\n| summarize Incidents = count() by Severity, Status\n| order by Severity asc",
+        "size": 0,
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "incidents"
+    }
+  ],
+  "fallbackResourceIds": [],
+  "fromTemplateId": "sentinel-IntuneLogsSolution",
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

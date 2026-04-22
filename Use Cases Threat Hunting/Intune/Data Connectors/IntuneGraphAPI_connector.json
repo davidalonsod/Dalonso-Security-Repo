@@ -1,0 +1,138 @@
+{
+  "name": "IntuneGraphAPIConnector",
+  "apiVersion": "2024-01-01-preview",
+  "type": "Microsoft.SecurityInsights/dataConnectors",
+  "kind": "RestApiPoller",
+  "properties": {
+    "connectorUiConfig": {
+      "id": "IntuneGraphAPI",
+      "title": "Microsoft Intune - Graph API (CCF)",
+      "publisher": "Community",
+      "descriptionMarkdown": "Codeless connector that polls Microsoft Graph for **Intune device management audit events** and **managed devices** beyond what Intune Diagnostic Settings provide. Pairs with the `Microsoft Intune (Diagnostic Settings)` connector. Requires an Entra ID app registration with `DeviceManagementApps.Read.All`, `DeviceManagementConfiguration.Read.All`, `DeviceManagementManagedDevices.Read.All`, and `DeviceManagementRBAC.Read.All` application permissions (admin-consented).",
+      "graphQueriesTableName": "IntuneGraph_AuditEvents_CL",
+      "graphQueries": [
+        {
+          "metricName": "Intune Graph audit events",
+          "legend": "IntuneGraph_AuditEvents_CL",
+          "baseQuery": "IntuneGraph_AuditEvents_CL"
+        },
+        {
+          "metricName": "Intune managed devices (snapshot)",
+          "legend": "IntuneGraph_ManagedDevices_CL",
+          "baseQuery": "IntuneGraph_ManagedDevices_CL"
+        }
+      ],
+      "sampleQueries": [
+        {
+          "description": "Intune audit events (Graph) in the last 24h",
+          "query": "IntuneGraph_AuditEvents_CL | where TimeGenerated > ago(24h) | project TimeGenerated, activityType_s, activityOperationType_s, userPrincipalName_s, resources_s"
+        },
+        {
+          "description": "Managed devices last checked-in > 30 days",
+          "query": "IntuneGraph_ManagedDevices_CL | where TimeGenerated > ago(1d) | extend lastSync = todatetime(lastSyncDateTime_s) | where lastSync < ago(30d) | project deviceName_s, userPrincipalName_s, operatingSystem_s, complianceState_s, lastSync"
+        }
+      ],
+      "dataTypes": [
+        {
+          "name": "IntuneGraph_AuditEvents_CL",
+          "lastDataReceivedQuery": "IntuneGraph_AuditEvents_CL | summarize Time = max(TimeGenerated) | where isnotempty(Time)"
+        },
+        {
+          "name": "IntuneGraph_ManagedDevices_CL",
+          "lastDataReceivedQuery": "IntuneGraph_ManagedDevices_CL | summarize Time = max(TimeGenerated) | where isnotempty(Time)"
+        }
+      ],
+      "connectivityCriteria": [
+        {
+          "type": "HasDataConnectors"
+        }
+      ],
+      "availability": { "status": 1, "isPreview": true },
+      "permissions": {
+        "resourceProvider": [
+          {
+            "provider": "Microsoft.OperationalInsights/workspaces",
+            "permissionsDisplayText": "read and write permissions required",
+            "providerDisplayName": "Workspace",
+            "scope": "Workspace",
+            "requiredPermissions": { "write": true, "read": true, "delete": true }
+          }
+        ],
+        "customs": [
+          {
+            "name": "Microsoft Entra app (application permissions, admin-consented)",
+            "description": "Register an app in Entra ID and grant: `DeviceManagementApps.Read.All`, `DeviceManagementConfiguration.Read.All`, `DeviceManagementManagedDevices.Read.All`, `DeviceManagementRBAC.Read.All` on Microsoft Graph. Generate a client secret."
+          }
+        ]
+      },
+      "instructionSteps": [
+        {
+          "title": "Step 1 - Register an Entra ID application",
+          "description": "In the Entra admin center, create an app registration. Note the **Application (client) ID** and **Directory (tenant) ID**. Generate a **client secret** and copy the value (you will not see it again)."
+        },
+        {
+          "title": "Step 2 - Grant Graph API permissions",
+          "description": "On the app's **API permissions** blade, add the following **Application** permissions from Microsoft Graph, then click **Grant admin consent**:\n- `DeviceManagementApps.Read.All`\n- `DeviceManagementConfiguration.Read.All`\n- `DeviceManagementManagedDevices.Read.All`\n- `DeviceManagementRBAC.Read.All`\n\nReference: [Intune Graph overview](https://learn.microsoft.com/graph/api/resources/intune-graph-overview)."
+        },
+        {
+          "title": "Step 3 - Connect",
+          "description": "Enter the tenant ID, client ID, and client secret below and click Connect.",
+          "instructions": [
+            {
+              "type": "OAuthForm",
+              "parameters": {
+                "clientIdLabel": "Application (client) ID",
+                "clientSecretLabel": "Client secret",
+                "connectButtonLabel": "Connect",
+                "disconnectButtonLabel": "Disconnect"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "pollingConfig": {
+      "auth": {
+        "authType": "OAuth2",
+        "grantType": "client_credentials",
+        "tokenEndpoint": "https://login.microsoftonline.com/{{tenantId}}/oauth2/v2.0/token",
+        "tokenEndpointHeaders": { "Content-Type": "application/x-www-form-urlencoded" },
+        "tokenEndpointQueryParameters": {},
+        "scope": "https://graph.microsoft.com/.default"
+      },
+      "request": {
+        "apiEndpoint": "https://graph.microsoft.com/beta/deviceManagement/auditEvents",
+        "httpMethod": "GET",
+        "queryParameters": {
+          "$orderby": "activityDateTime asc",
+          "$filter": "activityDateTime ge {_QueryWindowStartTime}"
+        },
+        "queryWindowInMin": 15,
+        "queryTimeFormat": "yyyy-MM-ddTHH:mm:ssZ",
+        "rateLimitQPS": 1,
+        "retryCount": 3,
+        "timeoutInSeconds": 60,
+        "headers": {
+          "Accept": "application/json",
+          "User-Agent": "Sentinel-IntuneLogs-CCF/1.0"
+        },
+        "startTimeAttributeName": "activityDateTime"
+      },
+      "paging": {
+        "pagingType": "LinkHeader",
+        "nextPageParaName": "@odata.nextLink"
+      },
+      "response": {
+        "eventsJsonPaths": ["$.value"],
+        "isGzipCompressed": false,
+        "successStatusJsonPath": "$.statusCode",
+        "successStatusValue": "200"
+      }
+    },
+    "dcrConfig": {
+      "dataCollectionEndpoint": "{{dataCollectionEndpoint}}",
+      "dataCollectionRuleImmutableId": "{{dataCollectionRuleImmutableId}}",
+      "streamName": "Custom-IntuneGraph_AuditEvents_CL"
+    }
+  }
+}

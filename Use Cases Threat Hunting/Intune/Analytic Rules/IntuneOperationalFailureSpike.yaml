@@ -1,0 +1,47 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d514
+name: Intune - MDM enrollment or check-in failure spike per user
+description: |
+  Detects a statistically abnormal spike in Intune enrollment / check-in failures for a single
+  user principal in IntuneOperationalLogs. Can indicate enrollment-spray attacks, scripted
+  registration (ROADtools / AADInternals `Join-AADIntDeviceToAzureAD`), or MDM policy fuzzing
+  to discover weak configurations.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneOperationalLogs
+queryFrequency: 30m
+queryPeriod: 6h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - InitialAccess
+  - Reconnaissance
+relevantTechniques:
+  - T1078
+  - T1595
+query: |
+  let threshold = 15;
+  IntuneOperationalLogs
+  | where TimeGenerated > ago(30m)
+  | where Result =~ "Failure" or tostring(OperationName) has_any ("Enrollment","CheckIn","Sync")
+  | extend Props = parse_json(tostring(Properties))
+  | extend UPN = tolower(coalesce(tostring(Props.Upn), tostring(Props.UserPrincipalName), tostring(column_ifexists("Identity", ""))))
+  | extend Reason = tostring(coalesce(tostring(column_ifexists("ResultReason", "")), tostring(Props.ResultReason)))
+  | where isnotempty(UPN)
+  | summarize Failures = count(),
+              Operations = make_set(OperationName, 20),
+              Reasons    = make_set(Reason, 20),
+              FirstSeen  = min(TimeGenerated),
+              LastSeen   = max(TimeGenerated)
+            by UPN
+  | where Failures >= threshold
+  | extend AccountCustomEntity = UPN
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+version: 1.0.0
+kind: Scheduled

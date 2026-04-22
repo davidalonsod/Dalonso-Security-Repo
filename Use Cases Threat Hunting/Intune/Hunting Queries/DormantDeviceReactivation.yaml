@@ -1,0 +1,29 @@
+id: 7b8c9d10-aaaa-4001-8001-000000000007
+name: HUNT - Stale / dormant devices suddenly active
+description: |
+  Identifies Intune-managed devices that were dormant >60 days and recently checked in.
+  Reactivated accounts / devices are a known persistence technique.
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneDevices
+tactics:
+  - Persistence
+relevantTechniques:
+  - T1098.005
+query: |
+  IntuneDevices
+  | where TimeGenerated > ago(90d)
+  | summarize LastSeen = max(TimeGenerated), FirstSeen = min(TimeGenerated),
+              arg_max(TimeGenerated, DeviceName, UPN, OS, Ownership, CompliantState)
+            by DeviceId = tostring(DeviceId)
+  | extend DaysIdleBefore = datetime_diff('day', LastSeen, FirstSeen)
+  | where LastSeen > ago(7d) and DaysIdleBefore >= 60
+  | project LastSeen, DeviceId, DeviceName,
+            UserPrincipalName = tolower(tostring(UPN)),
+            OperatingSystem   = tostring(OS),
+            OwnerType         = tostring(Ownership),
+            ComplianceState   = tostring(CompliantState),
+            DaysIdleBefore
+  | order by LastSeen desc
+version: 1.0.0
