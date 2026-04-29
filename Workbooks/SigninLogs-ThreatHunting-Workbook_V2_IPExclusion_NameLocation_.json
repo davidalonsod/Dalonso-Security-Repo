@@ -186,6 +186,14 @@
             "linkLabel": "🔐 MFA Analysis",
             "subTarget": "MFAAnalysis",
             "style": "link"
+          },
+          {
+            "id": "tab-botnet",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "Botnet Detection",
+            "subTarget": "BotnetDetection",
+            "style": "link"
           }
         ]
       },
@@ -1046,7 +1054,7 @@
             "type": 3,
             "content": {
               "version": "KqlItem/1.0",
-              "query": "// Active Threat Intelligence Indicators Summary (STIX 2.1)\nThreatIntelIndicators\n| where TimeGenerated > ago(30d)\n| where IsActive == true and Revoked == false\n| extend ObservableType = tostring(split(ObservableKey, \":\")[0])\n| summarize \n    ActiveIndicators = dcount(Id),\n    Sources = dcount(SourceSystem),\n    AvgConfidence = round(avg(todouble(ConfidenceScore)), 1),\n    HighConfidence = countif(todouble(ConfidenceScore) >= 80)\n  by ObservableType\n| order by ActiveIndicators desc",
+              "query": "// Active Threat Intelligence Indicators Summary (STIX 2.1)\nThreatIntelIndicators\n| where TimeGenerated > ago(30d)\n| where IsActive == true and Revoked == false\n| extend ObservableType = tostring(split(ObservableKey, \":\")[0])\n| summarize \n    ActiveIndicators = dcount(Id),\n    Sources = dcount(SourceSystem),\n    AvgConfidence = round(avg(todouble(Confidence)), 1),\n    HighConfidence = countif(todouble(Confidence) >= 80)\n  by ObservableType\n| order by ActiveIndicators desc",
               "size": 4,
               "title": "🧭 Active TI Indicators (Last 30 Days)",
               "timeContext": { "durationMs": 2592000000 },
@@ -1066,7 +1074,7 @@
             "type": 3,
             "content": {
               "version": "KqlItem/1.0",
-              "query": "let _ExcIPs_raw = '{ExcludedIPs}';\r\nlet _ExcIPs = iif(_ExcIPs_raw == '', dynamic([]),\r\n    todynamic(strcat('[\"', replace_string(replace_string(_ExcIPs_raw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _NLSel = dynamic([{NamedLocations}]);\r\nlet _NLActive = array_length(_NLSel) > 0;\r\nlet SigninLogs = SigninLogs\r\n    | where _ExcIPs_raw == '' or isempty(IPAddress) or not(ipv4_is_in_any_range(IPAddress, _ExcIPs))\r\n    | where not(_NLActive) or isempty(NetworkLocationDetails) or not(tostring(NetworkLocationDetails) has_any (_NLSel));\r\n// Sign-ins from IPs Matching Active TI Indicators (STIX 2.1)\nlet MaliciousIPs = ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where IsActive == true and Revoked == false\n    | where ObservableKey =~ \"ipv4-addr:value\"\n    | where todouble(ConfidenceScore) >= 50\n    | extend MaliciousIP = tostring(ObservableValue)\n    | where isnotempty(MaliciousIP)\n    | summarize \n        ThreatTypes = make_set(ThreatType, 5),\n        TISources = make_set(SourceSystem, 5),\n        MaxConfidence = max(todouble(ConfidenceScore)),\n        LastReported = max(TimeGenerated)\n      by MaliciousIP;\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where isnotempty(IPAddress)\n| join kind=inner MaliciousIPs on $left.IPAddress == $right.MaliciousIP\n| summarize \n    SignInAttempts = count(),\n    SuccessfulSignIns = countif(ResultType == \"0\"),\n    FailedSignIns = countif(ResultType != \"0\"),\n    TargetedUsers = dcount(UserPrincipalName),\n    UserList = make_set(UserPrincipalName, 10),\n    Apps = make_set(AppDisplayName, 5),\n    Countries = make_set(tostring(LocationDetails.countryOrRegion), 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n  by IPAddress, tostring(ThreatTypes), tostring(TISources), MaxConfidence\n| extend ThreatLevel = case(\n    SuccessfulSignIns > 0, \"🔴 Critical - Successful Sign-in from TI-Flagged IP\",\n    MaxConfidence >= 80, \"🟠 High Confidence TI Match\",\n    \"🟡 TI Match\"\n)\n| project ThreatLevel, IPAddress, ThreatTypes, MaxConfidence, TISources, SignInAttempts, SuccessfulSignIns, FailedSignIns, TargetedUsers, UserList, Apps, Countries, FirstSeen, LastSeen\n| order by SuccessfulSignIns desc, SignInAttempts desc",
+              "query": "let _ExcIPs_raw = '{ExcludedIPs}';\r\nlet _ExcIPs = iif(_ExcIPs_raw == '', dynamic([]),\r\n    todynamic(strcat('[\"', replace_string(replace_string(_ExcIPs_raw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _NLSel = dynamic([{NamedLocations}]);\r\nlet _NLActive = array_length(_NLSel) > 0;\r\nlet SigninLogs = SigninLogs\r\n    | where _ExcIPs_raw == '' or isempty(IPAddress) or not(ipv4_is_in_any_range(IPAddress, _ExcIPs))\r\n    | where not(_NLActive) or isempty(NetworkLocationDetails) or not(tostring(NetworkLocationDetails) has_any (_NLSel));\r\n// Sign-ins from IPs Matching Active TI Indicators (STIX 2.1)\nlet MaliciousIPs = ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where IsActive == true and Revoked == false\n    | where ObservableKey =~ \"ipv4-addr:value\"\n    | where todouble(Confidence) >= 50\n    | extend MaliciousIP = tostring(ObservableValue)\r\n    | extend ThreatType = tostring(column_ifexists(\"ThreatType\",\"\"))\n    | where isnotempty(MaliciousIP)\n    | summarize \n        ThreatTypes = make_set(ThreatType, 5),\n        TISources = make_set(SourceSystem, 5),\n        MaxConfidence = max(todouble(Confidence)),\n        LastReported = max(TimeGenerated)\n      by MaliciousIP;\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where isnotempty(IPAddress)\n| join kind=inner MaliciousIPs on $left.IPAddress == $right.MaliciousIP\n| summarize \n    SignInAttempts = count(),\n    SuccessfulSignIns = countif(ResultType == \"0\"),\n    FailedSignIns = countif(ResultType != \"0\"),\n    TargetedUsers = dcount(UserPrincipalName),\n    UserList = make_set(UserPrincipalName, 10),\n    Apps = make_set(AppDisplayName, 5),\n    Countries = make_set(tostring(LocationDetails.countryOrRegion), 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n  by IPAddress, tostring(ThreatTypes), tostring(TISources), MaxConfidence\n| extend ThreatLevel = case(\n    SuccessfulSignIns > 0, \"🔴 Critical - Successful Sign-in from TI-Flagged IP\",\n    MaxConfidence >= 80, \"🟠 High Confidence TI Match\",\n    \"🟡 TI Match\"\n)\n| project ThreatLevel, IPAddress, ThreatTypes, MaxConfidence, TISources, SignInAttempts, SuccessfulSignIns, FailedSignIns, TargetedUsers, UserList, Apps, Countries, FirstSeen, LastSeen\n| order by SuccessfulSignIns desc, SignInAttempts desc",
               "size": 0,
               "title": "🚨 Sign-ins from Known Malicious IPs (ThreatIntelIndicators)",
               "timeContext": { "durationMs": 604800000 },
@@ -1089,7 +1097,7 @@
             "type": 3,
             "content": {
               "version": "KqlItem/1.0",
-              "query": "let _ExcIPs_raw = '{ExcludedIPs}';\r\nlet _ExcIPs = iif(_ExcIPs_raw == '', dynamic([]),\r\n    todynamic(strcat('[\"', replace_string(replace_string(_ExcIPs_raw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _NLSel = dynamic([{NamedLocations}]);\r\nlet _NLActive = array_length(_NLSel) > 0;\r\nlet SigninLogs = SigninLogs\r\n    | where _ExcIPs_raw == '' or isempty(IPAddress) or not(ipv4_is_in_any_range(IPAddress, _ExcIPs))\r\n    | where not(_NLActive) or isempty(NetworkLocationDetails) or not(tostring(NetworkLocationDetails) has_any (_NLSel));\r\n// TI-Correlated Users (Sign-ins from Malicious Infrastructure)\nlet MaliciousIPs = ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where IsActive == true and Revoked == false\n    | where ObservableKey =~ \"ipv4-addr:value\"\n    | where todouble(ConfidenceScore) >= 50\n    | distinct MaliciousIP = tostring(ObservableValue);\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where IPAddress in (MaliciousIPs)\n| summarize \n    TIHits = count(),\n    Successful = countif(ResultType == \"0\"),\n    Failed = countif(ResultType != \"0\"),\n    MaliciousIPsSeen = dcount(IPAddress),\n    IPList = make_set(IPAddress, 10),\n    Countries = make_set(tostring(LocationDetails.countryOrRegion), 5),\n    Apps = make_set(AppDisplayName, 5),\n    LastActivity = max(TimeGenerated)\n  by UserPrincipalName\n| extend CompromiseLikelihood = case(\n    Successful > 0, \"🔴 Critical - Authenticated from TI-Flagged IP\",\n    TIHits >= 10, \"🟠 High - Sustained Targeting\",\n    \"🟡 Under Attack\"\n)\n| order by Successful desc, TIHits desc\n| take 30",
+              "query": "let _ExcIPs_raw = '{ExcludedIPs}';\r\nlet _ExcIPs = iif(_ExcIPs_raw == '', dynamic([]),\r\n    todynamic(strcat('[\"', replace_string(replace_string(_ExcIPs_raw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _NLSel = dynamic([{NamedLocations}]);\r\nlet _NLActive = array_length(_NLSel) > 0;\r\nlet SigninLogs = SigninLogs\r\n    | where _ExcIPs_raw == '' or isempty(IPAddress) or not(ipv4_is_in_any_range(IPAddress, _ExcIPs))\r\n    | where not(_NLActive) or isempty(NetworkLocationDetails) or not(tostring(NetworkLocationDetails) has_any (_NLSel));\r\n// TI-Correlated Users (Sign-ins from Malicious Infrastructure)\nlet MaliciousIPs = ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where IsActive == true and Revoked == false\n    | where ObservableKey =~ \"ipv4-addr:value\"\n    | where todouble(Confidence) >= 50\n    | distinct MaliciousIP = tostring(ObservableValue);\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where IPAddress in (MaliciousIPs)\n| summarize \n    TIHits = count(),\n    Successful = countif(ResultType == \"0\"),\n    Failed = countif(ResultType != \"0\"),\n    MaliciousIPsSeen = dcount(IPAddress),\n    IPList = make_set(IPAddress, 10),\n    Countries = make_set(tostring(LocationDetails.countryOrRegion), 5),\n    Apps = make_set(AppDisplayName, 5),\n    LastActivity = max(TimeGenerated)\n  by UserPrincipalName\n| extend CompromiseLikelihood = case(\n    Successful > 0, \"🔴 Critical - Authenticated from TI-Flagged IP\",\n    TIHits >= 10, \"🟠 High - Sustained Targeting\",\n    \"🟡 Under Attack\"\n)\n| order by Successful desc, TIHits desc\n| take 30",
               "size": 0,
               "title": "👤 Users Targeted by TI-Flagged Infrastructure",
               "timeContext": { "durationMs": 604800000 },
@@ -1113,7 +1121,7 @@
             "type": 3,
             "content": {
               "version": "KqlItem/1.0",
-              "query": "let _ExcIPs_raw = '{ExcludedIPs}';\r\nlet _ExcIPs = iif(_ExcIPs_raw == '', dynamic([]),\r\n    todynamic(strcat('[\"', replace_string(replace_string(_ExcIPs_raw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _NLSel = dynamic([{NamedLocations}]);\r\nlet _NLActive = array_length(_NLSel) > 0;\r\nlet SigninLogs = SigninLogs\r\n    | where _ExcIPs_raw == '' or isempty(IPAddress) or not(ipv4_is_in_any_range(IPAddress, _ExcIPs))\r\n    | where not(_NLActive) or isempty(NetworkLocationDetails) or not(tostring(NetworkLocationDetails) has_any (_NLSel));\r\n// TI Match Threat Type Distribution\nlet MaliciousIPs = ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where IsActive == true and Revoked == false\n    | where ObservableKey =~ \"ipv4-addr:value\"\n    | where todouble(ConfidenceScore) >= 50\n    | extend MaliciousIP = tostring(ObservableValue)\n    | project MaliciousIP, ThreatType = tostring(ThreatType);\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where isnotempty(IPAddress)\n| join kind=inner MaliciousIPs on $left.IPAddress == $right.MaliciousIP\n| extend ThreatCategory = iif(isempty(ThreatType), \"Unclassified\", ThreatType)\n| summarize Matches = count() by ThreatCategory\n| order by Matches desc",
+              "query": "let _ExcIPs_raw = '{ExcludedIPs}';\r\nlet _ExcIPs = iif(_ExcIPs_raw == '', dynamic([]),\r\n    todynamic(strcat('[\"', replace_string(replace_string(_ExcIPs_raw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _NLSel = dynamic([{NamedLocations}]);\r\nlet _NLActive = array_length(_NLSel) > 0;\r\nlet SigninLogs = SigninLogs\r\n    | where _ExcIPs_raw == '' or isempty(IPAddress) or not(ipv4_is_in_any_range(IPAddress, _ExcIPs))\r\n    | where not(_NLActive) or isempty(NetworkLocationDetails) or not(tostring(NetworkLocationDetails) has_any (_NLSel));\r\n// TI Match Threat Type Distribution\nlet MaliciousIPs = ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where IsActive == true and Revoked == false\n    | where ObservableKey =~ \"ipv4-addr:value\"\n    | where todouble(Confidence) >= 50\n    | extend MaliciousIP = tostring(ObservableValue)\r\n    | extend ThreatType = tostring(column_ifexists(\"ThreatType\",\"\"))\n    | project MaliciousIP, ThreatType = tostring(ThreatType);\nSigninLogs\n| where TimeGenerated {TimeRange}\n| where isnotempty(IPAddress)\n| join kind=inner MaliciousIPs on $left.IPAddress == $right.MaliciousIP\n| extend ThreatCategory = iif(isempty(ThreatType), \"Unclassified\", ThreatType)\n| summarize Matches = count() by ThreatCategory\n| order by Matches desc",
               "size": 2,
               "title": "📊 TI Match Distribution by Threat Type",
               "timeContext": { "durationMs": 604800000 },
@@ -1414,6 +1422,93 @@
         "value": "MFAAnalysis"
       },
       "name": "group - mfa"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🤖 Botnet Detection (Behavioral)\r\n\r\nPure-behavior heuristics that flag distributed / automated sign-in activity **without** relying on Threat Intelligence feeds. Useful when ThreatIntelIndicators is empty or stale.\r\n\r\n| Signal | Heuristic |\r\n|---|---|\r\n| **Distributed users** | One UPN targeted by many distinct IPs across multiple countries |\r\n| **Shared UA fanout** | Same User-Agent string seen across an unusually large number of IPs |\r\n| **Low-and-slow** | Many IPs each making only 1–3 failed attempts against the same user |\r\n| **Automated UAs** | Headless / scripted clients (curl, python, Go-http-client, okhttp, …) |\r\n| **Timeline** | Spikes in *distinct attacking IPs per hour* (volumetric botnet bursts) |\r\n\r\n> All tiles honour **Time Range**, **Excluded IPs** and **Named Locations** filters."
+            },
+            "name": "text - botnet header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExcIPs_raw = '{ExcludedIPs}';\r\nlet _ExcIPs = iif(_ExcIPs_raw == '', dynamic([]),\r\n    todynamic(strcat('[\"', replace_string(replace_string(_ExcIPs_raw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _NLSel = dynamic([{NamedLocations}]);\r\nlet _NLActive = array_length(_NLSel) > 0;\r\nlet SigninLogs = SigninLogs\r\n    | where _ExcIPs_raw == '' or isempty(IPAddress) or not(ipv4_is_in_any_range(IPAddress, _ExcIPs))\r\n    | where not(_NLActive) or isempty(NetworkLocationDetails) or not(tostring(NetworkLocationDetails) has_any (_NLSel));\r\n// Distributed Attack: users targeted by many distinct IPs across multiple countries\r\nSigninLogs\r\n| where TimeGenerated {TimeRange}\r\n| where ResultType != \"0\"\r\n| extend Country = tostring(LocationDetails.countryOrRegion)\r\n| summarize\r\n    DistinctIPs = dcount(IPAddress),\r\n    DistinctCountries = dcount(Country),\r\n    DistinctASNs = dcount(tostring(parse_json(tostring(NetworkLocationDetails))[0].networkNames)),\r\n    FailedAttempts = count(),\r\n    SuccessfulSignIns = countif(ResultType == \"0\"),\r\n    IPSample = make_set(IPAddress, 10),\r\n    CountrySample = make_set(Country, 10),\r\n    FirstSeen = min(TimeGenerated),\r\n    LastSeen = max(TimeGenerated)\r\n  by UserPrincipalName\r\n| where DistinctIPs >= 10 and DistinctCountries >= 3\r\n| extend BotnetLikelihood = case(\r\n    DistinctIPs >= 100 or DistinctCountries >= 10, \"🔴 Critical - Highly Distributed\",\r\n    DistinctIPs >= 30 or DistinctCountries >= 5, \"🟠 High - Distributed Attack\",\r\n    \"🟡 Suspicious - Multi-Source\")\r\n| project BotnetLikelihood, UserPrincipalName, DistinctIPs, DistinctCountries, FailedAttempts, SuccessfulSignIns, IPSample, CountrySample, FirstSeen, LastSeen\r\n| order by DistinctIPs desc",
+              "size": 0,
+              "title": "Users Targeted by Distributed Sources",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "visualization": "table"
+            },
+            "name": "query - botnet distributed users"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExcIPs_raw = '{ExcludedIPs}';\r\nlet _ExcIPs = iif(_ExcIPs_raw == '', dynamic([]),\r\n    todynamic(strcat('[\"', replace_string(replace_string(_ExcIPs_raw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _NLSel = dynamic([{NamedLocations}]);\r\nlet _NLActive = array_length(_NLSel) > 0;\r\nlet SigninLogs = SigninLogs\r\n    | where _ExcIPs_raw == '' or isempty(IPAddress) or not(ipv4_is_in_any_range(IPAddress, _ExcIPs))\r\n    | where not(_NLActive) or isempty(NetworkLocationDetails) or not(tostring(NetworkLocationDetails) has_any (_NLSel));\r\n// Shared User-Agent Fanout: same UA seen across many distinct IPs (botnet C2 / fleet)\r\nSigninLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend UA = tostring(parse_json(tostring(DeviceDetail)).browser)\r\n| where isnotempty(UA)\r\n| summarize\r\n    DistinctIPs = dcount(IPAddress),\r\n    DistinctUsers = dcount(UserPrincipalName),\r\n    DistinctCountries = dcount(tostring(LocationDetails.countryOrRegion)),\r\n    Attempts = count(),\r\n    Failed = countif(ResultType != \"0\"),\r\n    Successful = countif(ResultType == \"0\"),\r\n    IPSample = make_set(IPAddress, 10)\r\n  by UA\r\n| where DistinctIPs >= 20\r\n| extend Verdict = case(\r\n    DistinctIPs >= 200, \"🔴 Critical - Massive UA Reuse\",\r\n    DistinctIPs >= 50, \"🟠 High - Botnet UA Pattern\",\r\n    \"🟡 Suspicious\")\r\n| project Verdict, UA, DistinctIPs, DistinctUsers, DistinctCountries, Attempts, Failed, Successful, IPSample\r\n| order by DistinctIPs desc\r\n| take 50",
+              "size": 0,
+              "title": "Shared User-Agent Across Many IPs",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "visualization": "table"
+            },
+            "name": "query - botnet shared ua"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExcIPs_raw = '{ExcludedIPs}';\r\nlet _ExcIPs = iif(_ExcIPs_raw == '', dynamic([]),\r\n    todynamic(strcat('[\"', replace_string(replace_string(_ExcIPs_raw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _NLSel = dynamic([{NamedLocations}]);\r\nlet _NLActive = array_length(_NLSel) > 0;\r\nlet SigninLogs = SigninLogs\r\n    | where _ExcIPs_raw == '' or isempty(IPAddress) or not(ipv4_is_in_any_range(IPAddress, _ExcIPs))\r\n    | where not(_NLActive) or isempty(NetworkLocationDetails) or not(tostring(NetworkLocationDetails) has_any (_NLSel));\r\n// Coordinated low-volume failures: many IPs each making only 1-3 failed attempts (slow/distributed brute-force)\r\nlet _t = SigninLogs\r\n    | where TimeGenerated {TimeRange}\r\n    | where ResultType != \"0\";\r\nlet perIP = _t\r\n    | summarize Attempts = count(), Users = dcount(UserPrincipalName), TargetUsers = make_set(UserPrincipalName, 5) by IPAddress\r\n    | where Attempts between (1 .. 3);\r\nlet coord = _t\r\n    | where IPAddress in ((perIP | project IPAddress))\r\n    | summarize\r\n        DistinctAttackerIPs = dcount(IPAddress),\r\n        TotalAttempts = count(),\r\n        DistinctCountries = dcount(tostring(LocationDetails.countryOrRegion)),\r\n        SampleIPs = make_set(IPAddress, 15),\r\n        SampleCountries = make_set(tostring(LocationDetails.countryOrRegion), 10),\r\n        FirstSeen = min(TimeGenerated),\r\n        LastSeen = max(TimeGenerated)\r\n      by UserPrincipalName\r\n    | where DistinctAttackerIPs >= 10;\r\ncoord\r\n| extend BotnetVerdict = case(\r\n    DistinctAttackerIPs >= 100, \"🔴 Critical - Coordinated Slow Brute-Force\",\r\n    DistinctAttackerIPs >= 30, \"🟠 High - Distributed Low-and-Slow\",\r\n    \"🟡 Suspicious\")\r\n| project BotnetVerdict, UserPrincipalName, DistinctAttackerIPs, TotalAttempts, DistinctCountries, SampleIPs, SampleCountries, FirstSeen, LastSeen\r\n| order by DistinctAttackerIPs desc",
+              "size": 0,
+              "title": "Coordinated Low-and-Slow Brute-Force",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "visualization": "table"
+            },
+            "name": "query - botnet low volume"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExcIPs_raw = '{ExcludedIPs}';\r\nlet _ExcIPs = iif(_ExcIPs_raw == '', dynamic([]),\r\n    todynamic(strcat('[\"', replace_string(replace_string(_ExcIPs_raw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _NLSel = dynamic([{NamedLocations}]);\r\nlet _NLActive = array_length(_NLSel) > 0;\r\nlet SigninLogs = SigninLogs\r\n    | where _ExcIPs_raw == '' or isempty(IPAddress) or not(ipv4_is_in_any_range(IPAddress, _ExcIPs))\r\n    | where not(_NLActive) or isempty(NetworkLocationDetails) or not(tostring(NetworkLocationDetails) has_any (_NLSel));\r\n// Headless / automated User-Agents (botnet/scripted clients)\r\nlet bots = dynamic([\"curl\",\"python-requests\",\"python\",\"Go-http-client\",\"libwww\",\"wget\",\"okhttp\",\"aiohttp\",\"Apache-HttpClient\",\"node-fetch\",\"axios\",\"httpclient\",\"powershell\",\"msrest\",\"scrapy\",\"httpx\",\"httperf\",\"bot\",\"crawler\",\"spider\"]);\r\nSigninLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend UA = tostring(parse_json(tostring(DeviceDetail)).browser)\r\n| extend OS = tostring(parse_json(tostring(DeviceDetail)).operatingSystem)\r\n| extend UALower = tolower(UA)\r\n| where UA matches regex @\"(?i)(curl|python|go-http|libwww|wget|okhttp|aiohttp|apache-http|node-fetch|axios|httpclient|powershell|msrest|scrapy|httpx|httperf|\\bbot\\b|crawler|spider)\"\r\n| summarize\r\n    Attempts = count(),\r\n    DistinctIPs = dcount(IPAddress),\r\n    DistinctUsers = dcount(UserPrincipalName),\r\n    DistinctCountries = dcount(tostring(LocationDetails.countryOrRegion)),\r\n    Failed = countif(ResultType != \"0\"),\r\n    Successful = countif(ResultType == \"0\"),\r\n    IPSample = make_set(IPAddress, 10),\r\n    UserSample = make_set(UserPrincipalName, 10),\r\n    FirstSeen = min(TimeGenerated),\r\n    LastSeen = max(TimeGenerated)\r\n  by UA, OS\r\n| extend Verdict = case(\r\n    Successful > 0, \"🔴 Critical - Successful Auth from Automated Client\",\r\n    Attempts >= 50, \"🟠 High - Sustained Automated Activity\",\r\n    \"🟡 Suspicious - Automated UA Detected\")\r\n| project Verdict, UA, OS, Attempts, DistinctIPs, DistinctUsers, DistinctCountries, Failed, Successful, IPSample, UserSample, FirstSeen, LastSeen\r\n| order by Successful desc, Attempts desc",
+              "size": 0,
+              "title": "Automated / Headless User-Agents",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "visualization": "table"
+            },
+            "name": "query - botnet automated ua"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExcIPs_raw = '{ExcludedIPs}';\r\nlet _ExcIPs = iif(_ExcIPs_raw == '', dynamic([]),\r\n    todynamic(strcat('[\"', replace_string(replace_string(_ExcIPs_raw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _NLSel = dynamic([{NamedLocations}]);\r\nlet _NLActive = array_length(_NLSel) > 0;\r\nlet SigninLogs = SigninLogs\r\n    | where _ExcIPs_raw == '' or isempty(IPAddress) or not(ipv4_is_in_any_range(IPAddress, _ExcIPs))\r\n    | where not(_NLActive) or isempty(NetworkLocationDetails) or not(tostring(NetworkLocationDetails) has_any (_NLSel));\r\n// Botnet Activity Timeline (distinct IPs vs failed attempts per hour)\r\nSigninLogs\r\n| where TimeGenerated {TimeRange}\r\n| where ResultType != \"0\"\r\n| summarize\r\n    DistinctIPs = dcount(IPAddress),\r\n    Failures = count(),\r\n    DistinctUsers = dcount(UserPrincipalName)\r\n  by bin(TimeGenerated, 1h)\r\n| order by TimeGenerated asc\r\n| render timechart",
+              "size": 0,
+              "title": "Botnet Activity Timeline",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "visualization": "timechart"
+            },
+            "name": "query - botnet timeline"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "BotnetDetection"
+      },
+      "name": "group - botnet"
     }
   ],
   "fallbackResourceIds": [],
