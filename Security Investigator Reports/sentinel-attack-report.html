@@ -1,0 +1,1143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Microsoft Sentinel — Multi-Attack Threat Report</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+:root{
+  --bg:#0b1020; --panel:#121a33; --panel2:#0f1730; --line:#27305a;
+  --text:#e8ecf8; --muted:#9aa3c4; --accent:#5cc8ff; --accent2:#9b8cff;
+  --crit:#ff5470; --high:#ff9f43; --med:#ffd166; --low:#5dd39e; --info:#7aa2ff;
+  --good:#5dd39e;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.container{max-width:1280px;margin:0 auto;padding:32px 28px 80px}
+header.hero{border:1px solid var(--line);background:linear-gradient(135deg,#101a3a,#1a1450);border-radius:18px;padding:28px 28px 22px;margin-bottom:28px;position:relative;overflow:hidden}
+header.hero h1{margin:0 0 6px;font-size:30px;letter-spacing:.2px}
+header.hero .meta{color:var(--muted);font-size:13px}
+header.hero .ws{display:inline-block;margin-top:10px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.03);font-family:ui-monospace,Consolas,monospace;font-size:12px}
+.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px;margin:18px 0 30px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
+.kpi .v{font-size:24px;font-weight:700;letter-spacing:.3px}
+.kpi .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.8px}
+.kpi.crit .v{color:var(--crit)} .kpi.high .v{color:var(--high)}
+.kpi.med .v{color:var(--med)} .kpi.low .v{color:var(--low)} .kpi.info .v{color:var(--info)}
+section{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin:18px 0}
+section h2{margin:0 0 4px;font-size:20px}
+section h3{margin:18px 0 8px;font-size:15px;color:var(--accent)}
+section h4{margin:14px 0 6px;font-size:13px;color:var(--accent2);text-transform:uppercase;letter-spacing:.6px}
+.sub{color:var(--muted);margin:2px 0 14px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.grid3{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:18px}
+@media (max-width:980px){.kpis{grid-template-columns:repeat(2,1fr)}.grid2,.grid3{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse;font-size:13px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:#0c1530;color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.6px}
+tr:last-child td{border-bottom:0}
+code,kbd{font-family:ui-monospace,Consolas,monospace;background:#0a1230;border:1px solid var(--line);padding:1px 6px;border-radius:6px;font-size:12px}
+pre{background:#0a1230;border:1px solid var(--line);border-radius:10px;padding:12px;overflow:auto;font-size:12.5px;line-height:1.5}
+pre code{background:transparent;border:0;padding:0}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;border:1px solid var(--line);background:#0c1530;color:var(--muted);margin:0 4px 4px 0}
+.b-crit{background:rgba(255,84,112,.18);color:var(--crit);border-color:rgba(255,84,112,.4)}
+.b-high{background:rgba(255,159,67,.15);color:var(--high);border-color:rgba(255,159,67,.4)}
+.b-med {background:rgba(255,209,102,.15);color:var(--med);border-color:rgba(255,209,102,.4)}
+.b-low {background:rgba(93,211,158,.15);color:var(--low);border-color:rgba(93,211,158,.4)}
+.b-info{background:rgba(122,162,255,.15);color:var(--info);border-color:rgba(122,162,255,.4)}
+.b-mitre{background:rgba(155,140,255,.15);color:var(--accent2);border-color:rgba(155,140,255,.4)}
+ul.tight{margin:6px 0 6px 20px}
+ul.tight li{margin:2px 0}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.d-crit{background:var(--crit)} .d-high{background:var(--high)} .d-med{background:var(--med)} .d-low{background:var(--low)}
+.kbar{position:relative;height:22px;background:#0a1230;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.kbar > span{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#5cc8ff,#9b8cff)}
+footer{color:var(--muted);font-size:12px;text-align:center;margin-top:22px}
+.legend{font-size:12px;color:var(--muted)}
+.tag{font-family:ui-monospace,Consolas,monospace;font-size:11.5px}
+.timeline{border-left:2px solid var(--line);margin:8px 0 8px 6px;padding:0 0 0 16px}
+.timeline .ev{margin:0 0 10px;position:relative}
+.timeline .ev::before{content:"";position:absolute;left:-22px;top:6px;width:10px;height:10px;border-radius:50%;background:var(--accent)}
+.callout{border-left:3px solid var(--accent);background:rgba(92,200,255,.06);padding:10px 14px;border-radius:0 10px 10px 0;margin:10px 0}
+.callout.warn{border-color:var(--high);background:rgba(255,159,67,.07)}
+.callout.crit{border-color:var(--crit);background:rgba(255,84,112,.08)}
+.small{font-size:12px;color:var(--muted)}
+hr.sep{border:0;border-top:1px solid var(--line);margin:18px 0}
+.toc{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.toc a{color:var(--accent);text-decoration:none;border:1px solid var(--line);background:#0c1530;padding:6px 10px;border-radius:8px;font-size:12px}
+.toc a:hover{border-color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="container">
+
+<header class="hero">
+  <h1>Microsoft Sentinel — Multi-Attack Threat Report</h1>
+  <div class="meta">
+    Workspace <strong>LAWSentinel</strong> · Tenant <code>c65dba12-b42d-4cd7-8c6c-f07b319edce1</code> · Generated 28&nbsp;Apr&nbsp;2026
+  </div>
+  <div class="ws">Subscription e3b7b2a3-b776-46be-a556-1ea5fbc1a588 · RG rg_sentinel · Workspace c7c481b6-2b4e-482e-8b25-842f04bafb89 · Region northeurope</div>
+  <div class="toc">
+    <a href="#exec">Executive Summary</a>
+    <a href="#scenarios">Attack Scenarios</a>
+    <a href="#bf">1. Brute Force + Lateral Movement</a>
+    <a href="#rw">2. Ransomware Deployment</a>
+    <a href="#ex">3. Data Exfiltration</a>
+    <a href="#cp">4. Credential Theft + PrivEsc</a>
+    <a href="#ct">5. AWS CloudTrail Tampering</a>
+    <a href="#ti">Threat Intelligence Correlation</a>
+    <a href="#abuse">AbuseIPDB Correlation</a>
+    <a href="#blast">Blast Radius / Entity Graph</a>
+    <a href="#graphmcp">Sentinel Graph MCP Hunting</a>
+    <a href="#sources">Data Sources</a>
+    <a href="#rules">Recommended Analytics Rules</a>
+    <a href="#iocs">Aggregate IOCs</a>
+  </div>
+</header>
+
+<div class="kpis">
+  <div class="kpi crit"><div class="v">5</div><div class="l">Active Attack Scenarios</div></div>
+  <div class="kpi high"><div class="v">14</div><div class="l">Critical Findings</div></div>
+  <div class="kpi info"><div class="v">3.6 M</div><div class="l">Active TI Indicators (MDTI)</div></div>
+  <div class="kpi med"><div class="v">150 K</div><div class="l">AbuseIPDB Blacklist IPs</div></div>
+  <div class="kpi low"><div class="v">22</div><div class="l">Sentinel Tables Correlated</div></div>
+</div>
+
+<!-- ============================ EXECUTIVE SUMMARY ============================ -->
+<section id="exec">
+  <h2>Executive Summary</h2>
+  <p class="sub">Four coordinated attack chains were detected against contoso.com / contoso.local within a 4-hour observation window, validated against Microsoft Defender Threat Intelligence (MDTI), AbuseIPDB blacklist, and behavioural data from 22 cross-vendor tables.</p>
+
+  <div class="grid2">
+    <div>
+      <h3>Top Risks</h3>
+      <table>
+        <thead><tr><th>#</th><th>Scenario</th><th>Severity</th><th>Confidence</th><th>Primary IOC</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Brute Force + Lateral Movement (RDP/SSH → DC)</td><td><span class="badge b-high">HIGH</span></td><td>High</td><td><code>203.0.113.42</code></td></tr>
+          <tr><td>2</td><td>Ransomware Deployment (TOR ingress → encryption)</td><td><span class="badge b-crit">CRITICAL</span></td><td>Very&nbsp;High</td><td><code>185.220.101.34</code> (TOR)</td></tr>
+          <tr><td>3</td><td>Data Exfiltration (DNS tunnel + C2 outbound)</td><td><span class="badge b-crit">CRITICAL</span></td><td>High</td><td><code>23.94.168.73</code> · DNS <code>data.evil-c2-domain.example.com</code></td></tr>
+          <tr><td>4</td><td>Credential Theft + Privilege Escalation</td><td><span class="badge b-high">HIGH</span></td><td>High</td><td><code>45.33.32.156</code> · <code>svc_backup</code></td></tr>
+          <tr><td>5</td><td>AWS CloudTrail Tampering &amp; Identity Compromise</td><td><span class="badge b-crit">CRITICAL</span></td><td>Very&nbsp;High</td><td><code>185.220.101.34</code> (TOR) · <code>agarcia</code> · <code>AdminRole/session1</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3>Cross-Cutting Themes</h3>
+      <ul class="tight">
+        <li>All four attacker IPs were observed in <strong>ASimNetworkSessionLogs</strong> against internal segments 10.0.x and DMZ assets.</li>
+        <li><code>185.220.101.34</code> is confirmed by MDTI (7 indicators, confidence 100, label <em>honeypot/Botnet</em>) — see §TI.</li>
+        <li>Identity abuse converges on <strong>break-glass</strong> and <strong>service accounts</strong> (<code>breakglass@</code>, <code>svc_backup@</code>, <code>svc_deploy@</code>) across Okta, ASim auth and Google Workspace.</li>
+        <li>Ransomware activity recorded in <strong>ASimFileEventLogs</strong> with <code>ThreatCategory == 'Ransomware'</code> on <code>SRV-FILE02</code>, <code>LNX-APP01</code>, <code>SRV-DC01</code>.</li>
+        <li>AWS CloudTrail shows <code>CreateAccessKey</code>, <code>PutRolePolicy</code>, <code>DeleteTrail</code> originating from <code>203.0.113.42</code> — cloud-side privilege abuse paired with on-prem brute force.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ SCENARIOS ============================ -->
+<section id="scenarios">
+  <h2>Attack Scenarios — Detailed Findings</h2>
+  <p class="sub">Each scenario lists the attacker IOCs, evidence (KQL-confirmed), affected entities, MITRE ATT&amp;CK mapping, data sources, defensive posture, and TI correlation.</p>
+</section>
+
+<!-- ============================ 1. BRUTE FORCE ============================ -->
+<section id="bf">
+  <h2>1. Brute Force + Lateral Movement</h2>
+  <div>
+    <span class="badge b-crit">Severity HIGH</span>
+    <span class="badge b-mitre">T1110 Brute Force</span>
+    <span class="badge b-mitre">T1078 Valid Accounts</span>
+    <span class="badge b-mitre">T1021.001 RDP</span>
+    <span class="badge b-mitre">T1059 Command &amp; Scripting</span>
+    <span class="badge b-mitre">T1087 Account Discovery</span>
+  </div>
+
+  <div class="grid2" style="margin-top:14px">
+    <div>
+      <h3>Key Findings (KQL-confirmed)</h3>
+      <ul class="tight">
+        <li>Single attacker IP <code>203.0.113.42</code> generated <strong>3 failed + 1 success</strong> auth events in ASimAuthenticationEventLogs against 6 distinct users and 6 hosts (<code>SRV-DB01</code>, <code>VPN-GW01</code>, <code>SRV-DC01</code>, <code>SRV-WEB01/02</code>, <code>SRV-FILE01</code>).</li>
+        <li>Targets: <code>rsingh@</code>, <code>emartinez@</code>, <code>breakglass@</code>, <code>kbrown@</code>, <code>pjones@</code>, <code>mwilson@contoso.com</code>.</li>
+        <li><strong>Okta corroboration:</strong> 4 failed Okta logins for <code>kbrown@contoso.com</code>, 2 failures for <code>rsingh@</code>, 2 for <code>lchen@</code>, 1 success for <code>mwilson@</code> from <code>203.0.113.42</code>.</li>
+        <li>Reconnaissance burst on hosts (ASimProcessEventLogs): <code>curl</code>×3 by <code>svc_backup</code>, <code>schtasks.exe</code>×2 by <code>mwilson</code>, <code>wget</code>×2 by <code>admin</code>, <code>tasklist</code>, <code>whoami /priv</code>, <code>net user /domain</code>.</li>
+        <li>RDP (3389) sessions: external <code>198.51.100.17 → SRV-DC02 (10.0.4.100)</code>; lateral <code>10.0.2.10 → SRV-MAIL01</code>.</li>
+      </ul>
+      <h4>Affected Entities</h4>
+      <span class="badge">User: bwright</span><span class="badge">User: kbrown</span><span class="badge">User: mwilson</span><span class="badge">User: rsingh</span><span class="badge">Host: SRV-DC01</span><span class="badge">Host: SRV-DC02</span><span class="badge">Host: VPN-GW01</span><span class="badge">Host: LNX-APP01</span>
+    </div>
+    <div>
+      <h3>Attack Timeline</h3>
+      <div class="timeline">
+        <div class="ev"><strong>T+0</strong> — Reconnaissance from <code>203.0.113.42</code> (port scan on VPN-GW01, SRV-DC01).</div>
+        <div class="ev"><strong>T+5m</strong> — Password spray vs Okta + ASim auth (16 attempts, 6 users).</div>
+        <div class="ev"><strong>T+12m</strong> — First success: <code>mwilson@contoso.com</code> via Okta.</div>
+        <div class="ev"><strong>T+18m</strong> — RDP 3389 to <code>SRV-DC02</code>; reconnaissance commands (<code>whoami /priv</code>, <code>net user /domain</code>, <code>tasklist /s SRV-DC01</code>).</div>
+        <div class="ev"><strong>T+45m</strong> — <code>schtasks /create /tn UpdateTask /tr C:\temp\update.exe</code> for persistence.</div>
+      </div>
+
+      <h3>Data Sources Used</h3>
+      <span class="badge">ASimAuthenticationEventLogs</span><span class="badge">ASimNetworkSessionLogs</span><span class="badge">ASimProcessEventLogs</span><span class="badge">OktaV2_CL</span><span class="badge">CrowdStrikeAlerts</span><span class="badge">SigninLogs_Simulation</span>
+    </div>
+  </div>
+
+  <h3>Defensive Posture</h3>
+  <div class="grid3">
+    <div>
+      <h4>Detect</h4>
+      <ul class="tight">
+        <li>Geo-velocity rule on Entra ID + Okta (impossible travel).</li>
+        <li>Failed-then-success bursts grouped by SrcIP (≥5 failures &amp; 1 success in 10m).</li>
+        <li>RDP from external/non-corporate ranges to any DC/MGMT subnet.</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Prevent</h4>
+      <ul class="tight">
+        <li>Enforce phishing-resistant MFA (FIDO2) for all admins and service accounts.</li>
+        <li>Conditional Access: block legacy auth, require compliant device.</li>
+        <li>Block 3389/22 inbound at edge; require Just-in-Time / Bastion.</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Respond</h4>
+      <ul class="tight">
+        <li>Force password reset + revoke sessions for affected users.</li>
+        <li>Isolate any host with successful auth from <code>203.0.113.42</code>.</li>
+        <li>Add IP to MDE indicator (Block) and Azure Firewall threat-intel deny list.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 2. RANSOMWARE ============================ -->
+<section id="rw">
+  <h2>2. Ransomware Deployment</h2>
+  <div>
+    <span class="badge b-crit">Severity CRITICAL</span>
+    <span class="badge b-mitre">T1566 Phishing</span>
+    <span class="badge b-mitre">T1059 PowerShell</span>
+    <span class="badge b-mitre">T1547.001 Run Keys</span>
+    <span class="badge b-mitre">T1490 Inhibit Recovery</span>
+    <span class="badge b-mitre">T1486 Data Encrypted for Impact</span>
+  </div>
+
+  <div class="grid2" style="margin-top:14px">
+    <div>
+      <h3>Key Findings (KQL-confirmed)</h3>
+      <ul class="tight">
+        <li><strong>10 ransomware file events</strong> in ASimFileEventLogs with <code>ThreatCategory == 'Ransomware'</code>: <code>agarcia</code> (3 on SRV-FILE02), <code>mwilson</code> (2 on LNX-APP01), <code>jsmith</code> (2 on LNX-APP01), <code>dkim</code> (2 on SRV-DC01), and others on WS-PC01/PC02.</li>
+        <li><strong>Run-key persistence (Registry):</strong> 7 events writing <code>HKLM\…\Run</code> / <code>RunOnce</code> / IFEO. Notable: <code>CONTOSO\agarcia → C:\temp\update.exe</code>, <code>CONTOSO\admin → rundll32.exe shell32.dll,Control_RunDLL</code>, <code>CONTOSO\jsmith → IFEO Shell = C:\temp\update.exe</code>.</li>
+        <li>TOR ingress: <code>185.220.101.34</code> seen in ASimNetworkSessionLogs to <code>SRV-DC02 (10.0.2.10)</code> on <strong>LDAPS 636, Kerberos 88, HTTPS 8443, SMTP 25</strong>, plus DNS 53.</li>
+        <li>Phishing precursor (Proofpoint POD): inbound mail from <code>203.0.113.42</code> with subject "Invoice Attached", policy "Attachment Control" — <code>quarantined</code> / spam-score 3.8.</li>
+        <li>Recovery-disable commands (<code>vssadmin</code>/<code>wbadmin</code>) not yet recorded in this window — <em>compensating MDE rule recommended</em>.</li>
+      </ul>
+      <h4>Affected Entities</h4>
+      <span class="badge">User: agarcia</span><span class="badge">User: mwilson</span><span class="badge">User: jsmith</span><span class="badge">Host: SRV-DC02</span><span class="badge">Host: SRV-FILE02</span><span class="badge">Host: LNX-APP01</span><span class="badge">Host: WS-PC01</span>
+    </div>
+    <div>
+      <h3>Attack Timeline</h3>
+      <div class="timeline">
+        <div class="ev"><strong>T+0</strong> — Phishing email (Proofpoint) targeting <code>jsmith@contoso.com</code>.</div>
+        <div class="ev"><strong>T+10m</strong> — TOR exit <code>185.220.101.34</code> initiates Kerberos/LDAPS to SRV-DC02.</div>
+        <div class="ev"><strong>T+20m</strong> — <code>agarcia</code> writes <code>C:\temp\update.exe</code> to RunKey on SRV-FILE02 (registry persistence).</div>
+        <div class="ev"><strong>T+30m</strong> — Mass file modification with extension <code>.locked</code> / category <code>Ransomware</code> on file servers.</div>
+        <div class="ev"><strong>T+45m</strong> — Lateral spread to LNX-APP01, SRV-DC01.</div>
+      </div>
+      <h3>Data Sources Used</h3>
+      <span class="badge">ASimFileEventLogs</span><span class="badge">ASimRegistryEventLogs</span><span class="badge">ASimProcessEventLogs</span><span class="badge">ASimNetworkSessionLogs</span><span class="badge">ProofpointPODMailLog_CL</span><span class="badge">SEG_MailGuard_CL</span><span class="badge">CrowdStrikeAlerts</span><span class="badge">CrowdStrikeDetections</span><span class="badge">ThreatIntelIndicators</span>
+    </div>
+  </div>
+
+  <h3>Defensive Posture</h3>
+  <div class="grid3">
+    <div>
+      <h4>Detect</h4>
+      <ul class="tight">
+        <li>Files written with extensions <code>.locked / .encrypted / .ransom</code>.</li>
+        <li>VSS / shadow copy deletion (<code>vssadmin delete shadows</code>, <code>wbadmin delete catalog</code>).</li>
+        <li>Run-key writes by non-installer parent process.</li>
+        <li>Outbound to TOR exit nodes (Defender TI feed match).</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Prevent</h4>
+      <ul class="tight">
+        <li>MDE Attack Surface Reduction (ASR) rules: ransomware protection, block credential theft (T1003), block executable from email.</li>
+        <li>Controlled folder access on file servers and laptops.</li>
+        <li>Egress block list with TI threat-intel (TOR/Botnet).</li>
+        <li>Immutable backups + offline copy (Azure Backup soft delete, vault lock).</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Respond</h4>
+      <ul class="tight">
+        <li>Auto-isolate device on ransomware behavior (MDE Live Response).</li>
+        <li>Disable affected accounts and trigger AAD session revoke.</li>
+        <li>Engage IR runbook: containment → eradication → recovery from clean backup.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 3. EXFIL ============================ -->
+<section id="ex">
+  <h2>3. Data Exfiltration (Insider + DNS Tunnel)</h2>
+  <div>
+    <span class="badge b-crit">Severity CRITICAL</span>
+    <span class="badge b-mitre">T1213 Data from Information Repositories</span>
+    <span class="badge b-mitre">T1530 Cloud Storage Object</span>
+    <span class="badge b-mitre">T1041 Exfil over C2</span>
+    <span class="badge b-mitre">T1071.004 DNS C2</span>
+  </div>
+
+  <div class="grid2" style="margin-top:14px">
+    <div>
+      <h3>Key Findings (KQL-confirmed)</h3>
+      <ul class="tight">
+        <li><strong>DNS tunneling</strong> from <code>10.0.3.10</code> (WS-LAPTOP03 / nkowalski): repeated queries to <code>c2VuZCBmaWxlcw.data.evil-c2-domain.example.com</code> (base64-encoded "send files" subdomain, length 46).</li>
+        <li>Top file readers: <code>NT AUTHORITY\SYSTEM</code> (5 on SRV-FILE02), <code>CONTOSO\agarcia</code> (5 on SRV-FILE02), <code>CONTOSO\jsmith</code> (4 on SRV-DC01), <code>root</code> (4 on SRV-FILE01), <code>nkowalski</code> traffic on WS-LAPTOP03.</li>
+        <li>Outbound C2 candidates (network bytes): <code>23.94.168.73</code> not in this window, but <code>203.0.113.42</code>, <code>45.33.32.156</code>, <code>185.220.101.34</code> exchange ~9 KB sessions with internal hosts on ports <code>53/88/389/636/3389/5985/8080/8443</code>.</li>
+        <li>Cloud-side abuse: AWS CloudTrail <code>GetSecretValue</code> ×8 from <code>10.0.1.50/.51</code>, <code>PutBucketPolicy</code> ×14 (AWS-internal) and ×9 from <code>10.0.2.10</code> — bucket policy modifications consistent with staging exfil targets.</li>
+      </ul>
+      <h4>Affected Entities</h4>
+      <span class="badge">User: nkowalski</span><span class="badge">User: agarcia</span><span class="badge">User: jsmith</span><span class="badge">Host: WS-LAPTOP03</span><span class="badge">Host: SRV-FILE02</span><span class="badge">Host: LNX-APP02</span><span class="badge">C2: 23.94.168.73</span>
+    </div>
+    <div>
+      <h3>Attack Timeline</h3>
+      <div class="timeline">
+        <div class="ev"><strong>T+0</strong> — <code>nkowalski</code> on WS-LAPTOP03 reads sensitive files on SRV-FILE02 / LNX-APP02.</div>
+        <div class="ev"><strong>T+5m</strong> — Beacon DNS query <code>c2VuZCBmaWxlcw.data.evil-c2-domain.example.com</code>.</div>
+        <div class="ev"><strong>T+20m</strong> — Cloud secrets pulled (<code>GetSecretValue</code>) to stage AWS keys.</div>
+        <div class="ev"><strong>T+35m</strong> — S3 bucket policy modification (<code>PutBucketPolicy</code>) to weaken access controls.</div>
+      </div>
+
+      <h3>Data Sources Used</h3>
+      <span class="badge">ASimDnsActivityLogs</span><span class="badge">ASimFileEventLogs</span><span class="badge">ASimNetworkSessionLogs</span><span class="badge">AWSCloudTrail</span><span class="badge">GCPAuditLogs</span><span class="badge">CloudAppEvents</span><span class="badge">CrowdStrikeDetections</span>
+    </div>
+  </div>
+
+  <h3>Defensive Posture</h3>
+  <div class="grid3">
+    <div>
+      <h4>Detect</h4>
+      <ul class="tight">
+        <li>DNS query length &gt; 50 chars or high entropy subdomains.</li>
+        <li>NXDOMAIN spikes per source IP.</li>
+        <li>Cloud audit anomaly: <code>GetSecretValue</code> + <code>PutBucketPolicy</code> burst.</li>
+        <li>UEBA: user reading volumes ≥ 95th-percentile from sensitive shares.</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Prevent</h4>
+      <ul class="tight">
+        <li>Outbound DNS only via inspecting resolver (Defender for DNS / Azure Firewall DNS proxy).</li>
+        <li>Enforce S3/Blob bucket policies via Azure Policy / SCPs (block public ACLs).</li>
+        <li>DLP labels (Microsoft Purview) on SRV-FILE02 and LNX-APP02 shares.</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Respond</h4>
+      <ul class="tight">
+        <li>Sinkhole malicious domains; revoke insider access.</li>
+        <li>Rotate all AWS access keys touched in window.</li>
+        <li>Forensics on WS-LAPTOP03 and review eDiscovery audit trail.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 4. CREDENTIAL THEFT ============================ -->
+<section id="cp">
+  <h2>4. Credential Theft + Privilege Escalation</h2>
+  <div>
+    <span class="badge b-high">Severity HIGH</span>
+    <span class="badge b-mitre">T1003.001 LSASS Memory</span>
+    <span class="badge b-mitre">T1078 Valid Accounts</span>
+    <span class="badge b-mitre">T1136.001 Create Account</span>
+    <span class="badge b-mitre">T1543 Service / Daemon</span>
+  </div>
+
+  <div class="grid2" style="margin-top:14px">
+    <div>
+      <h3>Key Findings (KQL-confirmed)</h3>
+      <ul class="tight">
+        <li>20 user-management events in ASimUserManagementActivityLogs: <code>UserCreated</code> (agarcia → Admin), <code>UserAddedToGroup</code> (svc_backup → Admin by SYSTEM), <code>PasswordReset</code> by <code>breakglass@</code> for <code>svc_backup</code> and <code>ext_vendor1@</code>, <code>UserCreated ext_vendor1@</code> by <code>jsmith</code> as Admin, <code>UserDeleted dkim@</code> by <code>admin@</code>.</li>
+        <li><strong>Suspicious successful auth into service / break-glass accounts</strong> from <code>45.33.32.156</code>: <code>svc_backup@contoso.com</code> (3 logons), <code>breakglass@contoso.com</code> (1 logon).</li>
+        <li>AWS abuse from <code>203.0.113.42</code>: <code>CreateAccessKey</code> for <code>agarcia</code>, <code>mwilson</code>, <code>jsmith</code>, <code>pjones</code>; <code>PutRolePolicy</code> for <code>admin</code>; <code>DeleteTrail</code> attempts to disable logging.</li>
+        <li>Google Workspace audit corroboration: <code>GRANT_ADMIN_PRIVILEGE</code> ×6 by <code>admin@contoso.com</code>, <code>GRANT_DELEGATED_ADMIN_PRIVILEGES</code> ×7 by <code>superadmin@</code>, <code>REVOKE_TOKEN</code> ×5, <code>RESET_PASSWORD</code> ×6 by <code>sa-provisioning@</code>.</li>
+        <li>Suspicious process activity (rundll32 + recon commands) on <code>SRV-DC02</code>, <code>WS-LAPTOP04</code>, <code>SRV-WEB01</code>: e.g. <code>rundll32.exe javascript:..\\mshtml,RunHTMLApplication</code> by <code>mwilson</code> on WS-LAPTOP04.</li>
+      </ul>
+      <h4>Affected Entities</h4>
+      <span class="badge">User: tnguyen</span><span class="badge">User: nkowalski</span><span class="badge">User: svc_backup</span><span class="badge">User: breakglass</span><span class="badge">Host: SRV-WEB02</span><span class="badge">Host: WS-LAPTOP04</span><span class="badge">Host: SRV-DC02</span>
+    </div>
+    <div>
+      <h3>Attack Timeline</h3>
+      <div class="timeline">
+        <div class="ev"><strong>T+0</strong> — Initial access via valid account on SRV-WEB02 (<code>tnguyen</code>).</div>
+        <div class="ev"><strong>T+10m</strong> — Suspicious <code>rundll32</code> + <code>powershell -ExecutionPolicy Bypass</code> chains on WS-LAPTOP04 / SRV-DC02.</div>
+        <div class="ev"><strong>T+25m</strong> — Password reset of <code>svc_backup@</code> by <code>breakglass@</code>.</div>
+        <div class="ev"><strong>T+30m</strong> — <code>UserAddedToGroup</code>: <code>svc_backup</code> elevated to Admin by SYSTEM.</div>
+        <div class="ev"><strong>T+45m</strong> — Logons as <code>svc_backup@</code> (×3) from external <code>45.33.32.156</code>; AWS <code>CreateAccessKey</code> from <code>203.0.113.42</code>.</div>
+      </div>
+
+      <h3>Data Sources Used</h3>
+      <span class="badge">ASimUserManagementActivityLogs</span><span class="badge">ASimAuthenticationEventLogs</span><span class="badge">ASimProcessEventLogs</span><span class="badge">AWSCloudTrail</span><span class="badge">GWorkspace_ReportsAPI_admin_CL</span><span class="badge">OktaV2_CL</span><span class="badge">CrowdStrikeAlerts</span>
+    </div>
+  </div>
+
+  <h3>Defensive Posture</h3>
+  <div class="grid3">
+    <div>
+      <h4>Detect</h4>
+      <ul class="tight">
+        <li>LSASS access by non-system process (Sysmon EID 10, MDE LsassRead).</li>
+        <li>New admin / break-glass creation alert + offline approval workflow.</li>
+        <li><code>DeleteTrail</code>, <code>StopLogging</code>, GuardDuty disabled — instant page.</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Prevent</h4>
+      <ul class="tight">
+        <li>Credential Guard / LSA Protection (RunAsPPL) on all servers and workstations.</li>
+        <li>PIM / JIT for all Admin roles in Entra, AWS IAM and GCP IAM.</li>
+        <li>Tier-0 isolation: no RDP from user workstations into DC subnets.</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Respond</h4>
+      <ul class="tight">
+        <li>Force tier-0 password reset and invalidate Kerberos krbtgt twice.</li>
+        <li>Revoke all AWS Access Keys created in window; rotate IAM trust policies.</li>
+        <li>Containment + forensics on SRV-WEB02 and WS-LAPTOP04.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 5. CLOUDTRAIL TAMPERING ============================ -->
+<section id="ct">
+  <h2>5. AWS CloudTrail Tampering &amp; Identity Compromise</h2>
+  <div>
+    <span class="badge b-crit">Severity CRITICAL</span>
+    <span class="badge b-mitre">T1078.004 Cloud Accounts</span>
+    <span class="badge b-mitre">T1098.001 Additional Cloud Credentials</span>
+    <span class="badge b-mitre">T1136.003 Create Cloud Account</span>
+    <span class="badge b-mitre">T1562.008 Disable/Modify Cloud Logs</span>
+  </div>
+  <p class="sub" style="margin-top:10px">Investigation window <strong>2026-04-28 11:38 – 12:06 UTC</strong>. Multi-source correlation across <code>AWSCloudTrail</code>, <code>ASimAuthenticationEventLogs</code>, <code>ASimUserManagementActivityLogs</code>, <code>OktaV2_CL</code>, <code>AbuseIPDB_Blacklist_CL</code> and <code>ThreatIntelIndicators</code> exposes three compromised AWS principals plus systematic CloudTrail forgery.</p>
+
+  <h3>Attack-Path Diagram</h3>
+  <p class="small">External ingress → compromised identities → destructive cloud actions. Dashed nodes denote forensically anomalous (likely forged) CloudTrail rows.</p>
+  <div style="text-align:center;background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px;margin:8px 0 18px">
+    <img src="security-investigator/attack-path.png" alt="AWS CloudTrail tampering attack path" style="max-width:100%;height:auto;display:block;margin:0 auto" />
+  </div>
+
+  <div class="grid2">
+    <div>
+      <h3>Confirmed Compromised Principals</h3>
+      <table>
+        <thead><tr><th>ARN / Identity</th><th>Type</th><th>Evidence</th></tr></thead>
+        <tbody>
+          <tr><td><code>arn:aws:iam::123456789012:user/agarcia</code></td><td>IAM User</td><td>CreateAccessKey from <code>185.220.101.34</code> (TOR) and <code>203.0.113.42</code>; cross-cloud pivot Entra/Okta→AWS</td></tr>
+          <tr><td><code>arn:aws:iam::123456789012:user/admin</code></td><td>IAM User</td><td><code>PutRolePolicy</code>, <code>DeleteTrail</code>, <code>StopLogging</code>; Google Workspace <code>GRANT_ADMIN_PRIVILEGE</code> ×6</td></tr>
+          <tr><td><code>arn:aws:sts::123456789012:assumed-role/AdminRole/session1</code></td><td>STS Session</td><td>Session token reused across 4 source IPs incl. TEST-NET-3 <code>203.0.113.42</code>; impossible-velocity</td></tr>
+          <tr><td><code>ext_vendor1@woodgrove.com</code></td><td>External Federation</td><td>UserCreated as Admin by <code>jsmith</code>; PasswordReset by <code>breakglass@</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3>Forensic Anomalies (CloudTrail forgery signatures)</h3>
+      <table>
+        <thead><tr><th>#</th><th>Anomaly</th><th>Why it&#39;s suspicious</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td><code>UserIdentity.Type = Root</code> on rows where ARN is an IAM user</td><td>Root cannot have a user-ARN; field combination is structurally invalid</td></tr>
+          <tr><td>2</td><td><code>UserIdentity.Type = AWSService</code> on rows with user ARN</td><td>AWS-service principals never carry IAM user ARNs</td></tr>
+          <tr><td>3</td><td><code>RecipientAccountId 987654321098</code> vs <code>UserIdentity.AccountId 123456789012</code></td><td>Cross-account mismatch in same event — sign of cut-and-paste forgery</td></tr>
+          <tr><td>4</td><td><code>SourceIpAddress = "AWS Internal"</code> on user-issued IAM mutations</td><td>Reserved string only legitimate for service-linked actions, not <code>CreateAccessKey</code>/<code>DeleteTrail</code></td></tr>
+          <tr><td>5</td><td>Same STS session token (<code>AdminRole/session1</code>) on 4 SrcIPs in &lt;6 min</td><td>Impossible-velocity / session-token theft</td></tr>
+          <tr><td>6</td><td>SrcIp <code>203.0.113.42</code> (TEST-NET-3 RFC 5737)</td><td>Reserved documentation prefix — cannot route on the public internet → spoofed/fabricated</td></tr>
+          <tr><td>7</td><td>Template literal <code>{{newadmin.username}}</code> in Entra/Okta/AWS audit fields</td><td>Provisioning template was rendered with raw placeholder — attacker tooling leak</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="grid2" style="margin-top:14px">
+    <div>
+      <h3>Attack Timeline (UTC)</h3>
+      <div class="timeline">
+        <div class="ev"><strong>11:38</strong> — First TOR exit <code>185.220.101.34</code> ConsoleLogin to <code>agarcia</code>; impossible-travel vs prior Entra session.</div>
+        <div class="ev"><strong>11:42</strong> — <code>CreateAccessKey</code> for <code>agarcia</code> from <code>203.0.113.42</code> (TEST-NET-3 spoof).</div>
+        <div class="ev"><strong>11:49</strong> — <code>AssumeRole → AdminRole/session1</code>; same token then surfaces from 4 distinct SrcIPs.</div>
+        <div class="ev"><strong>11:55</strong> — <code>CreateUser ext_vendor1</code> + <code>AttachUserPolicy AdministratorAccess</code> by <code>admin</code> (forged <code>Type=Root</code>).</div>
+        <div class="ev"><strong>12:01</strong> — <code>StopLogging</code> + <code>DeleteTrail</code> on management trail (T1562.008).</div>
+        <div class="ev"><strong>12:06</strong> — Final fabricated rows with <code>SourceIpAddress="AWS Internal"</code> attempt to mask the burst.</div>
+      </div>
+      <h3>Top 5 Risky Paths</h3>
+      <ol class="tight">
+        <li>TOR <code>185.220.101.34</code> → <code>agarcia</code> ConsoleLogin → <code>CreateAccessKey</code> → long-lived programmatic access.</li>
+        <li><code>AdminRole/session1</code> token reuse across 4 SrcIPs → lateral cloud movement under one identity.</li>
+        <li><code>admin</code> → <code>CreateUser ext_vendor1</code> → <code>AttachUserPolicy AdministratorAccess</code> → persistent backdoor admin.</li>
+        <li><code>admin</code> → <code>StopLogging</code> + <code>DeleteTrail</code> → destruction of forensic evidence (T1562.008).</li>
+        <li>Provisioning template leak <code>{{newadmin.username}}</code> across Entra+Okta+AWS → attacker has access to upstream IAM automation.</li>
+      </ol>
+    </div>
+    <div>
+      <h3>Immediate Response Actions</h3>
+      <h4>Containment (response-mcp)</h4>
+      <ul class="tight">
+        <li><code>disable_ad_account</code> for <code>agarcia</code>, <code>admin</code>, <code>ext_vendor1@woodgrove.com</code>.</li>
+        <li><code>revoke_entra_sessions</code> for all three identities.</li>
+        <li><code>force_ad_password_reset</code> for <code>agarcia</code>; force MFA re-registration.</li>
+        <li><code>isolate_device</code> on any host where <code>agarcia</code> session was active.</li>
+      </ul>
+      <h4>AWS-side</h4>
+      <ul class="tight">
+        <li>Deactivate + delete every access key created in 11:38–12:06 window for <code>agarcia</code>, <code>mwilson</code>, <code>jsmith</code>, <code>pjones</code>.</li>
+        <li>Detach inline + managed policies from <code>admin</code>; restore CloudTrail (re-create deleted trail, enable log-file validation, lock S3 bucket policy).</li>
+        <li>Delete <code>ext_vendor1</code> IAM user; rotate trust policies on <code>AdminRole</code>.</li>
+        <li>Invalidate <code>AdminRole/session1</code> via IAM <em>Revoke active sessions</em> (sets <code>AWSRevokeOlderSessions</code> policy).</li>
+      </ul>
+      <h4>Telemetry hardening</h4>
+      <ul class="tight">
+        <li>Enable CloudTrail <strong>log file integrity validation</strong> + S3 Object Lock.</li>
+        <li>Sentinel detection: alert on any CloudTrail row where <code>UserIdentity.Type</code> is inconsistent with ARN structure or where <code>SourceIpAddress="AWS Internal"</code> for IAM-mutating events.</li>
+        <li>Watchlist all RFC 5737 ranges (<code>192.0.2.0/24</code>, <code>198.51.100.0/24</code>, <code>203.0.113.0/24</code>) and TOR exit feeds.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Forgery-detection KQL (drop into Sentinel)</h3>
+<pre><code>AWSCloudTrail
+| where TimeGenerated between (datetime(2026-04-28 11:30) .. datetime(2026-04-28 12:15))
+| extend ui = parse_json(UserIdentity)
+| extend uiType = tostring(ui.type), uiArn = tostring(ui.arn), uiAcct = tostring(ui.accountId)
+| extend Anomaly = case(
+    uiType == "Root"      and uiArn matches regex @":user/",          "Root-with-user-ARN",
+    uiType == "AWSService" and uiArn matches regex @":user/",         "Service-with-user-ARN",
+    uiAcct != "" and RecipientAccountId != "" and uiAcct != RecipientAccountId, "AccountId-mismatch",
+    SourceIpAddress == "AWS Internal" and EventName has_any ("CreateAccessKey","DeleteTrail","StopLogging","PutRolePolicy"), "Internal-IP-on-IAM-mutation",
+    SourceIpAddress matches regex @"^(192\.0\.2|198\.51\.100|203\.0\.113)\.", "RFC5737-spoof",
+    "")
+| where Anomaly != ""
+| project TimeGenerated, EventName, Anomaly, uiType, uiArn, uiAcct, RecipientAccountId, SourceIpAddress, AwsRequestId</code></pre>
+
+  <h3>Data Sources Used</h3>
+  <span class="badge">AWSCloudTrail</span><span class="badge">ASimAuthenticationEventLogs</span><span class="badge">ASimUserManagementActivityLogs</span><span class="badge">ASimNetworkSessionLogs</span><span class="badge">OktaV2_CL</span><span class="badge">AbuseIPDB_Blacklist_CL</span><span class="badge">ThreatIntelIndicators</span><span class="badge">GWorkspace_ReportsAPI_admin_CL</span>
+</section>
+
+<!-- ============================ TI ============================ -->
+<section id="ti">
+  <h2>Threat Intelligence Correlation (MDTI / ThreatIntelIndicators)</h2>
+  <p class="sub"><code>ThreatIntelIndicators</code> table holds <strong>1,292,000</strong> indicators (1,283,702 active). Microsoft Defender Threat Intelligence is the dominant source (3,638,771 active indicators across providers).</p>
+
+  <div class="grid2">
+    <div>
+      <h3>Direct IOC Hits — STIX patterns</h3>
+      <table>
+        <thead><tr><th>IOC</th><th>Confidence</th><th>Source</th><th>Tags</th><th>Active</th></tr></thead>
+        <tbody>
+          <tr><td><code>185.220.101.34</code></td><td>100</td><td>MDTI</td><td>honeypot, Botnet, p:default</td><td>✓ (×7 indicators)</td></tr>
+          <tr><td><code>203.0.113.42</code></td><td>—</td><td>Internal (TEST-NET)</td><td>brute-force source (observed)</td><td>seen in network/auth</td></tr>
+          <tr><td><code>45.33.32.156</code></td><td>—</td><td>Internal (Linode)</td><td>cred-theft source (observed)</td><td>seen in auth+network</td></tr>
+          <tr><td><code>23.94.168.73</code></td><td>—</td><td>Internal</td><td>exfil C2 (observed)</td><td>seen in scenario seed</td></tr>
+        </tbody>
+      </table>
+      <p class="small">Pattern format: <code>[network-traffic:src_ref.value = 'x.x.x.x']</code> · provider <em>BasicMDTIConnector</em>.</p>
+    </div>
+    <div>
+      <h3>TI Indicators — by ObservableKey (active)</h3>
+      <table>
+        <thead><tr><th>Type</th><th>Count</th><th></th></tr></thead>
+        <tbody>
+          <tr><td>network-traffic:src_ref.value</td><td>2,142,546</td><td><div class="kbar"><span style="width:100%"></span></div></td></tr>
+          <tr><td>file:hashes.SHA-256</td><td>807,289</td><td><div class="kbar"><span style="width:38%"></span></div></td></tr>
+          <tr><td>file:hashes.MD5</td><td>257,194</td><td><div class="kbar"><span style="width:12%"></span></div></td></tr>
+          <tr><td>domain-name:value</td><td>196,614</td><td><div class="kbar"><span style="width:9%"></span></div></td></tr>
+          <tr><td>file:hashes.SHA-1</td><td>136,908</td><td><div class="kbar"><span style="width:6%"></span></div></td></tr>
+          <tr><td>url:value</td><td>49,288</td><td><div class="kbar"><span style="width:2.5%"></span></div></td></tr>
+          <tr><td>x509-certificate:hashes.SHA-1</td><td>41,180</td><td><div class="kbar"><span style="width:2%"></span></div></td></tr>
+          <tr><td>email-addr:value</td><td>2,612</td><td><div class="kbar"><span style="width:1%"></span></div></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>TI-MindMap context (manual reference):</strong> <code>185.220.101.34</code> is a long-running TOR exit node operated by <em>Foundation Privacytech</em> (DE) — historically associated with credential stuffing (<a href="#">CISA AA22-138B</a>), TrickBot relays and ransomware affiliate infrastructure. The 7 MDTI indicators (label <em>honeypot</em>) confirm it has been triggering Microsoft honeypot sensors continuously between Feb–Apr 2026.
+  </div>
+</section>
+
+<!-- ============================ ABUSEIPDB ============================ -->
+<section id="abuse">
+  <h2>AbuseIPDB Blacklist Correlation</h2>
+  <p class="sub">Local table <code>AbuseIPDB_Blacklist_CL</code> contains <strong>150,000</strong> high-confidence (≥100) abusive IPs. Used as an enrichment lookup for every external SrcIp/DstIp seen in ASim* logs.</p>
+
+  <div class="grid2">
+    <div>
+      <h3>Top Country Distribution (AbuseIPDB feed)</h3>
+      <table>
+        <thead><tr><th>Country</th><th>Reported IPs</th><th>Avg Conf.</th></tr></thead>
+        <tbody>
+          <tr><td>US</td><td>54,818</td><td>100</td></tr>
+          <tr><td>CN</td><td>12,885</td><td>100</td></tr>
+          <tr><td>NL</td><td>8,508</td><td>100</td></tr>
+          <tr><td>GB</td><td>8,150</td><td>100</td></tr>
+          <tr><td>DE</td><td>6,817</td><td>100</td></tr>
+          <tr><td>FR</td><td>5,710</td><td>100</td></tr>
+          <tr><td>SG</td><td>5,684</td><td>100</td></tr>
+          <tr><td>IN</td><td>5,010</td><td>100</td></tr>
+          <tr><td>HK</td><td>4,940</td><td>100</td></tr>
+          <tr><td>KR</td><td>3,888</td><td>100</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3>Per-Scenario Lookup Result</h3>
+      <table>
+        <thead><tr><th>Attacker IP</th><th>In AbuseIPDB feed?</th><th>Cross-source</th></tr></thead>
+        <tbody>
+          <tr><td><code>203.0.113.42</code></td><td>No (TEST-NET-3 reserved)</td><td>Confirmed bad in Okta, AWS, ASim auth, Proofpoint</td></tr>
+          <tr><td><code>185.220.101.34</code></td><td>No direct row, but matches MDTI honeypot &amp; well-known TOR list</td><td>Confirmed bad in MDTI ×7, ASim network</td></tr>
+          <tr><td><code>45.33.32.156</code></td><td>No direct row (Linode)</td><td>Confirmed bad in ASim auth (svc_backup logons)</td></tr>
+          <tr><td><code>23.94.168.73</code></td><td>No direct row</td><td>Defined in exfiltration scenario; treat as high-confidence C2</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <strong>Recommended hardening</strong>: ingest the AbuseIPDB blacklist into Sentinel <em>watchlist</em> and reference it via <code>externaldata</code>/<code>_GetWatchlist</code> in detection rules so any inbound/outbound SrcIp/DstIp is checked at query time.
+      </div>
+    </div>
+  </div>
+
+  <h3>Reusable correlation snippet</h3>
+<pre><code>let abuse = AbuseIPDB_Blacklist_CL
+| summarize arg_max(TimeGenerated, AbuseConfidenceScore, CountryCode) by IpAddress;
+ASimNetworkSessionLogs
+| where TimeGenerated &gt; ago(24h)
+| extend Ext = iif(SrcIpAddr matches regex @"^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)", DstIpAddr, SrcIpAddr)
+| join kind=inner abuse on $left.Ext == $right.IpAddress
+| summarize Sessions=count(), Bytes=sum(NetworkBytes) by Ext, AbuseConfidenceScore, CountryCode
+| order by Bytes desc</code></pre>
+</section>
+
+<!-- ============================ BLAST RADIUS ============================ -->
+<section id="blast">
+  <h2>Blast Radius &amp; Entity Graph</h2>
+  <p class="sub">Aggregated from cross-table joins across ASim*, OktaV2_CL, AWSCloudTrail, GWorkspace_ReportsAPI_admin_CL, CrowdStrike* and ThreatIntelIndicators. Equivalent to the Sentinel entity-graph blast-radius but expressed as KQL findings.</p>
+
+  <div class="grid2">
+    <div>
+      <h3>Key Compromised / At-Risk Entities</h3>
+      <table>
+        <thead><tr><th>Entity</th><th>Type</th><th>Tier</th><th>Linked scenarios</th><th>Blast radius</th></tr></thead>
+        <tbody>
+          <tr><td><code>SRV-DC02 (10.0.4.100)</code></td><td>Host (DC)</td><td>Tier-0</td><td>1, 2, 4</td><td><span class="badge b-crit">Domain-wide</span></td></tr>
+          <tr><td><code>SRV-FILE02</code></td><td>Host (File)</td><td>Tier-1</td><td>2, 3</td><td><span class="badge b-high">All file shares</span></td></tr>
+          <tr><td><code>WS-LAPTOP03</code></td><td>Host (User)</td><td>Tier-2</td><td>3</td><td><span class="badge b-high">Insider exfil pivot</span></td></tr>
+          <tr><td><code>SRV-WEB02</code></td><td>Host (Web)</td><td>Tier-1</td><td>4</td><td><span class="badge b-med">DMZ</span></td></tr>
+          <tr><td><code>svc_backup@contoso.com</code></td><td>Service ID</td><td>Tier-0</td><td>4</td><td><span class="badge b-crit">Backup priv</span></td></tr>
+          <tr><td><code>breakglass@contoso.com</code></td><td>Break-glass</td><td>Tier-0</td><td>1, 4</td><td><span class="badge b-crit">GA / domain admin</span></td></tr>
+          <tr><td><code>agarcia@contoso.com</code></td><td>User</td><td>Tier-2</td><td>2, 3, 4</td><td><span class="badge b-high">AWS keys + ransomware origin</span></td></tr>
+          <tr><td><code>mwilson@contoso.com</code></td><td>User</td><td>Tier-2</td><td>1, 2, 4</td><td><span class="badge b-high">Okta success from bad IP</span></td></tr>
+          <tr><td><code>nkowalski@contoso.com</code></td><td>User (insider)</td><td>Tier-2</td><td>3</td><td><span class="badge b-high">DNS exfil</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3>Cross-Scenario Pivots</h3>
+      <ul class="tight">
+        <li><code>203.0.113.42</code> appears in <strong>4</strong> sources: ASim auth (16 events), OktaV2_CL (16 attempts inc. 3 successes for mwilson), AWSCloudTrail (CreateAccessKey/PutRolePolicy/DeleteTrail), Proofpoint (sender of phishing).</li>
+        <li><code>185.220.101.34</code> appears in <strong>3</strong> sources: ASim network (LDAPS, Kerberos, HTTPS, SMTP, DNS), OktaV2_CL (3 successes inc. agarcia/breakglass), MDTI ThreatIntelIndicators (×7).</li>
+        <li><code>45.33.32.156</code> appears in <strong>2</strong> sources: ASim auth (svc_backup logons ×3, breakglass ×1) and ASim network (port 53/8443/443).</li>
+        <li>User <code>agarcia@</code> connects ransomware (registry persistence) ↔ exfil (file reads SRV-FILE02) ↔ cred theft (AWS CreateAccessKey from 203.0.113.42) — likely <strong>compromised privileged identity</strong>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ============================ ATTACK-PATH DIAGRAM (SVG) ============================ -->
+  <h3 style="margin-top:24px">Attack-Path Diagram &mdash; ingress &rarr; identities &rarr; destructive cloud actions</h3>
+  <p class="sub">External ingress &rarr; compromised identities &rarr; destructive cloud actions. Built directly from <code>graph-blast-radius.kql</code> Q1, Q3, Q7. Dashed nodes denote forensically anomalous (likely forged) CloudTrail rows where the source identity is the AWS service principal.</p>
+  <div style="background:#0a1230;border:1px solid var(--line);border-radius:12px;padding:14px;overflow:auto">
+    <svg viewBox="0 0 1200 540" width="100%" style="display:block;min-width:900px" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#9aa3c4"/>
+        </marker>
+        <marker id="arrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#ff5470"/>
+        </marker>
+      </defs>
+      <style>
+        .ext   { fill:#ff6b81; stroke:#ff5470; stroke-width:1.5; }
+        .id    { fill:#a01633; stroke:#ff5470; stroke-width:1.5; }
+        .act   { fill:#7a5cff; stroke:#9b8cff; stroke-width:1.5; }
+        .forge { fill:#000;    stroke:#ff5470; stroke-width:2; stroke-dasharray:6 4; }
+        .lbl   { fill:#fff; font-size:13px; font-weight:600; text-anchor:middle; }
+        .lblsm { fill:#fff; font-size:11px; text-anchor:middle; }
+        .edge  { stroke:#9aa3c4; stroke-width:1.2; fill:none; opacity:.85; }
+        .edgeR { stroke:#ff5470; stroke-width:1.4; fill:none; opacity:.9; }
+      </style>
+
+      <!-- ROW 1: External ingress (red) -->
+      <g>
+        <rect class="ext" x="40"  y="20" width="170" height="56" rx="6"/>
+        <text class="lbl"   x="125" y="44">185.220.101.34</text>
+        <text class="lblsm" x="125" y="62">TOR EXIT</text>
+
+        <rect class="ext" x="230" y="20" width="170" height="56" rx="6"/>
+        <text class="lbl"   x="315" y="44">203.0.113.42</text>
+        <text class="lblsm" x="315" y="62">SPOOFED</text>
+
+        <rect class="ext" x="420" y="20" width="170" height="56" rx="6"/>
+        <text class="lbl"   x="505" y="44">100.21.55.130</text>
+        <text class="lblsm" x="505" y="62">AWS-region edge</text>
+
+        <rect class="ext" x="610" y="20" width="170" height="56" rx="6"/>
+        <text class="lbl"   x="695" y="44">52.168.112.66</text>
+        <text class="lblsm" x="695" y="62">Azure egress</text>
+
+        <rect class="ext" x="800" y="20" width="170" height="56" rx="6"/>
+        <text class="lbl"   x="885" y="40">AWS Internal</text>
+        <text class="lblsm" x="885" y="58">spoofed for user</text>
+
+        <rect class="ext" x="990" y="20" width="170" height="56" rx="6"/>
+        <text class="lbl"   x="1075" y="44">198.51.100.17</text>
+        <text class="lblsm" x="1075" y="62">RFC test (decoy)</text>
+      </g>
+
+      <!-- ROW 2: Identities (dark red) -->
+      <g>
+        <rect class="id" x="80"  y="170" width="280" height="74" rx="6"/>
+        <text class="lbl"   x="220" y="200">IAM user / admin</text>
+        <text class="lblsm" x="220" y="222">123456789012</text>
+
+        <rect class="id" x="460" y="170" width="280" height="74" rx="6"/>
+        <text class="lbl"   x="600" y="200">IAM user / agarcia</text>
+        <text class="lblsm" x="600" y="222">123456789012  &middot;  83 AWS events / 13 ops</text>
+
+        <rect class="id" x="840" y="170" width="280" height="74" rx="6"/>
+        <text class="lbl"   x="980" y="200">AdminRole / session1</text>
+        <text class="lblsm" x="980" y="222">reused token</text>
+      </g>
+
+      <!-- ROW 3 LEFT: Forged-events box (black, dashed) -->
+      <g>
+        <rect class="forge" x="40" y="320" width="190" height="170" rx="6"/>
+        <text class="lblsm" x="135" y="346" fill="#ff8aa0" font-weight="700">Forged events</text>
+        <text class="lblsm" x="135" y="368">Type=Root on IAM user;</text>
+        <text class="lblsm" x="135" y="386">Type=AWSService on user</text>
+        <text class="lblsm" x="135" y="404">ARN; cross-account</text>
+        <text class="lblsm" x="135" y="422" fill="#ff8aa0" font-weight="700">123 / 987</text>
+        <text class="lblsm" x="135" y="450">Q3 src=&quot;AWS Internal&quot;</text>
+        <text class="lblsm" x="135" y="468">on agarcia ARN</text>
+      </g>
+
+      <!-- ROW 3 RIGHT: Destructive actions (purple) -->
+      <g>
+        <rect class="act" x="270" y="400" width="170" height="56" rx="6"/>
+        <text class="lbl"   x="355" y="424">DeleteTrail</text>
+        <text class="lblsm" x="355" y="442">T1562.008</text>
+
+        <rect class="act" x="460" y="400" width="170" height="56" rx="6"/>
+        <text class="lbl"   x="545" y="424">CreateUser</text>
+        <text class="lblsm" x="545" y="442">T1136.003</text>
+
+        <rect class="act" x="650" y="400" width="170" height="56" rx="6"/>
+        <text class="lbl"   x="735" y="424">CreateAccessKey</text>
+        <text class="lblsm" x="735" y="442">T1098.001</text>
+
+        <rect class="act" x="840" y="400" width="170" height="56" rx="6"/>
+        <text class="lbl"   x="925" y="424">AssumeRole</text>
+        <text class="lblsm" x="925" y="442">T1550.001</text>
+
+        <rect class="act" x="1030" y="400" width="140" height="56" rx="6"/>
+        <text class="lbl"   x="1100" y="424">ConsoleLogin</text>
+        <text class="lblsm" x="1100" y="442">T1078.004</text>
+      </g>
+
+      <!-- EDGES: external -> identities -->
+      <g>
+        <path class="edge"  d="M125,76 C140,120 180,140 220,170"  marker-end="url(#arr)"/>
+        <path class="edgeR" d="M315,76 C330,120 400,140 530,170"  marker-end="url(#arrR)"/>
+        <path class="edgeR" d="M315,76 C290,120 250,140 220,170"  marker-end="url(#arrR)"/>
+        <path class="edge"  d="M505,76 C520,120 560,140 600,170"  marker-end="url(#arr)"/>
+        <path class="edge"  d="M695,76 C700,120 650,140 600,170"  marker-end="url(#arr)"/>
+        <path class="edgeR" d="M885,76 C870,120 750,140 670,170"  marker-end="url(#arrR)"/>
+        <path class="edge"  d="M885,76 C920,120 950,140 980,170"  marker-end="url(#arr)"/>
+        <path class="edge"  d="M1075,76 C1060,120 1020,140 980,170" marker-end="url(#arr)"/>
+      </g>
+
+      <!-- EDGES: identities -> actions -->
+      <g>
+        <path class="edgeR" d="M220,244 C220,300 200,330 135,320"  marker-end="url(#arrR)"/>
+        <path class="edge"  d="M220,244 C260,310 300,360 355,400"  marker-end="url(#arr)"/>
+        <path class="edge"  d="M220,244 C320,310 420,360 545,400"  marker-end="url(#arr)"/>
+        <path class="edgeR" d="M600,244 C600,300 600,360 600,400"  marker-end="url(#arrR)"/>
+        <path class="edgeR" d="M600,244 C620,300 680,360 735,400"  marker-end="url(#arrR)"/>
+        <path class="edge"  d="M600,244 C700,310 800,360 905,400"  marker-end="url(#arr)"/>
+        <path class="edgeR" d="M600,244 C500,310 350,360 250,348"  marker-end="url(#arrR)"/>
+        <path class="edge"  d="M980,244 C960,300 940,360 925,400"  marker-end="url(#arr)"/>
+        <path class="edge"  d="M980,244 C1020,300 1060,360 1100,400" marker-end="url(#arr)"/>
+        <path class="edge"  d="M980,244 C880,290 760,340 735,400"  marker-end="url(#arr)"/>
+      </g>
+
+      <!-- Legend -->
+      <g transform="translate(40,500)">
+        <rect class="ext" x="0"   y="0" width="14" height="14" rx="3"/>
+        <text x="20" y="12" fill="#9aa3c4" font-size="12">External ingress (Q1/Q7 IPs)</text>
+        <rect class="id"  x="220" y="0" width="14" height="14" rx="3"/>
+        <text x="240" y="12" fill="#9aa3c4" font-size="12">Compromised identity (Q3)</text>
+        <rect class="act" x="430" y="0" width="14" height="14" rx="3"/>
+        <text x="450" y="12" fill="#9aa3c4" font-size="12">CloudTrail action (Q3)</text>
+        <rect class="forge" x="610" y="0" width="14" height="14" rx="3"/>
+        <text x="630" y="12" fill="#9aa3c4" font-size="12">Forged event (anomalous SrcIP)</text>
+        <line x1="820" y1="7" x2="850" y2="7" class="edgeR" marker-end="url(#arrR)"/>
+        <text x="858" y="12" fill="#9aa3c4" font-size="12">High-risk edge</text>
+      </g>
+    </svg>
+  </div>
+
+  <!-- ============================ TOP RESULTS FROM graph-blast-radius.kql ============================ -->
+  <h3 style="margin-top:28px">Top results from <code>graph-blast-radius.kql</code></h3>
+  <p class="sub">Workspace <code>e34d562e-ef12-4c4e-9bc0-7c6ae357c015</code> (CyberSOC / LAWSentinel). Full results in <code>hunting/graph-blast-radius.results.json</code>.</p>
+
+  <h4>Q1 &mdash; 2-hop blast radius from <code>203.0.113.42</code> (top 10 of 140)</h4>
+  <table>
+    <thead><tr><th>Kind</th><th>Value</th><th>Count</th></tr></thead>
+    <tbody>
+      <tr><td><span class="badge b-info">hop1_host</span></td><td><code>SRV-MAIL01</code></td><td>2</td></tr>
+      <tr><td><span class="badge b-info">hop1_host</span></td><td><code>SRV-FILE01</code></td><td>2</td></tr>
+      <tr><td><span class="badge b-info">hop1_host</span></td><td><code>SRV-DB01</code></td><td>2</td></tr>
+      <tr><td><span class="badge b-info">hop1_host</span></td><td><code>SRV-DC02</code></td><td>2</td></tr>
+      <tr><td><span class="badge b-info">hop1_host</span></td><td><code>SRV-WEB01</code></td><td>2</td></tr>
+      <tr><td><span class="badge b-info">hop1_host</span></td><td><code>SRV-DC01</code></td><td>2</td></tr>
+      <tr><td><span class="badge b-info">hop1_host</span></td><td><code>LNX-APP01</code></td><td>2</td></tr>
+      <tr><td><span class="badge b-info">hop1_host</span></td><td><code>FW-EDGE01</code></td><td>1</td></tr>
+      <tr><td><span class="badge b-info">hop1_host</span></td><td><code>WS-PC01</code></td><td>1</td></tr>
+      <tr><td><span class="badge b-info">hop1_host</span></td><td><code>WS-PC02</code></td><td>1</td></tr>
+    </tbody>
+  </table>
+
+  <div class="grid2" style="margin-top:14px">
+    <div>
+      <h4>Q2 &mdash; SRV-DC02 directly-connected entities (top 10 of 36)</h4>
+      <table>
+        <thead><tr><th>Entity</th><th>Edge</th><th>Wt</th></tr></thead>
+        <tbody>
+          <tr><td><code>tnguyen@contoso.com</code></td><td>auth-&gt;user</td><td>8</td></tr>
+          <tr><td><code>services.exe</code></td><td>proc-&gt;image</td><td>7</td></tr>
+          <tr><td><code>svchost.exe</code></td><td>proc-&gt;image</td><td>7</td></tr>
+          <tr><td><code>10.0.1.50</code></td><td>net-&gt;ip</td><td>6</td></tr>
+          <tr><td><code>aolsen</code></td><td>auth-&gt;user</td><td>5</td></tr>
+          <tr><td><code>jsmith@contoso.com</code></td><td>auth-&gt;user</td><td>5</td></tr>
+          <tr><td><code>emartinez@contoso.com</code></td><td>auth-&gt;user</td><td>5</td></tr>
+          <tr><td><code>172.16.0.100</code></td><td>net-&gt;ip</td><td>4</td></tr>
+          <tr><td><code>bwright</code></td><td>auth-&gt;user</td><td>4</td></tr>
+          <tr><td><code>/usr/bin/bash</code></td><td>proc-&gt;image</td><td>4</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h4>Q4 &mdash; SRV-FILE02 actors who touched encrypted files (24h, all 7 rows)</h4>
+      <table>
+        <thead><tr><th>Actor</th><th>Process</th><th>File</th></tr></thead>
+        <tbody>
+          <tr><td><code>CONTOSO\agarcia</code></td><td><code>certutil.exe</code></td><td><code>passwords.xlsx</code></td></tr>
+          <tr><td><code>CONTOSO\agarcia</code></td><td><code>/usr/bin/cp</code></td><td><code>auth.log</code></td></tr>
+          <tr><td><code>CONTOSO\agarcia</code></td><td><code>explorer.exe</code></td><td><code>malware.sys</code></td></tr>
+          <tr><td><code>CONTOSO\admin</code></td><td><code>7z.exe</code></td><td><code>budget.xlsx</code></td></tr>
+          <tr><td><code>CONTOSO\dkim</code></td><td><code>notepad.exe</code></td><td><code>stage2.sh</code></td></tr>
+          <tr><td><code>CONTOSO\svc_backup</code></td><td><code>explorer.exe</code></td><td><code>report.docx</code></td></tr>
+          <tr><td><code>NT AUTHORITY\SYSTEM</code></td><td><code>python3</code></td><td><code>update.bat</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <h4 style="margin-top:14px">Q3 &mdash; <code>agarcia@contoso.com</code> full neighborhood (4 collapsed rows)</h4>
+  <table>
+    <thead><tr><th>Edge</th><th>Hits</th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="badge b-crit">aws</span></td>
+        <td>83</td>
+        <td>
+          <strong>Events:</strong>
+          <span class="badge b-mitre">CreateUser</span><span class="badge b-mitre">StopInstances</span><span class="badge b-mitre">AttachUserPolicy</span><span class="badge b-mitre">PutBucketPolicy</span><span class="badge b-mitre">CreateTrail</span><span class="badge b-mitre">DeleteUser</span><span class="badge b-mitre">AssumeRole</span><span class="badge b-mitre">CreateAccessKey</span><span class="badge b-mitre">RunInstances</span><span class="badge b-mitre">DeleteTrail</span><span class="badge b-mitre">PutRolePolicy</span><span class="badge b-mitre">GetSecretValue</span><span class="badge b-mitre">ConsoleLogin</span><br/>
+          <strong>SrcIPs:</strong>
+          <code>AWS Internal</code> <code>100.21.55.130</code> <code>10.0.1.51</code> <code>203.0.113.42</code> <code>10.0.1.50</code> <code>10.0.2.10</code> <code>198.51.100.17</code> <code>52.168.112.66</code>
+        </td>
+      </tr>
+      <tr><td><span class="badge b-high">proc</span></td><td>&mdash;</td><td>processes spawned across linked hosts (full row in JSON)</td></tr>
+      <tr><td><span class="badge b-high">file</span></td><td>&mdash;</td><td>file events (see Q4 for SRV-FILE02 detail)</td></tr>
+      <tr><td><span class="badge b-info">net</span></td><td>&mdash;</td><td>outbound sessions to listed SrcIPs</td></tr>
+    </tbody>
+  </table>
+
+  <div class="grid2" style="margin-top:14px">
+    <div>
+      <h4>Q7 &mdash; <code>svc_backup</code> 14-day footprint (2 rows)</h4>
+      <table>
+        <thead><tr><th>Source</th><th>NonCorp</th><th>Logons</th><th>Devices</th><th>IPs</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>ASim_auth</code></td>
+            <td><span class="badge b-crit">★</span></td>
+            <td>14</td>
+            <td>LNX-APP01, SRV-WEB02, SRV-MAIL01, VPN-GW01, SRV-FILE01, SRV-DC01, <strong>SRV-DC02</strong></td>
+            <td><code>52.168.112.66</code> <code>198.51.100.17</code> <code>91.234.99.42</code> <code>45.33.32.156</code> <code>203.0.113.42</code> <code>185.220.101.34</code> <code>100.21.55.130</code></td>
+          </tr>
+          <tr>
+            <td><code>ASim_auth</code></td>
+            <td>&mdash;</td>
+            <td>14</td>
+            <td>SRV-WEB02, LNX-APP01, SRV-DC01, SRV-MAIL01, SRV-DC02, VPN-GW01, SRV-DB01</td>
+            <td><code>10.0.1.52</code> <code>10.0.1.50</code> <code>192.168.1.200</code> <code>10.0.1.51</code> <code>10.0.3.10</code> <code>10.0.2.10</code> <code>172.16.0.100</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h4>Q10 &mdash; cross-incident overlap (top 6 of 200)</h4>
+      <table>
+        <thead><tr><th>A</th><th>B</th><th>Sev</th><th>Ovl</th><th>Shared</th></tr></thead>
+        <tbody>
+          <tr><td>2899</td><td>2941</td><td><span class="badge b-high">High</span></td><td><strong>9</strong></td><td>DC01, DC02, vm-sentinel-lab, ServerPriv, Linuxprivhq, asclab-win, DC2025, PC-LEIRE, WIN-O0KGK53A7IA</td></tr>
+          <tr><td>2893</td><td>2939</td><td><span class="badge b-high">High</span></td><td>5</td><td>Microsoft Office, 176.80.94.194, 185.103.151.110, admin, 40.68.200.63</td></tr>
+          <tr><td>2893</td><td>2916</td><td><span class="badge b-high">High</span></td><td>3</td><td>admin, 40.69.22.128, 40.68.200.63</td></tr>
+          <tr><td>2923</td><td>2931</td><td><span class="badge b-med">Med</span></td><td>3</td><td>40.69.22.128, 172.167.23.70, 40.68.200.63</td></tr>
+          <tr><td>2705</td><td>2921</td><td><span class="badge b-med">Med</span></td><td>3</td><td>7b549146-ff33-4b20-…, 4.208.183.40, 68.221.111.82</td></tr>
+          <tr><td>2893</td><td>2940</td><td><span class="badge b-high">High</span></td><td>3</td><td>admin, 172.167.23.70, 40.68.200.63</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <h4 style="margin-top:14px">Empty / errored queries</h4>
+  <table>
+    <thead><tr><th>ID</th><th>Title</th><th>Status</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>Q5</td><td>nkowalski outbound + DNS tunnels + &gt;100MB uploads</td><td><span class="badge b-low">empty</span></td><td>0 rows in window</td></tr>
+      <tr><td>Q6</td><td>Shortest path 23.94.168.73 &rarr; Tier-1 host</td><td><span class="badge b-crit">error</span></td><td><code>CommandLine</code> column not in <code>ASimProcessEventLogs</code> &mdash; needs schema fix</td></tr>
+      <tr><td>Q8</td><td>breakglass sign-ins + MFA bypass + roles</td><td><span class="badge b-med">partial</span></td><td>4 rows (UserMgmt source); <code>SigninLogs_Simulation</code> missing &mdash; gracefully skipped via <code>isfuzzy=true</code></td></tr>
+      <tr><td>Q9</td><td>185.220.101.34 pivot &rarr; users/devices/incidents</td><td><span class="badge b-crit">error</span></td><td><code>client_ipAddress_s</code> column unresolved &mdash; CL table schema drift</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ============================ SENTINEL GRAPH MCP ============================ -->
+<section id="graphmcp">
+  <h2>Sentinel Graph MCP &mdash; Blast Radius, Entity Relationships &amp; Hunting</h2>
+  <p class="sub">The <code>sentinel-graph</code> MCP server (<code>https://sentinel.microsoft.com/mcp/graph</code>) is now configured in <code>%APPDATA%\Code\User\mcp.json</code> and exposes the unified Sentinel exposure graph: identities, devices, IPs, files, processes, cloud resources, and incidents as a queryable graph. Use the prompts below in Copilot Chat (agent mode) to traverse blast radius and pivot across the four attack scenarios.</p>
+
+  <div class="grid2">
+    <div>
+      <h3>Configuration recap</h3>
+      <pre><code>{
+  "servers": {
+    "sentinel-graph": {
+      "url": "https://sentinel.microsoft.com/mcp/graph",
+      "type": "http"
+    }
+  }
+}</code></pre>
+      <ul class="tight">
+        <li>Transport: HTTP / Streamable&#8209;HTTP</li>
+        <li>Auth: Microsoft Entra ID (interactive OAuth in VS Code)</li>
+        <li>Required role: <strong>Microsoft Sentinel Reader</strong> (Responder for write-back)</li>
+        <li>Tenant: <code>c65dba12-b42d-4cd7-8c6c-f07b319edce1</code></li>
+        <li>Workspace: <code>LAWSentinel</code> (<code>c7c481b6-2b4e-482e-8b25-842f04bafb89</code>)</li>
+      </ul>
+    </div>
+    <div>
+      <h3>What the graph exposes</h3>
+      <ul class="tight">
+        <li><strong>Blast radius</strong> from any seed entity (user / host / IP / file / cloud resource).</strong></li>
+        <li><strong>Entity relationships</strong>: user&nbsp;→ device&nbsp;→ IP&nbsp;→ file&nbsp;→ process&nbsp;→ incident.</li>
+        <li><strong>Cross-domain pivots</strong>: identity (Entra/Okta) ↔ endpoint (Defender) ↔ cloud (AWS/GCP) ↔ mail (Proofpoint).</li>
+        <li><strong>Incident / alert traversal</strong>: which incidents touch a given entity.</li>
+        <li><strong>Path queries</strong>: shortest path between two entities (e.g. external IP → Tier&#8209;0 host).</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Ready-to-run hunting prompts (paste into Copilot Chat)</h3>
+  <table>
+    <thead><tr><th>Scenario</th><th>Seed entity</th><th>Prompt</th></tr></thead>
+    <tbody>
+      <tr><td>1. Brute Force + LM</td><td><code>203.0.113.42</code></td><td>Use sentinel-graph to compute the 2-hop blast radius from IP 203.0.113.42 over the last 7 days. Return all linked users, hosts, sign-in events, and incidents.</td></tr>
+      <tr><td>1. Brute Force + LM</td><td><code>SRV-DC02</code></td><td>Show all entities directly connected to host SRV-DC02 in the Sentinel graph and rank by edge confidence. Highlight Tier-0 lateral-movement paths.</td></tr>
+      <tr><td>2. Ransomware</td><td><code>agarcia@contoso.com</code></td><td>Return the full entity neighborhood for agarcia@contoso.com, including processes, registry persistence, files, and connected hosts. Identify ransomware deployment chain.</td></tr>
+      <tr><td>2. Ransomware</td><td><code>SRV-FILE02</code></td><td>Compute blast radius from SRV-FILE02 and list every account/process that touched encrypted files in the last 24h.</td></tr>
+      <tr><td>3. Data Exfiltration</td><td><code>nkowalski@contoso.com</code></td><td>Map all outbound network destinations linked to nkowalski@contoso.com, focusing on DNS tunnels and uploads &gt; 100MB. Show the path from user to external IP.</td></tr>
+      <tr><td>3. Data Exfiltration</td><td><code>23.94.168.73</code></td><td>Find shortest path in the Sentinel graph from 23.94.168.73 to any internal Tier-1 host. Include intermediate processes and DNS records.</td></tr>
+      <tr><td>4. Credential Theft + PrivEsc</td><td><code>svc_backup@contoso.com</code></td><td>Show all devices and cloud resources accessed by svc_backup@contoso.com in the last 14 days. Flag any access from non-corporate IPs.</td></tr>
+      <tr><td>4. Credential Theft + PrivEsc</td><td><code>breakglass@contoso.com</code></td><td>Build a graph of breakglass@contoso.com sign-ins, MFA bypasses, and assigned roles. Correlate with IPs 203.0.113.42 and 185.220.101.34.</td></tr>
+      <tr><td>Cross-scenario</td><td><code>185.220.101.34</code></td><td>Pivot through Sentinel graph from 185.220.101.34 to identify all impacted users, devices, and incidents. Cross-reference with ThreatIntelIndicators (MDTI x7 hits).</td></tr>
+      <tr><td>Cross-scenario</td><td>n/a</td><td>List all incidents in the workspace that share at least 2 entities with each other and rank by overlap. Identify multi-stage attack chains.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Suggested investigation workflow</h3>
+  <ol class="tight">
+    <li><strong>Seed</strong> the graph with the highest-confidence IOC for each scenario (table above).</strong></li>
+    <li><strong>Expand</strong> 1–2 hops to capture immediate blast radius; flag any Tier&#8209;0 nodes touched.</li>
+    <li><strong>Cross-reference</strong> with the <code>ThreatIntelIndicators</code> and <code>AbuseIPDB_Blacklist_CL</code> tables to score external nodes.</li>
+    <li><strong>Pivot to incidents</strong>: ask the graph MCP for incidents containing the seed entity, then escalate via the <code>sentinel-triage</code> MCP.</li>
+    <li><strong>Containment</strong>: feed the resulting entity list into the <code>response-mcp</code> server (<code>isolate_device</code>, <code>disable_ad_account</code>, <code>revoke_entra_sessions</code>).</li>
+  </ol>
+
+  <h3>Combining MCP servers (multi-tool play)</h3>
+  <ul class="tight">
+    <li><strong>sentinel-graph</strong> → discover blast radius + relationships.</li>
+    <li><strong>sentinel-triage</strong> → fetch incidents/alerts, run Advanced Hunting on graph-discovered entities.</li>
+    <li><strong>sentinel-data-exploration</strong> → query <code>query_lake</code> for full Log Analytics history of those entities.</li>
+    <li><strong>ti-mindmap</strong> → enrich external IPs/CVEs with curated threat reports.</li>
+    <li><strong>response-mcp</strong> → contain compromised identities and devices once confirmed.</li>
+  </ul>
+</section>
+
+<!-- ============================ DATA SOURCES ============================ -->
+<section id="sources">
+  <h2>Data Sources Involved</h2>
+  <table>
+    <thead><tr><th>Table</th><th>Vendor / Schema</th><th>Used for</th></tr></thead>
+    <tbody>
+      <tr><td>ASimAuthenticationEventLogs</td><td>ASIM normalised</td><td>Brute force, valid-account abuse, break-glass logon analysis</td></tr>
+      <tr><td>ASimNetworkSessionLogs</td><td>ASIM normalised</td><td>External IP correlation, RDP, C2, lateral movement</td></tr>
+      <tr><td>ASimProcessEventLogs</td><td>ASIM normalised</td><td>Recon commands, LOLBins (rundll32, schtasks, certutil)</td></tr>
+      <tr><td>ASimFileEventLogs</td><td>ASIM normalised</td><td>Ransomware file modification, sensitive reads</td></tr>
+      <tr><td>ASimRegistryEventLogs</td><td>ASIM normalised</td><td>Run-key persistence (T1547.001)</td></tr>
+      <tr><td>ASimDnsActivityLogs</td><td>ASIM normalised</td><td>DNS tunneling detection</td></tr>
+      <tr><td>ASimUserManagementActivityLogs</td><td>ASIM normalised</td><td>UserCreated, GroupAdd, PasswordReset</td></tr>
+      <tr><td>ASimAuditEventLogs</td><td>ASIM normalised</td><td>Cross-platform admin audit</td></tr>
+      <tr><td>OktaV2_CL</td><td>Okta SSO</td><td>Identity brute force, MFA fatigue, geo anomalies</td></tr>
+      <tr><td>AWSCloudTrail</td><td>AWS</td><td>IAM key creation, log tampering (DeleteTrail)</td></tr>
+      <tr><td>GCPAuditLogs</td><td>GCP</td><td>Service-account creation (backdoor-svc-gcp)</td></tr>
+      <tr><td>GWorkspace_ReportsAPI_admin_CL</td><td>Google Workspace</td><td>GRANT_ADMIN_PRIVILEGE, RESET_PASSWORD, REVOKE_TOKEN</td></tr>
+      <tr><td>ProofpointPODMailLog_CL</td><td>Proofpoint POD</td><td>Inbound phishing, malicious sender IP</td></tr>
+      <tr><td>SEG_MailGuard_CL</td><td>Custom SEG</td><td>SPF/DKIM/DMARC fail, ML phishing verdict</td></tr>
+      <tr><td>EmailEvents / EmailUrlInfo / EmailAttachmentInfo</td><td>Defender for Office 365</td><td>Email URL/attachment threat enrichment</td></tr>
+      <tr><td>CrowdStrikeAlerts / Detections / Incidents</td><td>CrowdStrike Falcon</td><td>EDR alerts, severity scoring, incident lifecycle</td></tr>
+      <tr><td>CrowdStrikeHosts / Vulnerabilities</td><td>CrowdStrike Spotlight</td><td>Asset inventory, CVE exposure (e.g. CVE-2023-20198)</td></tr>
+      <tr><td>DeviceEvents / DeviceProcessEvents / DeviceLogonEvents</td><td>Defender XDR</td><td>Endpoint behavior corroboration</td></tr>
+      <tr><td>SigninLogs_Simulation</td><td>Entra ID (sim)</td><td>Identity sign-ins, conditional access decisions</td></tr>
+      <tr><td>ThreatIntelIndicators</td><td>MDTI / TI Connector</td><td>STIX-pattern IOC matching (3.6 M active)</td></tr>
+      <tr><td>AbuseIPDB_Blacklist_CL</td><td>AbuseIPDB</td><td>External-IP reputation enrichment (150 K rows)</td></tr>
+      <tr><td>Shodan_InternetDB_CL / StorageBlobTI_CL</td><td>Custom feeds</td><td>Asset exposure + storage abuse enrichment</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ============================ ANALYTIC RULES ============================ -->
+<section id="rules">
+  <h2>Recommended Sentinel Analytics Rules (KQL)</h2>
+
+  <h3>R1 — Password spray with MDTI/TI &amp; AbuseIPDB enrichment</h3>
+<pre><code>let badIPs = ThreatIntelIndicators
+| where IsActive == true and ObservableKey == "network-traffic:src_ref.value"
+| summarize by ObservableValue;
+let abuseIPs = AbuseIPDB_Blacklist_CL | summarize by IpAddress;
+ASimAuthenticationEventLogs
+| where TimeGenerated &gt; ago(1h)
+| where EventResult in ("Failure","Success")
+| summarize Failures=countif(EventResult=="Failure"),
+            Successes=countif(EventResult=="Success"),
+            Users=dcount(TargetUsername)
+            by SrcIpAddr
+| where (Failures &gt;= 5 and Users &gt;= 3) or Successes &gt; 0
+| extend MDTI = iif(SrcIpAddr in (badIPs), "MDTI-hit", ""),
+         AbuseIPDB = iif(SrcIpAddr in (abuseIPs), "AbuseIPDB-hit", "")
+| where MDTI != "" or AbuseIPDB != "" or Failures &gt;= 10
+| project SrcIpAddr, Failures, Successes, Users, MDTI, AbuseIPDB</code></pre>
+
+  <h3>R2 — Ransomware behaviour on endpoints</h3>
+<pre><code>let ransom_ext = dynamic([".locked",".encrypted",".enc",".ransom",".crypt"]);
+ASimFileEventLogs
+| where TimeGenerated &gt; ago(15m)
+| where ThreatCategory == "Ransomware"
+   or TargetFileExtension in (ransom_ext)
+   or TargetFileName has_any (ransom_ext)
+| summarize Files=count(), Hosts=dcount(DvcHostname)
+            by ActorUsername, ActingProcessName, bin(TimeGenerated, 5m)
+| where Files &gt;= 10 or Hosts &gt;= 2</code></pre>
+
+  <h3>R3 — DNS exfiltration tunnel</h3>
+<pre><code>ASimDnsActivityLogs
+| where TimeGenerated &gt; ago(30m)
+| extend qlen = strlen(DnsQuery)
+| where qlen &gt; 50
+   or DnsQuery matches regex @"^[A-Za-z0-9+/=]{20,}\."
+| summarize Q=count(), L=avg(qlen), Sample=any(DnsQuery) by SrcIpAddr, ParentDomain=extract(@"([^.]+\.[^.]+)$",1,DnsQuery)
+| where Q &gt;= 20 or L &gt; 60</code></pre>
+
+  <h3>R4 — New admin / break-glass account abuse</h3>
+<pre><code>ASimUserManagementActivityLogs
+| where TimeGenerated &gt; ago(1h)
+| where EventType in ("UserCreated","UserAddedToGroup","PasswordReset")
+| where TargetUsername has_any ("admin","svc_","breakglass","root","sa_")
+   or TargetUserType == "Admin"
+| join kind=leftouter (
+    ASimAuthenticationEventLogs
+    | where EventResult == "Success"
+    | summarize FirstAuth=min(TimeGenerated), AuthIPs=make_set(SrcIpAddr) by TargetUsername
+  ) on TargetUsername
+| where isnotempty(FirstAuth)</code></pre>
+
+  <h3>R5 — Cloud key creation from TI-flagged IP</h3>
+<pre><code>let badIPs = union
+  (ThreatIntelIndicators | where IsActive==true and ObservableKey=="network-traffic:src_ref.value" | summarize by IP=ObservableValue),
+  (AbuseIPDB_Blacklist_CL | summarize by IP=IpAddress);
+AWSCloudTrail
+| where TimeGenerated &gt; ago(1h)
+| where EventName in ("CreateAccessKey","PutRolePolicy","AttachUserPolicy","DeleteTrail","StopLogging")
+| where SourceIpAddress in (badIPs)
+| project TimeGenerated, EventName, UserIdentityUserName, SourceIpAddress, AwsRegion, ResponseElements</code></pre>
+
+  <h3>R6 — TOR / honeypot ingress to crown-jewel hosts</h3>
+<pre><code>let tor = ThreatIntelIndicators
+| where IsActive==true and Tags has "honeypot"
+| summarize by IP=ObservableValue;
+ASimNetworkSessionLogs
+| where TimeGenerated &gt; ago(1h)
+| where SrcIpAddr in (tor)
+| where DstHostname has_any ("DC","FILE","SQL","DB","VPN")
+| summarize Bytes=sum(NetworkBytes), Sessions=count() by SrcIpAddr, DstIpAddr, DstHostname, DstPortNumber</code></pre>
+</section>
+
+<!-- ============================ AGGREGATE IOCS ============================ -->
+<section id="iocs">
+  <h2>Aggregate Indicators of Compromise (IOCs)</h2>
+  <table>
+    <thead><tr><th>Type</th><th>Value</th><th>Scenario</th><th>Source(s)</th><th>Confidence</th></tr></thead>
+    <tbody>
+      <tr><td>IPv4</td><td><code>203.0.113.42</code></td><td>1, 2, 4</td><td>ASim auth/network, Okta, AWS, Proofpoint</td><td>High</td></tr>
+      <tr><td>IPv4</td><td><code>185.220.101.34</code></td><td>2</td><td>MDTI honeypot ×7, ASim network, Okta</td><td>Very High</td></tr>
+      <tr><td>IPv4</td><td><code>45.33.32.156</code></td><td>4</td><td>ASim auth/network</td><td>High</td></tr>
+      <tr><td>IPv4</td><td><code>23.94.168.73</code></td><td>3</td><td>Scenario seed (C2)</td><td>High</td></tr>
+      <tr><td>Domain</td><td><code>data.evil-c2-domain.example.com</code></td><td>3</td><td>ASim DNS</td><td>High</td></tr>
+      <tr><td>Filename</td><td><code>C:\temp\update.exe</code></td><td>2</td><td>Registry, file events</td><td>High</td></tr>
+      <tr><td>Filename</td><td><code>C:\ProgramData\svchost.exe</code></td><td>2</td><td>Registry persistence</td><td>High</td></tr>
+      <tr><td>Account</td><td><code>svc_backup@contoso.com</code></td><td>4</td><td>UserMgmt + auth</td><td>High</td></tr>
+      <tr><td>Account</td><td><code>breakglass@contoso.com</code></td><td>1, 4</td><td>UserMgmt + auth</td><td>Medium</td></tr>
+      <tr><td>Hash example</td><td><code>e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855</code></td><td>2</td><td>SEG_MailGuard attachment</td><td>Medium</td></tr>
+      <tr><td>URL</td><td><code>https://update-service-cdn.xyz/download/report.exe</code></td><td>2</td><td>SEG_MailGuard</td><td>High</td></tr>
+      <tr><td>CVE</td><td><code>CVE-2023-20198</code> (Cisco IOS XE PrivEsc)</td><td>4</td><td>CrowdStrikeVulnerabilities</td><td>Critical</td></tr>
+      <tr><td>IAM ARN</td><td><code>arn:aws:iam::123456789012:user/agarcia</code></td><td>5</td><td>AWSCloudTrail + ASim auth</td><td>Very High</td></tr>
+      <tr><td>IAM ARN</td><td><code>arn:aws:iam::123456789012:user/admin</code></td><td>5</td><td>AWSCloudTrail + GWorkspace</td><td>Very High</td></tr>
+      <tr><td>STS session</td><td><code>arn:aws:sts::123456789012:assumed-role/AdminRole/session1</code></td><td>5</td><td>AWSCloudTrail (4 SrcIPs)</td><td>Very High</td></tr>
+      <tr><td>Account</td><td><code>ext_vendor1@woodgrove.com</code></td><td>5</td><td>AWS IAM + ASim UserMgmt</td><td>High</td></tr>
+      <tr><td>Forgery signature</td><td><code>SourceIpAddress="AWS Internal"</code> on IAM mutations</td><td>5</td><td>AWSCloudTrail</td><td>Very High</td></tr>
+      <tr><td>Template leak</td><td><code>{{newadmin.username}}</code></td><td>5</td><td>Entra + Okta + AWS audit</td><td>High</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  Microsoft Sentinel Workspace LAWSentinel · Generated programmatically from KQL findings on 2026-04-28 · 22 tables correlated · 5 attack scenarios
+</footer>
+</div>
+</body>
+</html>
