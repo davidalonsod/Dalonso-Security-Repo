@@ -1,0 +1,44 @@
+id: 7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f0a
+name: GWS - Phishing Alert Spike Across Multiple Users
+description: |
+  Five or more distinct users received phishing-related alerts in a 1-hour window.
+  Suggests an active campaign hitting the tenant.
+severity: Medium
+status: Available
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+relevantTechniques:
+  - T1566.001
+  - T1566.002
+query: |
+  GWSAlerts_CL
+  | where Source == "Gmail phishing" or AlertDataType endswith "MailPhishing"
+  | extend User = tostring(AlertData.email)
+  | summarize Users = make_set(User, 100), AlertCount = count(),
+              FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+              by bin(TimeGenerated, 1h)
+  | where array_length(Users) >= 5
+  | mv-expand User = Users to typeof(string)
+  | project TimeGenerated, FirstSeen, LastSeen, AlertCount, User
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: User
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: 4h
+    matchingMethod: AnyAlert
+version: 1.0.0
+kind: Scheduled

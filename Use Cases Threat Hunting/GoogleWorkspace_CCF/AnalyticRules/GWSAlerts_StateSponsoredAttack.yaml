@@ -1,0 +1,47 @@
+id: 7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f01
+name: GWS - Government-backed (State-Sponsored) Attack Warning
+description: |
+  Google Alert Center has issued a state-sponsored attack warning for an account
+  in the tenant. Google sends these only when there is high-confidence evidence
+  of nation-state targeting. Treat as critical and engage IR.
+severity: High
+status: Available
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+queryFrequency: 10m
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078.004
+  - T1566
+query: |
+  GWSAlerts_CL
+  | where Source == "Google identity" or AlertType == "Government attack warning"
+       or AlertDataType endswith "StateSponsoredAttack"
+  | extend TargetUser = tostring(AlertData.email)
+  | project TimeGenerated, AlertId, MetadataSeverity, Source, AlertType,
+            TargetUser, SecurityInvestigationToolLink, AlertData
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: TargetUser
+  - entityType: URL
+    fieldMappings:
+      - identifier: Url
+        columnName: SecurityInvestigationToolLink
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: 24h
+    matchingMethod: AllEntities
+version: 1.0.0
+kind: Scheduled

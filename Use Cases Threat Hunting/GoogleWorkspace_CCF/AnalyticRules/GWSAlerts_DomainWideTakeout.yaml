@@ -1,0 +1,42 @@
+id: 7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f02
+name: GWS - Domain-Wide Takeout Initiated
+description: |
+  A super admin initiated a domain-wide data takeout. This exports every user's
+  data and is a high-impact action commonly observed in account-takeover and
+  insider exfiltration scenarios.
+severity: High
+status: Available
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+queryFrequency: 10m
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Exfiltration
+relevantTechniques:
+  - T1567
+  - T1530
+query: |
+  GWSAlerts_CL
+  | where Source == "Domain wide takeout"
+       or AlertDataType endswith "DomainWideTakeoutInitiated"
+       or AlertType has "takeout"
+  | extend Initiator = tostring(coalesce(AlertData.email, AlertData.initiator))
+  | project TimeGenerated, AlertId, MetadataSeverity, Source, AlertType,
+            Initiator, SecurityInvestigationToolLink, AlertData
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Initiator
+  - entityType: URL
+    fieldMappings:
+      - identifier: Url
+        columnName: SecurityInvestigationToolLink
+incidentConfiguration:
+  createIncident: true
+version: 1.0.0
+kind: Scheduled

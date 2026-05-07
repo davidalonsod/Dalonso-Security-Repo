@@ -1,0 +1,44 @@
+id: 7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f09
+name: GWS - Mobile Device Compromised
+description: |
+  Workspace MDM flagged a managed mobile device as compromised (e.g., rooted/jailbroken,
+  malware-infected). Treat as endpoint compromise impacting Workspace data.
+severity: High
+status: Available
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+queryFrequency: 30m
+queryPeriod: 2h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - Persistence
+relevantTechniques:
+  - T1078.004
+  - T1474
+query: |
+  GWSAlerts_CL
+  | where Source == "Mobile device management"
+       or AlertDataType endswith "DeviceCompromised"
+       or AlertType has "Device compromised"
+  | extend User = tostring(AlertData.email),
+           DeviceId = tostring(AlertData.deviceId),
+           DeviceModel = tostring(AlertData.deviceModel)
+  | project TimeGenerated, AlertId, MetadataSeverity, AlertType,
+            User, DeviceId, DeviceModel, SecurityInvestigationToolLink, AlertData
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: User
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: DeviceId
+incidentConfiguration:
+  createIncident: true
+version: 1.0.0
+kind: Scheduled
