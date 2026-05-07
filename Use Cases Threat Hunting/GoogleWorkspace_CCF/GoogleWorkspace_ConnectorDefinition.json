@@ -1,0 +1,131 @@
+{
+    "name": "GoogleWorkspaceDefinition",
+    "apiVersion": "2022-09-01-preview",
+    "type": "Microsoft.SecurityInsights/dataConnectorDefinitions",
+    "location": "{{location}}",
+    "kind": "Customizable",
+    "availability": {
+        "isPreview": true,
+        "status": 1
+    },
+    "properties": {
+        "connectorUiConfig": {
+            "id": "GoogleWorkspaceConnector",
+            "title": "Google Workspace Alert Center (using Sentinel Connector Builder Agent)",
+            "publisher": "Community custom connector",
+            "descriptionMarkdown": "The Google Workspace connector ingests Alert Center alerts (phishing, DLP, device compromise, state-sponsored attacks, and suspicious activity) from Google Workspace into Microsoft Sentinel.\n\nSupports OAuth2 authentication.\n\nFor more information, visit [Google Workspace Alert Center API](https://developers.google.com/workspace/admin/alertcenter/reference/rest).",
+            "graphQueriesTableName": "GWSAlerts_CL",
+            "graphQueries": [
+                {
+                    "metricName": "Total alerts received",
+                    "legend": "{{graphQueriesTableName}}",
+                    "baseQuery": "{{graphQueriesTableName}} | where TimeGenerated > ago(14d) | summarize count() by bin(TimeGenerated, 1d)"
+                }
+            ],
+            "dataTypes": [
+                {
+                    "name": "{{graphQueriesTableName}}",
+                    "lastDataReceivedQuery": "{{graphQueriesTableName}} | summarize Time = max(TimeGenerated) | where isnotempty(Time)"
+                }
+            ],
+            "connectivityCriteria": [
+                {
+                    "type": "HasDataConnectors"
+                }
+            ],
+            "sampleQueries": [
+                {
+                    "description": "All alerts from the last 24 hours",
+                    "query": "{{graphQueriesTableName}} | where TimeGenerated > ago(24h) | take 100"
+                },
+                {
+                    "description": "Alerts grouped by severity",
+                    "query": "{{graphQueriesTableName}} | summarize count() by MetadataSeverity | order by count_ desc"
+                },
+                {
+                    "description": "Alerts grouped by alert type",
+                    "query": "{{graphQueriesTableName}} | summarize count() by AlertType | order by count_ desc"
+                },
+                {
+                    "description": "High severity alerts in the last 7 days",
+                    "query": "{{graphQueriesTableName}} | where TimeGenerated > ago(7d) | where MetadataSeverity == 'HIGH' | project TimeGenerated, AlertId, AlertType, Source, MetadataStatus, MetadataAssignee"
+                },
+                {
+                    "description": "Open (not closed) alerts grouped by source",
+                    "query": "{{graphQueriesTableName}} | where MetadataStatus != 'CLOSED' | summarize count() by Source | order by count_ desc"
+                }
+            ],
+            "permissions": {
+                "resourceProvider": [
+                    {
+                        "provider": "Microsoft.OperationalInsights/workspaces",
+                        "permissionsDisplayText": "read and write permissions are required.",
+                        "providerDisplayName": "Workspace",
+                        "scope": "Workspace",
+                        "requiredPermissions": {
+                            "write": true,
+                            "read": true,
+                            "delete": false
+                        }
+                    }
+                ],
+                "customs": [
+                    {
+                        "name": "Google Workspace OAuth Application",
+                        "description": "An OAuth2 application must be registered in Google Cloud Console with the `https://www.googleapis.com/auth/apps.alerts` scope authorized. Client ID and Client Secret are required. See [Alert Center API documentation](https://developers.google.com/workspace/admin/alertcenter/reference/rest) for setup instructions."
+                    }
+                ],
+                "tenant": [
+                    "GlobalAdmin",
+                    "SecurityAdmin"
+                ]
+            },
+            "instructionSteps": [
+                {
+                    "title": "Step 1 - Register an OAuth2 application in Google Cloud Console",
+                    "description": "1. Go to the [Google Cloud Console](https://console.cloud.google.com/) and select or create a project.\n2. Enable the **Google Workspace Alert Center API** for the project.\n3. Configure the OAuth consent screen and add the scope `https://www.googleapis.com/auth/apps.alerts`.\n4. Under **APIs & Services > Credentials**, create an **OAuth 2.0 Client ID** (Web application).\n5. Add the following Authorized redirect URI: `https://portal.azure.com/TokenAuthorize/ExtensionName/Microsoft_Azure_Security_Insights`.\n6. Copy the generated **Client ID** and **Client Secret** for use in the next step.\n\nFor more information, see the [Alert Center API documentation](https://developers.google.com/workspace/admin/alertcenter/reference/rest)."
+                },
+                {
+                    "title": "Step 2 - Connect to Google Workspace Alert Center",
+                    "description": "Provide the OAuth2 Client ID, Client Secret, and Authorization Code from your Google Cloud OAuth application, then click **Connect** to authorize access and begin ingesting alerts.",
+                    "instructions": [
+                        {
+                            "type": "Textbox",
+                            "parameters": {
+                                "label": "Client ID",
+                                "placeholder": "Enter the OAuth 2.0 Client ID",
+                                "type": "text",
+                                "name": "clientId"
+                            }
+                        },
+                        {
+                            "type": "Textbox",
+                            "parameters": {
+                                "label": "Client Secret",
+                                "placeholder": "Enter the OAuth 2.0 Client Secret",
+                                "type": "password",
+                                "name": "clientSecret"
+                            }
+                        },
+                        {
+                            "type": "Textbox",
+                            "parameters": {
+                                "label": "Authorization Code",
+                                "placeholder": "Enter the OAuth 2.0 Authorization Code",
+                                "type": "text",
+                                "name": "code"
+                            }
+                        },
+                        {
+                            "type": "ConnectionToggleButton",
+                            "parameters": {
+                                "connectLabel": "Connect",
+                                "name": "connect"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+}
