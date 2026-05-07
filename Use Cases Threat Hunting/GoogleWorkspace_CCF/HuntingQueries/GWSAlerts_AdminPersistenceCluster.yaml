@@ -1,0 +1,37 @@
+id: 8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a04
+name: GWS Alerts - SSO / Admin Persistence Cluster
+description: |
+  Cluster of admin-persistence-related alerts within a 24-hour window per actor:
+  SSO profile changes, super-admin password resets, primary admin changes,
+  privilege grants. Detects the classic IdP-relay / golden-account pattern from
+  the GCP Pentest Checklist (Workspace persistence).
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+tactics:
+  - Persistence
+  - PrivilegeEscalation
+relevantTechniques:
+  - T1098
+  - T1556
+  - T1484.002
+query: |
+  GWSAlerts_CL
+  | where TimeGenerated > ago(14d)
+  | where Source in ("Sensitive Admin Action", "User Changes")
+       or AlertType has_any ("SSO profile", "Super admin password reset",
+                             "Primary admin changed", "granted Admin")
+  | extend Actor = tostring(coalesce(AlertData.actorEmail, AlertData.email))
+  | summarize DistinctTypes = dcount(AlertType),
+              AlertTypes = make_set(AlertType, 50),
+              FirstSeen = min(TimeGenerated),
+              LastSeen = max(TimeGenerated),
+              AlertCount = count()
+              by bin(TimeGenerated, 1d), Actor
+  | where DistinctTypes >= 2
+  | order by AlertCount desc
+tags:
+  - GoogleWorkspace
+  - Persistence
+  - GCPPentestChecklist

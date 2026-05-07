@@ -1,0 +1,37 @@
+id: 8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a06
+name: GWS Alerts - Phishing User-Reported vs System-Detected Correlation
+description: |
+  Joins user-reported phishing with system-detected phishing/malware reclassification
+  to find campaigns where users reported messages BEFORE Google reclassified them.
+  Highlights detection-gap windows.
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+tactics:
+  - InitialAccess
+relevantTechniques:
+  - T1566.001
+query: |
+  let userReported =
+      GWSAlerts_CL
+      | where AlertType has_any ("User reported phishing", "Suspicious message reported")
+      | extend Subject = tostring(AlertData.messages[0].subject),
+               Sender = tostring(AlertData.messages[0].fromHeader)
+      | project ReportTime = TimeGenerated, Subject, Sender, ReportAlertId = AlertId;
+  let reclassified =
+      GWSAlerts_CL
+      | where AlertType has_any ("Phishing reclassification", "Malware reclassification")
+      | extend Subject = tostring(AlertData.messages[0].subject),
+               Sender = tostring(AlertData.messages[0].fromHeader)
+      | project ReclassifyTime = TimeGenerated, Subject, Sender, ReclassifyAlertId = AlertId;
+  userReported
+  | join kind=inner reclassified on Subject, Sender
+  | extend GapHours = (ReclassifyTime - ReportTime) / 1h
+  | where GapHours > 0
+  | project ReportTime, ReclassifyTime, GapHours, Subject, Sender,
+            ReportAlertId, ReclassifyAlertId
+  | order by GapHours desc
+tags:
+  - GoogleWorkspace
+  - Phishing

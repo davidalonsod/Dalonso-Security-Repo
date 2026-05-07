@@ -1,0 +1,31 @@
+id: 8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a07
+name: GWS Alerts - First-Seen Alert Types Per User (Anomaly Hunt)
+description: |
+  Surfaces (User, AlertType) pairs that have never been observed in the tenant
+  before within the chosen baseline window. New alert categories on a user are
+  worth a manual look.
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+tactics:
+  - Discovery
+query: |
+  let baseline = 60d;
+  let recent   = 1d;
+  let historical =
+      GWSAlerts_CL
+      | where TimeGenerated between (ago(baseline) .. ago(recent))
+      | extend User = tostring(AlertData.email)
+      | distinct User, AlertType;
+  GWSAlerts_CL
+  | where TimeGenerated > ago(recent)
+  | extend User = tostring(AlertData.email)
+  | join kind=leftanti historical on User, AlertType
+  | project TimeGenerated, AlertId, User, Source, AlertType, MetadataSeverity,
+            SecurityInvestigationToolLink
+  | order by TimeGenerated desc
+tags:
+  - GoogleWorkspace
+  - Anomaly
+  - Discovery

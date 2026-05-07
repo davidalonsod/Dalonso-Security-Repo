@@ -1,0 +1,33 @@
+id: 8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a05
+name: GWS Alerts - DLP Top Offenders & Sensitive File Hotspots
+description: |
+  Aggregates DLP rule violations to surface top offending users and the most
+  frequently flagged files / rules. Pivot for data-exfil hunts.
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+tactics:
+  - Exfiltration
+  - Collection
+relevantTechniques:
+  - T1530
+  - T1567.002
+query: |
+  GWSAlerts_CL
+  | where TimeGenerated > ago(30d)
+  | where Source == "Data Loss Prevention" or AlertDataType endswith "DlpRuleViolation"
+  | extend Owner = tostring(coalesce(AlertData.resourceOwner, AlertData.email)),
+           RuleName = tostring(AlertData.ruleName),
+           ResourceTitle = tostring(AlertData.resourceTitle),
+           Severity = tostring(coalesce(AlertData.severity, MetadataSeverity))
+  | summarize Hits = count(),
+              Rules = make_set(RuleName, 25),
+              Resources = make_set(ResourceTitle, 25),
+              MaxSeverity = max(Severity)
+              by Owner
+  | order by Hits desc
+tags:
+  - GoogleWorkspace
+  - DLP
+  - Exfiltration

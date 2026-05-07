@@ -1,0 +1,36 @@
+id: 8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a02
+name: GWS Alerts - Suspicious Programmatic Login (OAuth Abuse)
+description: |
+  Hunt for "Suspicious programmatic login" alerts. These typically indicate token
+  theft, OAuth grant abuse, or service-account misuse - patterns documented in
+  the GCP Pentest Checklist (OAuth/IAM persistence section). Pivot on user and
+  source IP to find the abused identity / token.
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078.004
+  - T1550.001
+query: |
+  GWSAlerts_CL
+  | where TimeGenerated > ago(14d)
+  | where AlertType has_any ("Suspicious programmatic login",
+                             "Suspicious login from a less secure app")
+  | extend User = tostring(AlertData.email),
+           ClientIp = tostring(AlertData.loginDetails.ipAddress),
+           AppName = tostring(coalesce(AlertData.appName, AlertData.applicationName))
+  | summarize Alerts = count(),
+              IPs = make_set(ClientIp, 50),
+              Apps = make_set(AppName, 50),
+              FirstSeen = min(TimeGenerated),
+              LastSeen = max(TimeGenerated)
+              by User, AlertType
+  | order by Alerts desc
+tags:
+  - GoogleWorkspace
+  - OAuth
+  - GCPPentestChecklist
