@@ -1,0 +1,42 @@
+id: 7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f05
+name: GWS - User Granted Admin Privilege
+description: |
+  A user was granted admin privileges or a previously suspended user was
+  reactivated. Common technique for persistence after account takeover.
+severity: Medium
+status: Available
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+queryFrequency: 30m
+queryPeriod: 2h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Persistence
+  - PrivilegeEscalation
+relevantTechniques:
+  - T1098.003
+query: |
+  GWSAlerts_CL
+  | where Source == "User Changes"
+       or AlertDataType endswith "UserChanges"
+  | where AlertType has_any ("granted Admin", "Suspended user made active")
+  | extend Actor = tostring(coalesce(AlertData.actorEmail, AlertData.email)),
+           Target = tostring(coalesce(AlertData.targetEmail, AlertData.userEmail))
+  | project TimeGenerated, AlertId, MetadataSeverity, Source, AlertType,
+            Actor, Target, SecurityInvestigationToolLink, AlertData
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Actor
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Target
+incidentConfiguration:
+  createIncident: true
+version: 1.0.0
+kind: Scheduled
