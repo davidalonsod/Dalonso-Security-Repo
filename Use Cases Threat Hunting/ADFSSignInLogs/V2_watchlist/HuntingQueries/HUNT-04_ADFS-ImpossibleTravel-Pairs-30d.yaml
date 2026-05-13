@@ -1,0 +1,42 @@
+id: a1f00004-0004-4004-9004-adfs00000004
+name: HUNT-04 ADFS Impossible Travel Pairs (30d)
+description: |
+  Looks back 30 days for the same user authenticating from two distinct
+  countries within a short window (default 4h). Use to investigate users
+  flagged by RULE-07 and find historical occurrences.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+tactics:
+  - InitialAccess
+  - LateralMovement
+relevantTechniques:
+  - T1078
+query: |
+  ADFSSignInLogs
+  | invoke ExcludeAllowlistedIPs()
+  | where TimeGenerated > ago(30d)
+  | where ResultType == 0
+  | where isnotempty(Location)
+  | sort by UserPrincipalName asc, TimeGenerated asc
+  | extend PrevTime    = prev(TimeGenerated, 1)
+  | extend PrevCountry = prev(Location, 1)
+  | extend PrevIP      = prev(IPAddress, 1)
+  | extend PrevUser    = prev(UserPrincipalName, 1)
+  | where UserPrincipalName == PrevUser
+       and Location != PrevCountry
+       and (TimeGenerated - PrevTime) < 4h
+  | project
+      TimeGenerated, UserPrincipalName,
+      CurrentCountry = Location, CurrentIP = IPAddress,
+      PreviousCountry = PrevCountry, PreviousIP = PrevIP,
+      DeltaMinutes   = datetime_diff('minute', TimeGenerated, PrevTime)
+  | summarize
+      Occurrences = count(),
+      MinDelta    = min(DeltaMinutes),
+      Countries   = make_set(strcat(PreviousCountry, '->', CurrentCountry), 25),
+      IPs         = make_set(CurrentIP, 25)
+    by UserPrincipalName
+  | order by Occurrences desc

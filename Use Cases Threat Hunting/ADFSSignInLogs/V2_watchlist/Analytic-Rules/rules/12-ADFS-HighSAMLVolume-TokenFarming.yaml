@@ -1,0 +1,67 @@
+id: f2a3b4c5-d6e7-4f8a-9b0c-1d2e3f4a5b6c
+name: ADFS High SAML Token Volume - Automated Token Farming
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects a user generating more than 50 ADFS SAML tokens in a single hour from the same IP
+  address. Legitimate interactive users do not generate hundreds of SAML assertions per hour;
+  this volume indicates automated credential stuffing, token farming for downstream replay,
+  or a compromised account being actively used by a script or bot. High-volume SAML issuance
+  from one IP is a precursor to large-scale token replay attacks.
+  MITRE ATT&CK: T1550 (Use Alternate Authentication Material), T1606 (Forge Web Credentials)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+queryFrequency: 1h
+queryPeriod: 2h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - LateralMovement
+relevantTechniques:
+  - T1550
+  - T1606
+query: |
+  ADFSSignInLogs
+  | where TimeGenerated > ago(2h)
+  | where ResultType == 0
+  | where TokenIssuerType == "ADFederationServices"
+  | summarize
+      TokenCount = count(),
+      UniqueApps = dcount(AppDisplayName),
+      Apps       = make_set(AppDisplayName)
+    by UserPrincipalName, IPAddress, bin(TimeGenerated, 1h)
+  | where TokenCount > 50
+  | order by TokenCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  TokenCount: TokenCount
+  UniqueApps: UniqueApps
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS Token Volume Spike - {{UserPrincipalName}} generated {{TokenCount}} tokens in 1h"
+  alertDescriptionFormat: "User {{UserPrincipalName}} from IP {{IPAddress}} generated {{TokenCount}} ADFS SAML tokens in one hour. Possible automated token farming or credential stuffing."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+      - IP
+    groupByAlertDetails: []
+    groupByCustomDetails: []

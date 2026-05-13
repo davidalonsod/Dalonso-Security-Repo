@@ -1,0 +1,32 @@
+id: a1f00007-0007-4007-9007-adfs00000007
+name: HUNT-07 ADFS New Country per User (30d vs 90d baseline)
+description: |
+  Detects users whose 30-day country footprint includes a country never seen
+  in the prior 60 days of ADFS sign-ins. Complements RULE-08 by surfacing
+  every first-seen country shift, not only ones with anomaly scoring.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+tactics:
+  - InitialAccess
+relevantTechniques:
+  - T1078
+query: |
+  let now      = ADFSSignInLogs
+    | invoke ExcludeAllowlistedIPs()
+    | where TimeGenerated between (ago(30d) .. now())
+    | where ResultType == 0
+    | summarize NowCountries = make_set(Location, 25) by UserPrincipalName;
+  let baseline = ADFSSignInLogs
+    | invoke ExcludeAllowlistedIPs()
+    | where TimeGenerated between (ago(90d) .. ago(30d))
+    | where ResultType == 0
+    | summarize BaselineCountries = make_set(Location, 25) by UserPrincipalName;
+  now
+  | join kind=leftouter (baseline) on UserPrincipalName
+  | extend NewCountries = set_difference(NowCountries, coalesce(BaselineCountries, dynamic([])))
+  | where array_length(NewCountries) > 0
+  | project UserPrincipalName, NewCountries, NowCountries, BaselineCountries
+  | order by array_length(NewCountries) desc

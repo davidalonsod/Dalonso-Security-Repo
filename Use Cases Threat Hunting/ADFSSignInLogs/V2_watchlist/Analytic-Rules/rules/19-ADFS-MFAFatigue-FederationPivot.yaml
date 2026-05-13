@@ -1,0 +1,92 @@
+id: a9b0c1d2-e3f4-4a5b-6c7d-8e9f0a1b2c3d
+name: MFA Fatigue Attack Followed by ADFS Federation Pivot
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects the "MFA fatigue → ADFS pivot" attack chain: a user receives 3 or more MFA push
+  prompts (MFA fatigue indicators in SigninLogs), eventually approves one (MFA success), and
+  then the attacker pivots to ADFS-federated resources within the same session window. This
+  multi-stage attack exploits user MFA fatigue to gain initial access, then uses the resulting
+  session to authenticate silently to on-premises resources via the ADFS federation path.
+  MITRE ATT&CK: T1621 (Multi-Factor Authentication Request Generation), T1550 (Use Alternate Authentication Material)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - InitialAccess
+  - DefenseEvasion
+relevantTechniques:
+  - T1621
+  - T1550
+query: |
+  let MFAFatigue =
+      SigninLogs
+      | where TimeGenerated > ago(1d)
+      | where ResultType in (50074, 500121, 50076)
+      | summarize
+          MFAAttempts  = count(),
+          FirstAttempt = min(TimeGenerated)
+        by UserPrincipalName;
+  let MFASuccess =
+      SigninLogs
+      | where TimeGenerated > ago(1d)
+      | where ResultType == 0
+      | where AuthenticationRequirement == "multiFactorAuthentication"
+      | summarize MFASuccessTime = min(TimeGenerated)
+        by UserPrincipalName;
+  MFAFatigue
+  | where MFAAttempts >= 3
+  | join kind=inner MFASuccess on UserPrincipalName
+  | where MFASuccessTime > FirstAttempt
+  | join kind=inner (
+      ADFSSignInLogs
+      | where TimeGenerated > ago(1d)
+      | where ResultType == 0
+      | summarize
+          ADFS_Count     = count(),
+          ADFS_Countries = make_set(Location),
+          ADFS_IPs       = make_set(IPAddress)
+        by UserPrincipalName
+    ) on UserPrincipalName
+  | where ADFS_Count > 5
+  | project
+      UserPrincipalName,
+      MFAAttempts,
+      FirstMFAPrompt = FirstAttempt,
+      MFASuccessTime,
+      ADFS_Count,
+      ADFS_Countries,
+      ADFS_IPs
+  | order by MFAAttempts desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  MFAAttempts: MFAAttempts
+  ADFS_Count: ADFS_Count
+alertDetailsOverride:
+  alertDisplayNameFormat: "MFA Fatigue→ADFS Pivot - {{UserPrincipalName}} with {{MFAAttempts}} MFA prompts"
+  alertDescriptionFormat: "User {{UserPrincipalName}} received {{MFAAttempts}} MFA challenges (fatigue indicator), then pivoted to ADFS with {{ADFS_Count}} federated sign-ins. Possible adversary-in-the-middle attack."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

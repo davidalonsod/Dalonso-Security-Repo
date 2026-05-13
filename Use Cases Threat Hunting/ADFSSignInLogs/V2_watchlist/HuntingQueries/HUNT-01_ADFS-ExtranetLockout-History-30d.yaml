@@ -1,0 +1,32 @@
+id: a1f00001-0001-4001-9001-adfs00000001
+name: HUNT-01 ADFS Extranet Lockout History (30d)
+description: |
+  30-day timeline of ADFS extranet lockout events (ResultType 396083) per user/IP.
+  Surfaces sustained brute-force campaigns that RULE-01 might suppress via
+  grouping. Excludes IPs from the NetworkAllowlist watchlist.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+tactics:
+  - CredentialAccess
+relevantTechniques:
+  - T1110
+query: |
+  ADFSSignInLogs
+  | invoke ExcludeAllowlistedIPs()
+  | where TimeGenerated > ago(30d)
+  | where ResultType == 396083
+  | summarize
+      LockoutCount = count(),
+      UniqueIPs    = dcount(IPAddress),
+      IPs          = make_set(IPAddress, 25),
+      Countries    = make_set(Location, 10),
+      Apps         = make_set(AppDisplayName, 10),
+      FirstSeen    = min(TimeGenerated),
+      LastSeen     = max(TimeGenerated),
+      ActiveDays   = dcount(startofday(TimeGenerated))
+    by UserPrincipalName
+  | extend SustainedCampaign = ActiveDays >= 3
+  | order by LockoutCount desc

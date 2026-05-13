@@ -1,0 +1,71 @@
+id: b4c5d6e7-f8a9-4b0c-1d2e-3f4a5b6c7d8e
+name: ADFS Legacy Authentication Protocol - MFA Bypass via User Agent
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects successful ADFS authentications using legacy protocols (ActiveSync, IMAP, POP3,
+  EWS, MAPI, SMTP, etc.) that cannot participate in MFA challenges. Since ADFSSignInLogs
+  does not include a ClientAppUsed column, detection is based on UserAgent string patterns.
+  Legacy protocol authentication through ADFS bypasses all MFA and Conditional Access controls
+  that require modern authentication. More than 3 successful legacy auth events per user
+  indicates active legacy protocol usage that should be blocked.
+  MITRE ATT&CK: T1078 (Valid Accounts), T1550 (Use Alternate Authentication Material)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+queryFrequency: 4h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - DefenseEvasion
+relevantTechniques:
+  - T1078
+  - T1550
+query: |
+  let LegacyPatterns = dynamic([
+      "ActiveSync", "IMAP4", "IMAP", "POP3", "SMTP", "ExchangeWebServices",
+      "AutoDiscover", "EWS", "OutlookAnywhere", "MAPI",
+      "Microsoft Office", "MSExchangeFBA"
+  ]);
+  ADFSSignInLogs
+  | where TimeGenerated > ago(1d)
+  | where UserAgent has_any (LegacyPatterns)
+  | where ResultType == 0
+  | summarize
+      SignInCount = count(),
+      IPs         = make_set(IPAddress),
+      Countries   = make_set(Location),
+      UserAgents  = make_set(UserAgent, 5),
+      FirstSeen   = min(TimeGenerated),
+      LastSeen    = max(TimeGenerated)
+    by UserPrincipalName, AppDisplayName
+  | where SignInCount > 3
+  | order by SignInCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+customDetails:
+  SignInCount: SignInCount
+  AppDisplayName: AppDisplayName
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS Legacy Auth Detected - {{UserPrincipalName}} via {{AppDisplayName}}"
+  alertDescriptionFormat: "User {{UserPrincipalName}} completed {{SignInCount}} ADFS sign-ins via legacy protocol app {{AppDisplayName}}. Legacy auth bypasses MFA and Conditional Access."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

@@ -1,0 +1,38 @@
+id: a1f00003-0003-4003-9003-adfs00000003
+name: HUNT-03 ADFS Sign-ins from High-Risk Countries (90d)
+description: |
+  90-day timeline of successful ADFS sign-ins from high-risk countries per
+  user. Use to baseline travel patterns and find users with persistent
+  high-risk-country activity that may indicate compromised credentials.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+tactics:
+  - InitialAccess
+relevantTechniques:
+  - T1078
+query: |
+  let HighRiskCountries = dynamic([
+      "KP", "IR", "RU", "CN", "BY", "CU", "SY", "VE", "NG", "MM", "AF"
+  ]);
+  ADFSSignInLogs
+  | invoke ExcludeAllowlistedIPs()
+  | where TimeGenerated > ago(90d)
+  | where ResultType == 0
+  | where Location in (HighRiskCountries)
+  | summarize
+      Signins     = count(),
+      UniqueIPs   = dcount(IPAddress),
+      Countries   = make_set(Location, 10),
+      Apps        = make_set(AppDisplayName, 10),
+      FirstSeen   = min(TimeGenerated),
+      LastSeen    = max(TimeGenerated),
+      ActiveDays  = dcount(startofday(TimeGenerated))
+    by UserPrincipalName
+  | extend Persistence = case(
+      ActiveDays >= 30, "Long-term",
+      ActiveDays >= 5,  "Repeated",
+      "Sporadic")
+  | order by Signins desc

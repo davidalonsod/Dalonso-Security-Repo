@@ -1,0 +1,91 @@
+id: e7f8a9b0-c1d2-4e3f-4a5b-6c7d8e9f0a1b
+name: ADFS Auth Followed by Email Forwarding Rule - BEC Indicator
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects Business Email Compromise (BEC) patterns: a user authenticates via ADFS and then
+  creates or modifies an inbox forwarding/redirect rule in Exchange Online within 2 hours.
+  This sequence occurs when an attacker obtains valid credentials (via phishing or brute force
+  against ADFS), uses the ADFS-issued token to access Exchange, and immediately sets up
+  forwarding rules to exfiltrate email or maintain persistent email access even after
+  the password is changed.
+  MITRE ATT&CK: T1114 (Email Collection), T1078 (Valid Accounts), T1560 (Archive Collected Data)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+  - connectorId: Office365
+    dataTypes:
+      - OfficeActivity
+queryFrequency: 1h
+queryPeriod: 3h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Collection
+  - Exfiltration
+  - Persistence
+relevantTechniques:
+  - T1114
+  - T1078
+query: |
+  let ADFSAuthUsers =
+      ADFSSignInLogs
+      | where TimeGenerated > ago(3h)
+      | where ResultType == 0
+      | summarize
+          LastADFS = max(TimeGenerated),
+          ADFS_IPs = make_set(IPAddress)
+        by UserPrincipalName;
+  OfficeActivity
+  | where TimeGenerated > ago(3h)
+  | where Operation in (
+      "New-InboxRule", "Set-InboxRule", "UpdateInboxRules", "Set-Mailbox"
+    )
+  | where Parameters has_any (
+      "ForwardTo", "RedirectTo", "ForwardAsAttachmentTo",
+      "DeleteMessage", "MarkAsRead"
+    )
+  | extend UPN = tolower(UserId)
+  | join kind=inner ADFSAuthUsers on $left.UPN == $right.UserPrincipalName
+  | where TimeGenerated > LastADFS
+     and  (TimeGenerated - LastADFS) < 2h
+  | project
+      RuleCreationTime  = TimeGenerated,
+      UserPrincipalName = UPN,
+      Operation,
+      Parameters,
+      ADFS_IPs,
+      LastADFSSignIn    = LastADFS,
+      TimeSinceADFS     = (TimeGenerated - LastADFS),
+      ClientIP
+  | order by RuleCreationTime desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: ClientIP
+customDetails:
+  Operation: Operation
+  TimeSinceADFS: TimeSinceADFS
+alertDetailsOverride:
+  alertDisplayNameFormat: "ADFS BEC Alert - {{UserPrincipalName}} created forwarding rule after ADFS auth"
+  alertDescriptionFormat: "User {{UserPrincipalName}} authenticated via ADFS and then performed inbox rule operation '{{Operation}}' within 2 hours. High-confidence Business Email Compromise indicator."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

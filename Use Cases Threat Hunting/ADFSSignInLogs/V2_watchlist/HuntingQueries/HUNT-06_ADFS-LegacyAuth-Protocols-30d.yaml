@@ -1,0 +1,39 @@
+id: a1f00006-0006-4006-9006-adfs00000006
+name: HUNT-06 ADFS Legacy / Basic Auth Protocols (30d)
+description: |
+  ADFS sign-ins via legacy authentication clients (POP, IMAP, SMTP, MAPI,
+  Other clients) that bypass MFA. Useful for governance and to find users
+  still using deprecated auth flows that should be migrated to modern auth.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+tactics:
+  - DefenseEvasion
+  - InitialAccess
+relevantTechniques:
+  - T1078
+  - T1556
+query: |
+  let LegacyProtocols = dynamic([
+      "Other clients", "POP", "IMAP", "SMTP", "MAPI", "Exchange ActiveSync",
+      "Authenticated SMTP", "Exchange Web Services"
+  ]);
+  ADFSSignInLogs
+  | invoke ExcludeAllowlistedIPs()
+  | where TimeGenerated > ago(30d)
+  | where isnotempty(ClientAppUsed)
+  | where ClientAppUsed in (LegacyProtocols)
+       or ClientAppUsed startswith "Other"
+  | summarize
+      Attempts       = count(),
+      SuccessfulAuth = countif(ResultType == 0),
+      UniqueIPs      = dcount(IPAddress),
+      IPs            = make_set(IPAddress, 25),
+      Protocols      = make_set(ClientAppUsed, 10),
+      Countries      = make_set(Location, 10),
+      FirstSeen      = min(TimeGenerated),
+      LastSeen       = max(TimeGenerated)
+    by UserPrincipalName
+  | order by SuccessfulAuth desc, Attempts desc

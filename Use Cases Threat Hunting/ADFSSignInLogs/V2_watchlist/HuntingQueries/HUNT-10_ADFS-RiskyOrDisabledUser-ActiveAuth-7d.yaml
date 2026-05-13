@@ -1,0 +1,38 @@
+id: a1f00010-0010-4010-9010-adfs00000010
+name: HUNT-10 ADFS Active Auth from Risky / Disabled Users (7d)
+description: |
+  Finds ADFS sign-ins (any ResultType) in the last 7 days for accounts that
+  are currently disabled or flagged risky in Azure AD. Surfaces dormant or
+  off-boarded identities that still receive auth traffic - high signal of
+  persistence or credential reuse.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+      - IdentityInfo
+tactics:
+  - Persistence
+relevantTechniques:
+  - T1078
+query: |
+  let RiskyOrDisabled = IdentityInfo
+    | summarize arg_max(TimeGenerated, *) by AccountUPN
+    | where (isnotempty(RiskLevel) and RiskLevel !~ "none")
+         or IsAccountEnabled == false
+    | project AccountUPN, RiskLevel, IsAccountEnabled, JobTitle, Department;
+  ADFSSignInLogs
+  | invoke ExcludeAllowlistedIPs()
+  | where TimeGenerated > ago(7d)
+  | join kind=inner (RiskyOrDisabled) on $left.UserPrincipalName == $right.AccountUPN
+  | summarize
+      Attempts        = count(),
+      SuccessfulAuth  = countif(ResultType == 0),
+      UniqueIPs       = dcount(IPAddress),
+      IPs             = make_set(IPAddress, 25),
+      Countries       = make_set(Location, 10),
+      Apps            = make_set(AppDisplayName, 10),
+      FirstSeen       = min(TimeGenerated),
+      LastSeen        = max(TimeGenerated)
+    by UserPrincipalName, RiskLevel, IsAccountEnabled
+  | order by SuccessfulAuth desc, Attempts desc

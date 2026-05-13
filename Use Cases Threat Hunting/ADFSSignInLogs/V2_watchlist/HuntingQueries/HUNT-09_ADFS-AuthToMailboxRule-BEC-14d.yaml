@@ -1,0 +1,42 @@
+id: a1f00009-0009-4009-9009-adfs00000009
+name: HUNT-09 ADFS Auth to Mailbox Rule Correlation - BEC (14d)
+description: |
+  Joins ADFS sign-ins with Office 365 Exchange mailbox rule creation events
+  (within 6 hours of the same user). Reveals BEC patterns where a federated
+  identity is compromised and an inbox forwarding / autoresponder rule is
+  created from that session.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+  - connectorId: Office365
+    dataTypes:
+      - OfficeActivity
+tactics:
+  - Collection
+  - Exfiltration
+relevantTechniques:
+  - T1114.003
+  - T1098.002
+query: |
+  let RuleOps = dynamic([
+      "New-InboxRule", "Set-InboxRule", "New-TransportRule",
+      "Set-TransportRule", "Set-Mailbox"
+  ]);
+  let Auths = ADFSSignInLogs
+    | invoke ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(14d)
+    | where ResultType == 0
+    | project AuthTime = TimeGenerated, UserPrincipalName, AuthIP = IPAddress, AuthCountry = Location;
+  OfficeActivity
+  | where TimeGenerated > ago(14d)
+  | where OfficeWorkload =~ "Exchange"
+  | where Operation in (RuleOps)
+  | extend Actor = tolower(coalesce(UserId, Caller))
+  | join kind=inner (Auths | extend UPN = tolower(UserPrincipalName)) on $left.Actor == $right.UPN
+  | where TimeGenerated between (AuthTime .. AuthTime + 6h)
+  | project
+      TimeGenerated, Actor, Operation, ClientIP, Parameters,
+      AuthTime, AuthIP, AuthCountry
+  | order by TimeGenerated desc

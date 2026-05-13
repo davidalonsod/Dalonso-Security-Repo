@@ -1,0 +1,44 @@
+id: a1f00008-0008-4008-9008-adfs00000008
+name: HUNT-08 ADFS Sign-in to Privileged Azure AD Action Correlation (30d)
+description: |
+  Correlates successful ADFS sign-ins with subsequent privileged directory
+  actions in AuditLogs (within 1 hour). Useful for reconstructing the post-
+  authentication blast radius of suspected federated-account compromise.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+      - AuditLogs
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+relevantTechniques:
+  - T1098
+  - T1078
+query: |
+  let PrivOps = dynamic([
+      "Add member to role", "Add app role assignment to user",
+      "Add eligible member to role", "Add owner to application",
+      "Add service principal credentials", "Reset user password",
+      "Update user", "Disable Strong Authentication",
+      "Update conditional access policy", "Delete conditional access policy"
+  ]);
+  let Auths = ADFSSignInLogs
+    | invoke ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(30d)
+    | where ResultType == 0
+    | project AuthTime = TimeGenerated, UserPrincipalName, IPAddress, Location;
+  AuditLogs
+  | where TimeGenerated > ago(30d)
+  | where OperationName in (PrivOps)
+  | where Result =~ "success"
+  | extend Actor = tostring(InitiatedBy.user.userPrincipalName)
+  | where isnotempty(Actor)
+  | join kind=inner (Auths) on $left.Actor == $right.UserPrincipalName
+  | where TimeGenerated between (AuthTime .. AuthTime + 1h)
+  | project
+      TimeGenerated, Actor, OperationName, IPAddress, Location,
+      AuthTime,
+      TargetResources, AdditionalDetails
+  | order by TimeGenerated desc
