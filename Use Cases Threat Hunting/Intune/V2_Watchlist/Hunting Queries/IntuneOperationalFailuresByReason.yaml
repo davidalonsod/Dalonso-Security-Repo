@@ -1,0 +1,27 @@
+id: 7b8c9d10-aaaa-4001-8001-00000000000C
+name: HUNT - Intune operational errors grouped by reason
+description: |
+  Groups IntuneOperationalLogs failures by Category, OperationName, and ResultReason to surface
+  recurrent enrollment, check-in, or app-install failures. Repeated failures on a specific reason
+  can indicate mis-configured policies, tenant throttling, or adversary enrollment fuzzing.
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneOperationalLogs
+tactics:
+  - Reconnaissance
+relevantTechniques:
+  - T1595
+query: |
+  IntuneOperationalLogs
+  | where TimeGenerated > ago(1d)
+  | where Result =~ "Failure"
+  | extend Props = parse_json(tostring(Properties))
+  | extend UPN = tolower(coalesce(tostring(Props.Upn), tostring(Props.UserPrincipalName)))
+  | summarize Count = count(),
+              UniqueUsers = dcount(UPN),
+              Users = make_set(UPN, 25),
+              Sample = any(Props)
+            by Category, OperationName, ResultReason = tostring(coalesce(ResultReason, tostring(Props.ResultReason)))
+  | order by Count desc
+version: 1.0.0

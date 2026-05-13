@@ -1,0 +1,36 @@
+id: 7b8c9d10-aaaa-4001-8001-000000000003
+name: HUNT - Non-compliant devices still accessing corporate apps
+description: |
+  Lists devices currently in a non-compliant / error / unknown state that nevertheless
+  produced successful sign-ins to corporate apps. Indicates CA gaps or compliance bypass.
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneDeviceComplianceOrg
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+tactics:
+  - DefenseEvasion
+relevantTechniques:
+  - T1562
+query: |
+  let NetworkAllowlist = _GetWatchlist('NetworkAllowlist') | project IPRange = tostring(SearchKey);
+  let AllowedRanges = toscalar(NetworkAllowlist | summarize make_list(IPRange));
+  let bad =
+      IntuneDeviceComplianceOrg
+      | where TimeGenerated > ago(1d)
+      | where ComplianceState in~ ("NonCompliant","Error","Unknown","InGracePeriod")
+      | summarize arg_max(TimeGenerated, *) by DeviceId = tostring(DeviceId)
+      | project DeviceId, DeviceName = tostring(DeviceName), ComplianceState,
+                UPN = tolower(tostring(UPN));
+  SigninLogs
+  | where TimeGenerated > ago(1d) and ResultType == 0
+  | where not(ipv4_is_in_any_range(tostring(IPAddress), AllowedRanges))
+  | extend DeviceId = tostring(DeviceDetail.deviceId), UPN = tolower(UserPrincipalName)
+  | join kind=inner bad on DeviceId
+  | summarize SignIns = count(), Apps = make_set(AppDisplayName, 20),
+              IPs = make_set(IPAddress, 20)
+            by UPN, DeviceId, DeviceName, ComplianceState
+  | order by SignIns desc
+version: 1.0.0

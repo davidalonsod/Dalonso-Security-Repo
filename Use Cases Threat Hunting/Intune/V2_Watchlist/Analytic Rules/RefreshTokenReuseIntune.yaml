@@ -1,0 +1,58 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d508
+name: Intune - Possible refresh token / PRT reuse accessing Intune resource
+description: |
+  Detects non-interactive token redemption for Intune / Device Management resources from
+  an IP or ASN not previously associated with the user, where MFA was not freshly performed.
+  This pattern is characteristic of stolen refresh-token / PRT replay (token-theft).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADNonInteractiveUserSignInLogs
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - CredentialAccess
+  - LateralMovement
+relevantTechniques:
+  - T1528
+  - T1550.001
+query: |
+  let NetworkAllowlist = _GetWatchlist('NetworkAllowlist') | project IPRange = tostring(SearchKey);
+  let AllowedRanges = toscalar(NetworkAllowlist | summarize make_list(IPRange));
+  let intuneResources = dynamic([
+      "Microsoft Intune","Microsoft Intune API","Device Management",
+      "Windows 365","Microsoft Graph"
+  ]);
+  let baseline =
+      AADNonInteractiveUserSignInLogs
+      | where TimeGenerated between (ago(14d) .. ago(1h))
+      | summarize KnownIPs = make_set(IPAddress, 500), KnownASNs = make_set(tostring(AutonomousSystemNumber), 50)
+                by UPN = tolower(UserPrincipalName);
+  AADNonInteractiveUserSignInLogs
+  | where TimeGenerated > ago(1h)
+  | where ResultType == 0
+  | where not(ipv4_is_in_any_range(tostring(IPAddress), AllowedRanges))
+  | where ResourceDisplayName has_any (intuneResources)
+  | extend UPN = tolower(UserPrincipalName), ASN = tostring(AutonomousSystemNumber)
+  | extend AuthDetails = tostring(AuthenticationDetails)
+  | where AuthDetails !has "Multifactor"  // token used without fresh MFA
+  | join kind=leftouter baseline on UPN
+  | where isnull(KnownIPs) or (not(set_has_element(KnownIPs, IPAddress)) and not(set_has_element(KnownASNs, ASN)))
+  | project TimeGenerated, UPN, IPAddress, ASN, ResourceDisplayName, AppDisplayName,
+            UserAgent, Location=tostring(parse_json(tostring(LocationDetails)).countryOrRegion)
+  | extend AccountCustomEntity = UPN, IPCustomEntity = IPAddress
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPCustomEntity
+version: 1.0.0
+kind: Scheduled

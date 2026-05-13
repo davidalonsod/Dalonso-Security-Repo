@@ -1,0 +1,32 @@
+id: 7b8c9d10-aaaa-4001-8001-000000000008
+name: HUNT - Conditional Access device-compliance gaps
+description: |
+  Finds successful sign-ins where ConditionalAccessStatus was `notApplied` and the
+  device was not marked compliant/managed. Exposes CA policy gaps that an attacker
+  with a non-compliant device would exploit.
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+tactics:
+  - DefenseEvasion
+relevantTechniques:
+  - T1562
+query: |
+  let NetworkAllowlist = _GetWatchlist('NetworkAllowlist') | project IPRange = tostring(SearchKey);
+  let AllowedRanges = toscalar(NetworkAllowlist | summarize make_list(IPRange));
+  SigninLogs
+  | where TimeGenerated > ago(7d) and ResultType == 0
+  | where not(ipv4_is_in_any_range(tostring(IPAddress), AllowedRanges))
+  | extend IsCompliant = tobool(tostring(DeviceDetail.isCompliant)),
+           IsManaged   = tobool(tostring(DeviceDetail.isManaged)),
+           TrustType   = tostring(DeviceDetail.trustType),
+           CAStatus    = tostring(ConditionalAccessStatus)
+  | where CAStatus =~ "notApplied" and (IsCompliant != true or IsManaged != true)
+  | summarize SignIns = count(),
+              Apps  = make_set(AppDisplayName, 20),
+              IPs   = make_set(IPAddress, 20),
+              Users = make_set(UserPrincipalName, 50)
+            by TrustType
+  | order by SignIns desc
+version: 1.0.0

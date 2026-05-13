@@ -1,0 +1,30 @@
+id: 7b8c9d10-aaaa-4001-8001-00000000000B
+name: HUNT - Top Intune audit operators (volume baseline)
+description: |
+  Establishes a per-actor volume baseline across IntuneAuditLogs. Useful to spot service accounts
+  or admins whose operation volume has materially increased versus the previous week — a common
+  precursor to mass-policy changes or bulk device actions.
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneAuditLogs
+tactics:
+  - Discovery
+relevantTechniques:
+  - T1087
+query: |
+  let now =
+      IntuneAuditLogs
+      | where TimeGenerated > ago(1d)
+      | summarize Today = count(), OpsToday = make_set(OperationName, 30) by Actor = tostring(Identity);
+  let baseline =
+      IntuneAuditLogs
+      | where TimeGenerated between (ago(8d) .. ago(1d))
+      | summarize PrevWeek = count() / 7.0 by Actor = tostring(Identity);
+  now
+  | join kind=leftouter baseline on Actor
+  | extend Ratio = iff(PrevWeek == 0, todouble(Today), todouble(Today) / PrevWeek)
+  | where Today >= 20 and Ratio >= 3
+  | project Actor, Today, PrevWeekDailyAvg = PrevWeek, Ratio, OpsToday
+  | order by Ratio desc
+version: 1.0.0

@@ -1,0 +1,68 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d504
+name: Intune - Rogue device registration from suspicious user agent / tool
+description: |
+  Detects device registration or MDM enrollment activity with user agents or client strings
+  associated with offensive tooling (AADInternals, ROADtools / roadtx, goroadtools). These
+  strings appear in `SigninLogs.UserAgent` or Intune operational logs when attackers
+  forge or replay device-bound tokens.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+      - AADNonInteractiveUserSignInLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - CredentialAccess
+  - Persistence
+relevantTechniques:
+  - T1528
+  - T1098.005
+query: |
+  let NetworkAllowlist = _GetWatchlist('NetworkAllowlist') | project IPRange = tostring(SearchKey);
+  let AllowedRanges = toscalar(NetworkAllowlist | summarize make_list(IPRange));
+  let suspiciousUA = dynamic([
+      "AADInternals","roadtx","roadtools","goroadtools",
+      "Python-requests","Mozilla/5.0 (compatible; MSIE 10.0; Windows NT 6.2; Trident/6.0)"
+  ]);
+  let suspiciousApps = dynamic([
+      "Microsoft Intune Company Portal","Microsoft Authentication Broker",
+      "Azure Active Directory PowerShell","Microsoft Graph PowerShell",
+      "Microsoft Intune"
+  ]);
+  union isfuzzy=true
+      (SigninLogs
+          | where TimeGenerated > ago(1h)
+          | extend LocationDetails = todynamic(tostring(LocationDetails))
+          | project TimeGenerated, UserPrincipalName, AppDisplayName, ResourceDisplayName,
+                    UserAgent, IPAddress, LocationDetails, ResultType,
+                    AuthenticationRequirement, ConditionalAccessStatus),
+      (AADNonInteractiveUserSignInLogs
+          | where TimeGenerated > ago(1h)
+          | extend LocationDetails = todynamic(tostring(column_ifexists("LocationDetails", dynamic({}))))
+          | project TimeGenerated, UserPrincipalName, AppDisplayName, ResourceDisplayName,
+                    UserAgent, IPAddress, LocationDetails, ResultType,
+                    AuthenticationRequirement, ConditionalAccessStatus)
+  | where ResultType == 0
+  | where AppDisplayName in~ (suspiciousApps) or ResourceDisplayName has_any ("Device Registration","Intune")
+  | where UserAgent has_any (suspiciousUA) or isempty(UserAgent)
+  | where not(ipv4_is_in_any_range(tostring(IPAddress), AllowedRanges))
+  | project TimeGenerated, UserPrincipalName, AppDisplayName, ResourceDisplayName,
+            UserAgent, IPAddress, Location=tostring(parse_json(tostring(LocationDetails)).countryOrRegion),
+            AuthenticationRequirement, ConditionalAccessStatus
+  | extend AccountCustomEntity = UserPrincipalName, IPCustomEntity = IPAddress
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPCustomEntity
+version: 1.0.0
+kind: Scheduled

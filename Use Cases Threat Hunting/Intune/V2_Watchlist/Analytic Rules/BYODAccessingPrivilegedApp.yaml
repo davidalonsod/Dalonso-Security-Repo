@@ -1,0 +1,64 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d510
+name: Intune - Personal / BYOD device enrolled accessing privileged app
+description: |
+  Detects when a device whose ownership is "personal" (BYOD) is enrolled and subsequently
+  used to access a privileged / sensitive application (e.g. Azure Portal, Microsoft Admin,
+  Exchange Admin). Often the final step in identity → device-trust → policy-abuse chains.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneDevices
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 7d
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - Persistence
+  - PrivilegeEscalation
+relevantTechniques:
+  - T1098.005
+query: |
+  let NetworkAllowlist = _GetWatchlist('NetworkAllowlist') | project IPRange = tostring(SearchKey);
+  let AllowedRanges = toscalar(NetworkAllowlist | summarize make_list(IPRange));
+  let privApps = dynamic([
+      "Azure Portal","Microsoft Azure Management","Microsoft 365 admin center",
+      "Exchange Admin Center","Microsoft Intune","Microsoft Admin Portals",
+      "Azure Active Directory PowerShell","Microsoft Graph PowerShell"
+  ]);
+  let byod =
+      IntuneDevices
+      | where TimeGenerated > ago(7d)
+      | where tostring(column_ifexists("OwnerType", "")) =~ "personal"
+      | summarize arg_max(TimeGenerated, *) by DeviceId = tostring(DeviceId)
+      | project DeviceId, DeviceName = tostring(DeviceName),
+                UPN = tolower(tostring(column_ifexists("UPN", column_ifexists("UserPrincipalName", ""))));
+  SigninLogs
+  | where TimeGenerated > ago(1h)
+  | where ResultType == 0
+  | where AppDisplayName in~ (privApps)
+  | where not(ipv4_is_in_any_range(tostring(IPAddress), AllowedRanges))
+  | extend DeviceId = tostring(DeviceDetail.deviceId), UPN = tolower(UserPrincipalName)
+  | join kind=inner byod on DeviceId
+  | project TimeGenerated, UPN, DeviceId, DeviceName, AppDisplayName, IPAddress,
+            Location=tostring(LocationDetails.countryOrRegion)
+  | extend AccountCustomEntity = UPN, HostCustomEntity = DeviceName, IPCustomEntity = IPAddress
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: HostCustomEntity
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPCustomEntity
+version: 1.0.0
+kind: Scheduled

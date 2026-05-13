@@ -1,0 +1,27 @@
+id: 7b8c9d10-aaaa-4001-8001-000000000009
+name: HUNT - Intune operational errors by category
+description: |
+  Aggregates IntuneOperationalLogs failures (policy application errors, enrollment
+  errors, app install errors). Spikes often precede compliance bypass or indicate
+  misconfiguration that lowers the security posture.
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneOperationalLogs
+tactics:
+  - DefenseEvasion
+relevantTechniques:
+  - T1562
+query: |
+  IntuneOperationalLogs
+  | where TimeGenerated > ago(7d)
+  | where tostring(Result) =~ "Failure"
+  | extend Props = parse_json(tostring(Properties))
+  | extend Reason = tostring(coalesce(tostring(Props.ResultReason),
+                                     tostring(Props.ResultDescription),
+                                     tostring(Props.ErrorDescription)))
+  | summarize Count = count(),
+              Examples = make_list(Reason, 5)
+            by Category = tostring(Category), OperationName
+  | order by Count desc
+version: 1.0.0

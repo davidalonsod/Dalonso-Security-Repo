@@ -1,0 +1,66 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d503
+name: Intune - Device registered with impossible travel to sign-in
+description: |
+  Correlates a new Intune/Azure AD device registration with a sign-in from a geographic
+  location inconsistent with the user's recent sign-ins (impossible travel). Common in
+  token-theft scenarios where an adversary registers their own device using a stolen PRT
+  or refresh token (AADInternals `Join-AADIntDeviceToAzureAD -PRTToken`).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneAuditLogs
+queryFrequency: 1h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - Persistence
+  - CredentialAccess
+relevantTechniques:
+  - T1098.005
+  - T1528
+query: |
+  let lookback = 1d;
+  let NetworkAllowlist = _GetWatchlist('NetworkAllowlist') | project IPRange = tostring(SearchKey);
+  let AllowedRanges = toscalar(NetworkAllowlist | summarize make_list(IPRange));
+  let registrations =
+      IntuneAuditLogs
+      | where TimeGenerated > ago(lookback)
+      | where OperationName has_any ("enroll","register","Create Device")
+      | extend DeviceName = tostring(parse_json(tostring(Properties)).TargetObjectName)
+      | project RegTime=TimeGenerated, UserPrincipalName=tolower(tostring(Identity)), DeviceName, OperationName;
+  let signins =
+      SigninLogs
+      | where TimeGenerated > ago(lookback)
+      | where ResultType == 0
+      | project SignInTime=TimeGenerated, UserPrincipalName=tolower(UserPrincipalName),
+                IPAddress, Location=tostring(LocationDetails.countryOrRegion),
+                City=tostring(LocationDetails.city), AppDisplayName, DeviceDetail=tostring(DeviceDetail);
+  registrations
+  | join kind=inner signins on UserPrincipalName
+  | where not(ipv4_is_in_any_range(tostring(IPAddress), AllowedRanges))
+  | where abs(datetime_diff('minute', RegTime, SignInTime)) <= 60
+  | summarize Locations = make_set(Location, 10),
+              Cities = make_set(City, 10),
+              IPs = make_set(IPAddress, 10),
+              Apps = make_set(AppDisplayName, 10),
+              FirstSignIn = min(SignInTime), LastSignIn = max(SignInTime)
+            by UserPrincipalName, DeviceName, RegTime, OperationName
+  | where array_length(Locations) > 1
+  | extend AccountCustomEntity = UserPrincipalName, HostCustomEntity = DeviceName
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: HostCustomEntity
+version: 1.0.0
+kind: Scheduled

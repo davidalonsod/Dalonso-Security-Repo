@@ -1,0 +1,54 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d515
+name: Intune - Stale managed device still reporting as compliant
+description: |
+  Devices that have not checked into Intune for 30+ days but are still returning a `Compliant`
+  posture in IntuneDeviceComplianceOrg. Attackers abuse this condition when they copy or replay
+  a device's PRT / compliance token from a dormant endpoint — the real device is offline but
+  compliance-gated Conditional Access still accepts the token. High FP potential; review with
+  sign-in logs for the same DeviceId.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneDevices
+      - IntuneDeviceComplianceOrg
+queryFrequency: 6h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - CredentialAccess
+  - DefenseEvasion
+relevantTechniques:
+  - T1552
+  - T1550
+query: |
+  let stale =
+      IntuneDevices
+      | where TimeGenerated > ago(14d)
+      | summarize LastSeen = max(todatetime(LastContact)) by DeviceId = tostring(DeviceId),
+                                                             DeviceName = tostring(DeviceName),
+                                                             UPN = tolower(tostring(UPN))
+      | where LastSeen < ago(30d);
+  let stillCompliant =
+      IntuneDeviceComplianceOrg
+      | where TimeGenerated > ago(1d)
+      | where ComplianceState =~ "Compliant"
+      | summarize arg_max(TimeGenerated, *) by DeviceId = tostring(DeviceId)
+      | project DeviceId, ComplianceState, ReportedOn = TimeGenerated;
+  stale
+  | join kind=inner stillCompliant on DeviceId
+  | project DeviceId, DeviceName, UPN, LastSeen, ReportedOn, ComplianceState
+  | extend AccountCustomEntity = UPN, HostCustomEntity = DeviceName
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: HostCustomEntity
+version: 1.0.0
+kind: Scheduled

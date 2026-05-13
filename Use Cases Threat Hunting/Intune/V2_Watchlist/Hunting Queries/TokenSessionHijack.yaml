@@ -1,0 +1,34 @@
+id: 7b8c9d10-aaaa-4001-8001-00000000000A
+name: HUNT - Token session hijack indicators on Intune resources
+description: |
+  Looks for non-interactive sign-ins to Intune / Device Management / Graph where the
+  same session id is seen from two different countries or two different user agents
+  within a short window — indicator of refresh-token / session-cookie replay.
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADNonInteractiveUserSignInLogs
+tactics:
+  - CredentialAccess
+  - LateralMovement
+relevantTechniques:
+  - T1528
+  - T1550.001
+query: |
+  let NetworkAllowlist = _GetWatchlist('NetworkAllowlist') | project IPRange = tostring(SearchKey);
+  let AllowedRanges = toscalar(NetworkAllowlist | summarize make_list(IPRange));
+  AADNonInteractiveUserSignInLogs
+  | where TimeGenerated > ago(1d) and ResultType == 0
+  | where ResourceDisplayName has_any ("Microsoft Intune","Device Management","Microsoft Graph","Windows 365")
+  | where not(ipv4_is_in_any_range(tostring(IPAddress), AllowedRanges))
+  | extend Country = tostring(parse_json(tostring(LocationDetails)).countryOrRegion),
+           SessionId = tostring(SessionLifetimePolicies)
+  | summarize Countries = dcount(Country), UAs = dcount(UserAgent),
+              IPs = make_set(IPAddress, 10),
+              CountryList = make_set(Country, 5),
+              UAList = make_set(UserAgent, 5),
+              Events = count()
+            by UserPrincipalName, bin(TimeGenerated, 30m)
+  | where Countries > 1 or UAs > 2
+  | order by TimeGenerated desc
+version: 1.0.0

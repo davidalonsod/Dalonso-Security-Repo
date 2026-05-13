@@ -1,0 +1,121 @@
+{
+  "name": "IntuneLogsDiagnosticSettingsConnector",
+  "apiVersion": "2024-01-01-preview",
+  "type": "Microsoft.SecurityInsights/dataConnectors",
+  "kind": "GenericUI",
+  "properties": {
+    "connectorUiConfig": {
+      "id": "IntuneLogsDiagnosticSettings",
+      "title": "Microsoft Intune (Diagnostic Settings)",
+      "publisher": "Community",
+      "descriptionMarkdown": "Collects Microsoft Intune / MDM management data via **Intune Diagnostic Settings** streaming to Log Analytics. Populates four tables used by the **Intune Logs** Sentinel solution's analytic rules, hunting queries, and CIO/CISO workbook: `IntuneAuditLogs`, `IntuneOperationalLogs`, `IntuneDeviceComplianceOrg`, `IntuneDevices`. This is the Microsoft-recommended ingestion path (no secrets, no polling, no app registration required).",
+      "graphQueriesTableName": "IntuneAuditLogs",
+      "graphQueries": [
+        {
+          "metricName": "Intune audit events",
+          "legend": "IntuneAuditLogs",
+          "baseQuery": "IntuneAuditLogs"
+        },
+        {
+          "metricName": "Intune operational events",
+          "legend": "IntuneOperationalLogs",
+          "baseQuery": "IntuneOperationalLogs"
+        },
+        {
+          "metricName": "Intune device compliance",
+          "legend": "IntuneDeviceComplianceOrg",
+          "baseQuery": "IntuneDeviceComplianceOrg"
+        },
+        {
+          "metricName": "Intune devices",
+          "legend": "IntuneDevices",
+          "baseQuery": "IntuneDevices"
+        }
+      ],
+      "sampleQueries": [
+        {
+          "description": "All Intune audit events in the last 24h",
+          "query": "IntuneAuditLogs\n| where TimeGenerated > ago(24h)\n| project TimeGenerated, Identity, OperationName, ResultType, Properties\n| order by TimeGenerated desc"
+        },
+        {
+          "description": "Non-compliant devices (latest state per device)",
+          "query": "IntuneDeviceComplianceOrg\n| where TimeGenerated > ago(1d)\n| summarize arg_max(TimeGenerated, *) by tostring(DeviceId)\n| where ComplianceState != 'Compliant'\n| project TimeGenerated, DeviceName, UserPrincipalName, ComplianceState, OSDescription"
+        },
+        {
+          "description": "New device enrollments by user",
+          "query": "IntuneAuditLogs\n| where TimeGenerated > ago(7d)\n| where OperationName has 'enroll'\n| summarize Enrollments = count() by Identity = tostring(Identity)\n| order by Enrollments desc"
+        },
+        {
+          "description": "Top operational errors",
+          "query": "IntuneOperationalLogs\n| where TimeGenerated > ago(24h)\n| where Result has_any ('Fail','Error')\n| summarize Count = count() by OperationName\n| order by Count desc"
+        }
+      ],
+      "dataTypes": [
+        { "name": "IntuneAuditLogs",           "lastDataReceivedQuery": "IntuneAuditLogs           | summarize Time = max(TimeGenerated) | where isnotempty(Time)" },
+        { "name": "IntuneOperationalLogs",     "lastDataReceivedQuery": "IntuneOperationalLogs     | summarize Time = max(TimeGenerated) | where isnotempty(Time)" },
+        { "name": "IntuneDeviceComplianceOrg", "lastDataReceivedQuery": "IntuneDeviceComplianceOrg | summarize Time = max(TimeGenerated) | where isnotempty(Time)" },
+        { "name": "IntuneDevices",             "lastDataReceivedQuery": "IntuneDevices             | summarize Time = max(TimeGenerated) | where isnotempty(Time)" }
+      ],
+      "connectivityCriterias": [
+        {
+          "type": "IsConnectedQuery",
+          "value": [
+            "union isfuzzy=true IntuneAuditLogs, IntuneOperationalLogs, IntuneDeviceComplianceOrg, IntuneDevices | summarize LastLogReceived = max(TimeGenerated) | project IsConnected = LastLogReceived > ago(14d)"
+          ]
+        }
+      ],
+      "availability": {
+        "status": 1,
+        "isPreview": false
+      },
+      "permissions": {
+        "resourceProvider": [
+          {
+            "provider": "Microsoft.OperationalInsights/workspaces",
+            "permissionsDisplayText": "read and write permissions on the workspace are required for diagnostic settings target.",
+            "providerDisplayName": "Workspace",
+            "scope": "Workspace",
+            "requiredPermissions": { "read": true, "write": true, "delete": true }
+          }
+        ],
+        "customs": [
+          {
+            "name": "Intune Administrator or Global Administrator",
+            "description": "Required in the Microsoft Entra tenant to configure Intune diagnostic settings. See [Intune Administrator role](https://learn.microsoft.com/entra/identity/role-based-access-control/permissions-reference)."
+          },
+          {
+            "name": "Log Analytics Contributor",
+            "description": "Required on the destination workspace to write diagnostic settings. See [Manage access](https://learn.microsoft.com/azure/azure-monitor/logs/manage-access)."
+          }
+        ]
+      },
+      "instructionSteps": [
+        {
+          "title": "Step 1 - Open Intune Diagnostic settings",
+          "description": "1. Sign in to the [Microsoft Intune admin center](https://intune.microsoft.com).\n2. Go to **Reports** > **Diagnostic settings**.\n3. If prompted, **Turn on** diagnostic logging for Intune, then click **+ Add diagnostic setting**."
+        },
+        {
+          "title": "Step 2 - Select log categories",
+          "description": "Give the diagnostic setting a name (e.g. `Microsoft Sentinel Intune Logs`). Under **Logs to send** select **all four** categories required by the Intune Logs solution:\n- `AuditLogs`\n- `OperationalLogs`\n- `DeviceComplianceOrg`\n- `Devices`\n\nOptional categories (enable if used):\n- `Windows365AuditLogs` (Cloud PC)"
+        },
+        {
+          "title": "Step 3 - Select destination workspace",
+          "description": "Under **Destination details**, check **Send to Log Analytics workspace**. Select the Azure subscription and the Microsoft Sentinel-enabled workspace (e.g. `lawsentinel`). Click **Save**."
+        },
+        {
+          "title": "Step 4 - Verify ingestion",
+          "description": "Within ~15 minutes new data should appear. Run the query below in the workspace to confirm. If the connector shows as connected here, you are done.",
+          "instructions": [
+            {
+              "parameters": {
+                "fillWith": ["WorkspaceId"],
+                "label": "Workspace ID"
+              },
+              "type": "CopyableLabel"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

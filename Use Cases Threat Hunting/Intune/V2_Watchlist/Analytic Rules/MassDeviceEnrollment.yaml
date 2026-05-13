@@ -1,0 +1,49 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d502
+name: Intune - Mass device enrollment spike by single user
+description: |
+  Detects a single user enrolling an unusually high number of devices in a short window,
+  a pattern consistent with automated enrollment abuse (ROADtools `roadtx device`,
+  AADInternals `Join-AADIntDeviceToAzureAD`) to create attacker-controlled trusted devices.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneAuditLogs
+      - IntuneDevices
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - Persistence
+  - InitialAccess
+relevantTechniques:
+  - T1098.005
+  - T1078.004
+query: |
+  let window = 1h;
+  let baseline =
+      IntuneAuditLogs
+      | where TimeGenerated between (ago(14d) .. ago(1h))
+      | where OperationName has "enroll"
+      | summarize BaselineCount = count() by Identity=tostring(Identity), bin_at = bin(TimeGenerated, 1h)
+      | summarize BaseAvg = avg(BaselineCount), BaseStdev = stdev(BaselineCount) by Identity;
+  IntuneAuditLogs
+  | where TimeGenerated > ago(window)
+  | where OperationName has "enroll"
+  | summarize EnrollCount = count(),
+              Devices = make_set(tostring(parse_json(tostring(Properties)).TargetObjectName), 50),
+              FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+            by Identity=tostring(Identity)
+  | join kind=leftouter baseline on Identity
+  | extend Threshold = coalesce(BaseAvg, 0.0) + 3.0 * coalesce(BaseStdev, 1.0)
+  | where EnrollCount >= 5 and EnrollCount > Threshold
+  | extend AccountCustomEntity = Identity
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+version: 1.0.0
+kind: Scheduled

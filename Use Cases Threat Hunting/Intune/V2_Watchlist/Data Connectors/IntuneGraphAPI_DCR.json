@@ -1,0 +1,181 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Deploys the custom table and Data Collection Rule (DCR) required by the Intune Graph API codeless connector."
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": { "description": "Sentinel-enabled Log Analytics workspace name." }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    }
+  },
+  "variables": {
+    "dceName": "[concat('dce-intune-graph-', uniqueString(resourceGroup().id))]",
+    "dcrName": "[concat('dcr-intune-graph-', uniqueString(resourceGroup().id))]",
+    "workspaceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspace'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/tables",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspace'), '/IntuneGraph_AuditEvents_CL')]",
+      "properties": {
+        "schema": {
+          "name": "IntuneGraph_AuditEvents_CL",
+          "columns": [
+            { "name": "TimeGenerated",            "type": "datetime" },
+            { "name": "id_s",                     "type": "string"   },
+            { "name": "displayName_s",            "type": "string"   },
+            { "name": "componentName_s",          "type": "string"   },
+            { "name": "actor_s",                  "type": "dynamic"  },
+            { "name": "activity_s",               "type": "string"   },
+            { "name": "activityDateTime_t",       "type": "datetime" },
+            { "name": "activityType_s",           "type": "string"   },
+            { "name": "activityOperationType_s",  "type": "string"   },
+            { "name": "activityResult_s",         "type": "string"   },
+            { "name": "correlationId_g",          "type": "string"   },
+            { "name": "category_s",               "type": "string"   },
+            { "name": "userPrincipalName_s",      "type": "string"   },
+            { "name": "resources_s",              "type": "dynamic"  },
+            { "name": "RawData",                  "type": "dynamic"  }
+          ]
+        },
+        "retentionInDays": 90
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/tables",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspace'), '/IntuneGraph_ManagedDevices_CL')]",
+      "properties": {
+        "schema": {
+          "name": "IntuneGraph_ManagedDevices_CL",
+          "columns": [
+            { "name": "TimeGenerated",        "type": "datetime" },
+            { "name": "id_s",                 "type": "string"   },
+            { "name": "deviceName_s",         "type": "string"   },
+            { "name": "userPrincipalName_s",  "type": "string"   },
+            { "name": "operatingSystem_s",    "type": "string"   },
+            { "name": "osVersion_s",          "type": "string"   },
+            { "name": "complianceState_s",    "type": "string"   },
+            { "name": "ownerType_s",          "type": "string"   },
+            { "name": "deviceRegistrationState_s", "type": "string" },
+            { "name": "managementState_s",    "type": "string"   },
+            { "name": "joinType_s",           "type": "string"   },
+            { "name": "lastSyncDateTime_s",   "type": "string"   },
+            { "name": "enrolledDateTime_s",   "type": "string"   },
+            { "name": "serialNumber_s",       "type": "string"   },
+            { "name": "model_s",              "type": "string"   },
+            { "name": "manufacturer_s",       "type": "string"   },
+            { "name": "RawData",              "type": "dynamic"  }
+          ]
+        },
+        "retentionInDays": 90
+      }
+    },
+    {
+      "type": "Microsoft.Insights/dataCollectionEndpoints",
+      "apiVersion": "2022-06-01",
+      "name": "[variables('dceName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "networkAcls": { "publicNetworkAccess": "Enabled" }
+      }
+    },
+    {
+      "type": "Microsoft.Insights/dataCollectionRules",
+      "apiVersion": "2022-06-01",
+      "name": "[variables('dcrName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Insights/dataCollectionEndpoints', variables('dceName'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/tables', parameters('workspace'), 'IntuneGraph_AuditEvents_CL')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/tables', parameters('workspace'), 'IntuneGraph_ManagedDevices_CL')]"
+      ],
+      "properties": {
+        "dataCollectionEndpointId": "[resourceId('Microsoft.Insights/dataCollectionEndpoints', variables('dceName'))]",
+        "streamDeclarations": {
+          "Custom-IntuneGraph_AuditEvents_CL": {
+            "columns": [
+              { "name": "TimeGenerated",           "type": "datetime" },
+              { "name": "id",                      "type": "string"   },
+              { "name": "displayName",             "type": "string"   },
+              { "name": "componentName",           "type": "string"   },
+              { "name": "actor",                   "type": "dynamic"  },
+              { "name": "activity",                "type": "string"   },
+              { "name": "activityDateTime",        "type": "datetime" },
+              { "name": "activityType",            "type": "string"   },
+              { "name": "activityOperationType",   "type": "string"   },
+              { "name": "activityResult",          "type": "string"   },
+              { "name": "correlationId",           "type": "string"   },
+              { "name": "category",                "type": "string"   },
+              { "name": "userPrincipalName",       "type": "string"   },
+              { "name": "resources",               "type": "dynamic"  }
+            ]
+          },
+          "Custom-IntuneGraph_ManagedDevices_CL": {
+            "columns": [
+              { "name": "TimeGenerated",        "type": "datetime" },
+              { "name": "id",                   "type": "string"   },
+              { "name": "deviceName",           "type": "string"   },
+              { "name": "userPrincipalName",    "type": "string"   },
+              { "name": "operatingSystem",      "type": "string"   },
+              { "name": "osVersion",            "type": "string"   },
+              { "name": "complianceState",      "type": "string"   },
+              { "name": "ownerType",            "type": "string"   },
+              { "name": "deviceRegistrationState", "type": "string" },
+              { "name": "managementState",      "type": "string"   },
+              { "name": "joinType",             "type": "string"   },
+              { "name": "lastSyncDateTime",     "type": "string"   },
+              { "name": "enrolledDateTime",     "type": "string"   },
+              { "name": "serialNumber",         "type": "string"   },
+              { "name": "model",                "type": "string"   },
+              { "name": "manufacturer",         "type": "string"   }
+            ]
+          }
+        },
+        "destinations": {
+          "logAnalytics": [
+            {
+              "workspaceResourceId": "[variables('workspaceId')]",
+              "name": "sentinelWorkspace"
+            }
+          ]
+        },
+        "dataFlows": [
+          {
+            "streams": ["Custom-IntuneGraph_AuditEvents_CL"],
+            "destinations": ["sentinelWorkspace"],
+            "transformKql": "source | extend TimeGenerated = coalesce(todatetime(activityDateTime), now()) | project TimeGenerated, id_s=id, displayName_s=displayName, componentName_s=componentName, actor_s=actor, activity_s=activity, activityDateTime_t=todatetime(activityDateTime), activityType_s=activityType, activityOperationType_s=activityOperationType, activityResult_s=activityResult, correlationId_g=correlationId, category_s=category, userPrincipalName_s=userPrincipalName, resources_s=resources, RawData=pack_all()",
+            "outputStream": "Custom-IntuneGraph_AuditEvents_CL"
+          },
+          {
+            "streams": ["Custom-IntuneGraph_ManagedDevices_CL"],
+            "destinations": ["sentinelWorkspace"],
+            "transformKql": "source | extend TimeGenerated = now() | project TimeGenerated, id_s=id, deviceName_s=deviceName, userPrincipalName_s=userPrincipalName, operatingSystem_s=operatingSystem, osVersion_s=osVersion, complianceState_s=complianceState, ownerType_s=ownerType, deviceRegistrationState_s=deviceRegistrationState, managementState_s=managementState, joinType_s=joinType, lastSyncDateTime_s=lastSyncDateTime, enrolledDateTime_s=enrolledDateTime, serialNumber_s=serialNumber, model_s=model, manufacturer_s=manufacturer, RawData=pack_all()",
+            "outputStream": "Custom-IntuneGraph_ManagedDevices_CL"
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "dataCollectionEndpointId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Insights/dataCollectionEndpoints', variables('dceName'))]"
+    },
+    "dataCollectionRuleImmutableId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Insights/dataCollectionRules', variables('dcrName')), '2022-06-01').immutableId]"
+    },
+    "logsIngestionEndpoint": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Insights/dataCollectionEndpoints', variables('dceName')), '2022-06-01').logsIngestion.endpoint]"
+    }
+  }
+}

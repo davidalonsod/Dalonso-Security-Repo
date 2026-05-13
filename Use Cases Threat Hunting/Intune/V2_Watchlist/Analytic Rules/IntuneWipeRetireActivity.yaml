@@ -1,0 +1,44 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d511
+name: Intune - Wipe or Retire action on managed device
+description: |
+  Detects wipe, retire, fresh-start, or delete actions against Intune-managed devices recorded in
+  IntuneAuditLogs. These are destructive admin operations abused by attackers with stolen Intune
+  Administrator / Global Administrator tokens to disable corporate devices, cover tracks, or perform
+  ransom-style lockouts.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneAuditLogs
+queryFrequency: 15m
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - Impact
+  - DefenseEvasion
+relevantTechniques:
+  - T1485
+  - T1531
+query: |
+  IntuneAuditLogs
+  | where TimeGenerated > ago(1h)
+  | where OperationName has_any ("wipe","retire","freshStart","delete","eraseDevice","remoteLock","resetPasscode","disable")
+  | where Category =~ "DeviceActions" or OperationName has "ManagedDevice"
+  | extend Props = parse_json(tostring(Properties))
+  | extend Actor      = tostring(Identity)
+  | extend TargetId   = tostring(Props.TargetObjectId)
+  | extend TargetName = tostring(Props.TargetDisplayName)
+  | where isnotempty(Actor)
+  | summarize Count = count(), Devices = make_set(TargetName, 50), Operations = make_set(OperationName, 20),
+              FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+          by Actor
+  | extend AccountCustomEntity = Actor
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+version: 1.0.0
+kind: Scheduled

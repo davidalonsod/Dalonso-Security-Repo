@@ -1,0 +1,38 @@
+id: 7b8c9d10-aaaa-4001-8001-00000000000E
+name: HUNT - Disabled or offboarded accounts with active Intune devices
+description: |
+  Cross-references IntuneDevices with Entra ID `AuditLogs` for user account disable / delete
+  operations. Devices still enrolled and checking in for a disabled identity are common residual
+  access points and should be wiped or retired.
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneDevices
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+tactics:
+  - Persistence
+relevantTechniques:
+  - T1078
+query: |
+  let disabled =
+      AuditLogs
+      | where TimeGenerated > ago(30d)
+      | where Category =~ "UserManagement"
+      | where OperationName has_any ("Disable account","Delete user","Soft delete user")
+      | mv-expand TargetResources
+      | extend UPN = tolower(tostring(TargetResources.userPrincipalName))
+      | where isnotempty(UPN)
+      | summarize DisabledOn = max(TimeGenerated) by UPN;
+  IntuneDevices
+  | where TimeGenerated > ago(7d)
+  | summarize arg_max(TimeGenerated, *) by DeviceId = tostring(DeviceId)
+  | extend UPN = tolower(tostring(UPN))
+  | join kind=inner disabled on UPN
+  | where todatetime(LastContact) > DisabledOn
+  | project UPN, DeviceId, DeviceName = tostring(DeviceName), OS = tostring(OS),
+            OSVersion = tostring(OSVersion), LastContact, DisabledOn,
+            ComplianceState = tostring(CompliantState)
+  | order by LastContact desc
+version: 1.0.0

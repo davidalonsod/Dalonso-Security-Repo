@@ -1,0 +1,46 @@
+id: 5a6f1c3e-2a1b-4c9e-9f01-11a2b3c4d505
+name: Intune - Compliance or configuration policy modified or deleted
+description: |
+  Detects modification or deletion of Intune device compliance policies, configuration profiles,
+  or Conditional Access device filters by non-privileged or newly elevated actors. Attackers may
+  weaken policies to allow non-compliant / rogue devices access to corporate resources.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneAuditLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - DefenseEvasion
+  - Impact
+relevantTechniques:
+  - T1562
+  - T1484
+query: |
+  let sensitiveOps = dynamic([
+      "Delete DeviceCompliancePolicy","Patch DeviceCompliancePolicy",
+      "Delete DeviceConfiguration","Patch DeviceConfiguration",
+      "Delete DeviceManagementConfigurationPolicy","Patch DeviceManagementConfigurationPolicy",
+      "Delete CompliancePolicyAssignment","Patch CompliancePolicyAssignment",
+      "Delete ConditionalAccessPolicy","Patch ConditionalAccessPolicy"
+  ]);
+  IntuneAuditLogs
+  | where TimeGenerated > ago(1h)
+  | where OperationName in~ (sensitiveOps) or OperationName has_any ("Delete","Patch") and OperationName has_any ("Compliance","Configuration")
+  | extend Props = parse_json(tostring(Properties))
+  | extend TargetObjectName = tostring(Props.TargetObjectName),
+           TargetObjectType = tostring(Props.TargetObjectType),
+           ModifiedProperties = tostring(Props.ModifiedProperties)
+  | project TimeGenerated, Identity, OperationName, TargetObjectName, TargetObjectType, ModifiedProperties, ResultType
+  | extend AccountCustomEntity = tostring(Identity)
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountCustomEntity
+version: 1.0.0
+kind: Scheduled

@@ -1,0 +1,24 @@
+id: 7b8c9d10-aaaa-4001-8001-000000000001
+name: HUNT - First-time device enrollment per user
+description: |
+  Surfaces the first Intune device enrollment per user in the last 30 days.
+  Useful to review new devices against HR / joiner lists and catch stealth enrollments.
+requiredDataConnectors:
+  - connectorId: AzureMonitor(IntuneLogs)
+    dataTypes:
+      - IntuneAuditLogs
+tactics:
+  - Persistence
+relevantTechniques:
+  - T1098.005
+query: |
+  IntuneAuditLogs
+  | where TimeGenerated > ago(30d)
+  | where OperationName has_any ("enroll","Create Device","register")
+  | extend Props = parse_json(tostring(Properties))
+  | extend DeviceName = tostring(Props.TargetObjectName)
+  | summarize FirstEnroll = min(TimeGenerated), Devices = make_set(DeviceName, 50), Count = count()
+            by Identity = tostring(Identity)
+  | where FirstEnroll > ago(7d)
+  | order by FirstEnroll desc
+version: 1.0.0

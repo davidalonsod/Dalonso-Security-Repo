@@ -1,0 +1,36 @@
+id: 7b8c9d10-aaaa-4001-8001-000000000005
+name: HUNT - Users holding sensitive Intune/Endpoint roles
+description: |
+  Enumerates current members of sensitive Intune / endpoint-management roles
+  (Intune Administrator, Endpoint Security Manager, Cloud Device Administrator,
+  Windows 365 Administrator, Global Administrator). Baseline for privilege review.
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+tactics:
+  - PrivilegeEscalation
+relevantTechniques:
+  - T1078.004
+query: |
+  let sensitiveRoles = dynamic([
+      "Intune Administrator","Intune Service Administrator",
+      "Endpoint Security Manager","Cloud Device Administrator",
+      "Windows 365 Administrator","Security Administrator","Global Administrator"]);
+  AuditLogs
+  | where TimeGenerated > ago(90d)
+  | where OperationName has_any ("Add member to role","Add eligible member to role","Remove member from role")
+  | mv-expand TargetResources = todynamic(tostring(TargetResources))
+  | mv-expand Mod = todynamic(tostring(TargetResources.modifiedProperties))
+  | extend PropName = tostring(Mod.displayName),
+           NewVal  = tostring(Mod.newValue)
+  | where PropName =~ "Role.DisplayName"
+  | extend RoleName = replace_string(replace_string(NewVal, '"', ''), '\\', '')
+  | where RoleName has_any (sensitiveRoles)
+  | extend TargetUser = tostring(TargetResources.userPrincipalName),
+           Initiator  = tostring(InitiatedBy.user.userPrincipalName)
+  | summarize Events = count(), LastChange = max(TimeGenerated),
+              Operations = make_set(OperationName, 10)
+            by TargetUser, RoleName, Initiator
+  | order by LastChange desc
+version: 1.0.0
