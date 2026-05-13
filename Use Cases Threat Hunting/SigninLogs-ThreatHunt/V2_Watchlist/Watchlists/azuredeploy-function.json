@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": { "description": "Log Analytics / Sentinel workspace name." }
+    },
+    "functionAlias": {
+      "type": "string",
+      "defaultValue": "ExcludeAllowlistedIPs",
+      "metadata": { "description": "Function alias used by hunting queries: `SigninLogs | invoke ExcludeAllowlistedIPs()`." }
+    }
+  },
+  "variables": {
+    "functionQuery": "let _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nT\n| extend IPAddress = tostring(IPAddress)\n| where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\n| mv-apply _r = _allowRange to typeof(string) on (\n    extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n    | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\n    | summarize _anyInRange = max(toint(_inRange)))\n| where isnull(_anyInRange) or _anyInRange == 0\n| project-away _anyInRange"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', parameters('functionAlias'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "[parameters('functionAlias')]",
+        "category": "Security - Functions",
+        "functionAlias": "[parameters('functionAlias')]",
+        "functionParameters": "T:(IPAddress:string)",
+        "query": "[variables('functionQuery')]",
+        "version": 2,
+        "tags": [
+          {
+            "name": "Description",
+            "value": "Filters a table that has an IPAddress column, excluding rows whose IPv4 matches any entry in the NetworkAllowlist watchlist (single IPs, CIDR subnets, or IPv4 start-end ranges). Used by SigninLogs hunting queries and the workbook to suppress trusted-network false positives."
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "usage": {
+      "type": "string",
+      "value": "SigninLogs | invoke ExcludeAllowlistedIPs()"
+    }
+  }
+}

@@ -1,0 +1,93 @@
+id: e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b
+name: "SigninLogs — Conditional Access Policy Blocked then Successful Bypass"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects a user blocked by Conditional Access (ResultType 53003) who then achieves a successful sign-in within 4 hours — possibly via a legacy auth client that bypasses CA, an unmanaged device, or a CA policy gap. MITRE ATT&CK: T1078 (Valid Accounts), T1562.001 (Disable or Modify Tools).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: PT4H
+queryPeriod: PT4H
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - DefenseEvasion
+  - InitialAccess
+relevantTechniques:
+  - T1078
+  - T1562
+query: |
+    // ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+    let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+    let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+    let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+    let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+        T
+        | extend IPAddress = tostring(IPAddress)
+        | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+        | mv-apply _r = _allowRange to typeof(string) on (
+            extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+            | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+            | summarize _anyInRange = max(toint(_inRange)))
+        | where isnull(_anyInRange) or _anyInRange == 0
+        | project-away _anyInRange
+    };
+    // ---------------------------------------------------------------------------
+    let lookback     = 4h;
+    let bypassWindow = 4h;
+    let CABlockedUsers =
+        SigninLogs
+        | invoke _ExcludeAllowlistedIPs()
+        | where TimeGenerated > ago(lookback)
+        | where ResultType == "53003"
+        | summarize
+            BlockedCount = count(),
+            LastBlocked  = max(TimeGenerated),
+            BlockedIPs   = make_set(IPAddress, 5),
+            BlockedApps  = make_set(AppDisplayName, 5)
+          by UserPrincipalName;
+    SigninLogs
+    | invoke _ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(lookback)
+    | where ResultType == "0"
+    | join kind=inner CABlockedUsers on UserPrincipalName
+    | where TimeGenerated > LastBlocked
+    | where TimeGenerated - LastBlocked <= bypassWindow
+    | extend MinutesAfterBlock = datetime_diff("minute", TimeGenerated, LastBlocked)
+    | project
+        TimeGenerated, UserPrincipalName,
+        IPAddress, Location, AppDisplayName,
+        ClientAppUsed, ConditionalAccessStatus,
+        RiskLevelDuringSignIn, BlockedCount,
+        BlockedIPs, LastBlocked, MinutesAfterBlock
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  BlockedCount: BlockedCount
+  MinutesAfterBlock: MinutesAfterBlock
+alertDetailsOverride:
+  alertDisplayNameFormat: "CA Policy Bypass — {{UserPrincipalName}} succeeded {{MinutesAfterBlock}}m after {{BlockedCount}} CA blocks"
+  alertDescriptionFormat: "User {{UserPrincipalName}} was CA-blocked {{BlockedCount}} times then authenticated successfully {{MinutesAfterBlock}} minutes later — possible legacy auth or unmanaged device bypass."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT4H
+    matchingMethod: AllEntities
+    groupByEntities:
+  - Account
+  - IP
+
+
+

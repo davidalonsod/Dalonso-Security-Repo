@@ -1,0 +1,76 @@
+id: c7d8e9f0-a1b2-4c3d-4e5f-6a7b8c9d0e1f
+name: "SigninLogs — Nation State IP Sign-In Detected"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects sign-ins where Azure AD Identity Protection tagged the source IP as affiliated with a nation-state threat actor (estsNationStateIP risk event type). Requires Entra ID P2 and Microsoft Defender for Identity. MITRE ATT&CK: T1078 (Valid Accounts).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: PT6H
+queryPeriod: P7D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+relevantTechniques:
+  - T1078
+query: |
+    // ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+    let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+    let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+    let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+    let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+        T
+        | extend IPAddress = tostring(IPAddress)
+        | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+        | mv-apply _r = _allowRange to typeof(string) on (
+            extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+            | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+            | summarize _anyInRange = max(toint(_inRange)))
+        | where isnull(_anyInRange) or _anyInRange == 0
+        | project-away _anyInRange
+    };
+    // ---------------------------------------------------------------------------
+    SigninLogs
+    | invoke _ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(7d)
+    | extend V2Risk = tostring(RiskEventTypes_V2)
+    | where V2Risk contains "estsNationStateIP"
+    | project
+        TimeGenerated,
+        UserPrincipalName, IPAddress,
+        Location, AppDisplayName,
+        ResultType, ResultDescription,
+        RiskLevel = RiskLevelDuringSignIn,
+        RiskEventTypes_V2
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  Location: Location
+  RiskLevel: RiskLevel
+alertDetailsOverride:
+  alertDisplayNameFormat: "Nation State IP Sign-In — {{UserPrincipalName}} from {{IPAddress}}"
+  alertDescriptionFormat: "Sign-in from {{IPAddress}} flagged as nation-state IP — {{RiskLevel}} risk level."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT1H
+    matchingMethod: AllEntities
+    groupByEntities:
+  - Account
+  - IP
+
+
+

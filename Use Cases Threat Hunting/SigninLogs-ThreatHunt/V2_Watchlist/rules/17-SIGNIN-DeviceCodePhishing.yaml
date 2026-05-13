@@ -1,0 +1,83 @@
+id: a7b8c9d0-e1f2-4a3b-4c5d-6e7f8a9b0c1d
+name: "SigninLogs — Device Code Flow Authentication (Phishing Vector)"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects successful device code flow authentications where one IP collects tokens for 2 or more accounts. Attackers phish victims to device.microsoft.com to enter a code the attacker generated — bypassing password and MFA. Actively used by Storm-0539 and Midnight Blizzard. MITRE ATT&CK: T1566 (Phishing), T1528 (Steal Application Access Token).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: PT4H
+queryPeriod: PT4H
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1566
+  - T1528
+query: |
+    // ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+    let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+    let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+    let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+    let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+        T
+        | extend IPAddress = tostring(IPAddress)
+        | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+        | mv-apply _r = _allowRange to typeof(string) on (
+            extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+            | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+            | summarize _anyInRange = max(toint(_inRange)))
+        | where isnull(_anyInRange) or _anyInRange == 0
+        | project-away _anyInRange
+    };
+    // ---------------------------------------------------------------------------
+    let lookback      = 4h;
+    let multiUserMin  = 2;
+    let highVolumeMin = 5;
+    SigninLogs
+    | invoke _ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(lookback)
+    | where AuthenticationProtocol == "deviceCode"
+    | where ResultType == "0"
+    | summarize
+        SuccessCount  = count(),
+        UniqueUsers   = dcount(UserPrincipalName),
+        TargetedUsers = make_set(UserPrincipalName, 20),
+        Locations     = make_set(Location, 5),
+        Apps          = make_set(AppDisplayName, 5),
+        FirstSeen     = min(TimeGenerated),
+        LastSeen      = max(TimeGenerated)
+      by IPAddress
+    | where UniqueUsers >= multiUserMin or SuccessCount >= highVolumeMin
+    | project
+        TimeGenerated = FirstSeen,
+        IPAddress, SuccessCount, UniqueUsers,
+        TargetedUsers, Locations, Apps, LastSeen
+entityMappings:
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  SuccessCount: SuccessCount
+  UniqueUsers: UniqueUsers
+alertDetailsOverride:
+  alertDisplayNameFormat: "Device Code Phishing — {{IPAddress}} collected tokens for {{UniqueUsers}} accounts"
+  alertDescriptionFormat: "IP {{IPAddress}} obtained {{SuccessCount}} device code flow tokens for {{UniqueUsers}} users — classic device-code phishing pattern (Storm-0539, Midnight Blizzard TTP)."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT4H
+    matchingMethod: AllEntities
+    groupByEntities:
+  - IP
+
+
+

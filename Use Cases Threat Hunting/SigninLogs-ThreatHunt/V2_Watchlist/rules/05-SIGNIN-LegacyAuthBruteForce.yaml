@@ -1,0 +1,84 @@
+id: a5b6c7d8-e9f0-4a1b-2c3d-4e5f6a7b8c9d
+name: "SigninLogs — Legacy Authentication Brute Force (IMAP/POP/SMTP)"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects brute force attacks using legacy authentication protocols (IMAP, POP3, SMTP, Exchange ActiveSync). Legacy auth bypasses MFA and Conditional Access — any sustained attack via these protocols warrants immediate investigation. MITRE ATT&CK: T1110 (Brute Force), T1550 (Use Alternate Authentication Material).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - DefenseEvasion
+relevantTechniques:
+  - T1110
+  - T1550
+query: |
+    // ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+    let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+    let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+    let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+    let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+        T
+        | extend IPAddress = tostring(IPAddress)
+        | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+        | mv-apply _r = _allowRange to typeof(string) on (
+            extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+            | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+            | summarize _anyInRange = max(toint(_inRange)))
+        | where isnull(_anyInRange) or _anyInRange == 0
+        | project-away _anyInRange
+    };
+    // ---------------------------------------------------------------------------
+    let failureThreshold = 10;
+    let legacyProtocols  = dynamic([
+        "IMAP", "POP", "SMTP", "Authenticated SMTP",
+        "Exchange ActiveSync", "Other clients"]);
+    SigninLogs
+    | invoke _ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(1h)
+    | where ClientAppUsed in (legacyProtocols)
+    | where ResultType != "0"
+    | summarize
+        FailedAttempts = count(),
+        UniqueUsers    = dcount(UserPrincipalName),
+        TargetedUsers  = make_set(UserPrincipalName, 50),
+        Protocols      = make_set(ClientAppUsed),
+        StartTime      = min(TimeGenerated),
+        EndTime        = max(TimeGenerated),
+        Locations      = make_set(Location, 5)
+      by IPAddress
+    | where FailedAttempts >= failureThreshold
+    | project
+        TimeGenerated = StartTime,
+        IPAddress, FailedAttempts, UniqueUsers,
+        TargetedUsers, Protocols, Locations, EndTime
+entityMappings:
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  FailedAttempts: FailedAttempts
+  UniqueUsers: UniqueUsers
+alertDetailsOverride:
+  alertDisplayNameFormat: "Legacy Auth Brute Force from {{IPAddress}} — {{UniqueUsers}} accounts"
+  alertDescriptionFormat: "{{FailedAttempts}} failed legacy auth attempts (IMAP/POP/SMTP) from {{IPAddress}}."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT1H
+    matchingMethod: AllEntities
+    groupByEntities:
+  - IP
+
+
+

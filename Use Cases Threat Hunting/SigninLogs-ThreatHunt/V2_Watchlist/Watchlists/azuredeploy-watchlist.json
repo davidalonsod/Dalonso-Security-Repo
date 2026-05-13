@@ -1,0 +1,54 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": { "description": "Log Analytics / Sentinel workspace name." }
+    },
+    "watchlistAlias": {
+      "type": "string",
+      "defaultValue": "NetworkAllowlist",
+      "metadata": { "description": "Watchlist alias referenced by analytic rules." }
+    },
+    "watchlistDisplayName": {
+      "type": "string",
+      "defaultValue": "Network Allowlist (Trusted IP / CIDR / Ranges)"
+    },
+    "watchlistDescription": {
+      "type": "string",
+      "defaultValue": "Trusted IPs, CIDR subnets and IPv4 ranges excluded from SigninLogs analytic rules and hunting queries to suppress false positives."
+    },
+    "watchlistItemsBase64": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": { "description": "(Optional) Base64-encoded CSV content. If empty, 'rawContent' is used instead." }
+    },
+    "rawContent": {
+      "type": "string",
+      "defaultValue": "IPOrRange,Description,Owner,AddedDate\r\n10.0.0.0/8,RFC1918 private space,SOC,2026-04-20\r\n172.16.0.0/12,RFC1918 private space,SOC,2026-04-20\r\n192.168.0.0/16,RFC1918 private space,SOC,2026-04-20\r\n",
+      "metadata": { "description": "Full CSV content (with header row). Used when 'watchlistItemsBase64' is empty." }
+    }
+  },
+  "variables": {
+    "effectiveRawContent": "[if(empty(parameters('watchlistItemsBase64')), parameters('rawContent'), base64ToString(parameters('watchlistItemsBase64')))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "apiVersion": "2023-02-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', parameters('watchlistAlias'))]",
+      "properties": {
+        "displayName": "[parameters('watchlistDisplayName')]",
+        "source": "NetworkAllowlist.csv",
+        "sourceType": "Local file",
+        "provider": "SOC",
+        "description": "[parameters('watchlistDescription')]",
+        "itemsSearchKey": "IPOrRange",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "[variables('effectiveRawContent')]"
+      }
+    }
+  ]
+}
