@@ -1,0 +1,58 @@
+// Rule    : M365 - OneDrive External Sharing Spike to New Domains
+// Severity: High
+// Tactics : Exfiltration
+// MITRE   : T1567.002 (Exfiltration Over Web Service: Exfiltration to Cloud Storage)
+// Freq    : PT1H   Period: PT1H
+// Description: Detects when a user shares OneDrive files with external email addresses
+//              from domains not seen in the past 14 days, especially in bulk.
+//              New external domain + high volume = elevated exfiltration risk.
+//==========================================================================================
+
+let LookbackPeriod  = 1h;
+let BaselineDays    = 14d;
+let SharingThreshold = 10;   // unique external users shared with in 1 hour
+
+// Known external domains in baseline
+let KnownExternalDomains = OfficeActivity
+    | where TimeGenerated between (ago(BaselineDays) .. ago(LookbackPeriod))
+    | where RecordType in ("SharePoint", "OneDrive")
+    | where Operation in ("SharingInvitationCreated", "AddedToSecureLink")
+    | extend TargetDomain = tostring(split(TargetUserOrGroupName, "@")[1])
+    | where isnotempty(TargetDomain)
+    | distinct UserId, TargetDomain;
+
+// Current hour sharing
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType in ("SharePoint", "OneDrive")
+| where Operation in (
+    "SharingInvitationCreated", "AddedToSecureLink",
+    "AnonymousLinkCreated", "SharingSet")
+| extend
+    TargetUser   = tostring(TargetUserOrGroupName),
+    TargetDomain = tostring(split(TargetUserOrGroupName, "@")[1])
+| where TargetUser !has UserId        // only external, not self-share
+| join kind=leftanti KnownExternalDomains on UserId, TargetDomain
+| summarize
+    SharedCount      = count(),
+    UniqueExtDomains = dcount(TargetDomain),
+    ExternalUsers    = make_set(TargetUser, 20),
+    ExtDomainList    = make_set(TargetDomain, 10),
+    FilesShared      = make_set(SourceFileName, 15),
+    SiteURLs         = make_set(SiteUrl, 5)
+    by UserId
+| where SharedCount >= SharingThreshold or UniqueExtDomains >= 3
+| extend AlertSeverity = case(
+    UniqueExtDomains >= 5, "High",
+    SharedCount >= 20,     "High",
+    "Medium")
+| project
+    TimeGenerated  = now(),
+    UserId,
+    SharedCount,
+    UniqueExtDomains,
+    ExtDomainList,
+    ExternalUsers,
+    FilesShared,
+    SiteURLs,
+    AlertSeverity

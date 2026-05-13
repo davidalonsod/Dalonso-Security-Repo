@@ -1,0 +1,51 @@
+// Hunt    : M365 - OneDrive Stale Guest Access (90d no activity since invite)
+// Purpose : Find guest accounts that were given access to OneDrive/SharePoint
+//           resources over 90 days ago but show no subsequent access activity.
+//           Stale guest accounts represent an unrevoked attack surface.
+// Tables  : OfficeActivity
+// Period  : P90D
+//==========================================================================================
+
+let LookbackDays     = 90d;
+let StaleDays        = 30;   // inactive for 30+ days after invite = stale
+
+// All guest invitations in the window
+let GuestInvitations = OfficeActivity
+    | where TimeGenerated > ago(LookbackDays)
+    | where RecordType in ("SharePoint", "OneDrive", "MicrosoftTeams")
+    | where Operation in (
+        "SharingInvitationCreated", "AddedToSecureLink",
+        "MemberAdded", "InviteAccepted")
+    | where TargetUserOrGroupName has "#EXT#"
+        or TargetUserOrGroupName has "guest"
+    | extend GuestUPN = tostring(TargetUserOrGroupName)
+    | summarize InviteDate = min(TimeGenerated), InviteCount = count()
+        by GuestUPN, Site_Url;
+
+// All guest access activity
+let GuestActivity = OfficeActivity
+    | where TimeGenerated > ago(LookbackDays)
+    | where RecordType in ("SharePoint", "OneDrive", "SharePointFileOperation", "OneDriveFileOperation")
+    | where UserId has "#EXT#"
+    | where Operation in (
+        "FileAccessed", "FileDownloaded", "FileViewed",
+        "FilePreviewed", "PageViewed")
+    | summarize LastActivity = max(TimeGenerated) by UserId, Site_Url;
+
+// Stale = invited but last activity was > StaleDays ago OR no activity at all
+GuestInvitations
+| join kind=leftouter GuestActivity
+    on $left.GuestUPN == $right.UserId and $left.Site_Url == $right.Site_Url
+| extend
+    DaysSinceActivity = iif(isnotnull(LastActivity),
+        datetime_diff("day", now(), LastActivity),
+        datetime_diff("day", now(), InviteDate))
+| where isnull(LastActivity) or DaysSinceActivity >= StaleDays
+| project
+    GuestUPN,
+    Site_Url,
+    InviteDate,
+    LastActivity,
+    DaysSinceActivity,
+    InviteCount
+| sort by DaysSinceActivity desc

@@ -1,0 +1,44 @@
+// Hunt    : M365 - Sensitivity Label Change History on SharePoint / OneDrive (90d)
+// Purpose : Enumerate all sensitivity label changes—upgrades and downgrades—on
+//           SharePoint and OneDrive files over 90 days. Useful for compliance
+//           audits, DLP investigations, and exfiltration-path reconstruction.
+// Tables  : OfficeActivity
+// Period  : P90D
+//==========================================================================================
+
+let LookbackDays = 90d;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType in ("SharePoint", "OneDrive")
+| where Operation in (
+    "SensitivityLabelChanged", "SensitivityLabelApplied",
+    "SensitivityLabelRemoved", "FileSensitivityLabelChanged")
+| extend
+    OldLabelName        = tostring(OperationProperties.OldSensitivityLabelName),
+    NewLabelName        = tostring(OperationProperties.NewSensitivityLabelName),
+    LabelJustification  = tostring(OperationProperties.JustificationText),
+    AutoLabeled         = tostring(OperationProperties.IsAutoLabel)
+| extend
+    ChangeType = case(
+        Operation == "SensitivityLabelRemoved",          "Removed",
+        isempty(OldLabelName) and isnotempty(NewLabelName), "Applied",
+        OldLabelName != NewLabelName,                    "Changed",
+        "Unknown")
+| summarize
+    ChangeCount        = count(),
+    RemovedCount       = countif(ChangeType == "Removed"),
+    DowngradeCount     = countif(ChangeType == "Changed"),
+    FilesAffected      = make_set(SourceFileName, 20),
+    SiteURLs           = make_set(Site_Url, 10)
+    by UserId, ChangeType, OldLabelName, NewLabelName
+| sort by ChangeCount desc
+| project
+    UserId,
+    ChangeType,
+    OldLabelName,
+    NewLabelName,
+    ChangeCount,
+    RemovedCount,
+    FilesAffected,
+    SiteURLs

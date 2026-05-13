@@ -1,0 +1,50 @@
+// Rule    : M365 - DLP Policy Override by User (Justification Abuse)
+// Severity: Medium
+// Tactics : DefenseEvasion, Exfiltration
+// MITRE   : T1222 (File and Directory Permissions Modification), T1537
+// Freq    : PT1H   Period: PT1H
+// Description: Detects users who override DLP block actions with justifications.
+//              Repeated overrides — especially for high-sensitivity data types —
+//              may indicate intentional exfiltration or policy-awareness abuse.
+//==========================================================================================
+
+let OverrideThreshold = 3;    // overrides per user per hour
+let LookbackPeriod    = 1h;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType in (
+    "ComplianceDLPExchange", "ComplianceDLPSharePoint",
+    "ComplianceDLPSharePointClassification")
+| extend
+    PolicyName         = tostring(parse_json(PolicyDetails)[0].PolicyName),
+    RuleName           = tostring(parse_json(PolicyDetails)[0].Rules[0].RuleName),
+    OverrideAction     = tostring(parse_json(PolicyDetails)[0].Rules[0].Actions),
+    Justification      = tostring(parse_json(PolicyDetails)[0].Rules[0].OverrideJustification),
+    SensitiveInfoTypes = tostring(parse_json(PolicyDetails)[0].Rules[0].ConditionsMatched.SensitiveInformation)
+| where OverrideAction has "Override"
+    or Justification != ""
+| summarize
+    OverrideCount     = count(),
+    Policies          = make_set(PolicyName, 10),
+    Rules             = make_set(RuleName, 10),
+    Justifications    = make_set(Justification, 5),
+    SensitiveTypes    = make_set(SensitiveInfoTypes, 5),
+    ObjectIds         = make_set(ObjectId, 10),
+    ClientIPs         = make_set(ClientIP, 5)
+    by UserId
+| where OverrideCount >= OverrideThreshold
+| extend AlertSeverity = case(
+    OverrideCount >= 10, "High",
+    OverrideCount >= 5,  "Medium",
+    "Low")
+| project
+    TimeGenerated  = now(),
+    UserId,
+    OverrideCount,
+    Policies,
+    Justifications,
+    SensitiveTypes,
+    ObjectIds,
+    ClientIPs,
+    AlertSeverity

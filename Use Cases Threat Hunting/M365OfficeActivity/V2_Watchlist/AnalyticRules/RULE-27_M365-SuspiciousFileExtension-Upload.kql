@@ -1,0 +1,76 @@
+// Rule     : M365 - Suspicious File Extension Uploaded to SharePoint / OneDrive / Teams
+// Severity : High
+// Tactics  : InitialAccess, Execution, LateralMovement
+// MITRE    : T1105 (Ingress Tool Transfer), T1566.002 (Phishing: Spear Phishing Link),
+//            T1204.002 (User Execution: Malicious File)
+// Freq     : PT1H  /  Period: P1D
+// Purpose  : Detect uploads of executables, scripts, and other high-risk file types to
+//            SharePoint, OneDrive, or Teams. Adversaries stage tools via cloud storage to
+//            bypass perimeter email gateways. Rule fires on any single suspicious upload;
+//            severity is scaled by extension risk tier.
+//==========================================================================================
+
+let LookbackDays = 1d;
+
+// Tier-1 (High): binary executables and loaders
+let Tier1 = dynamic([
+    ".exe", ".dll", ".scr", ".pif", ".com", ".cpl",
+    ".ocx", ".sys", ".drv"]);
+
+// Tier-2 (High): scripting and macro languages
+let Tier2 = dynamic([
+    ".ps1", ".psm1", ".psd1",
+    ".bat", ".cmd",
+    ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh",
+    ".hta", ".sh", ".bash"]);
+
+// Tier-3 (Medium): package installers and archives with code
+let Tier3 = dynamic([
+    ".msi", ".msp", ".mst",
+    ".jar", ".war", ".ear",
+    ".py", ".rb", ".pl", ".php"]);
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType in (
+    "SharePoint", "SharePointFileOperation",
+    "OneDrive", "OneDriveFileOperation",
+    "MicrosoftTeams")
+| where Operation in (
+    "FileUploaded",
+    "FileSyncUploadedFull",
+    "FileCheckedIn",
+    "FileModifiedExtended",
+    "FileAdded")
+| extend FileName      = tostring(SourceFileName)
+| extend FileExtension = tolower(extract(@"(\.[^.\\/:*?""<>|]+)$", 1, FileName))
+| where FileExtension in (array_concat(Tier1, Tier2, Tier3))
+| extend
+    RiskTier    = case(
+        FileExtension in (Tier1), "Tier1-Binary",
+        FileExtension in (Tier2), "Tier2-Script",
+        "Tier3-Installer"),
+    AlertSeverity = case(
+        FileExtension in (Tier1), "High",
+        FileExtension in (Tier2), "High",
+        "Medium"),
+    Workload    = case(
+        RecordType in ("SharePoint","SharePointFileOperation"), "SharePoint",
+        RecordType in ("OneDrive","OneDriveFileOperation"),     "OneDrive",
+        RecordType == "MicrosoftTeams",                        "Teams",
+        "Other"),
+    IsGuest     = UserId has "#EXT#"
+| project
+    TimeGenerated,
+    UserId,
+    IsGuest,
+    Workload,
+    Operation,
+    FileName,
+    FileExtension,
+    RiskTier,
+    AlertSeverity,
+    SiteUrl,
+    ClientIP,
+    UserAgent
+| sort by AlertSeverity asc, TimeGenerated desc

@@ -1,0 +1,91 @@
+// Rule     : M365 - Data Exfiltration to USB / Removable Media via Endpoint DLP
+// Severity : High
+// Tactics  : Exfiltration, Collection
+// MITRE    : T1052.001 (Exfiltration over Physical Medium: Exfiltration over USB),
+//            T1074.001 (Data Staged: Local Data Staging)
+// Freq     : PT30M  /  Period: PT1H
+// Purpose  : Detect when Microsoft Purview Endpoint DLP records a copy, move, or print
+//            of sensitive data to a removable/USB storage device. Requires Endpoint DLP
+//            enabled in Microsoft Purview with policies covering removable media.
+//            RecordType = ComplianceDLPEndpoint covers the Defender for Endpoint (MDE)
+//            DLP telemetry forwarded to the Unified Audit Log.
+//==========================================================================================
+
+let LookbackWindow = 1h;
+
+// Sensitive information type names that warrant immediate High severity
+let HighSensitivityTypes = dynamic([
+    "Credit Card Number",
+    "U.S. Social Security Number",
+    "U.S. / U.K. Passport Number",
+    "U.S. Bank Account Number",
+    "SWIFT Code",
+    "International Banking Account Number (IBAN)",
+    "Azure DocumentDB Auth Key",
+    "Azure SAS",
+    "Azure Service Bus Shared Access Signature",
+    "ABA Routing Number"]);
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackWindow)
+| where RecordType == "ComplianceDLPEndpoint"
+// USB / removable media activities
+| where PolicyDetails has_any (
+    "CopyToUsbDrive",
+    "CopyToRemovableMedia",
+    "RemovableStorage",
+    "PrintToLocalPrinter",
+    "CopyToNetworkShare",
+    "CopyToClipboard")
+    or SensitiveInfoTypeData has_any (
+        "CopyToUsbDrive",
+        "RemovableStorage",
+        "CopyToRemovableMedia")
+| extend
+    // Parse policy JSON
+    PolicyDetailsJson  = todynamic(PolicyDetails),
+    SensitiveInfoJson  = todynamic(SensitiveInfoTypeData),
+    DeviceName         = tostring(DeviceName),
+    ObjectPath         = tostring(ObjectId),
+    ProcessName        = tostring(parse_json(AuditData).ProcessName)
+| extend
+    PolicyName         = tostring(PolicyDetailsJson[0].PolicyName),
+    SensitiveTypeName  = tostring(SensitiveInfoJson[0].SensitiveInfoTypeName),
+    ActionType         = tostring(PolicyDetailsJson[0].Actions[0])
+| extend
+    IsHighSensitivity  = SensitiveTypeName in (HighSensitivityTypes),
+    IsGuest            = UserId has "#EXT#",
+    AlertSeverity      = case(
+        SensitiveTypeName in (HighSensitivityTypes), "High",
+        ActionType has_any ("Block","BlockOverride"), "High",
+        "Medium")
+// Aggregate by user+device within window
+| summarize
+    IncidentCount      = count(),
+    PolicyNames        = make_set(PolicyName, 5),
+    SensitiveTypes     = make_set(SensitiveTypeName, 10),
+    AffectedFiles      = make_set(ObjectPath, 15),
+    ActionTypes        = make_set(ActionType, 5),
+    HighSensCount      = countif(IsHighSensitivity),
+    FirstObserved      = min(TimeGenerated),
+    LastObserved       = max(TimeGenerated)
+    by UserId, DeviceName, ClientIP, IsGuest
+| extend FinalSeverity = case(
+    HighSensCount > 0,    "High",
+    IncidentCount >= 5,   "High",
+    "Medium")
+| project
+    UserId,
+    DeviceName,
+    ClientIP,
+    IsGuest,
+    FirstObserved,
+    LastObserved,
+    IncidentCount,
+    HighSensCount,
+    SensitiveTypes,
+    PolicyNames,
+    ActionTypes,
+    FinalSeverity,
+    AffectedFiles
+| sort by HighSensCount desc, IncidentCount desc

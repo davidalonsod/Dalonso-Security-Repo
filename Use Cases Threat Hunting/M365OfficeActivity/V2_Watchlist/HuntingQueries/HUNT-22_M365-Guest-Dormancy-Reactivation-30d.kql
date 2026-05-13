@@ -1,0 +1,89 @@
+// Hunt    : M365 - Guest Accounts Dormant Then Suddenly Reactivated (30d)
+// Purpose : Identify external guest (#EXT#) accounts that show zero OfficeActivity
+//           during a 30–90 day "dormancy window" and then generate a burst of events
+//           in the most recent 7 days. This pattern signals either:
+//           (a) a forgotten guest account whose credentials were compromised,
+//           (b) a guest who was re-invited under the same UPN after a long gap, or
+//           (c) a legitimate return that nevertheless warrants re-validation.
+//           Results include a risk profile of the post-reactivation activity.
+// Tables  : OfficeActivity
+// Period  : P90D lookback
+// Tactics : InitialAccess, Collection, Exfiltration
+// MITRE   : T1078.004, T1530, T1048
+// Scope   : Guest users (#EXT#) only
+//==========================================================================================
+
+let DormancyStart    = ago(90d);   // begin of dormancy check
+let DormancyEnd      = ago(7d);    // end of dormancy / begin of burst window
+let BurstWindowStart = ago(7d);    // burst observation window
+let MinBurstEvents   = 3;          // minimum events to surface as reactivated guest
+
+// --- Guests with NO activity during the dormancy window ---
+let GuestsActiveDuringDormancy = OfficeActivity
+    | where TimeGenerated between (DormancyStart .. DormancyEnd)
+    | where UserId has "#EXT#"
+    | summarize count() by UserId;
+
+// --- Guests with any history BEFORE the dormancy window ---
+let GuestsWithOlderHistory = OfficeActivity
+    | where TimeGenerated < DormancyEnd
+    | where UserId has "#EXT#"
+    | summarize LastOldEvent = max(TimeGenerated) by UserId;
+
+// Truly dormant guests = had old history, silent during dormancy window
+let TrulyDormantGuests = GuestsWithOlderHistory
+    | join kind=leftanti GuestsActiveDuringDormancy on UserId
+    | project UserId, LastOldEvent;
+
+// --- Burst activity in the last 7 days for those same guests ---
+let RecentBurst = OfficeActivity
+    | where TimeGenerated >= BurstWindowStart
+    | where UserId has "#EXT#"
+    | extend
+        ExternalDomain = extract(@"_([^_#]+)#EXT#", 1, tolower(UserId)),
+        IsExfilOp = Operation in (
+            "FileDownloaded", "FileSyncDownloadedFull",
+            "FileAccessed", "AnonymousLinkCreated",
+            "SecureLinkCreated", "SharingInvitationCreated",
+            "Send", "MailItemsAccessed"),
+        IsAfterHours = hourofday(TimeGenerated) < 6 or hourofday(TimeGenerated) >= 22
+    | summarize
+        BurstEvents       = count(),
+        FirstBurstEvent   = min(TimeGenerated),
+        ExfilOpCount      = countif(IsExfilOp),
+        AfterHoursCount   = countif(IsAfterHours),
+        DistinctSites     = dcount(Site_Url),
+        DistinctOps       = dcount(Operation),
+        Workloads         = make_set(RecordType, 5),
+        SampleOps         = make_set(Operation, 10),
+        ExternalDomain    = any(ExternalDomain)
+        by UserId;
+
+// --- Join dormant guests with their burst activity ---
+TrulyDormantGuests
+| join kind=inner RecentBurst on UserId
+| where BurstEvents >= MinBurstEvents
+| extend
+    DormancyDays    = datetime_diff("day", FirstBurstEvent, LastOldEvent),
+    ExfilRatio      = round(todouble(ExfilOpCount) / todouble(BurstEvents), 2)
+| extend RiskScore = toint(
+      iif(DormancyDays  >= 180, 3, iif(DormancyDays  >= 90,  2, 1))
+    + iif(ExfilRatio    >= 0.5, 3, iif(ExfilRatio    >= 0.2, 1, 0))
+    + iif(AfterHoursCount >= 3, 2, 0)
+    + iif(DistinctSites >= 5,   1, 0))
+| project
+    UserId,
+    ExternalDomain,
+    LastOldEvent,
+    DormancyDays,
+    FirstBurstEvent,
+    BurstEvents,
+    ExfilOpCount,
+    ExfilRatio,
+    AfterHoursCount,
+    DistinctSites,
+    DistinctOps,
+    Workloads,
+    RiskScore,
+    SampleOps
+| sort by RiskScore desc, DormancyDays desc

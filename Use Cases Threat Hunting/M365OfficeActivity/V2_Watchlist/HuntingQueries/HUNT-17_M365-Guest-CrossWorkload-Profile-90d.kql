@@ -1,0 +1,89 @@
+// Hunt    : M365 - Guest User Complete Cross-Workload Activity Profile (90d)
+// Purpose : Build a full profile of every guest (#EXT#) user that appeared in
+//           OfficeActivity in the past 90 days — their activity across Teams,
+//           Exchange, SharePoint, and OneDrive, first/last seen, total ops, and
+//           suspicious-behaviour flags (after-hours access, many-site spread,
+//           operations involving data exfiltration).
+//           Use this to review over-privileged, over-active, or forgotten external guests.
+// Tables  : OfficeActivity
+// Period  : P90D
+// Tactics : Discovery, Collection, Exfiltration
+// MITRE   : T1087.004, T1530, T1048
+//==========================================================================================
+
+let LookbackDays     = 90d;
+let SuspiciousDomains = dynamic([
+    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+    "protonmail.com", "tutanota.com", "guerrillamail.com"]);
+
+// All guest activity across all workloads
+let GuestActivity = OfficeActivity
+    | where TimeGenerated > ago(LookbackDays)
+    | where UserId has "#EXT#" or UserId has "guest"
+    // Normalize the external domain from the UPN  e.g. user_contoso.com#EXT#@tenant.com
+    | extend ExternalDomain = extract(@"_([^_#]+)#EXT#", 1, tolower(UserId))
+    | extend ExternalDomain = iif(isempty(ExternalDomain), "unknown", ExternalDomain)
+    | extend Workload = case(
+        RecordType == "MicrosoftTeams",                              "Teams",
+        RecordType in ("ExchangeAdmin", "ExchangeItem"),             "Exchange",
+        RecordType in ("SharePoint","SharePointFileOperation"),       "SharePoint",
+        RecordType in ("OneDrive","OneDriveFileOperation"),           "OneDrive",
+        "Other")
+    | extend IsAfterHours   = hourofday(TimeGenerated) < 6 or hourofday(TimeGenerated) >= 22
+    | extend IsExfilOp      = Operation in (
+        "FileDownloaded", "FileAccessed", "FileSyncDownloadedFull",
+        "MailItemsAccessed", "Send","AnonymousLinkCreated","SecureLinkCreated");
+
+// Aggregate per guest
+GuestActivity
+| summarize
+    FirstSeen           = min(TimeGenerated),
+    LastSeen            = max(TimeGenerated),
+    TotalEvents         = count(),
+    WorkloadsUsed       = make_set(Workload, 10),
+    DistinctWorkloads   = dcount(Workload),
+    DistinctSites       = dcount(Site_Url),
+    DistinctFiles       = dcount(SourceFileName),
+    DistinctOps         = dcount(Operation),
+    ExfilOpCount        = countif(IsExfilOp),
+    AfterHoursCount     = countif(IsAfterHours),
+    TopSites            = make_set(Site_Url, 5),
+    TopOps              = make_set(Operation, 10)
+    by UserId, ExternalDomain
+// Computed risk signals
+| extend
+    ActiveDays          = datetime_diff("day", LastSeen, FirstSeen),
+    IsFreeEmailGuest    = ExternalDomain in (SuspiciousDomains),
+    MultiWorkloadGuest  = DistinctWorkloads >= 3,
+    HighSiteSpread      = DistinctSites >= 10,
+    HighExfilRatio      = ExfilOpCount > 0
+        and (todouble(ExfilOpCount) / todouble(TotalEvents)) > 0.5,
+    FrequentAfterHours  = AfterHoursCount >= 5
+| extend RiskScore = toint(
+      iif(IsFreeEmailGuest,    2, 0)
+    + iif(MultiWorkloadGuest,  1, 0)
+    + iif(HighSiteSpread,      2, 0)
+    + iif(HighExfilRatio,      3, 0)
+    + iif(FrequentAfterHours,  2, 0))
+| project
+    UserId,
+    ExternalDomain,
+    FirstSeen,
+    LastSeen,
+    ActiveDays,
+    TotalEvents,
+    DistinctWorkloads,
+    WorkloadsUsed,
+    DistinctSites,
+    DistinctFiles,
+    ExfilOpCount,
+    AfterHoursCount,
+    IsFreeEmailGuest,
+    MultiWorkloadGuest,
+    HighSiteSpread,
+    HighExfilRatio,
+    FrequentAfterHours,
+    RiskScore,
+    TopSites,
+    TopOps
+| sort by RiskScore desc, TotalEvents desc

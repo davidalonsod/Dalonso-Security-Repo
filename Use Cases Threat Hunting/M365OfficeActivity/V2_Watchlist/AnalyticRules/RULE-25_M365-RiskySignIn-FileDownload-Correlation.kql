@@ -1,0 +1,76 @@
+// Rule    : M365 - Risky AAD Sign-In Correlated with M365 File Download Spike
+// Severity: High
+// Tactics : InitialAccess, Collection, Exfiltration
+// MITRE   : T1078.004 (Valid Accounts: Cloud Accounts),
+//           T1530 (Data from Cloud Storage)
+// Freq    : PT1H   Period: PT1H
+// Description: Correlates Microsoft Entra ID (AAD) risky sign-in events with a
+//              simultaneous M365 SharePoint/OneDrive file download spike for the same
+//              user. A risky sign-in alone may be a false positive; a download spike
+//              immediately following confirms active abuse. The combined signal
+//              significantly elevates confidence and severity of the finding.
+//
+//              Tables : SigninLogs, AADUserRiskEvents, OfficeActivity
+//==========================================================================================
+
+let LookbackPeriod    = 1h;
+let DownloadThreshold = 20;     // files downloaded in the same hour as risky sign-in
+
+// Step 1: Users with risky sign-ins in the current window
+let RiskySignIns = SigninLogs
+    | where TimeGenerated > ago(LookbackPeriod)
+    | where RiskLevelDuringSignIn in ("high", "medium")
+        or RiskState in ("atRisk", "confirmedCompromised")
+    | extend UserPrincipalNameLower = tolower(UserPrincipalName)
+    | summarize
+        RiskLevel       = max(RiskLevelDuringSignIn),
+        RiskState       = any(RiskState),
+        RiskReasons     = make_set(RiskDetail, 5),
+        RiskIPs         = make_set(IPAddress, 5),
+        SignInApps      = make_set(AppDisplayName, 5),
+        RiskFirstSeen   = min(TimeGenerated),
+        RiskLastSeen    = max(TimeGenerated)
+        by UserPrincipalNameLower;
+
+// Step 2: Users with download spikes in the same window
+let DownloadSpike = OfficeActivity
+    | where TimeGenerated > ago(LookbackPeriod)
+    | where RecordType in ("SharePoint", "OneDrive")
+    | where Operation in (
+        "FileDownloaded", "FileSyncDownloadedFull",
+        "FileSyncDownloadedPartial", "MailItemsAccessed")
+    | extend UserIdLower = tolower(UserId)
+    | summarize
+        DownloadCount   = count(),
+        FileList        = make_set(SourceFileName, 15),
+        SiteURLs        = make_set(SiteUrl, 5),
+        DownloadIPs     = make_set(ClientIP, 5)
+        by UserIdLower
+    | where DownloadCount >= DownloadThreshold;
+
+// Step 3: Correlate — same user appears in BOTH datasets
+RiskySignIns
+| join kind=inner DownloadSpike
+    on $left.UserPrincipalNameLower == $right.UserIdLower
+| extend
+    // Did the risky sign-in IP also appear in the download session?
+    SameIPForSignInAndDownload = set_intersect(RiskIPs, DownloadIPs)
+| extend AlertSeverity = case(
+    RiskState == "confirmedCompromised",             "Critical",
+    array_length(SameIPForSignInAndDownload) > 0,    "Critical",
+    RiskLevel == "high" and DownloadCount >= 100,    "High",
+    RiskLevel == "high",                             "High",
+    "Medium")
+| project
+    TimeGenerated          = RiskLastSeen,
+    UserId                 = UserPrincipalNameLower,
+    RiskLevel,
+    RiskState,
+    RiskReasons,
+    RiskIPs,
+    DownloadCount,
+    FileList,
+    SiteURLs,
+    DownloadIPs,
+    SameIPForSignInAndDownload,
+    AlertSeverity

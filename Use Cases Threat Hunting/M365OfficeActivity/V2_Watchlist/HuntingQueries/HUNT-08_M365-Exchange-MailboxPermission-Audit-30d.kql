@@ -1,0 +1,45 @@
+// Hunt    : M365 - Exchange Mailbox Permission Audit (30d)
+// Purpose : Enumerate all mailbox permission grants (FullAccess, SendAs, ReadPermission)
+//           over 30 days. Supports BEC, insider threat, and privilege escalation reviews.
+//           Highlights external delegates, sensitive mailboxes, and admin-level assignments.
+// Tables  : OfficeActivity
+// Period  : P30D
+//==========================================================================================
+
+let LookbackDays = 30d;
+let SensitiveKeywords = dynamic([
+    "ceo", "cfo", "cto", "coo", "vp-", "president", "director",
+    "finance", "legal", "hr", "payroll", "board", "exec", "security"
+]);
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType == "ExchangeAdmin"
+| where Operation in (
+    "Add-MailboxPermission", "Add-RecipientPermission",
+    "Remove-MailboxPermission", "Remove-RecipientPermission",
+    "AddMailboxPermission")
+| extend Params = tostring(Parameters)
+| extend
+    AccessRights   = extract(@"AccessRights.*?:(.*?)(\s|,|$)", 1, Params),
+    DelegateUser   = extract(@"User.*?:([^\s,]+)", 1, Params),
+    TargetMailbox  = extract(@"Identity.*?:([^\s,]+)", 1, Params),
+    IsAdd          = Operation has "Add"
+| extend
+    IsFullAccess   = AccessRights has_any ("FullAccess", "SendAs"),
+    IsExternal     = DelegateUser has "#EXT#"
+        or (DelegateUser has "@" and not(DelegateUser has "onmicrosoft.com")),
+    IsSensitiveBox = tolower(TargetMailbox) has_any (SensitiveKeywords)
+| sort by TimeGenerated desc
+| project
+    TimeGenerated,
+    ActorUserId    = UserId,
+    TargetMailbox,
+    DelegateUser,
+    AccessRights,
+    Operation,
+    IsAdd,
+    IsFullAccess,
+    IsExternal,
+    IsSensitiveBox,
+    ClientIP

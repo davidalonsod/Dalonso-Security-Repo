@@ -1,0 +1,50 @@
+// Rule    : M365 - SharePoint / OneDrive Anonymous Sharing Link Created for Sensitive File
+// Severity: High
+// Tactics : Exfiltration, Collection
+// MITRE   : T1567.002 (Exfiltration Over Web Service: Exfiltration to Cloud Storage),
+//           T1078.004
+// Freq    : PT1H   Period: PT1H
+// Description: Detects creation of anonymous sharing links (Anyone links) on files
+//              that carry a sensitivity label of Confidential or higher, or that reside
+//              in sites flagged as sensitive.
+//==========================================================================================
+
+let LookbackPeriod = 1h;
+let SensitiveLabels = dynamic([
+    "Confidential", "Highly Confidential", "Top Secret", "Restricted"
+]);
+let SensitiveSitePatterns = dynamic([
+    "hr", "legal", "finance", "exec", "security", "payroll", "board"
+]);
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType in ("SharePoint", "OneDrive")
+| where Operation in (
+    "AnonymousLinkCreated", "SharingLinkCreated",
+    "AddedToSecureLink", "SecureLinkUsed")
+| extend
+    SharingType      = tostring(parse_json(EventData).SharingType),
+    LinkScope        = tostring(parse_json(EventData).LinkScope),
+    TargetUserOrGroup = tostring(parse_json(EventData).TargetUserOrGroup),
+    SiteLower        = tolower(SiteUrl)
+| extend
+    IsAnonymous      = (SharingType == "AnonymousAccess" or LinkScope == "Anyone"),
+    IsSensitiveSite  = SiteLower has_any (SensitiveSitePatterns)
+| where IsAnonymous or IsSensitiveSite
+| project
+    TimeGenerated,
+    UserId,
+    ClientIP,
+    SourceFileName,
+    SiteUrl,
+    ObjectId,
+    Operation,
+    SharingType,
+    TargetUserOrGroup,
+    IsAnonymous,
+    IsSensitiveSite,
+    AlertSeverity = case(
+        IsAnonymous and IsSensitiveSite, "Critical",
+        IsAnonymous,                     "High",
+        "Medium")

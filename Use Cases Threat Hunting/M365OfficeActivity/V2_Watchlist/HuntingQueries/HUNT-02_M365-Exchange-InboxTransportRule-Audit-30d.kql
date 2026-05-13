@@ -1,0 +1,37 @@
+// Hunt    : M365 - Inbox Rule and Transport Rule Audit (30d)
+// Purpose : Full audit of all Exchange inbox and transport rules created or modified
+//           in the past 30 days, pre-calculated for forwarding, redirect and hiding
+//           indicators to support BEC and exfiltration investigations.
+// Tables  : OfficeActivity
+// Period  : P30D
+//==========================================================================================
+
+let LookbackDays = 30d;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType == "ExchangeAdmin"
+| where Operation in (
+    "New-InboxRule", "Set-InboxRule", "Remove-InboxRule",
+    "New-TransportRule", "Set-TransportRule",
+    "Enable-TransportRule", "Disable-TransportRule",
+    "Remove-TransportRule", "New-JournalRule")
+| extend Params = tostring(Parameters)
+| extend
+    HasForward      = Params has_any ("ForwardTo", "ForwardAsAttachmentTo", "RedirectTo", "RedirectMessageTo"),
+    HasHide         = Params has_any ("DeleteMessage", "MoveToFolder", "MarkAsRead"),
+    HasBypass       = Params has_any ("ExceptIfSenderDomainIs", "SetHeaderName"),
+    ExternalAddress = extract(@"(ForwardTo|RedirectTo|RedirectMessageTo).*?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", 2, Params),
+    FolderTarget    = extract(@"(MoveToFolder).*?:([^\s,]+)", 2, Params)
+| project
+    TimeGenerated,
+    UserId,
+    ClientIP,
+    Operation,
+    HasForward,
+    HasHide,
+    HasBypass,
+    ExternalAddress,
+    FolderTarget,
+    Params
+| sort by TimeGenerated desc

@@ -1,0 +1,134 @@
+// Hunt    : M365 Copilot - High-Volume Users and Off-Hours Interaction Anomalies (30d)
+// Purpose : Profile per-user Microsoft 365 Copilot (CopilotInteraction) activity and
+//           flag users who stand out on any of three behavioural axes:
+//             Volume   — they submitted significantly more prompts than peers (measured
+//                        against the tenant-wide median interaction count).
+//             Timing   — an unusual share of their activity falls outside business hours
+//                        (before 08:00 or after 18:00 local UTC) or on weekends.
+//             Location — they used Copilot from many distinct source IPs, which can
+//                        indicate shared credentials, VPN hopping, or travel that should
+//                        appear in parallel identity investigation.
+//           Results include the app hosts used (Teams, Word, Excel, Outlook, etc.),
+//           total resources addressed, active-day spread, and a plain-English
+//           WhySuspicious field summarising every anomaly flag per user.
+//           Pair with HUNT-25 (sensitive file content) and HUNT-26 (XPIA/jailbreak)
+//           to build a complete Copilot abuse picture.
+// Tables  : OfficeActivity
+// Period  : P30D
+// Tactics : Collection, Exfiltration, Discovery
+// MITRE   : T1119 (Automated Collection), T1530 (Cloud Storage Object Access),
+//           T1213.003 (Code Repositories — generalised to information repositories)
+// Scope   : All users with CopilotInteraction events; guests are flagged with +2 on
+//           risk score because guest accounts should not drive high Copilot volumes.
+//==========================================================================================
+
+let LookbackDays    = 30d;
+let BizHourStart    = 8;    // 08:00 UTC — start of core business hours
+let BizHourEnd      = 18;   // 18:00 UTC — end of core business hours
+let MinInteractions = 5;    // suppress noise from single-session / test accounts
+
+// ── Step 1: All Copilot interaction events in the look-back window ───────────────────────
+let CopilotEvents = OfficeActivity
+    | where TimeGenerated > ago(LookbackDays)
+    | where RecordType == "CopilotInteraction"
+    | extend AppHost      = tostring(OperationProperties.AppHost)
+    // ContextCount = number of files / emails / pages Copilot referenced in this prompt
+    | extend ContextCount = array_length(OperationProperties.Contexts)
+    | extend IsGuest      = UserId has "#EXT#"
+    | extend DayOfWeek    = dayofweek(TimeGenerated)            // 0d = Sun, 6d = Sat
+    | extend IsWeekend    = DayOfWeek == 0d or DayOfWeek == 6d
+    | extend IsAfterHours = hourofday(TimeGenerated) < BizHourStart
+                         or hourofday(TimeGenerated) >= BizHourEnd
+    | extend IsOffHours   = IsAfterHours or IsWeekend;
+
+// ── Step 2: Per-user 30-day aggregate profile ────────────────────────────────────────────
+let UserProfile = CopilotEvents
+    | summarize
+        TotalInteractions     = count(),
+        OffHoursCount         = countif(IsOffHours),
+        AfterHoursCount       = countif(IsAfterHours),
+        WeekendCount          = countif(IsWeekend),
+        IsGuestUser           = max(toint(IsGuest)),
+        DistinctAppHosts      = dcount(AppHost),
+        AppHostsUsed          = make_set(AppHost, 10),
+        DistinctClientIPs     = dcount(ClientIP),
+        IPsUsed               = make_set(ClientIP, 10),
+        DistinctDays          = dcount(bin(TimeGenerated, 1d)),
+        TotalContextsAccessed = sum(ContextCount),
+        FirstSeen             = min(TimeGenerated),
+        LastSeen              = max(TimeGenerated)
+        by UserId
+    | where TotalInteractions >= MinInteractions;
+
+// ── Step 3: Compute tenant-wide median for volume anomaly scoring ────────────────────────
+let MedianInteractions = toscalar(
+    UserProfile
+    | summarize percentile(TotalInteractions, 50));
+
+// ── Step 4: Score and flag anomalies; emit per-user result row ───────────────────────────
+UserProfile
+| extend
+    OffHoursRatio    = round(todouble(OffHoursCount)      / todouble(TotalInteractions), 2),
+    VsMedianMultiple = round(todouble(TotalInteractions)  / toreal(iif(MedianInteractions == 0, 1, MedianInteractions)), 1),
+    ActiveDays       = datetime_diff("day", LastSeen, FirstSeen)
+| extend RiskScore = toint(
+    // Volume anomaly: how many times the tenant median?
+      iif(VsMedianMultiple   >= 10, 4,
+      iif(VsMedianMultiple   >= 5,  3,
+      iif(VsMedianMultiple   >= 3,  2,
+      iif(VsMedianMultiple   >= 2,  1, 0))))
+    // Off-hours / weekend concentration
+    + iif(OffHoursRatio      >= 0.5, 3,
+      iif(OffHoursRatio      >= 0.3, 2,
+      iif(OffHoursRatio      >= 0.15, 1, 0)))
+    + iif(WeekendCount       >= 20,  2,
+      iif(WeekendCount       >= 5,   1, 0))
+    // Multiple distinct source IPs → possible credential sharing / travel
+    + iif(DistinctClientIPs  >= 5,   2,
+      iif(DistinctClientIPs  >= 3,   1, 0))
+    // Guest accounts should not drive heavy Copilot volumes
+    + iif(IsGuestUser        == 1,   2, 0)
+    // Wide app coverage (Teams + Word + Excel + Outlook + Loop all at once)
+    + iif(DistinctAppHosts   >= 5,   1, 0))
+| extend AnomalyFlags = strcat_array(pack_array(
+    iif(VsMedianMultiple  >= 3,
+        strcat("VolumeAnomaly(", tostring(VsMedianMultiple), "xMedian)"),    ""),
+    iif(OffHoursRatio     >= 0.3,
+        strcat("OffHoursHeavy(", tostring(round(OffHoursRatio * 100, 0)), "%)"), ""),
+    iif(WeekendCount      >= 5,
+        strcat("WeekendUsage(", tostring(WeekendCount), "sessions)"),         ""),
+    iif(DistinctClientIPs >= 3,
+        strcat("MultipleIPs(", tostring(DistinctClientIPs), ")"),             ""),
+    iif(IsGuestUser       == 1,  "GuestUser",     ""),
+    iif(DistinctAppHosts  >= 5,  "BroadAppUsage", "")),
+    ",")
+| extend WhySuspicious = strcat(
+    "User '", UserId, "' submitted ", tostring(TotalInteractions),
+    " Copilot prompts across ", tostring(DistinctAppHosts), " app(s) [",
+    strcat_array(AppHostsUsed, ", "), "] over ", tostring(DistinctDays),
+    " active day(s) in 30d. That is ", tostring(VsMedianMultiple),
+    "x the tenant median (", tostring(MedianInteractions), " interactions). ",
+    "Off-hours share: ", tostring(round(OffHoursRatio * 100, 0)),
+    "% | Weekend sessions: ", tostring(WeekendCount),
+    " | Distinct source IPs: ", tostring(DistinctClientIPs),
+    " | Total resources addressed by Copilot: ", tostring(TotalContextsAccessed), ".")
+| where RiskScore >= 2
+| project
+    UserId,
+    TotalInteractions,
+    MedianInteractions,
+    VsMedianMultiple,
+    OffHoursRatio,
+    WeekendCount,
+    DistinctClientIPs,
+    IPsUsed,
+    AppHostsUsed,
+    TotalContextsAccessed,
+    DistinctDays,
+    ActiveDays,
+    FirstSeen,
+    LastSeen,
+    RiskScore,
+    AnomalyFlags,
+    WhySuspicious
+| sort by RiskScore desc, TotalInteractions desc

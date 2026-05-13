@@ -1,0 +1,51 @@
+// Hunt    : M365 - Cross-Workload User Activity Timeline (30d)
+// Purpose : Build a unified per-user activity timeline across Teams, Exchange,
+//           SharePoint, and OneDrive for the past 30 days. Enables holistic
+//           investigation of a specific user's M365 footprint during an incident.
+// Tables  : OfficeActivity
+// Usage   : Set TargetUser to a specific UPN to scope to one user, or leave blank ("") for all users.
+// Period  : P30D
+//==========================================================================================
+
+let LookbackDays = 30d;
+// Set to a specific UPN (e.g. "user@contoso.com") to scope to one user.
+// Leave blank ("") to surface all users — results are capped at 500 rows by event count.
+let TargetUser   = "";
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where isempty(TargetUser) or UserId =~ TargetUser
+| extend
+    Workload        = OfficeWorkload,
+    ActionCategory  = case(
+        Operation has_any ("Download", "Sync"),  "Download",
+        Operation has_any ("Upload", "Create"),  "Upload/Create",
+        Operation has_any ("Delete", "Remove"),  "Deletion",
+        Operation has_any ("Share", "Invite"),   "Sharing",
+        Operation has_any ("Mail", "Message"),   "Messaging",
+        Operation has_any ("Rule", "Policy"),    "Policy/Rule Change",
+        Operation has_any ("Permission", "Admin"), "Permission Change",
+        Operation has_any ("Label", "Sensitivity"), "Label Change",
+        "Other")
+| summarize
+    Operations     = make_set(Operation, 50),
+    FileOrObjects  = make_set(SourceFileName, 20),
+    Sites          = make_set(Site_Url, 10),
+    ClientIPs      = make_set(ClientIP, 5),
+    EventCount     = count(),
+    FirstEvent     = min(TimeGenerated),
+    LastEvent      = max(TimeGenerated)
+    by UserId, Workload, ActionCategory
+| sort by EventCount desc, UserId asc, Workload asc
+| take 500
+| project
+    UserId,
+    Workload,
+    ActionCategory,
+    EventCount,
+    Operations,
+    FileOrObjects,
+    Sites,
+    ClientIPs,
+    FirstEvent,
+    LastEvent

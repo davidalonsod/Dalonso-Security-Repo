@@ -1,0 +1,47 @@
+// Hunt    : M365 - DLP Violations and Overrides per User (30d)
+// Purpose : Rank users by total DLP violations and overrides over 30 days,
+//           surfacing policy names, override justifications, and workloads.
+//           Identifies repeat offenders and data types most at risk.
+// Tables  : OfficeActivity
+// Period  : P30D
+//==========================================================================================
+
+let LookbackDays = 30d;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType in (
+    "ComplianceDLPExchange",
+    "ComplianceDLPSharePoint",
+    "ComplianceDLPSharePointClassification")
+| extend
+    PolicyName         = coalesce(tostring(SRPolicyName), extract('"PolicyName":"([^"]+)"', 1, tostring(Parameters))),
+    RuleName           = tostring(SRRuleMatchDetails[0].RuleName),
+    Action             = extract('"Actions":"([^"]+)"', 1, tostring(Parameters)),
+    SensitiveInfoTypes = tostring(SRRuleMatchDetails[0].SensitiveInfoTypes),
+    Justification      = extract('"OverrideJustification":"([^"]+)"', 1, tostring(Parameters))
+| extend
+    IsOverride    = Action has "Override" or isnotempty(Justification),
+    IsBlocked     = Action has_any ("BlockAccess", "BlockWithOverride"),
+    Workload      = OfficeWorkload
+| summarize
+    TotalViolations    = count(),
+    Overrides          = countif(IsOverride),
+    Blocks             = countif(IsBlocked),
+    Policies           = make_set(PolicyName, 10),
+    SensitiveTypes     = make_set(SensitiveInfoTypes, 5),
+    Workloads          = make_set(Workload, 5),
+    LastViolation      = max(TimeGenerated),
+    FirstViolation     = min(TimeGenerated)
+    by UserId
+| sort by TotalViolations desc
+| project
+    UserId,
+    TotalViolations,
+    Overrides,
+    Blocks,
+    Policies,
+    SensitiveTypes,
+    Workloads,
+    FirstViolation,
+    LastViolation

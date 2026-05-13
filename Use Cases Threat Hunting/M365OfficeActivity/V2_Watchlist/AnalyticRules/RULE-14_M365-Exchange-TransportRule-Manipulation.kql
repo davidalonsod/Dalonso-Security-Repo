@@ -1,0 +1,42 @@
+// Rule    : M365 - Exchange Transport Rule Modified (Mail Flow Manipulation)
+// Severity: High
+// Tactics : DefenseEvasion, Exfiltration, Collection
+// MITRE   : T1114.003 (Email Forwarding Rule), T1036 (Masquerading)
+// Freq    : PT1H   Period: PT1H
+// Description: Detects creation, modification, or enabling of Exchange Online
+//              transport rules that forward, redirect, or modify email in transit.
+//              Transport rules can bypass DLP and silently exfiltrate messages.
+//==========================================================================================
+
+let LookbackPeriod = 1h;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType == "ExchangeAdmin"
+| where Operation in (
+    "New-TransportRule", "Set-TransportRule",
+    "Enable-TransportRule", "New-JournalRule",
+    "New-RemoteDomain", "Set-RemoteDomain",
+    "New-AcceptedDomain")
+| extend Params = tostring(Parameters)
+| extend
+    HasForward      = Params has_any ("RedirectMessageTo", "CopyTo", "BlindCopyTo", "AddToRecipients"),
+    HasExternalDest = Params matches regex @"@(?!.*\.onmicrosoft\.com)[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+    HasBypass       = Params has_any ("SetHeaderName", "ExceptIfSenderDomainIs", "SenderDomainIs"),
+    RuleCondition   = extract(@"Condition.*?:(.*?)(\s|$)", 1, Params),
+    DestinationAddr = extract(@"(RedirectMessageTo|CopyTo|BlindCopyTo).*?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", 2, Params)
+| project
+    TimeGenerated,
+    UserId,
+    ClientIP,
+    Operation,
+    HasForward,
+    HasExternalDest,
+    HasBypass,
+    DestinationAddr,
+    RuleCondition,
+    Params,
+    AlertSeverity  = case(
+        HasForward and HasExternalDest, "High",
+        HasForward,                     "Medium",
+        "Low")

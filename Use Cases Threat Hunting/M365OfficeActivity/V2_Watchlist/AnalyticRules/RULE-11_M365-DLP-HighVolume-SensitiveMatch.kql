@@ -1,0 +1,57 @@
+// Rule    : M365 - DLP Policy Match - High Volume or Sensitive Data Type
+// Severity: High
+// Tactics : Exfiltration, Collection
+// MITRE   : T1537, T1567.002
+// Freq    : PT1H   Period: PT1H
+// Description: Alerts when the Microsoft 365 DLP engine generates a significant
+//              number of policy matches, or when a match involves high-sensitivity
+//              data types (Credit Cards, SSNs, Passports, Health Records).
+//              This rule focuses on anomalous user-level DLP match spikes.
+//==========================================================================================
+
+let HighSensitivityTypes = dynamic([
+    "Credit Card Number", "U.S. Social Security Number",
+    "International Banking Account Number", "Passport Number",
+    "U.S. Driver's License Number", "EU Debit Card Number",
+    "U.S. Individual Taxpayer Identification Number",
+    "U.S. / U.K. Passport Number", "Medical Terms"
+]);
+let DLPThreshold   = 20;    // DLP matches per user per hour
+let LookbackPeriod = 1h;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType == "ComplianceDLPExchange"
+    or RecordType == "ComplianceDLPSharePoint"
+    or RecordType == "ComplianceDLPSharePointClassification"
+| extend
+    PolicyName     = tostring(parse_json(PolicyDetails)[0].PolicyName),
+    SensitiveTypes = tostring(parse_json(PolicyDetails)[0].Rules[0].ConditionsMatched.SensitiveInformation),
+    DLPAction      = tostring(parse_json(PolicyDetails)[0].Rules[0].Actions)
+| extend
+    IsHighSensitivity = SensitiveTypes has_any (HighSensitivityTypes),
+    IsBlocked         = DLPAction has_any ("BlockAccess", "NotifyUser", "BlockWithOverride")
+| summarize
+    MatchCount        = count(),
+    Policies          = make_set(PolicyName, 10),
+    HighSensCount     = countif(IsHighSensitivity),
+    BlockedCount      = countif(IsBlocked),
+    UniqueFilesSites  = make_set(ObjectId, 10),
+    ClientIPs         = make_set(ClientIP, 5)
+    by UserId
+| where MatchCount >= DLPThreshold or HighSensCount >= 3
+| extend AlertSeverity = case(
+    HighSensCount >= 5,    "Critical",
+    HighSensCount >= 1,    "High",
+    MatchCount >= 50,      "High",
+    "Medium")
+| project
+    TimeGenerated  = now(),
+    UserId,
+    MatchCount,
+    HighSensCount,
+    BlockedCount,
+    Policies,
+    UniqueFilesSites,
+    ClientIPs,
+    AlertSeverity

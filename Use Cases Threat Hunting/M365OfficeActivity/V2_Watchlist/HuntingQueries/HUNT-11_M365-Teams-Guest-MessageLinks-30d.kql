@@ -1,0 +1,47 @@
+// Hunt    : M365 - Teams Messages with External Links Sent by Guests (30d)
+// Purpose : Enumerate all Teams messages containing external URLs sent by guest
+//           users over 30 days. Supports phishing campaign investigation,
+//           C2 link distribution analysis, and guest account compromise review.
+// Tables  : OfficeActivity
+// Period  : P30D
+//==========================================================================================
+
+let LookbackDays = 30d;
+let SuspiciousUrlPatterns = dynamic([
+    "bit.ly", "tinyurl", "t.co", "ow.ly", "goo.gl",
+    "ngrok.io", "loca.lt", "serveo.net",
+    "pastebin", "hastebin", "repl.it", "glitch.me"
+]);
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType == "MicrosoftTeams"
+| where Operation in ("MessageCreatedHasLink", "MessageCreated")
+| where UserId has "#EXT#"      // guest accounts only
+| extend MessageText   = coalesce(tostring(ExtraProperties[0].Value), tostring(ItemName))
+| extend ChannelLower  = tolower(ChannelName)
+| extend
+    IsSuspiciousUrl = MessageText has_any (SuspiciousUrlPatterns),
+    GuestDomain     = tostring(extract(@"#EXT#@(.+)", 1, UserId))
+| summarize
+    MessageCount     = count(),
+    SuspiciousLinks  = countif(IsSuspiciousUrl),
+    Teams            = make_set(TeamName, 10),
+    Channels         = make_set(ChannelName, 10),
+    URLSample        = make_set(MessageText, 10),
+    ClientIPs        = make_set(ClientIP, 5),
+    FirstMessage     = min(TimeGenerated),
+    LastMessage      = max(TimeGenerated)
+    by UserId, GuestDomain
+| sort by SuspiciousLinks desc, MessageCount desc
+| project
+    UserId,
+    GuestDomain,
+    MessageCount,
+    SuspiciousLinks,
+    Teams,
+    Channels,
+    URLSample,
+    ClientIPs,
+    FirstMessage,
+    LastMessage

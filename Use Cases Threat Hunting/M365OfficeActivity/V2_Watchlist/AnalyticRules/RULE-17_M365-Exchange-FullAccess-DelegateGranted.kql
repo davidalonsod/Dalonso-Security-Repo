@@ -1,0 +1,48 @@
+// Rule    : M365 - Exchange - Mailbox Full Access Permission Granted
+// Severity: High
+// Tactics : Persistence, Collection
+// MITRE   : T1098.002 (Additional Email Delegate Permissions), T1114
+// Freq    : PT1H   Period: PT1H
+// Description: Detects when FullAccess permissions are granted on Exchange Online
+//              mailboxes, especially for admin-level, executive, or sensitive mailboxes.
+//              Attackers with BEC access often add persistent delegate access.
+//==========================================================================================
+
+let LookbackPeriod = 1h;
+let SensitiveMailboxPatterns = dynamic([
+    "ceo", "cfo", "cto", "coo", "vp", "president", "director",
+    "finance", "legal", "hr", "payroll", "board", "exec", "security"
+]);
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType == "ExchangeAdmin"
+| where Operation in (
+    "Add-MailboxPermission", "Add-RecipientPermission",
+    "AddMailboxPermission")
+| extend Params = tostring(Parameters)
+| extend
+    AccessRights     = extract(@"AccessRights.*?:(.*?)(\s|,|$)", 1, Params),
+    DelegateUser     = extract(@"User.*?:([^\s,]+)", 1, Params),
+    TargetMailbox    = extract(@"Identity.*?:([^\s,]+)", 1, Params)
+| extend
+    IsFullAccess     = AccessRights has "FullAccess"
+        or AccessRights has "SendAs",
+    IsSensitiveBox   = tolower(TargetMailbox) has_any (SensitiveMailboxPatterns),
+    IsExternal       = DelegateUser has "#EXT#"
+| where IsFullAccess
+| project
+    TimeGenerated,
+    ActorUserId    = UserId,
+    TargetMailbox,
+    DelegateUser,
+    AccessRights,
+    ClientIP,
+    IsFullAccess,
+    IsSensitiveBox,
+    IsExternal,
+    AlertSeverity  = case(
+        IsExternal and IsFullAccess,          "Critical",
+        IsSensitiveBox and IsFullAccess,      "High",
+        IsFullAccess,                         "Medium",
+        "Low")

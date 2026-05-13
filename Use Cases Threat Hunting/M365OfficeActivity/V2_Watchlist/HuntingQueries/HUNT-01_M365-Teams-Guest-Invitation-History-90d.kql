@@ -1,0 +1,38 @@
+// Hunt    : M365 - Teams Guest Invitation History (90d)
+// Purpose : Map all guest invitations across Teams over 90 days to identify
+//           patterns: who invited guests, from what domains, into which teams.
+//           Supports investigation of insider threat, BEC, and shadow IT.
+// Tables  : OfficeActivity
+// Period  : P90D
+//==========================================================================================
+
+let LookbackDays = 90d;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType == "MicrosoftTeams"
+| where Operation in ("MemberAdded", "InviteAccepted", "GuestAccessEnabled")
+| extend MemberUPN = tostring(Members[0].UPN)
+| where MemberUPN has "#EXT#"
+| extend
+    GuestDomain    = tostring(extract(@"#EXT#@(.+)", 1, MemberUPN)),
+    InviterDomain  = tostring(split(UserId, "@")[1])
+| summarize
+    InviteCount    = count(),
+    InvitedGuests  = make_set(MemberUPN, 30),
+    Teams          = make_set(TeamName, 20),
+    ClientIPs      = make_set(ClientIP, 10),
+    FirstInvite    = min(TimeGenerated),
+    LastInvite     = max(TimeGenerated)
+    by UserId, GuestDomain, InviterDomain
+| extend IsExternalInviter = InviterDomain != GuestDomain
+| sort by InviteCount desc
+| project
+    UserId,
+    GuestDomain,
+    InviteCount,
+    Teams,
+    InvitedGuests,
+    IsExternalInviter,
+    FirstInvite,
+    LastInvite

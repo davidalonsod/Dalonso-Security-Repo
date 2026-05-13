@@ -1,0 +1,45 @@
+// Hunt    : M365 - OneDrive Deleted Files Timeline (for Ransomware / Sabotage) (30d)
+// Purpose : Enumerate all file deletion and version-deletion events in OneDrive
+//           over 30 days, ranked by user. Supports ransomware impact assessment,
+//           insider sabotage review, and recovery scoping.
+// Tables  : OfficeActivity
+// Period  : P30D
+//==========================================================================================
+
+let LookbackDays = 30d;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType in ("OneDrive", "SharePointFileOperation", "OneDriveFileOperation")
+| where Operation in (
+    "FileDeleted", "FolderDeleted",
+    "FileVersionsAllDeleted", "FileRecycled",
+    "FilePermanentlyDeleted")
+| extend
+    FileExt        = tostring(extract(@"(\.[a-zA-Z0-9]+)$", 1, SourceFileName)),
+    IsPermanent    = Operation in ("FilePermanentlyDeleted", "FileVersionsAllDeleted")
+| summarize
+    TotalDeleted     = count(),
+    PermanentDeletes = countif(IsPermanent),
+    VersionDeletes   = countif(Operation == "FileVersionsAllDeleted"),
+    UniqueFiles      = dcount(SourceFileName),
+    FolderDeletes    = countif(Operation == "FolderDeleted"),
+    FileExtensions   = make_set(FileExt, 15),
+    SampleFiles      = make_set(SourceFileName, 10),
+    ClientIPs        = make_set(ClientIP, 5),
+    FirstDelete      = min(TimeGenerated),
+    LastDelete       = max(TimeGenerated)
+    by UserId
+| sort by PermanentDeletes desc, TotalDeleted desc
+| project
+    UserId,
+    TotalDeleted,
+    PermanentDeletes,
+    VersionDeletes,
+    FolderDeletes,
+    UniqueFiles,
+    FileExtensions,
+    SampleFiles,
+    ClientIPs,
+    FirstDelete,
+    LastDelete

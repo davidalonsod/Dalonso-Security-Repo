@@ -1,0 +1,61 @@
+// Rule    : M365 - Exchange BEC Campaign: Multiple Mailboxes Forwarding to Same External Address
+// Severity: Critical
+// Tactics : Collection, Exfiltration
+// MITRE   : T1114.003 (Email Forwarding Rule), T1078.004
+// Freq    : PT1H   Period: P1D
+// Description: Detects when 3 or more distinct mailboxes have forwarding rules
+//              pointing to the same external email address or domain within the past
+//              24 hours — a strong indicator of a coordinated BEC campaign where an
+//              attacker progressively compromises accounts and adds forwarding rules
+//              to a single collection address.
+//==========================================================================================
+
+let LookbackPeriod      = 1d;
+let MailboxThreshold    = 3;     // minimum distinct source mailboxes sharing same destination
+
+// Collect all new/modified forwarding rules
+let ForwardingRules = OfficeActivity
+    | where TimeGenerated > ago(LookbackPeriod)
+    | where RecordType == "ExchangeAdmin"
+    | where Operation in (
+        "New-InboxRule", "Set-InboxRule",
+        "New-TransportRule", "Set-TransportRule",
+        "Set-Mailbox", "Set-MailboxAutoReplyConfiguration")
+    | extend Params = tostring(Parameters)
+    | extend
+        ForwardingDest = coalesce(
+            extract(@"(ForwardTo|ForwardAsAttachmentTo|RedirectTo|DeliverToMailboxAndForward|ForwardingAddress|ForwardingSmtpAddress).*?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", 2, Params),
+            extract(@"(ForwardTo|ForwardAsAttachmentTo|RedirectTo).*?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", 2, Params)
+        )
+    | where isnotempty(ForwardingDest)
+    | extend
+        ForwardDomain   = tostring(split(ForwardingDest, "@")[1]),
+        IsExternal      = not(ForwardingDest has "onmicrosoft.com")
+    | where IsExternal;
+
+// Group by destination — look for same dest receiving from multiple source accounts
+ForwardingRules
+| summarize
+    SourceMailboxCount  = dcount(UserId),
+    SourceMailboxes     = make_set(UserId, 20),
+    Operations          = make_set(Operation, 10),
+    ForwardDomain       = any(ForwardDomain),
+    ClientIPs           = make_set(ClientIP, 10),
+    FirstSeen           = min(TimeGenerated),
+    LastSeen            = max(TimeGenerated)
+    by ForwardingDest
+| where SourceMailboxCount >= MailboxThreshold
+| extend AlertSeverity = case(
+    SourceMailboxCount >= 10, "Critical",
+    SourceMailboxCount >= 5,  "High",
+    "Medium")
+| project
+    TimeGenerated      = LastSeen,
+    ForwardingDest,
+    ForwardDomain,
+    SourceMailboxCount,
+    SourceMailboxes,
+    Operations,
+    ClientIPs,
+    FirstSeen,
+    AlertSeverity

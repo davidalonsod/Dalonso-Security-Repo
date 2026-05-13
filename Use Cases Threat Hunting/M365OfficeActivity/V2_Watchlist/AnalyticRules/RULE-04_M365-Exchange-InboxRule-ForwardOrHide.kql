@@ -1,0 +1,48 @@
+// Rule    : M365 - Exchange Online Inbox Rule Created for Forwarding / Hiding
+// Severity: High
+// Tactics : Collection, Exfiltration, DefenseEvasion
+// MITRE   : T1114.003 (Email Collection: Email Forwarding Rule),
+//           T1564.008 (Hide Artifacts: Email Hiding Rules)
+// Freq    : PT1H   Period: PT1H
+// Description: Detects creation or modification of Exchange inbox rules that
+//              forward emails externally, redirect to folders like "RSS Feeds" or
+//              "Deleted Items", or mark all items as read — classic BEC/exfil tactics.
+//==========================================================================================
+
+let LookbackPeriod = 1h;
+let SuspiciousFolders = dynamic([
+    "DeletedItems", "RSS Feeds", "Junk Email", "Deleted Items",
+    "Sync Issues", "Conversation History"
+]);
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType == "ExchangeAdmin"
+| where Operation in (
+    "New-InboxRule", "Set-InboxRule", "New-TransportRule",
+    "Set-TransportRule", "New-MailboxRule")
+| extend RuleParams = tostring(Parameters)
+| extend
+    ForwardingEnabled      = RuleParams has_any ("ForwardTo", "ForwardAsAttachmentTo", "RedirectTo"),
+    HidingEnabled          = RuleParams has_any (SuspiciousFolders),
+    ExternalDomain         = RuleParams has_any (".com", ".net", ".io", ".org"),
+    MarkAsRead             = RuleParams has "MarkAsRead",
+    DeleteEnabled          = RuleParams has "Delete",
+    ExternalEmailPattern   = extract(@"ForwardTo.*?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", 1, RuleParams)
+| where ForwardingEnabled or HidingEnabled or DeleteEnabled
+| extend AlertSeverity = case(
+    ForwardingEnabled and ExternalDomain, "High",
+    HidingEnabled or DeleteEnabled,       "Medium",
+    "Low")
+| project
+    TimeGenerated,
+    UserId,
+    ClientIP,
+    Operation,
+    ForwardingEnabled,
+    HidingEnabled,
+    MarkAsRead,
+    DeleteEnabled,
+    ExternalEmailPattern,
+    RuleParams,
+    AlertSeverity

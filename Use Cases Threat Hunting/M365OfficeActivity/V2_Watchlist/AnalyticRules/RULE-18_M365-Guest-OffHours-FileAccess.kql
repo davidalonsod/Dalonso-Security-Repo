@@ -1,0 +1,47 @@
+// Rule    : M365 - SharePoint / OneDrive File Access by Guest During Off-Hours
+// Severity: Medium
+// Tactics : Collection, InitialAccess
+// MITRE   : T1530 (Data from Cloud Storage), T1078.004
+// Freq    : PT1H   Period: PT1H
+// Description: Detects guest users (#EXT#) accessing SharePoint or OneDrive files
+//              outside of typical business hours (22:00–06:00 UTC), which may
+//              indicate a compromised guest account or unauthorised after-hours access.
+//==========================================================================================
+
+let LookbackPeriod         = 1h;
+let OffHoursStart          = 22;    // 22:00 UTC
+let OffHoursEnd            = 6;     // 06:00 UTC
+let AccessThreshold        = 20;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType in ("SharePoint", "OneDrive")
+| where UserId has "#EXT#"          // guest/external account
+| where Operation in (
+    "FileAccessed", "FileDownloaded", "FileViewed",
+    "FilePreviewed", "FileCheckedOut")
+| extend HourUTC = hourofday(TimeGenerated)
+| where HourUTC >= OffHoursStart or HourUTC < OffHoursEnd
+| summarize
+    AccessCount     = count(),
+    FilesAccessed   = make_set(SourceFileName, 15),
+    SiteURLs        = make_set(SiteUrl, 5),
+    ClientIPs       = make_set(ClientIP, 5),
+    HoursActive     = make_set(HourUTC, 10)
+    by UserId
+| where AccessCount >= AccessThreshold
+| extend GuestDomain = tostring(extract(@"#EXT#@(.+)", 1, UserId))
+| extend AlertSeverity = case(
+    AccessCount >= 100, "High",
+    AccessCount >= 50,  "Medium",
+    "Low")
+| project
+    TimeGenerated  = now(),
+    UserId,
+    GuestDomain,
+    AccessCount,
+    FilesAccessed,
+    SiteURLs,
+    ClientIPs,
+    HoursActive,
+    AlertSeverity

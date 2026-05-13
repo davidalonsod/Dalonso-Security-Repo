@@ -1,0 +1,45 @@
+// Hunt    : M365 - Top File Downloaders and Uploaders to OneDrive (30d)
+// Purpose : Rank users by total volume of file downloads and uploads in OneDrive
+//           and SharePoint over 30 days. Surfaces outliers and high-volume movers
+//           for insider threat, data hoarding, and exfiltration investigations.
+// Tables  : OfficeActivity
+// Period  : P30D
+//==========================================================================================
+
+let LookbackDays = 30d;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where RecordType in ("SharePoint", "OneDrive", "SharePointFileOperation", "OneDriveFileOperation")
+| where Operation in (
+    "FileDownloaded", "FileSyncDownloadedFull", "FileSyncDownloadedPartial",
+    "FileUploaded", "FileSyncUploadedFull",
+    "FileCopied", "FileMoved")
+| extend ActivityType = case(
+    Operation has "Download" or Operation has "Sync" and Operation has "Downloaded", "Download",
+    Operation has "Upload"   or Operation has "Sync" and Operation has "Uploaded",   "Upload",
+    Operation has "Copie",   "Copy",
+    "Move")
+| summarize
+    TotalOps       = count(),
+    Downloads      = countif(ActivityType == "Download"),
+    Uploads        = countif(ActivityType == "Upload"),
+    Copies         = countif(ActivityType == "Copy"),
+    UniqueFiles    = dcount(SourceFileName),
+    SiteURLs       = make_set(Site_Url, 5),
+    ClientIPs      = make_set(ClientIP, 5),
+    LastActivity   = max(TimeGenerated)
+    by UserId
+| sort by Downloads desc
+| extend DownloadUploadRatio = round(todouble(Downloads) / (Uploads + 1), 2)
+| project
+    UserId,
+    TotalOps,
+    Downloads,
+    Uploads,
+    Copies,
+    DownloadUploadRatio,
+    UniqueFiles,
+    SiteURLs,
+    ClientIPs,
+    LastActivity

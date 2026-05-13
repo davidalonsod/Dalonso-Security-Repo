@@ -1,0 +1,67 @@
+// Rule    : M365 - SharePoint / OneDrive Anonymous or Shared Link Accessed (Data Made Public)
+// Severity: High
+// Tactics : Exfiltration, InitialAccess
+// MITRE   : T1567.002 (Exfiltration Over Web Service),
+//           T1530 (Data from Cloud Storage)
+// Freq    : PT1H   Period: PT1H
+// Description: Detects USAGE of anonymous or shared links to access SharePoint/OneDrive
+//              content — distinct from link CREATION (covered by RULE-09). High access
+//              counts on anonymous links, especially to sensitive-named content or from
+//              diverse IPs, indicate that data has been made publicly accessible and is
+//              actively being harvested, either after an internal share or via a leaked link.
+//==========================================================================================
+
+let LookbackPeriod          = 1h;
+let AnonymousAccessThreshold = 10;    // accesses per hour to trigger
+let SensitiveSitePatterns   = dynamic([
+    "hr", "legal", "finance", "exec", "security", "payroll",
+    "board", "audit", "compliance", "confidential", "restricted"
+]);
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType in ("SharePoint", "OneDrive")
+| where Operation in (
+    "AnonymousLinkUsed",
+    "SecureLinkUsed",
+    "AnonymousLinkUpdated",
+    "AppAccessedFileViaSharingLink",
+    "FileAccessedAnonymously",
+    "PageViewedExtended")
+| extend
+    SiteLower        = tolower(SiteUrl),
+    AccessorIP       = ClientIP,
+    IsAnonymousOp    = Operation in ("AnonymousLinkUsed", "FileAccessedAnonymously", "AnonymousLinkUpdated")
+| extend
+    IsSensitiveSite  = SiteLower has_any (SensitiveSitePatterns),
+    // Detect access from multiple distinct IPs — indicates public leaked link
+    FileKey          = strcat(SourceFileName, "|", SiteUrl)
+| summarize
+    TotalAccesses    = count(),
+    AnonymousAccesses = countif(IsAnonymousOp),
+    UniqueIPs        = dcount(AccessorIP),
+    IPList           = make_set(AccessorIP, 15),
+    FilesSeen        = make_set(SourceFileName, 10),
+    SiteURLs         = make_set(SiteUrl, 5),
+    IsSensitiveSite  = any(IsSensitiveSite),
+    FirstAccess      = min(TimeGenerated),
+    LastAccess       = max(TimeGenerated)
+    by SourceFileName, SiteUrl
+| where AnonymousAccesses >= AnonymousAccessThreshold
+    or (UniqueIPs >= 5 and AnonymousAccesses >= 3)
+| extend AlertSeverity = case(
+    IsSensitiveSite and UniqueIPs >= 10, "Critical",
+    IsSensitiveSite,                     "High",
+    UniqueIPs >= 10,                     "High",
+    "Medium")
+| project
+    TimeGenerated    = LastAccess,
+    SourceFileName,
+    SiteUrl,
+    TotalAccesses,
+    AnonymousAccesses,
+    UniqueIPs,
+    IPList,
+    IsSensitiveSite,
+    FirstAccess,
+    AlertSeverity

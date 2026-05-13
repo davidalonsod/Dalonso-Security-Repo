@@ -1,0 +1,102 @@
+// Hunt    : M365 - Dormant Account Sudden Activity Burst (90d lookback, 30d recent)
+// Purpose : Identify user accounts that showed no M365 OfficeActivity during a
+//           "silent window" (days 90–31 ago) and then suddenly generated a burst of
+//           events in the last 30 days. This pattern is consistent with account
+//           compromise, credential stuffing after a long gap, or re-enabled accounts
+//           being immediately weaponised. The query surfaces the exact operations that
+//           occurred after the silence, ranked by burst volume. Does NOT include guests.
+// Tables  : OfficeActivity
+// Period  : P90D (silence check) + P30D (burst detection)
+// Tactics : Initial Access, Collection, Exfiltration
+// MITRE   : T1078.004, T1530, T1048
+//==========================================================================================
+
+let SilenceWindowStart  = ago(90d);   // start of silence window
+let SilenceWindowEnd    = ago(30d);   // end of silence window / start of watch window
+let BurstWindowStart    = ago(30d);   // burst activity period
+let MinBurstEvents      = 5;          // minimum events in burst window to surface account
+
+// --- Users active BEFORE the silence window ---
+let ActiveBefore = OfficeActivity
+    | where TimeGenerated between (SilenceWindowStart .. SilenceWindowEnd)
+    | where UserId !has "#EXT#"
+    | summarize LastSeenBefore = max(TimeGenerated) by UserId;
+
+// --- Users silent during silence window (no events at all) ---
+let SilentUsers = OfficeActivity
+    | where TimeGenerated between (SilenceWindowStart .. SilenceWindowEnd)
+    | where UserId !has "#EXT#"
+    | summarize count() by UserId
+    | join kind=rightanti ActiveBefore on UserId   // those in ActiveBefore but not in silence window
+    // Actually: users who HAD activity before but NOT during the silence window
+    ;
+
+// Alternative approach: find users with events older than SilenceWindowEnd
+// but NO events during the silence window
+let UsersWithOlderActivity = OfficeActivity
+    | where TimeGenerated < SilenceWindowEnd
+    | where UserId !has "#EXT#"
+    | summarize LastOldEvent = max(TimeGenerated) by UserId;
+
+let UsersActiveDuringSilence = OfficeActivity
+    | where TimeGenerated between (SilenceWindowStart .. SilenceWindowEnd)
+    | where UserId !has "#EXT#"
+    | summarize count() by UserId;
+
+// Users that were active BEFORE the silence window but NOT DURING it
+let TrulyDormantUsers = UsersWithOlderActivity
+    | join kind=leftanti UsersActiveDuringSilence on UserId
+    | project UserId, LastOldEvent;
+
+// --- Burst activity in the watch window ---
+let BurstActivity = OfficeActivity
+    | where TimeGenerated >= BurstWindowStart
+    | where UserId !has "#EXT#"
+    | extend IsExfilOp = Operation in (
+        "FileDownloaded", "FileAccessed", "FileSyncDownloadedFull",
+        "MailItemsAccessed", "Send", "AnonymousLinkCreated",
+        "SecureLinkCreated", "SharingInvitationCreated")
+    | summarize
+        BurstEvents          = count(),
+        FirstBurstEvent      = min(TimeGenerated),
+        LastBurstEvent       = max(TimeGenerated),
+        ExfilOpCount         = countif(IsExfilOp),
+        DistinctOps          = dcount(Operation),
+        Workloads            = make_set(RecordType, 10),
+        DistinctSites        = dcount(Site_Url),
+        DistinctFiles        = dcount(SourceFileName),
+        SampleOps            = make_set(Operation, 15),
+        SampleSites          = make_set(Site_Url, 5)
+        by UserId;
+
+// --- Join: dormant users who produced a burst ---
+TrulyDormantUsers
+| join kind=inner BurstActivity on UserId
+| where BurstEvents >= MinBurstEvents
+| extend
+    SilenceDays       = datetime_diff("day", FirstBurstEvent, LastOldEvent),
+    BurstDuration     = datetime_diff("hour", LastBurstEvent, FirstBurstEvent),
+    ExfilRatio        = iif(BurstEvents > 0,
+                            round(todouble(ExfilOpCount) / todouble(BurstEvents), 2), 0.0)
+| extend RiskScore = toint(
+      iif(SilenceDays >= 180, 3, iif(SilenceDays >= 90, 2, 1))
+    + iif(ExfilRatio >= 0.5,  3, iif(ExfilRatio >= 0.2, 1, 0))
+    + iif(BurstEvents >= 100, 2, iif(BurstEvents >= 30,  1, 0))
+    + iif(DistinctSites >= 5, 1, 0))
+| project
+    UserId,
+    LastOldEvent,
+    SilenceDays,
+    FirstBurstEvent,
+    BurstEvents,
+    BurstDuration,
+    ExfilOpCount,
+    ExfilRatio,
+    DistinctOps,
+    Workloads,
+    DistinctSites,
+    DistinctFiles,
+    RiskScore,
+    SampleOps,
+    SampleSites
+| sort by RiskScore desc, SilenceDays desc

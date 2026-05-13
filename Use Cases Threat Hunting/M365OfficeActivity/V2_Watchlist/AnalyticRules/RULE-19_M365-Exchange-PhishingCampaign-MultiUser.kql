@@ -1,0 +1,46 @@
+// Rule    : M365 - Exchange Phishing Campaign - Multiple Users Report Same Sender
+// Severity: High
+// Tactics : InitialAccess
+// MITRE   : T1566.001 (Phishing: Spearphishing Attachment),
+//           T1566.002 (Phishing: Spearphishing Link)
+// Freq    : PT30M   Period: PT30M
+// Description: Detects when multiple unique users report the same sender as phishing
+//              within a short window — strong signal for an active phishing campaign
+//              using a shared delivery infrastructure. Correlates with submission reports.
+//==========================================================================================
+
+let LookbackPeriod     = 30m;
+let UniqueUserThreshold = 3;   // minimum distinct users reporting same sender
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType == "ExchangeAdmin"
+    or (RecordType == "ThreatIntelligence" and Operation has_any ("SubmitReport", "PhishReport"))
+| where Operation in (
+    "PhishingReported", "SubmitReport",
+    "Enable-AntiPhishRule", "New-AntiPhishPolicy",
+    "MessageTrace")
+| extend
+    ReportedSender = tostring(extract(@"SenderAddress.*?:([^\s,]+)", 1, tostring(Parameters))),
+    RecipientUser  = UserId
+| where isnotempty(ReportedSender)
+| summarize
+    UniqueReporters = dcount(RecipientUser),
+    Reporters       = make_set(RecipientUser, 20),
+    FirstReport     = min(TimeGenerated),
+    LastReport      = max(TimeGenerated)
+    by ReportedSender
+| where UniqueReporters >= UniqueUserThreshold
+| extend SenderDomain = tostring(split(ReportedSender, "@")[1])
+| extend AlertSeverity = case(
+    UniqueReporters >= 10, "Critical",
+    UniqueReporters >= 5,  "High",
+    "Medium")
+| project
+    TimeGenerated  = LastReport,
+    ReportedSender,
+    SenderDomain,
+    UniqueReporters,
+    Reporters,
+    FirstReport,
+    AlertSeverity

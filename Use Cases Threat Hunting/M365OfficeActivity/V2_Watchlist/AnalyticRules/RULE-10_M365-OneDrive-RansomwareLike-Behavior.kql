@@ -1,0 +1,53 @@
+// Rule    : M365 - OneDrive Ransomware-Like File Replacement Pattern
+// Severity: Critical
+// Tactics : Impact
+// MITRE   : T1486 (Data Encrypted for Impact)
+// Freq    : PT30M   Period: PT30M
+// Description: Detects ransomware-like behavior in OneDrive where a user deletes
+//              or overwrites a large number of unique files within a short time window.
+//              Correlates FileDeleted + FileModified or upload of files with suspicious
+//              extensions (.locked, .encrypt, .cry, etc.)
+//==========================================================================================
+
+let RansomExtensions = dynamic([
+    ".locked", ".encrypt", ".crypted", ".crypt", ".cry", ".wnry",
+    ".wncry", ".wcry", ".ecc", ".ezz", ".exx", ".axx", ".abc",
+    ".xyz", ".locky", ".crypz", ".zepto"
+]);
+let MassDeleteThreshold = 50;   // files deleted/replaced in 30 min
+let LookbackPeriod      = 30m;
+
+OfficeActivity
+| where TimeGenerated > ago(LookbackPeriod)
+| where RecordType == "OneDrive"
+| where Operation in ("FileDeleted", "FileModified", "FileUploaded", "FileVersionsAllDeleted")
+| extend FileExt = tostring(extract(@"(\.[a-zA-Z0-9]+)$", 1, SourceFileName))
+| extend IsSuspiciousExt = FileExt in~ (RansomExtensions)
+| summarize
+    TotalOps          = count(),
+    DeletedCount      = countif(Operation == "FileDeleted"),
+    VersionsDeleted   = countif(Operation == "FileVersionsAllDeleted"),
+    UploadedCount     = countif(Operation == "FileUploaded"),
+    SuspiciousExtCount = countif(IsSuspiciousExt),
+    UniqueFiles       = dcount(SourceFileName),
+    FileSample        = make_set(SourceFileName, 15),
+    ClientIPs         = make_set(ClientIP, 5)
+    by UserId
+| where DeletedCount >= MassDeleteThreshold
+    or VersionsDeleted >= 10
+    or SuspiciousExtCount >= 5
+| extend AlertSeverity = case(
+    SuspiciousExtCount >= 5 or VersionsDeleted >= 10, "Critical",
+    DeletedCount >= 200,                              "High",
+    "Medium")
+| project
+    TimeGenerated  = now(),
+    UserId,
+    DeletedCount,
+    VersionsDeleted,
+    UploadedCount,
+    SuspiciousExtCount,
+    UniqueFiles,
+    FileSample,
+    ClientIPs,
+    AlertSeverity
