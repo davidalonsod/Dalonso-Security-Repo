@@ -1,0 +1,118 @@
+// Rule    : Workload Identity - Risky User Grants App Roles with Concurrent M365 Data Access
+// Severity: High
+// Tactics : Persistence, PrivilegeEscalation, Collection
+// MITRE   : T1098.003 (Account Manipulation: Additional Cloud Roles), T1548, T1530
+// Freq    : PT1H   Period: PT1H
+// Tables  : AADUserRiskEvents, AuditLogs, OfficeActivity
+// Built-in differentiation: No Sentinel built-in correlates Identity Protection risk event
+// timing with privilege grant operations, and none cross-references concurrent M365 data
+// access from the same account. The triple signal — risk event + privilege grant +
+// OfficeActivity data ops — distinguishes deliberate multi-vector attacks from isolated
+// misconfiguration events.
+//==========================================================================================
+// Attack chain: attacker compromises a user account (Identity Protection fires a risk
+// event) → grants elevated app roles or OAuth consent on a controlled SP → simultaneously
+// accesses Exchange/SharePoint/Teams to stage or exfiltrate data. The proximity between
+// risk detection, privilege installation, and M365 data access is the diagnostic signal.
+
+// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+    T
+    | extend IPAddress = tostring(IPAddress)
+    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+    | mv-apply _r = _allowRange to typeof(string) on (
+        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+        | summarize _anyInRange = max(toint(_inRange)))
+    | where isnull(_anyInRange) or _anyInRange == 0
+    | project-away _anyInRange
+};
+// ---------------------------------------------------------------------------
+let LookbackWindow = 1h;
+let RiskLookback   = 24h;
+
+let PrivilegeGrantOps = dynamic([
+    "Add app role assignment to service principal",
+    "Add delegated permission grant",
+    "Add app role assignment grant to user",
+    "Add OAuth2PermissionGrant",
+    "Consent to application",
+    "Add member to role",
+    "Grant an application permission to user",
+    "Add application",
+    "Add service principal"
+]);
+
+// Users who triggered a risk event in the past 24 hours
+let RecentRiskyUsers = union isfuzzy=true
+    AADUserRiskEvents,
+    (datatable(UserId:string, UserPrincipalName:string, RiskEventType:string,
+               RiskLevel:string, DetectedDateTime:datetime)[])
+    | where DetectedDateTime > ago(RiskLookback)
+    | where RiskLevel in ("high", "medium")
+    | summarize
+        RiskEventTypes = make_set(RiskEventType, 10),
+        MaxRiskLevel   = max(RiskLevel),
+        FirstRisk      = min(DetectedDateTime),
+        LastRisk       = max(DetectedDateTime)
+        by UserId, UserPrincipalName;
+
+// Privilege grants by risky users in current window
+let PrivGrants = AuditLogs
+    | where TimeGenerated > ago(LookbackWindow)
+    | where OperationName has_any (PrivilegeGrantOps)
+    | where Result =~ "success"
+    | where isnotempty(tostring(InitiatedBy.user.id))
+    | extend InitiatorUserId = tostring(InitiatedBy.user.id)
+    | extend InitiatorUPN    = tostring(InitiatedBy.user.userPrincipalName)
+    | extend InitiatorIP     = tostring(InitiatedBy.user.ipAddress)
+    | extend TargetId        = tostring(TargetResources[0].id)
+    | extend TargetName      = tostring(TargetResources[0].displayName)
+    | join kind=inner RecentRiskyUsers on $left.InitiatorUserId == $right.UserId
+    | extend TimeSinceRisk   = datetime_diff("minute", TimeGenerated, LastRisk)
+    | summarize
+        GrantCount       = count(),
+        Operations       = make_set(OperationName, 10),
+        TargetApps       = make_set(TargetName, 10),
+        InitiatorIPs     = make_set(InitiatorIP, 5),
+        RiskEventTypes   = any(RiskEventTypes),
+        MaxRiskLevel     = any(MaxRiskLevel),
+        LastRisk         = any(LastRisk),
+        MinTimeSinceRisk = min(TimeSinceRisk),
+        FirstSeen        = min(TimeGenerated),
+        LastSeen         = max(TimeGenerated)
+        by InitiatorUserId, InitiatorUPN;
+
+// Concurrent OfficeActivity from the same risky user
+let M365Activity = OfficeActivity
+    | where TimeGenerated > ago(LookbackWindow)
+    | where isnotempty(UserId)
+    | extend UserIdLower = tolower(UserId)
+    | summarize
+        M365OperationCount = count(),
+        M365Operations     = make_set(Operation, 10),
+        M365Workloads      = make_set(OfficeWorkload, 5),
+        M365ResourceCount  = dcount(OfficeObjectId),
+        M365Resources      = make_set(OfficeObjectId, 5),
+        M365ClientIPs      = make_set(ClientIP, 5)
+        by UserIdLower;
+
+PrivGrants
+| extend UserIdLower = tolower(InitiatorUPN)
+| join kind=leftouter M365Activity on UserIdLower
+| extend AlertSeverity = case(
+    MaxRiskLevel == "high" and M365OperationCount > 0, "High",
+    MaxRiskLevel == "high",                             "High",
+    M365OperationCount > 0,                             "Medium",
+    "Medium")
+| project
+    InitiatorUPN, InitiatorUserId, MaxRiskLevel, RiskEventTypes,
+    LastRisk, MinTimeSinceRisk,
+    GrantCount, Operations, TargetApps, InitiatorIPs,
+    M365OperationCount, M365Operations, M365Workloads,
+    M365ResourceCount, M365Resources, M365ClientIPs,
+    AlertSeverity, FirstSeen, LastSeen
+| order by AlertSeverity asc, GrantCount desc

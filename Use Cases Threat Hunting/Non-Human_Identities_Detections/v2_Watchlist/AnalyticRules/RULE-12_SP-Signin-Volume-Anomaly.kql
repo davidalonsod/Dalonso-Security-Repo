@@ -1,0 +1,70 @@
+// Rule    : Workload Identity - SP Sign-in Anomaly Spike (Statistical Baseline Deviation)
+// Severity: Medium
+// Tactics : Discovery, CredentialAccess
+// MITRE   : T1078.004, T1087.004
+// Freq    : PT1H   Period: P14D
+//==========================================================================================
+
+// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+    T
+    | extend IPAddress = tostring(IPAddress)
+    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+    | mv-apply _r = _allowRange to typeof(string) on (
+        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+        | summarize _anyInRange = max(toint(_inRange)))
+    | where isnull(_anyInRange) or _anyInRange == 0
+    | project-away _anyInRange
+};
+// ---------------------------------------------------------------------------
+let DeviationThreshold = 3.0;    // 3 standard deviations above mean
+let MinSigninsThreshold = 50;    // minimum sign-ins in current hour
+let MinBaselineDays     = 3;
+
+// --- Baseline: per-SP hourly sign-in counts (last 13 days) ---
+let Baseline = AADServicePrincipalSignInLogs | invoke ExcludeAllowlistedIPs()
+    | where TimeGenerated between (ago(14d) .. ago(1h))
+    | where ResultType == "0"
+    | summarize HourlySignins = count()
+        by ServicePrincipalId, bin(TimeGenerated, 1h)
+    | summarize
+        AvgPerHour  = avg(HourlySignins),
+        StdDevPerHour = stdev(HourlySignins),
+        SampleDays  = dcount(bin(TimeGenerated, 1d))
+        by ServicePrincipalId
+    | where SampleDays >= MinBaselineDays;
+
+// --- Current 1-hour window ---
+let CurrentWindow = AADServicePrincipalSignInLogs | invoke ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(1h)
+    | where ResultType == "0"
+    | summarize
+        CurrentSignins   = count(),
+        UniqueResources  = dcount(ResourceDisplayName),
+        Resources        = make_set(ResourceDisplayName, 10),
+        UniqueIPs        = dcount(IPAddress),
+        CredTypes        = make_set(ClientCredentialType, 5),
+        FirstSignin      = min(TimeGenerated),
+        LastSignin       = max(TimeGenerated)
+        by ServicePrincipalName, ServicePrincipalId, AppId;
+
+CurrentWindow
+| join kind=inner Baseline on ServicePrincipalId
+| where CurrentSignins >= MinSigninsThreshold
+| extend DeviationScore = iff(
+    StdDevPerHour > 0,
+    (CurrentSignins - AvgPerHour) / StdDevPerHour,
+    toreal(CurrentSignins))
+| where DeviationScore >= DeviationThreshold
+    or (AvgPerHour < 5 and CurrentSignins >= MinSigninsThreshold)
+| project
+    ServicePrincipalName, ServicePrincipalId, AppId,
+    CurrentSignins, AvgPerHour = round(AvgPerHour, 1),
+    StdDevPerHour = round(StdDevPerHour, 1),
+    DeviationScore = round(DeviationScore, 1),
+    UniqueResources, Resources, UniqueIPs, CredTypes,
+    FirstSignin, LastSignin

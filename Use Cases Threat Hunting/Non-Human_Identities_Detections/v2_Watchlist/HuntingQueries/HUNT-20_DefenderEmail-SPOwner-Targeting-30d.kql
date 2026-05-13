@@ -1,0 +1,106 @@
+// Hunt    : Workload Identity - Defender for Office Suspicious Emails Targeting SP Owners (30d)
+// Purpose : Identifies Defender for Office email threats (malware, phishing, high-confidence
+//           phish) delivered to users who own or manage service principals in Entra ID.
+//           Correlates AuditLogs SP ownership records with EmailEvents/EmailAttachmentInfo/
+//           EmailPostDeliveryEvents to surface targeted attacks against users who hold
+//           privileged workload identity control. An SP owner receiving targeted malware
+//           is an elevated risk for subsequent SP credential theft or lateral movement.
+// Tables  : EmailEvents, EmailAttachmentInfo, EmailPostDeliveryEvents, AuditLogs
+// Period  : P30D
+// Tactics : InitialAccess, Collection
+// MITRE   : T1566.001, T1566.002, T1598
+//==========================================================================================
+
+let LookbackDays = 30d;
+let ThreatTypes  = dynamic(["Malware", "Phish", "HighConfidencePhish", "Spam"]);
+
+// SP owners and creators from AuditLogs
+let SPOwners = AuditLogs
+    | where TimeGenerated > ago(LookbackDays)
+    | where OperationName in~ (
+        "Add owner to service principal",
+        "Add owner to application",
+        "Add service principal",
+        "Add application")
+    | where Result =~ "success"
+    | where isnotempty(tostring(InitiatedBy.user.userPrincipalName))
+    | extend OwnerUPN  = tolower(tostring(InitiatedBy.user.userPrincipalName))
+    | extend SPId      = tostring(TargetResources[0].id)
+    | extend SPName    = tostring(TargetResources[0].displayName)
+    | summarize
+        ManagedSPs     = make_set(SPName, 20),
+        ManagedSPIds   = make_set(SPId, 20),
+        FirstSPAction  = min(TimeGenerated)
+        by OwnerUPN;
+
+// Threat emails from Defender for Office
+let ThreatEmails = union isfuzzy=true
+    EmailEvents,
+    (datatable(NetworkMessageId:string, RecipientEmailAddress:string,
+               SenderFromAddress:string, SenderFromDomain:string,
+               SenderIPv4:string, Subject:string,
+               ThreatTypes:string, DetectionMethods:string,
+               DeliveryAction:string, DeliveryLocation:string,
+               Timestamp:datetime)[])
+    | where TimeGenerated > ago(LookbackDays)
+    | where ThreatTypes has_any (ThreatTypes)
+    | extend RecipientLower = tolower(RecipientEmailAddress)
+    | project NetworkMessageId, RecipientEmailAddress, RecipientLower,
+              SenderFromAddress, SenderFromDomain, SenderIPv4,
+              Subject, ThreatTypes, DetectionMethods,
+              DeliveryAction, DeliveryLocation, EmailTime = Timestamp;
+
+// Attachment hashes for threat intelligence cross-reference
+let ThreatAttachments = union isfuzzy=true
+    EmailAttachmentInfo,
+    (datatable(NetworkMessageId:string, FileName:string,
+               FileType:string, SHA256:string,
+               ThreatTypes:string, DetectionMethods:string)[])
+    | where TimeGenerated > ago(LookbackDays)
+    | where ThreatTypes has_any (ThreatTypes)
+    | summarize
+        AttachmentFiles     = make_set(FileName, 5),
+        AttachmentHashes    = make_set(SHA256, 5),
+        AttachmentThreats   = make_set(ThreatTypes, 5)
+        by NetworkMessageId;
+
+// Post-delivery actions
+let PostDelivery = union isfuzzy=true
+    EmailPostDeliveryEvents,
+    (datatable(NetworkMessageId:string, ActionType:string,
+               ActionResult:string, Timestamp:datetime)[])
+    | where TimeGenerated > ago(LookbackDays)
+    | summarize
+        PostDeliveryActions = make_set(ActionType, 5),
+        ZapApplied          = countif(ActionType =~ "ZAP" and ActionResult =~ "Success")
+        by NetworkMessageId;
+
+// Join: threat emails to SP owners
+ThreatEmails
+| join kind=inner SPOwners on $left.RecipientLower == $right.OwnerUPN
+| join kind=leftouter ThreatAttachments on NetworkMessageId
+| join kind=leftouter PostDelivery      on NetworkMessageId
+| summarize
+    ThreatEmailCount    = count(),
+    ThreatTypes         = make_set(ThreatTypes, 5),
+    DetectionMethods    = make_set(DetectionMethods, 5),
+    Senders             = make_set(SenderFromAddress, 10),
+    SenderDomains       = make_set(SenderFromDomain, 10),
+    SenderIPs           = make_set(SenderIPv4, 10),
+    Subjects            = make_set(Subject, 10),
+    DeliveryActions     = make_set(DeliveryAction, 5),
+    AttachmentFiles     = make_set(AttachmentFiles, 10),
+    AttachmentHashes    = make_set(AttachmentHashes, 10),
+    PostDeliveryActions = make_set(PostDeliveryActions, 5),
+    ZapCount            = sum(ZapApplied),
+    ManagedSPs          = any(ManagedSPs),
+    ManagedSPCount      = array_length(any(ManagedSPIds)),
+    FirstThreatEmail    = min(EmailTime),
+    LastThreatEmail     = max(EmailTime)
+    by RecipientEmailAddress, OwnerUPN
+| extend EscalationRisk = case(
+    ThreatEmailCount > 5 and ManagedSPCount > 3,  "Critical",
+    ThreatEmailCount > 2 and ManagedSPCount > 1,  "High",
+    ManagedSPCount > 3,                            "Medium",
+    "Low")
+| order by EscalationRisk asc, ThreatEmailCount desc

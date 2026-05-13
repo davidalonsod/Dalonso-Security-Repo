@@ -1,0 +1,92 @@
+// Rule    : Workload Identity - SP Identity Protection Risk State Escalation
+// Severity: High
+// Tactics : InitialAccess, CredentialAccess
+// MITRE   : T1078.004 (Valid Accounts: Cloud Accounts)
+// Freq    : PT1H   Period: PT1H
+// Tables  : RiskyServicePrincipals, ServicePrincipalRiskEvents
+// Built-in differentiation: The Sentinel built-in "Risky user signed in" and related rules
+// target the RiskyUsers table for *user* accounts exclusively. No built-in rule targets
+// RiskyServicePrincipals — workload identity risk escalations are completely undetected
+// by default even when Identity Protection for Workload Identities is licensed. This rule
+// fires the moment Entra ID IP elevates an SP to atRisk or confirmedCompromised at
+// medium/high level, and correlates with the specific risk event types that drove it.
+//==========================================================================================
+// Entra ID Identity Protection evaluates service principal sign-in patterns, API call
+// behaviors, and token claims using ML models and Microsoft threat intelligence. An SP
+// transition to "atRisk" means the model has high confidence that the identity is being
+// abused. A transition to "confirmedCompromised" means a human analyst or automated
+// remediation flow has confirmed the finding. Both states warrant immediate investigation.
+// Correlation with ServicePrincipalRiskEvents reveals which detection types fired
+// (e.g., anomalousToken, investigationsThreatIntelligence) to support triage prioritization.
+
+// --- High-severity event types that warrant Critical escalation ---
+// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+    T
+    | extend IPAddress = tostring(IPAddress)
+    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+    | mv-apply _r = _allowRange to typeof(string) on (
+        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+        | summarize _anyInRange = max(toint(_inRange)))
+    | where isnull(_anyInRange) or _anyInRange == 0
+    | project-away _anyInRange
+};
+// ---------------------------------------------------------------------------
+let HighSeverityEventTypes = dynamic([
+    "investigationsThreatIntelligence",   // Microsoft threat intelligence IOC match
+    "anomalousToken",                      // Abnormal token characteristics or claims
+    "maliciousIPAddress",                  // Sign-in from IP flagged in threat intel feed
+    "suspiciousAPITraffic"                 // Unusual API call rate or access pattern
+]);
+
+// --- isfuzzy=true: tables only exist when Identity Protection for Workload Identities is licensed ---
+let RiskyPrincipals = union isfuzzy=true
+    RiskyServicePrincipals,
+    (datatable(TimeGenerated:datetime, ServicePrincipalId:string, ServicePrincipalDisplayName:string,
+               AppId:string, RiskLevel:string, RiskState:string, RiskDetail:string,
+               RiskLastUpdatedDateTime:datetime)[]);
+let SPRiskEvents = union isfuzzy=true
+    ServicePrincipalRiskEvents,
+    (datatable(TimeGenerated:datetime, ServicePrincipalId:string, ServicePrincipalDisplayName:string,
+               AppId:string, RiskEventType:string, RiskLevel:string, DetectedDateTime:datetime)[]);
+// --- SP risk state escalations in the alert window ---
+let EscalatedSPs = RiskyPrincipals
+    | where TimeGenerated > ago(1h)
+    | where RiskState in ("atRisk", "confirmedCompromised")
+    | where RiskLevel in ("high", "medium")
+    | project
+        ServicePrincipalId, ServicePrincipalDisplayName, AppId,
+        RiskLevel, RiskState, RiskDetail, RiskLastUpdatedDateTime;
+
+// --- Enumerate which risk event types drove the escalation ---
+let RiskEventsDetail = SPRiskEvents
+    | where TimeGenerated > ago(1h)
+    | summarize
+        RiskEventTypes = make_set(RiskEventType, 10),
+        RiskEventCount = count(),
+        HighSevCount   = countif(RiskEventType in (HighSeverityEventTypes)),
+        FirstDetection = min(DetectedDateTime),
+        LastDetection  = max(DetectedDateTime)
+        by ServicePrincipalId;
+
+EscalatedSPs
+| join kind=leftouter RiskEventsDetail on ServicePrincipalId
+| extend RiskEventCount = coalesce(RiskEventCount, 0)
+| extend HighSevCount   = coalesce(HighSevCount, 0)
+| extend RiskEventTypes = coalesce(RiskEventTypes, dynamic([]))
+| extend IsThreatIntelMatch = RiskEventTypes has_any (HighSeverityEventTypes)
+| extend SeverityLevel = case(
+    RiskState =~ "confirmedCompromised",              "Critical — Identity Protection confirmed SP compromised",
+    RiskLevel =~ "high" and IsThreatIntelMatch,       "Critical — High-risk SP with threat intelligence detection",
+    RiskLevel =~ "high",                              "High — SP elevated to high risk by Identity Protection",
+    "Medium — SP elevated to medium risk by Identity Protection")
+| project
+    ServicePrincipalDisplayName, ServicePrincipalId, AppId,
+    RiskLevel, RiskState, RiskDetail, RiskLastUpdatedDateTime,
+    RiskEventTypes, RiskEventCount, HighSevCount,
+    IsThreatIntelMatch, SeverityLevel,
+    FirstDetection, LastDetection

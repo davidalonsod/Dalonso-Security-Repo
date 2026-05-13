@@ -1,0 +1,102 @@
+// Hunt     : Workload Identity - SP Risk Events Attribution and Attack Reconstruction (30d)
+// Tactics  : CredentialAccess, Persistence, InitialAccess
+// MITRE    : T1078.004, T1550.001
+// Purpose  : Full 30-day attribution of ServicePrincipalRiskEvents. Identifies SPs with
+//            the most varied risk event types (broad attack surface) and computes a
+//            composite attack-breadth score. Reconstructs the exploitation picture by
+//            correlating with concurrent sign-in activity and credential/privilege changes
+//            to support DFIR triage and incident response.
+//==========================================================================================
+
+let LookbackDays = 30d;
+let HighSeverityTypes = dynamic([
+    "investigationsThreatIntelligence",
+    "anomalousToken",
+    "maliciousIPAddress",
+    "suspiciousAPITraffic"
+]);
+
+// --- isfuzzy=true: table only exists when Identity Protection for Workload Identities is licensed ---
+let _SPRiskEvents = union isfuzzy=true
+    ServicePrincipalRiskEvents,
+    (datatable(TimeGenerated:datetime, ServicePrincipalId:string, ServicePrincipalDisplayName:string,
+               AppId:string, RiskEventType:string, RiskLevel:string, DetectedDateTime:datetime)[]);
+
+// --- Per-SP risk event summary with composite risk scoring ---
+let PerSPSummary = _SPRiskEvents
+    | where TimeGenerated > ago(LookbackDays)
+    | extend RiskScore = case(
+        RiskLevel == "high",   3,
+        RiskLevel == "medium", 2,
+        RiskLevel == "low",    1,
+        0)
+    | extend IsHighSeverity = RiskEventType in (HighSeverityTypes)
+    | summarize
+        TotalEvents       = count(),
+        UniqueEventTypes  = dcount(RiskEventType),
+        EventTypes        = make_set(RiskEventType, 15),
+        HighSeverityCount = countif(IsHighSeverity),
+        MaxRiskScore      = max(RiskScore),
+        TotalRiskScore    = sum(RiskScore),
+        FirstEvent        = min(DetectedDateTime),
+        LastEvent         = max(DetectedDateTime)
+        by ServicePrincipalId, ServicePrincipalDisplayName, AppId;
+
+// --- Sign-in activity for the same SPs over the lookback period ---
+let SigninActivity = AADServicePrincipalSignInLogs | invoke ExcludeAllowlistedIPs()
+    | where TimeGenerated > ago(LookbackDays)
+    | summarize
+        TotalSignins      = count(),
+        SuccessfulSignins = countif(ResultType == "0"),
+        UniqueCountries   = dcount(Location),
+        Countries         = make_set(Location, 10),
+        UniqueIPs         = dcount(IPAddress),
+        Resources         = make_set(ResourceDisplayName, 10),
+        LastSignin        = max(TimeGenerated)
+        by ServicePrincipalId;
+
+// --- Credential and privilege changes proximate to risk events ---
+let CredChanges = AuditLogs
+    | where TimeGenerated > ago(LookbackDays)
+    | where OperationName in (
+        "Add service principal credentials",
+        "Update service principal",
+        "Add app role assignment to service principal",
+        "Add delegated permission grant")
+    | where Result =~ "success"
+    | extend SPId = tostring(TargetResources[0].id)
+    | summarize
+        CredChangeCount = count(),
+        CredOps         = make_set(OperationName, 5),
+        LastCredChange  = max(TimeGenerated)
+        by SPId;
+
+PerSPSummary
+| join kind=leftouter SigninActivity on ServicePrincipalId
+| join kind=leftouter CredChanges on $left.ServicePrincipalId == $right.SPId
+| extend MaxRiskLevel = case(
+    MaxRiskScore == 3, "high",
+    MaxRiskScore == 2, "medium",
+    MaxRiskScore == 1, "low",
+    "none")
+| extend AttackBreadth = case(
+    UniqueEventTypes >= 4, "Very broad — 4+ detection types triggered",
+    UniqueEventTypes == 3, "Broad — 3 detection types triggered",
+    UniqueEventTypes == 2, "Moderate — 2 detection types triggered",
+    "Narrow — single detection type triggered")
+| extend InvestigationPriority = case(
+    HighSeverityCount >= 1 and coalesce(CredChangeCount, 0) > 0,    "1-Critical — Threat intel detection with credential changes",
+    HighSeverityCount >= 2,                                           "2-Critical — Multiple high-severity risk event types",
+    HighSeverityCount >= 1,                                           "3-High — High-severity risk event type",
+    UniqueEventTypes >= 3 and coalesce(CredChangeCount, 0) > 0,     "4-High — Risk stacking with credential changes",
+    UniqueEventTypes >= 3,                                            "5-High — 3+ distinct risk event types",
+    UniqueEventTypes >= 2,                                            "6-Medium — Multiple risk event types",
+    "7-Low — Single risk event type for baselining")
+| project
+    ServicePrincipalDisplayName, ServicePrincipalId, AppId,
+    TotalEvents, UniqueEventTypes, EventTypes, MaxRiskLevel, TotalRiskScore,
+    HighSeverityCount, AttackBreadth,
+    TotalSignins, SuccessfulSignins, UniqueIPs, Countries, Resources, LastSignin,
+    CredChangeCount, CredOps, LastCredChange,
+    InvestigationPriority, FirstEvent, LastEvent
+| order by TotalRiskScore desc, HighSeverityCount desc

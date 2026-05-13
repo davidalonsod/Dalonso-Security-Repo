@@ -1,0 +1,92 @@
+// Rule    : Workload Identity - SP Risk Event Stacking (Multiple Concurrent Detections)
+// Severity: High
+// Tactics : CredentialAccess, Persistence
+// MITRE   : T1078.004 (Valid Accounts: Cloud Accounts), T1550.001 (Use Alternate Auth Material)
+// Freq    : PT1H   Period: PT1H
+// Tables  : ServicePrincipalRiskEvents, AADServicePrincipalSignInLogs
+// Built-in differentiation: No Sentinel built-in correlates multiple distinct risk event
+// types for the same SP within a time window. Risk stacking — where ≥2 independent
+// Identity Protection models fire simultaneously — is statistically unlikely for benign SPs
+// and is a strong indicator of active exploitation rather than a false positive. This rule
+// also fires as soon as any single high-severity event type triggers (anomalousToken,
+// investigationsThreatIntelligence, maliciousIPAddress, suspiciousAPITraffic).
+//==========================================================================================
+// When an attacker actively abuses a compromised SP, their techniques typically trigger
+// multiple independent Entra ID Identity Protection detection models at once:
+//   anomalousToken          – stolen token reused with abnormal claims or lifetime
+//   maliciousIPAddress      – sign-in origin IP appears in Microsoft threat intel
+//   suspiciousAPITraffic    – unusual API call rate, resource spread, or access pattern
+//   investigationsThreatIntelligence – direct IOC match from Microsoft threat intelligence
+// Stacking ≥2 event types for the same SP within 1 hour is a compound signal that
+// distinguishes active exploitation from isolated model noise. Correlation with active
+// sign-in activity in AADServicePrincipalSignInLogs further confirms live exploitation.
+
+// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+    T
+    | extend IPAddress = tostring(IPAddress)
+    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+    | mv-apply _r = _allowRange to typeof(string) on (
+        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+        | summarize _anyInRange = max(toint(_inRange)))
+    | where isnull(_anyInRange) or _anyInRange == 0
+    | project-away _anyInRange
+};
+// ---------------------------------------------------------------------------
+let HighSeverityEventTypes = dynamic([
+    "investigationsThreatIntelligence",
+    "anomalousToken",
+    "maliciousIPAddress",
+    "suspiciousAPITraffic"
+]);
+// --- isfuzzy=true: table only exists when Identity Protection for Workload Identities is licensed ---
+let SPRiskEvents = union isfuzzy=true
+    ServicePrincipalRiskEvents,
+    (datatable(TimeGenerated:datetime, ServicePrincipalId:string, ServicePrincipalDisplayName:string,
+               AppId:string, RiskEventType:string, RiskLevel:string, DetectedDateTime:datetime)[]);
+
+SPRiskEvents
+| where TimeGenerated > ago(1h)
+| where RiskLevel in ("high", "medium") or RiskEventType in (HighSeverityEventTypes)
+| summarize
+    EventCount         = count(),
+    UniqueEventTypes   = dcount(RiskEventType),
+    EventTypes         = make_set(RiskEventType, 10),
+    HighSeverityEvents = countif(RiskEventType in (HighSeverityEventTypes)),
+    HighLevelCount     = countif(RiskLevel == "high"),
+    FirstEvent         = min(DetectedDateTime),
+    LastEvent          = max(DetectedDateTime)
+    by ServicePrincipalId, ServicePrincipalDisplayName, AppId
+| where UniqueEventTypes >= 2 or HighSeverityEvents >= 1
+// --- Correlate with concurrent sign-in activity to confirm live exploitation ---
+| join kind=leftouter (
+    (AADServicePrincipalSignInLogs | invoke _ExcludeAllowlistedIPs())
+    | where TimeGenerated > ago(1h)
+    | summarize
+        ConcurrentSignins = count(),
+        SuccessfulSignins = countif(ResultType == "0"),
+        UniqueIPs         = dcount(IPAddress),
+        Countries         = make_set(Location, 5),
+        SigninResources   = make_set(ResourceDisplayName, 5)
+        by ServicePrincipalId
+) on ServicePrincipalId
+| extend ConcurrentSignins   = coalesce(ConcurrentSignins, 0)
+| extend SuccessfulSignins   = coalesce(SuccessfulSignins, 0)
+| extend IsActivelyBeingUsed = ConcurrentSignins > 0
+| extend SeverityLevel = case(
+    HighSeverityEvents >= 1 and IsActivelyBeingUsed, "Critical — High-severity risk detection concurrent with active sign-ins",
+    HighSeverityEvents >= 1,                         "High — High-severity risk event type triggered",
+    UniqueEventTypes >= 3,                            "High — 3+ distinct risk event types stacked",
+    IsActivelyBeingUsed and UniqueEventTypes >= 2,   "High — Risk stacking with active concurrent sign-in",
+    "Medium — Multiple risk event types without active sign-in")
+| project
+    ServicePrincipalDisplayName, ServicePrincipalId, AppId,
+    EventCount, UniqueEventTypes, EventTypes,
+    HighSeverityEvents, HighLevelCount,
+    IsActivelyBeingUsed, ConcurrentSignins, SuccessfulSignins,
+    UniqueIPs, Countries, SigninResources,
+    SeverityLevel, FirstEvent, LastEvent

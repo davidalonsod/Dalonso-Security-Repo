@@ -1,0 +1,111 @@
+// Hunt    : Workload Identity - SP Dormant Reactivation History (90d)
+// Purpose : Retroactive 90-day view of service principals that went dormant
+//           for 30+ days and then reactivated. Pairs with RULE-13 for triage.
+//           Useful for identifying persistent backdoor SPs and reviewing whether
+//           reactivations correlated with credential change events.
+// Tables  : AADServicePrincipalSignInLogs, AuditLogs
+//========================================================================
+
+let LookbackEnd   = now();
+let LookbackStart = ago(90d);
+let DormancyThreshold = 30d;    // min gap to be considered "dormant"
+
+// --- Step 1: Build full sign-in timeline per SP ---
+let AllSignIns = AADServicePrincipalSignInLogs | invoke ExcludeAllowlistedIPs()
+    | where TimeGenerated between (LookbackStart .. LookbackEnd)
+    | where ResultType == "0"
+    | project TimeGenerated, ServicePrincipalId, ServicePrincipalName,
+        AppId, IPAddress, Location, ResourceDisplayName, ClientCredentialType,
+        ConditionalAccessStatus;
+
+// --- Step 2: For each SP, find the pairs (last-before-gap, first-after-gap) ---
+// Identify dormancy gaps ≥ DormancyThreshold
+// Approach: for each SP compute prev_signin using prev() over sorted timeline
+let GapEvents = AllSignIns
+    | sort by ServicePrincipalId asc, TimeGenerated asc
+    | extend PrevSignIn   = prev(TimeGenerated, 1)
+    | extend PrevSPId     = prev(ServicePrincipalId, 1)
+    | where ServicePrincipalId == PrevSPId          // same SP consecutive row
+    | extend GapDays = datetime_diff("day", TimeGenerated, PrevSignIn)
+    | where GapDays >= toint(DormancyThreshold / 1d)
+    | project
+        ServicePrincipalId,
+        ServicePrincipalName,
+        AppId,
+        DormantFrom   = PrevSignIn,
+        ReactivatedAt = TimeGenerated,
+        GapDays,
+        IPAddress,
+        Location,
+        ResourceDisplayName,
+        ClientCredentialType,
+        ConditionalAccessStatus;
+
+// --- Step 3: Correlate with credential changes during dormancy (AuditLogs) ---
+let CredentialChanges = AuditLogs
+    | where TimeGenerated between (LookbackStart .. LookbackEnd)
+    | where OperationName in (
+        "Update service principal",
+        "Add service principal credentials",
+        "Remove service principal credentials",
+        "Update service principal – Certificates and secrets management (by service)",
+        "Update application – Certificates and secrets management"
+    )
+    | where Result =~ "success"
+    | extend SPObjectId   = tostring(TargetResources[0].id)
+    | extend SPName       = tostring(TargetResources[0].displayName)
+    | project CredChangeTime = TimeGenerated, SPObjectId, SPName,
+        CredOperation = OperationName;
+
+// --- Step 4: Correlate with privilege changes during dormancy ---
+let RoleChanges = AuditLogs
+    | where TimeGenerated between (LookbackStart .. LookbackEnd)
+    | where OperationName in (
+        "Add member to role",
+        "Add app role assignment to service principal",
+        "Add delegated permission grant"
+    )
+    | where Result =~ "success"
+    | extend SPObjectId = tostring(TargetResources[0].id)
+    | project RoleChangeTime = TimeGenerated, SPObjectId, RoleChangeOp = OperationName;
+
+GapEvents
+| join kind=leftouter (CredentialChanges) on $left.ServicePrincipalId == $right.SPObjectId
+| where isempty(CredChangeTime)
+    or (CredChangeTime >= DormantFrom and CredChangeTime <= ReactivatedAt)   // during dormancy
+| summarize
+    DormantFrom           = min(DormantFrom),
+    ReactivatedAt         = min(ReactivatedAt),
+    GapDays               = max(GapDays),
+    ReactivationIPs       = make_set(IPAddress, 5),
+    ReactivationLocations = make_set(Location, 5),
+    ResourcesAccessed     = make_set(ResourceDisplayName, 10),
+    CredChangesCount      = countif(isnotempty(CredChangeTime)),
+    CredOps               = make_set_if(CredOperation, isnotempty(CredOperation), 10)
+    by ServicePrincipalId, ServicePrincipalName, AppId
+| join kind=leftouter (RoleChanges) on $left.ServicePrincipalId == $right.SPObjectId
+| summarize
+    DormantFrom           = min(DormantFrom),
+    ReactivatedAt         = min(ReactivatedAt),
+    GapDays               = max(GapDays),
+    ReactivationIPs       = take_any(ReactivationIPs),
+    ReactivationLocations = take_any(ReactivationLocations),
+    ResourcesAccessed     = take_any(ResourcesAccessed),
+    CredChangesCount      = max(CredChangesCount),
+    CredOps               = take_any(CredOps),
+    PrivChangesCount      = countif(isnotempty(RoleChangeOp)),
+    PrivOps               = make_set_if(RoleChangeOp, isnotempty(RoleChangeOp), 10)
+    by ServicePrincipalId, ServicePrincipalName, AppId
+| extend RiskSignals = bag_pack(
+    "CredChangedDuringDormancy", CredChangesCount > 0,
+    "PrivEscDuringDormancy",     PrivChangesCount > 0,
+    "DormancyDays",              GapDays,
+    "ReactivationIPs",           ReactivationIPs,
+    "ReactivationLocations",     ReactivationLocations
+)
+| extend RiskLevel = case(
+    CredChangesCount > 0 and PrivChangesCount > 0, "Critical",
+    CredChangesCount > 0 or GapDays > 60,          "High",
+    GapDays > 30,                                  "Medium",
+                                                   "Low")
+| sort by RiskLevel asc, GapDays desc

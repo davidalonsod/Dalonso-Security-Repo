@@ -1,0 +1,82 @@
+// Hunt    : Workload Identity - User Risk Event Timeline Correlated with SP Privilege Changes (30d)
+// Purpose : Builds a chronological timeline pairing each AADUserRiskEvents entry with all
+//           SP privilege escalation or credential operations performed by the same user within
+//           72 hours before or after the risk event. Use to reconstruct the attack chain:
+//           what was done to workload identities before, during, and after account compromise.
+//           Includes time-delta annotations to identify suspicious proximity between risk
+//           detection and SP modification.
+// Tables  : AADUserRiskEvents, AuditLogs
+// Period  : P30D
+// Tactics : CredentialAccess, Persistence, PrivilegeEscalation, LateralMovement
+// MITRE   : T1098.001, T1078.004, T1098.003
+//==========================================================================================
+
+let LookbackDays   = 30d;
+let ProximityHours = 72;
+
+let HighImpactOps = dynamic([
+    "Add service principal credentials",
+    "Remove service principal credentials",
+    "Add password to service principal",
+    "Add key credential to service principal",
+    "Add owner to service principal",
+    "Add owner to application",
+    "Add app role assignment to service principal",
+    "Add delegated permission grant",
+    "Consent to application",
+    "Add OAuth2PermissionGrant",
+    "Add member to role",
+    "Add application",
+    "Add service principal"
+]);
+
+// All user risk events in the window
+let RiskEvents = union isfuzzy=true
+    AADUserRiskEvents,
+    (datatable(UserId:string, UserPrincipalName:string, RiskEventType:string,
+               RiskLevel:string, DetectedDateTime:datetime)[])
+    | where DetectedDateTime > ago(LookbackDays)
+    | project
+        UserId,
+        UserPrincipalName,
+        RiskEventType,
+        RiskLevel,
+        RiskDetected = DetectedDateTime;
+
+// SP lifecycle operations in the same window
+let SPOps = AuditLogs
+    | where TimeGenerated > ago(LookbackDays)
+    | where OperationName has_any (HighImpactOps)
+    | where Result =~ "success"
+    | where isnotempty(tostring(InitiatedBy.user.id))
+    | extend InitiatorUserId = tostring(InitiatedBy.user.id)
+    | extend InitiatorUPN    = tostring(InitiatedBy.user.userPrincipalName)
+    | extend TargetId        = tostring(TargetResources[0].id)
+    | extend TargetName      = tostring(TargetResources[0].displayName)
+    | extend InitiatorIP     = tostring(InitiatedBy.user.ipAddress)
+    | project
+        InitiatorUserId, InitiatorUPN, OperationName,
+        TargetId, TargetName, InitiatorIP,
+        AuditTime = TimeGenerated;
+
+// Cross-join and compute time delta between risk detection and SP operation
+RiskEvents
+| join kind=inner SPOps on $left.UserId == $right.InitiatorUserId
+| extend DeltaHours = datetime_diff("hour", AuditTime, RiskDetected)
+| where abs(DeltaHours) <= ProximityHours
+| extend Proximity = case(
+    DeltaHours < 0,  strcat("Before risk by ", tostring(abs(DeltaHours)), "h"),
+    DeltaHours == 0, "Same hour as risk detection",
+    strcat("After risk by ", tostring(DeltaHours), "h"))
+| extend Phase = case(
+    DeltaHours < -24,   "Pre-detection (>24h before)",
+    DeltaHours < 0,     "Pre-detection (<24h before)",
+    DeltaHours == 0,    "Simultaneous",
+    DeltaHours <= 6,    "Post-detection (<6h)",
+    DeltaHours <= 24,   "Post-detection (6-24h)",
+    "Post-detection (24-72h)")
+| project
+    UserPrincipalName, UserId, RiskEventType, RiskLevel, RiskDetected,
+    OperationName, TargetName, TargetId, InitiatorIP,
+    AuditTime, DeltaHours, Proximity, Phase
+| order by UserPrincipalName asc, AuditTime asc

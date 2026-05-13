@@ -1,0 +1,67 @@
+// Rule    : Workload Identity - Service Principal Sign-in from Suspicious Country
+// Severity: High
+// Tactics : InitialAccess, CredentialAccess
+// MITRE   : T1078.004 (Valid Accounts: Cloud Accounts)
+// Freq    : PT1H   Period: PT1H
+//==========================================================================================
+
+// ---- Network Allowlist (exclude trusted IPs / CIDR / ranges) --------------
+let _allow = materialize(union isfuzzy=true (print R="" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));
+let _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));
+let _allowRange = toscalar(_allow | where R matches regex @'^\d+\.\d+\.\d+\.\d+-\d+\.\d+\.\d+\.\d+$' | summarize make_list(R));
+let _ExcludeAllowlistedIPs = (T:(IPAddress:string)) {
+    T
+    | extend IPAddress = tostring(IPAddress)
+    | where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))
+    | mv-apply _r = _allowRange to typeof(string) on (
+        extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])
+        | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0
+        | summarize _anyInRange = max(toint(_inRange)))
+    | where isnull(_anyInRange) or _anyInRange == 0
+    | project-away _anyInRange
+};
+// ---------------------------------------------------------------------------
+let HighRiskCountries = dynamic([
+    "CN", "RU", "KP", "IR", "NG", "IQ", "PK", "KZ", "UA", "BY",
+    "SY", "LY", "YE", "VE", "CU", "ZW", "MM", "AF"
+]);
+let PrivateRanges = dynamic(["10.", "192.168.", "172.16.", "172.17.", "172.18.",
+    "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+    "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
+    "127.", "169.254.", "168.63."]);
+// --- Baseline: countries this SP has historically signed in from ---
+let HistoricalCountries = AADServicePrincipalSignInLogs | invoke ExcludeAllowlistedIPs()
+    | where TimeGenerated between (ago(14d) .. ago(1h))
+    | where ResultType == "0"
+    | extend GeoInfo = geo_info_from_ip_address(IPAddress)
+    | extend Country = tostring(GeoInfo.country_iso_code)
+    | where isnotempty(Country)
+    | summarize KnownCountries = make_set(Country, 50) by ServicePrincipalId;
+// --- Current window ---
+(AADServicePrincipalSignInLogs | invoke _ExcludeAllowlistedIPs())
+| where TimeGenerated > ago(1h)
+| where ResultType == "0"
+| where isnotempty(IPAddress)
+| where not(IPAddress has_any (PrivateRanges))
+| extend GeoInfo = geo_info_from_ip_address(IPAddress)
+| extend Country = tostring(GeoInfo.country_iso_code)
+| extend City    = tostring(GeoInfo.city)
+| where Country in (HighRiskCountries)
+| join kind=leftouter HistoricalCountries on ServicePrincipalId
+| extend IsNewCountry = not(set_has_element(KnownCountries, Country))
+| summarize
+    SigninCount     = count(),
+    UniqueIPs       = dcount(IPAddress),
+    IPList          = make_set(IPAddress, 10),
+    Resources       = make_set(ResourceDisplayName, 10),
+    Countries       = make_set(Country, 5),
+    Cities          = make_set(City, 5),
+    CredTypes       = make_set(ClientCredentialType, 5),
+    IsNewCountry    = any(IsNewCountry),
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated)
+    by ServicePrincipalName, ServicePrincipalId, AppId
+| extend RiskScore = case(
+    IsNewCountry == true,  "Critical",
+    UniqueIPs > 3,         "High",
+    "Medium")
