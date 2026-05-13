@@ -1,0 +1,70 @@
+id: a1b2c3d4-0001-4a5b-8c9d-dns001tunneltxt
+name: DNS Tunneling via High-Volume TXT Record Queries
+description: |
+  Detects clients generating an abnormally high number of TXT record DNS queries,
+  which is a primary indicator of DNS tunneling tools such as iodine, dnscat2,
+  or Cobalt Strike DNS channels. TXT records can carry up to 255 characters per
+  record, making them ideal for encoding C2 commands and exfiltrated data.
+  Ref: Octoberfest7/DNS_Tunneling, OilRig (APT34) TTPs.
+  Differentiation from built-in "Potential DNS Tunnel (ASIM DNS)":
+  The built-in uses general query-length and entropy thresholds across all record
+  types. This rule focuses exclusively on TXT record count per client (>=100 in
+  1 hour), catching tunneling tools that use TXT as their primary data channel
+  regardless of individual query length. Can run alongside the built-in as a
+  complementary, record-type-specific signal.
+severity: High
+requiredDataConnectors:
+  - connectorId: WindowsDnsAma
+    dataTypes:
+      - ASimDnsActivityLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - CommandAndControl
+  - Exfiltration
+relevantTechniques:
+  - T1071.004
+  - T1048.003
+tags:
+  - DNS Tunneling
+  - TXT Records
+  - iodine
+  - dnscat2
+  - APT34
+  - OilRig
+query: |
+  ASimDnsActivityLogs
+  | where TimeGenerated > ago(1h)
+  | where DnsQueryTypeName =~ "TXT"
+  | summarize
+      TxtQueryCount  = count(),
+      UniqueDomains  = dcount(DnsQuery),
+      SampleDomains  = make_set(DnsQuery, 10),
+      FirstSeen      = min(TimeGenerated),
+      LastSeen       = max(TimeGenerated)
+    by SrcIpAddr, SrcHostname
+  | where TxtQueryCount > 100
+  | extend
+      HostName = iif(isnotempty(SrcHostname), SrcHostname, SrcIpAddr),
+      AlertDetail = strcat("Client sent ", tostring(TxtQueryCount),
+                           " TXT queries across ", tostring(UniqueDomains), " unique domains")
+entityMappings:
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: SrcHostname
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SrcIpAddr
+alertDetailsOverride:
+  alertDisplayNameFormat: "DNS Tunneling (TXT) — {{SrcHostname}} sent {{TxtQueryCount}} TXT queries"
+  alertDescriptionFormat: "Host {{SrcHostname}} ({{SrcIpAddr}}) sent {{TxtQueryCount}} TXT record queries across {{UniqueDomains}} unique domains in 1 hour. Sample domains: {{SampleDomains}}"
+  alertSeverityColumnName: null
+customDetails:
+  TxtQueryCount: TxtQueryCount
+  UniqueDomains: UniqueDomains
+  SampleDomains: SampleDomains

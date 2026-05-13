@@ -1,0 +1,1907 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace running Microsoft Sentinel"
+      }
+    },
+    "enableAnalyticRules": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "When false, all analytic rules deploy in disabled state. Useful for staged rollouts."
+      }
+    },
+    "watchlistAlias": {
+      "type": "string",
+      "defaultValue": "NetworkAllowlist",
+      "metadata": {
+        "description": "Alias of the trusted-IP exclusion watchlist consumed by every DNS rule."
+      }
+    },
+    "functionAlias": {
+      "type": "string",
+      "defaultValue": "ExcludeAllowlistedIPs_WindowsDNS",
+      "metadata": {
+        "description": "Alias of the saved KQL function rules call to filter allowlisted SrcIpAddr."
+      }
+    },
+    "watchlistRawContent": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "(Optional) Fully-formed CSV (CRLF-separated). Leave empty to use built-in defaults. Header: IPOrRange,Description,Owner,AddedDate"
+      }
+    }
+  },
+  "variables": {
+    "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+    "defaultWatchlistEntries": [
+      "10.0.0.0/8,RFC1918 private space,SOC,2026-04-20",
+      "172.16.0.0/12,RFC1918 private space,SOC,2026-04-20",
+      "192.168.0.0/16,RFC1918 private space,SOC,2026-04-20"
+    ],
+    "csvHeader": "IPOrRange,Description,Owner,AddedDate",
+    "crlf": "[json('\"\\r\\n\"')]",
+    "builtCsv": "[concat(variables('csvHeader'), variables('crlf'), join(variables('defaultWatchlistEntries'), variables('crlf')), variables('crlf'))]",
+    "effectiveRawContent": "[if(empty(parameters('watchlistRawContent')), variables('builtCsv'), parameters('watchlistRawContent'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "apiVersion": "2023-02-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', parameters('watchlistAlias'))]",
+      "properties": {
+        "displayName": "Network Allowlist (Trusted IP / CIDR / Ranges)",
+        "source": "NetworkAllowlist.csv",
+        "sourceType": "Local file",
+        "provider": "SOC",
+        "description": "Trusted internal IPs/CIDRs/ranges excluded from WindowsDNS rules to suppress noise from sanctioned resolvers and management subnets.",
+        "itemsSearchKey": "IPOrRange",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "[variables('effectiveRawContent')]"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', parameters('functionAlias'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "[parameters('functionAlias')]",
+        "category": "Security - Functions",
+        "functionAlias": "[parameters('functionAlias')]",
+        "functionParameters": "T:(SrcIpAddr:string)",
+        "query": "let _allow = materialize(union isfuzzy=true (print R=\"\" | take 0), (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange)) | where isnotempty(R));\nlet _allowCIDR  = toscalar(_allow | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$') | extend R = iff(R has '/', R, strcat(R, '/32')) | summarize make_list(R));\nlet _allowRange = toscalar(_allow | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$' | summarize make_list(R));\nT\n| extend _ip = tostring(SrcIpAddr)\n| where isempty(_ip) or array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(_ip, _allowCIDR)) or not(ipv4_is_in_any_range(_ip, _allowCIDR))\n| mv-apply _r = _allowRange to typeof(string) on (\n    extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\n    | extend _inRange = isnotempty(_ip) and ipv4_compare(_ip, _lo) >= 0 and ipv4_compare(_ip, _hi) <= 0\n    | summarize _anyInRange = max(toint(_inRange)))\n| where isnull(_anyInRange) or _anyInRange == 0\n| project-away _ip, _anyInRange",
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q01-TopTXTSenders')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Top TXT Query Senders",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| where DnsQueryTypeName =~ \"TXT\"\n| summarize\n    TxtQueryCount = count(),\n    UniqueDomains = dcount(DnsQuery),\n    TopDomains     = make_set(DnsQuery, 20)\n  by SrcIpAddr, SrcHostname\n| order by TxtQueryCount desc\n| where TxtQueryCount > 50",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Baseline: which clients generate the most TXT record lookups. TXT records are the primary channel for DNS tunneling. MITRE: T1071"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl,Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071,T1048"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q02-LongLabels')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - High Subdomain Label Length Distribution",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| extend Labels = split(DnsQuery, \".\")\n| extend MaxLabelLen = max_of(\n    strlen(tostring(Labels[0])),\n    strlen(tostring(Labels[1])),\n    strlen(tostring(Labels[2]))\n  )\n| where MaxLabelLen > 35\n| summarize\n    QueryCount   = count(),\n    AvgLabelLen  = avg(MaxLabelLen),\n    MaxLabelSeen = max(MaxLabelLen),\n    SampleDomains = make_set(DnsQuery, 10)\n  by SrcIpAddr, SrcHostname\n| order by QueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detect data-in-DNS: subdomain labels >35 chars indicate base64/hex encoded payload chunks. MITRE: T1048"
+          },
+          {
+            "name": "tactics",
+            "value": "Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1048"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q03-NslookupExplicitServer')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - nslookup with Non-Standard DNS Server",
+        "category": "Hunting Queries",
+        "query": "SecurityEvent\n| where TimeGenerated > ago(14d)\n| where EventID == 4688\n| where Process =~ \"nslookup.exe\"\n| where CommandLine has_any (\"-server\", \"/server\", \"server=\")\n       or CommandLine matches regex @\"nslookup\\s+\\S+\\s+\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\"\n| project\n    TimeGenerated,\n    Computer,\n    Account,\n    CommandLine,\n    ParentProcessName\n| order by TimeGenerated desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Hunt for ClickFix attack pattern: nslookup pointed at attacker-controlled DNS server to retrieve PowerShell payload (Feb 2026 campaign). MITRE: T1059, T1071"
+          },
+          {
+            "name": "tactics",
+            "value": "Execution,CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1059,T1071"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q04-DGAScore')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - DGA Score Distribution by Domain",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(1d)\n| extend _parts = split(DnsQuery, \".\")\n| extend SLD = tostring(_parts[array_length(_parts) - 2])\n| where strlen(SLD) between (10 .. 50)\n| extend\n    SLDLen         = strlen(SLD),\n    HasDigits      = SLD matches regex @\"\\d\",\n    ConsonantCount = countof(SLD, \"b\") + countof(SLD, \"c\") + countof(SLD, \"d\")\n                   + countof(SLD, \"f\") + countof(SLD, \"g\") + countof(SLD, \"h\")\n                   + countof(SLD, \"j\") + countof(SLD, \"k\") + countof(SLD, \"l\")\n                   + countof(SLD, \"m\") + countof(SLD, \"n\") + countof(SLD, \"p\")\n                   + countof(SLD, \"q\") + countof(SLD, \"r\") + countof(SLD, \"s\")\n                   + countof(SLD, \"t\") + countof(SLD, \"v\") + countof(SLD, \"w\")\n                   + countof(SLD, \"x\") + countof(SLD, \"y\") + countof(SLD, \"z\")\n| extend ConsonantRatio = todouble(ConsonantCount) / todouble(SLDLen)\n| where ConsonantRatio > 0.65 and HasDigits == true\n| summarize\n    DgaLikeDomains = dcount(DnsQuery),\n    SampleDomains  = make_set(DnsQuery, 15),\n    QueryCount     = count()\n  by SrcIpAddr, SrcHostname\n| where DgaLikeDomains > 10\n| order by DgaLikeDomains desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entropy-based DGA hunting: consonant ratio and digit presence as proxy for domain randomness. MITRE: T1568"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1568"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q05-ZoneTransferMap')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Zone Transfer Attempts Timeline",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(14d)\n| where DnsQueryTypeName in~ (\"AXFR\", \"IXFR\") or DnsQueryType in (252, 251)\n| summarize\n    TransferAttempts = count(),\n    TargetZones      = make_set(DnsQuery),\n    TargetServers    = make_set(DstIpAddr),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| order by TransferAttempts desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "AXFR/IXFR zone transfer attempt timeline. Any non-secondary server making zone transfers is suspicious. MITRE: T1590"
+          },
+          {
+            "name": "tactics",
+            "value": "Reconnaissance"
+          },
+          {
+            "name": "techniques",
+            "value": "T1590"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q06-BeaconInterval')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - C2 Beacon Interval Analysis",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(6h)\n| where EventResult =~ \"Success\"\n| summarize\n    QueryTimes = make_list(TimeGenerated),\n    QueryCount = count()\n  by SrcIpAddr, DnsQuery\n| where QueryCount >= 10\n| extend\n    FirstSeen = tostring(QueryTimes[0]),\n    LastSeen  = tostring(QueryTimes[array_length(QueryTimes) - 1])\n| project SrcIpAddr, DnsQuery, QueryCount, FirstSeen, LastSeen\n| order by QueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identify repeated DNS queries to same domain for C2 heartbeat regularity analysis (Cobalt Strike, Silver, Havoc). MITRE: T1071, T1132"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071,T1132"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q07-RareResolvers')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Rare External DNS Resolvers Used",
+        "category": "Hunting Queries",
+        "query": "let CorporateDNS = dynamic([]);\n// Populate with your internal DNS server IPs above\nASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| where DstIpAddr !in (CorporateDNS)\n       and not(DstIpAddr startswith \"127.\")\n       and not(DstIpAddr startswith \"169.254.\")\n| summarize\n    QueryCount       = count(),\n    UniqueDomains    = dcount(DnsQuery),\n    SampleQueries    = make_set(DnsQuery, 10)\n  by SrcIpAddr, SrcHostname, DstIpAddr\n| order by QueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detect clients bypassing corporate DNS by using external/attacker-controlled resolvers - DNS filter evasion. MITRE: T1071"
+          },
+          {
+            "name": "tactics",
+            "value": "DefenseEvasion,CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q08-ExfilVolumeEst')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Exfiltration Byte Volume Estimate by Client",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(24h)\n| where DnsQueryTypeName in~ (\"TXT\", \"NULL\", \"MX\", \"CNAME\")\n| extend\n    SubdomainDepth = array_length(split(DnsQuery, \".\")) - 2,\n    QuerySize      = strlen(DnsQuery)\n| summarize\n    TotalQueries   = count(),\n    EstimatedBytes = sum(QuerySize),\n    AvgDepth       = avg(SubdomainDepth),\n    MaxDepth       = max(SubdomainDepth),\n    UniqueDomains  = dcount(DnsQuery)\n  by SrcIpAddr, SrcHostname\n| extend EstimatedKB = round(todouble(EstimatedBytes) / 1024, 1)\n| where EstimatedKB > 100\n| order by EstimatedKB desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Estimate exfiltration volume from subdomain label sizes across TXT/MX/NULL queries. >100KB in 24h is suspicious. MITRE: T1048"
+          },
+          {
+            "name": "tactics",
+            "value": "Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1048"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q09-NXDomainStorm')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - NXDOMAIN Storm per Client (DGA / Spray)",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(1h)\n| where DnsResponseCode == 3\n| summarize\n    NxdomainCount  = count(),\n    UniqueDomains  = dcount(DnsQuery),\n    SampleDomains  = make_set(DnsQuery, 15),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| where NxdomainCount > 100\n| order by NxdomainCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "NXDOMAIN storm from single client - DGA malware exhausting domain list or subdomain brute force. MITRE: T1568"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1568"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q10-DeepSubdomains')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Long DNS Subdomain Chains (Tunneling)",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| extend SubdomainDepth = array_length(split(DnsQuery, \".\")) - 2\n| where SubdomainDepth >= 5\n| summarize\n    DeepQueryCount = count(),\n    MaxDepth       = max(SubdomainDepth),\n    AvgDepth       = round(avg(SubdomainDepth), 1),\n    SampleDomains  = make_set(DnsQuery, 10)\n  by SrcIpAddr, SrcHostname\n| order by DeepQueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "DNS tunneling creates deep subdomain chains (5+ labels). Legitimate domains rarely exceed 4 labels. MITRE: T1071"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl,Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q11-WPADSources')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - WPAD Lookup Sources",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| where DnsQuery has \"wpad\" or DnsQuery has \"isatap\"\n| summarize\n    LookupCount = count(),\n    UniqueHosts = dcount(SrcIpAddr),\n    Hosts       = make_set(SrcHostname, 20)\n  by DnsQuery\n| order by LookupCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identify hosts querying for WPAD - vulnerable to Responder/Inveigh NTLM credential capture without corporate WPAD server. MITRE: T1557"
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1557"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q12-NewlyObservedDomains')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Newly Observed Domains (NOD)",
+        "category": "Hunting Queries",
+        "query": "let HistoricalDomains =\n    ASimDnsActivityLogs\n    | where TimeGenerated between (ago(30d) .. ago(2d))\n    | distinct DnsQuery;\nASimDnsActivityLogs\n| where TimeGenerated > ago(2d)\n| where DnsQuery !in (HistoricalDomains)\n| where DnsResponseCode != 3\n| summarize\n    FirstSeen   = min(TimeGenerated),\n    QueryCount  = count(),\n    SrcHosts    = make_set(SrcHostname, 10)\n  by DnsQuery\n| order by FirstSeen asc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "First-seen domain detection - new domains indicate potential DGA, C2 staging, or fresh phishing infrastructure. MITRE: T1568, T1583"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl,ResourceDevelopment"
+          },
+          {
+            "name": "techniques",
+            "value": "T1568,T1583"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q13-RebindingFlip')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Low-TTL Domain Flip (DNS Rebinding Prep)",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(1d)\n| where isnotempty(DnsQuery)\n| summarize\n    QueryCount  = count(),\n    UniqueIPs   = dcount(DnsQuery)\n  by DnsQuery, SrcIpAddr\n| where QueryCount > 5 and UniqueIPs > 1\n| project DnsQuery, SrcIpAddr, QueryCount, UniqueIPs\n| order by UniqueIPs desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detect DNS rebinding preparation: same domain resolving to multiple IPs in short window. MITRE: T1557, T1090"
+          },
+          {
+            "name": "tactics",
+            "value": "LateralMovement,DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1557,T1090"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q14-ServfailSources')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Top SERVFAIL Sources",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(1h)\n| where DnsResponseCode == 2\n| summarize\n    ServfailCount = count(),\n    Domains       = make_set(DnsQuery, 10),\n    FirstSeen     = min(TimeGenerated),\n    LastSeen      = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| where ServfailCount > 20\n| order by ServfailCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "SERVFAIL can indicate DNS recon scanning, C2 infra outage, or misconfigured tunnels. MITRE: T1590"
+          },
+          {
+            "name": "tactics",
+            "value": "Reconnaissance"
+          },
+          {
+            "name": "techniques",
+            "value": "T1590"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q15-CertutilDNSChain')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Certutil + DNS Lookup Process Chain (LOLBin)",
+        "category": "Hunting Queries",
+        "query": "let NslookupHosts =\n    SecurityEvent\n    | where TimeGenerated > ago(1d)\n    | where EventID == 4688\n    | where Process =~ \"nslookup.exe\"\n    | extend NslookupTime = TimeGenerated\n    | project Computer, Account, NslookupTime, NslookupCL = CommandLine;\nlet CertutilHosts =\n    SecurityEvent\n    | where TimeGenerated > ago(1d)\n    | where EventID == 4688\n    | where Process =~ \"certutil.exe\"\n    | where CommandLine has_any (\"-decode\", \"-decodehex\", \"-urlcache\")\n    | extend CertutilTime = TimeGenerated\n    | project Computer, Account, CertutilTime, CertutilCL = CommandLine;\nNslookupHosts\n| join kind=inner CertutilHosts on Computer, Account\n| where CertutilTime > NslookupTime\n    and (CertutilTime - NslookupTime) < 5m\n| project Computer, Account, NslookupTime, CertutilTime, NslookupCL, CertutilCL, TimeDelta = CertutilTime - NslookupTime\n| order by NslookupTime desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "nslookup followed by certutil.exe -decode within 5 min - classic DNS payload staging (Octoberfest7 technique). MITRE: T1218, T1027"
+          },
+          {
+            "name": "tactics",
+            "value": "Execution,DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1218,T1027"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q16-DomainVolumeOutliers')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Domain Volume Outliers per Client (Internal Recon)",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(1h)\n| summarize\n    UniqueDomains = dcount(DnsQuery),\n    TotalQueries  = count()\n  by SrcIpAddr, SrcHostname\n| extend QueriesPerMinute = round(todouble(TotalQueries) / 60.0, 1)\n| where UniqueDomains > 300\n| order by UniqueDomains desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Single client resolving >300 unique domains/hour - indicates post-compromise network enumeration (BloodHound, ADRecon). MITRE: T1018, T1046"
+          },
+          {
+            "name": "tactics",
+            "value": "Discovery"
+          },
+          {
+            "name": "techniques",
+            "value": "T1018,T1046"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q17-PTRBulkLookup')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - PTR (Reverse DNS) Bulk Lookups - Network Mapping",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(1h)\n| where DnsQueryTypeName =~ \"PTR\" or DnsQueryType == 12\n| where DnsQuery has \"in-addr.arpa\" or DnsQuery has \"ip6.arpa\"\n| summarize\n    PtrCount      = count(),\n    UniqueSubnets = dcount(DnsQuery)\n  by SrcIpAddr, SrcHostname\n| where PtrCount > 50\n| order by PtrCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "High-volume PTR lookups from single source = automated network mapping. MITRE: T1018"
+          },
+          {
+            "name": "tactics",
+            "value": "Discovery,Reconnaissance"
+          },
+          {
+            "name": "techniques",
+            "value": "T1018"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q18-WildcardPatterns')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Wildcard DNS Query Patterns (Tool-Generated)",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(1h)\n| extend _p = split(DnsQuery, \".\")\n| extend BaseDomain = strcat(\n    tostring(_p[array_length(_p) - 2]), \".\",\n    tostring(_p[array_length(_p) - 1])\n  )\n| summarize\n    SubdomainCount = dcount(DnsQuery),\n    TotalQueries   = count(),\n    SampleSubs     = make_set(DnsQuery, 10)\n  by SrcIpAddr, SrcHostname, BaseDomain\n| where SubdomainCount > 30\n| order by SubdomainCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Tool-generated query bursts against same base domain (nmap, dnsrecon, dnsniper). MITRE: T1590"
+          },
+          {
+            "name": "tactics",
+            "value": "Reconnaissance"
+          },
+          {
+            "name": "techniques",
+            "value": "T1590"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q19-MXOutsideMail')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - MX Record Queries Outside Normal Mail Flow",
+        "category": "Hunting Queries",
+        "query": "let KnownMailServers = dynamic([\"mail01\", \"mail02\", \"smtp-relay\", \"exchange01\"]);\n// Replace with your actual mail server hostnames\nASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| where DnsQueryTypeName =~ \"MX\" or DnsQueryType == 15\n| where SrcHostname !in~ (KnownMailServers)\n| summarize\n    MxQueryCount  = count(),\n    TargetDomains = make_set(DnsQuery, 15)\n  by SrcIpAddr, SrcHostname\n| where MxQueryCount > 10\n| order by MxQueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "MX queries from non-mail-server hosts may indicate MX-based payload staging (Octoberfest7 technique). MITRE: T1071, T1132"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl,Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071,T1132"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q20-TORDomains')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - DNS Queries to TOR-Related Domains",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| where DnsQuery has_any (\n    \".onion\",\n    \"torproject.org\",\n    \"check.torproject.org\",\n    \"tor2web\",\n    \"onionite\",\n    \"tor.bravesoftware.com\",\n    \"meek-reflect.appspot.com\"\n  )\n| summarize\n    TorQueryCount = count(),\n    TorDomains    = make_set(DnsQuery),\n    FirstSeen     = min(TimeGenerated),\n    LastSeen      = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| order by TorQueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Hosts querying TOR-related domains may be routing C2 traffic or accessing dark web resources. MITRE: T1090"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl,DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1090"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q21-SingleLabelLookups')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - High-Frequency Single-Label Lookups (WPAD/NetBIOS)",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(1d)\n| where DnsQuery !has \".\"\n       or (array_length(split(DnsQuery, \".\")) <= 1)\n| where DnsQuery !in~ (\"localhost\", \"wpad\", \"isatap\")\n| summarize\n    Count       = count(),\n    UniqueNames = dcount(DnsQuery),\n    Names       = make_set(DnsQuery, 20)\n  by SrcIpAddr, SrcHostname\n| order by Count desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Single-label DNS lookups outside of wpad/isatap may indicate LLMNR/NetBIOS fallback abuse by Responder. MITRE: T1557"
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1557"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q22-SubdomainDepthOutlier')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Subdomain Depth Outliers (7+ Labels = Tunneling)",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| extend LabelCount = array_length(split(DnsQuery, \".\"))\n| where LabelCount >= 7\n| summarize\n    DeepDomainCount = count(),\n    MaxLabels       = max(LabelCount),\n    SampleDomains   = make_set(DnsQuery, 10)\n  by SrcIpAddr, SrcHostname\n| order by DeepDomainCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Domains with 7+ labels are generated by tunneling tools to chain data segments. MITRE: T1071"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl,Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q23-NonCorpNameservers')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - DNS Traffic to Non-Corporate Nameservers",
+        "category": "Hunting Queries",
+        "query": "let CorporateDNSServers = dynamic([]);\nlet KnownPublicResolvers = dynamic([\n    \"8.8.8.8\", \"8.8.4.4\",\n    \"1.1.1.1\", \"1.0.0.1\",\n    \"9.9.9.9\", \"149.112.112.112\",\n    \"208.67.222.222\"\n]);\nASimDnsActivityLogs\n| where TimeGenerated > ago(1d)\n| where DstIpAddr !in (CorporateDNSServers)\n| extend IsKnownPublic = DstIpAddr in (KnownPublicResolvers)\n| summarize\n    QueryCount    = count(),\n    IsKnownPublic = any(IsKnownPublic),\n    Domains       = make_set(DnsQuery, 10)\n  by SrcIpAddr, SrcHostname, DstIpAddr\n| order by QueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Clients bypassing corporate DNS resolver - evades DNS filtering and may deliver attacker-controlled responses. MITRE: T1071"
+          },
+          {
+            "name": "tactics",
+            "value": "DefenseEvasion,CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q24-RepeatedIdentical')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Repeated Identical Queries (C2 Beaconing Exact Match)",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(4h)\n| summarize\n    RepeatCount = count(),\n    FirstSeen   = min(TimeGenerated),\n    LastSeen    = max(TimeGenerated),\n    SrcHosts    = make_set(SrcHostname)\n  by SrcIpAddr, DnsQuery\n| where RepeatCount >= 20\n| extend\n    SpanMinutes  = datetime_diff('minute', LastSeen, FirstSeen),\n    QueriesPerMin = round(todouble(RepeatCount) / max_of(1, datetime_diff('minute', LastSeen, FirstSeen)), 1)\n| where SpanMinutes > 5\n| project SrcIpAddr, DnsQuery, RepeatCount, QueriesPerMin, FirstSeen, LastSeen, SrcHosts\n| order by RepeatCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Cobalt Strike DNS beacons poll exact same subdomain on timer. 20+ identical queries in 4h = beaconing signal. MITRE: T1071, T1132"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071,T1132"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q25-NewDomainRegistration')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Newly Registered Domain Lookups (30-day baseline)",
+        "category": "Hunting Queries",
+        "query": "let RecentWindowStart  = ago(30d);\nlet HistoricalWindow   = ago(90d);\nlet HistoricalBaseline =\n    ASimDnsActivityLogs\n    | where TimeGenerated between (HistoricalWindow .. RecentWindowStart)\n    | distinct DnsQuery;\nASimDnsActivityLogs\n| where TimeGenerated > RecentWindowStart\n| where DnsResponseCode != 3\n| where DnsQuery !in (HistoricalBaseline)\n| extend _pT = split(DnsQuery, \".\")\n| extend TLD = tostring(_pT[array_length(_pT) - 1])\n| summarize\n    FirstSeen     = min(TimeGenerated),\n    QueryCount    = count(),\n    ClientCount   = dcount(SrcIpAddr),\n    Clients       = make_set(SrcHostname, 5)\n  by DnsQuery, TLD\n| where ClientCount >= 2\n| order by FirstSeen asc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Domains first seen in last 30 days queried by 2+ clients - potential C2 and phishing infrastructure. MITRE: T1568, T1583"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl,ResourceDevelopment"
+          },
+          {
+            "name": "techniques",
+            "value": "T1568,T1583"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q26-LargeResponseSize')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - DNS Response Size Anomaly (Oversized TXT/NULL)",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| where DnsQueryTypeName in~ (\"TXT\", \"NULL\", \"ANY\")\n| where DnsResponseCode == 0\n| summarize\n    LargeAnswerCount = count(),\n    SampleDomains    = make_set(DnsQuery, 10)\n  by SrcIpAddr, SrcHostname\n| order by LargeAnswerCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Oversized TXT/NULL answers (3+ records) indicate payload delivery via DNS. Normal DNS rarely returns multiple TXT records. MITRE: T1071"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl,Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q27-LateralMoveDNS')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Lateral Movement via Internal DNS Lookup Patterns",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(1h)\n| where EventResult =~ \"Success\"\n| extend IsInternalDomain = DnsQuery matches regex @\"(?i)(dc\\d|srv\\d|db\\d|fs\\d|ws\\d|printer|exchange|vcenter|esxi|backup)\"\n| where IsInternalDomain\n| summarize\n    InternalLookupCount = count(),\n    UniqueInternalHosts = dcount(DnsQuery),\n    TargetHosts         = make_set(DnsQuery, 20)\n  by SrcIpAddr, SrcHostname\n| where UniqueInternalHosts > 10\n| order by InternalLookupCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Bulk resolution of internal server names (dc, db, exchange, vcenter) from single host = post-compromise lateral recon. MITRE: T1018"
+          },
+          {
+            "name": "tactics",
+            "value": "Discovery,LateralMovement"
+          },
+          {
+            "name": "techniques",
+            "value": "T1018"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q28-SuspiciousDNSParents')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Process-to-DNS Mapping (Unusual Parent Processes)",
+        "category": "Hunting Queries",
+        "query": "SecurityEvent\n| where TimeGenerated > ago(1d)\n| where EventID == 4688\n| where Process in~ (\"nslookup.exe\", \"Resolve-DnsName\")\n       or (Process =~ \"powershell.exe\" and CommandLine has_any (\"Resolve-DnsName\", \"nslookup\", \"[System.Net.Dns]\"))\n| summarize\n    QueryCount    = count(),\n    Accounts      = make_set(Account, 5),\n    SampleCmds    = make_set(CommandLine, 5),\n    Parents       = make_set(ParentProcessName, 5)\n  by Computer, Process\n| where tostring(Parents) !has \"explorer.exe\"\n       and tostring(Parents) !has \"services.exe\"\n       and tostring(Parents) !has \"svchost.exe\"\n| order by QueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "DNS resolution from unusual parent processes (malware, script engines). Legitimate DNS rarely originates from cmd/wscript/mshta parents. MITRE: T1059, T1071"
+          },
+          {
+            "name": "tactics",
+            "value": "Execution,CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1059,T1071"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q29-Base64InLabels')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - Base64 Patterns in DNS Labels",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| extend Labels = split(DnsQuery, \".\")\n| extend Label0 = tostring(Labels[0])\n| where strlen(Label0) > 20\n| extend\n    NonBase64Chars = countof(Label0, @\"[^A-Za-z0-9+/=_-]\")\n| extend\n    LabelLen       = strlen(Label0),\n    Base64Ratio    = todouble(strlen(Label0) - countof(Label0, @\"[^A-Za-z0-9+/=_-]\")) / todouble(strlen(Label0))\n| where Base64Ratio > 0.92\n| summarize\n    SuspiciousQueryCount = count(),\n    SampleLabels         = make_set(Label0, 10),\n    SampleDomains        = make_set(DnsQuery, 10)\n  by SrcIpAddr, SrcHostname\n| order by SuspiciousQueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Subdomain labels composed >92% of base64 alphabet chars are strongly indicative of encoded payload segments in DNS. MITRE: T1048, T1071"
+          },
+          {
+            "name": "tactics",
+            "value": "Exfiltration,CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1048,T1071"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q30-NewAccountDNS')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt - DNS Activity by Newly Created Accounts",
+        "category": "Hunting Queries",
+        "query": "let NewAccounts =\n    IdentityInfo\n    | where TimeGenerated > ago(30d)\n    | where AccountCreationTime > ago(24h)\n    | project AccountUPN, AccountCreationTime;\nASimDnsActivityLogs\n| where TimeGenerated > ago(24h)\n| join kind=inner NewAccounts on $left.SrcUsername == $right.AccountUPN\n| summarize\n    DnsQueryCount    = count(),\n    UniqueDomains    = dcount(DnsQuery),\n    SuspiciousTypes  = countif(DnsQueryTypeName in~ (\"TXT\", \"MX\", \"NULL\", \"ANY\")),\n    SampleDomains    = make_set(DnsQuery, 10)\n  by SrcUsername, SrcIpAddr, SrcHostname, AccountCreationTime\n| order by DnsQueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "New accounts (<24h old) performing unusual DNS activity - insider threat or initial access abuse indicator. MITRE: T1078, T1071"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078,T1071"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q31-ADSrvRecordEnum')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt — Active Directory SRV Record Enumeration",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| where DnsQueryTypeName =~ \"SRV\"\n| where DnsQuery has_any (\"_kerberos\", \"_ldap\", \"_gc\", \"_kpasswd\", \"_msrpc\", \"_msdcs\", \"_kerberos-master\", \"_adws\", \"_ntp\")\n| summarize\n    SrvQueryCount  = count(),\n    UniqueSrvTypes = dcount(DnsQuery),\n    SampleTargets  = make_set(DnsQuery, 25),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| order by SrvQueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "SRV record queries for AD services (_kerberos, _ldap, _gc, _kpasswd) mapping DC/GC/KDC infrastructure. Bulk queries from workstations indicate BloodHound/PowerSploit reconnaissance. MITRE: T1018, T1590"
+          },
+          {
+            "name": "tactics",
+            "value": "Reconnaissance"
+          },
+          {
+            "name": "techniques",
+            "value": "T1018,T1590"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q32-VersionFingerprint')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt — DNS Version Fingerprinting (version.bind / CHAOS)",
+        "category": "Hunting Queries",
+        "query": "ASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| where DnsQuery has_any (\"version.bind\", \"hostname.bind\", \"authors.bind\", \"version.server\", \"id.server\")\n    or DnsQueryClass in~ (\"CH\", \"CHAOS\")\n| summarize\n    QueryCount    = count(),\n    TargetServers = make_set(DstIpAddr, 10),\n    QueryTypes    = make_set(DnsQueryTypeName, 5),\n    SampleQueries = make_set(DnsQuery, 10),\n    FirstSeen     = min(TimeGenerated),\n    LastSeen      = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| order by QueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detect DNS banner grabbing via version.bind CHAOS TXT queries used to fingerprint DNS server software and version for targeted exploitation. Command: dig version.bind CHAOS TXT @<DNS>. MITRE: T1592, T1018"
+          },
+          {
+            "name": "tactics",
+            "value": "Reconnaissance"
+          },
+          {
+            "name": "techniques",
+            "value": "T1592,T1018"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q33-ADIDNSWildcard')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt — ADIDNS Wildcard Record Abuse (NXDOMAIN to NOERROR Flip)",
+        "category": "Hunting Queries",
+        "query": "let PreviouslyNxdomain =\n    ASimDnsActivityLogs\n    | where TimeGenerated between (ago(2h) .. ago(1h))\n    | where DnsResponseCode == 3\n    | where DnsQueryTypeName in~ (\"A\", \"AAAA\")\n    | summarize NxClients = dcount(SrcIpAddr) by DnsQuery\n    | where NxClients >= 2;\nASimDnsActivityLogs\n| where TimeGenerated > ago(1h)\n| where DnsResponseCode == 0\n| where DnsQueryTypeName in~ (\"A\", \"AAAA\")\n| join kind=inner (PreviouslyNxdomain) on DnsQuery\n| summarize\n    FlippedDomains  = dcount(DnsQuery),\n    AffectedClients = dcount(SrcIpAddr),\n    SampleDomains   = make_set(DnsQuery, 25),\n    AffectedHosts   = make_set(SrcHostname, 15),\n    FlipStartTime   = min(TimeGenerated)\n| where FlippedDomains >= 3\n| order by FlippedDomains desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Hunt for ADIDNS wildcard record injection: hostnames that returned NXDOMAIN are suddenly resolving. Ref: NetSPI Kevin Robertson. Tool: PowerMad Invoke-DNSUpdate. MITRE: T1557"
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess,LateralMovement"
+          },
+          {
+            "name": "techniques",
+            "value": "T1557"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q34-DNSAdminDLL')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt — DNSAdmins DLL Injection Trace (dnscmd /serverlevelplugindll)",
+        "category": "Hunting Queries",
+        "query": "let DnscmdEvents =\n    SecurityEvent\n    | where TimeGenerated > ago(7d)\n    | where EventID == 4688\n    | where NewProcessName has \"dnscmd.exe\"\n    | where CommandLine has \"serverlevelplugindll\"\n    | project DnscmdTime = TimeGenerated, Computer, SubjectUserName, CommandLine;\nlet ServiceEvents =\n    SecurityEvent\n    | where TimeGenerated > ago(7d)\n    | where EventID in (7036, 4697)\n    | where Activity has \"DNS\" or ServiceName contains \"DNS\"\n    | project RestartTime = TimeGenerated, Computer, Activity;\nDnscmdEvents\n| join kind=leftouter ServiceEvents on Computer\n| where isnull(RestartTime)\n    or abs(datetime_diff(\"minute\", DnscmdTime, RestartTime)) < 60\n| project DnscmdTime, Computer, SubjectUserName, CommandLine, RestartTime, Activity\n| order by DnscmdTime desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Hunt for dnscmd /serverlevelplugindll execution (DNSAdmins SYSTEM privilege escalation via DLL injection into dns.exe). Correlated with DNS service restart. Ref: Shay Ber 2017. MITRE: T1574, T1078"
+          },
+          {
+            "name": "tactics",
+            "value": "PrivilegeEscalation,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1574,T1078"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/DNS-HQ-Q35-DNSMiTM')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "DNS Hunt — DNS MiTM Indicators (Responses from Unexpected DNS Servers)",
+        "category": "Hunting Queries",
+        "query": "let CorporateDNS = dynamic([]);\n// Populate: dynamic([\"10.0.0.53\", \"10.0.1.53\"])\nASimDnsActivityLogs\n| where TimeGenerated > ago(7d)\n| where isnotempty(DstIpAddr)\n| where DstIpAddr !in (CorporateDNS)\n       and not(DstIpAddr startswith \"127.\")\n       and not(DstIpAddr startswith \"::1\")\n       and not(DstIpAddr startswith \"169.254.\")\n| summarize\n    QueryCount    = count(),\n    UniqueDomains = dcount(DnsQuery),\n    RogueServers  = make_set(DstIpAddr, 10),\n    SampleDomains = make_set(DnsQuery, 15),\n    FirstSeen     = min(TimeGenerated),\n    LastSeen      = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| where QueryCount > 5\n| order by QueryCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Find clients whose DNS traffic was handled by unexpected/unauthorized servers — indicator of DNS MiTM via ARP spoofing. Populate CorporateDNS with authorized DNS IPs. Ref: VerSprite Nagar.py. MITRE: T1557"
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess,Collection"
+          },
+          {
+            "name": "techniques",
+            "value": "T1557"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2022-09-01",
+      "name": "deploy-WindowsDNS-AnalyticRules",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "parameters": {
+          "workspaceName": {
+            "value": "[parameters('workspaceName')]"
+          },
+          "enableAnalyticRules": {
+            "value": "[parameters('enableAnalyticRules')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "workspaceName": {
+              "type": "string"
+            },
+            "enableAnalyticRules": {
+              "type": "bool"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-01-TunnelTXT')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "DNS Tunneling via High-Volume TXT Record Queries",
+                "description": "Detects clients generating abnormally high TXT record query volumes - primary indicator of DNS tunneling (iodine, dnscat2, Cobalt Strike). MITRE: T1071, T1048",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "ASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(1h)\n| where DnsQueryTypeName =~ \"TXT\"\n| summarize\n    TxtQueryCount  = count(),\n    UniqueDomains  = dcount(DnsQuery),\n    SampleDomains  = make_set(DnsQuery, 10),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| where TxtQueryCount > 250",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "CommandAndControl",
+                  "Exfiltration"
+                ],
+                "techniques": [
+                  "T1071",
+                  "T1048"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "TxtQueryCount": "TxtQueryCount",
+                  "UniqueDomains": "UniqueDomains"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-02-C2Beaconing')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "DNS C2 Beaconing - Low-TTL Periodic Domain Lookups",
+                "description": "Detects Cobalt Strike / Silver / Havoc DNS beaconing by identifying clients querying the same FQDN 20+ times in 4h with regular periodicity. MITRE: T1071, T1132",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "ASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(4h)\n| where EventResult =~ \"Success\"\n| where DnsQueryTypeName in~ (\"A\", \"AAAA\", \"TXT\", \"MX\", \"CNAME\", \"NULL\")\n| summarize\n    QueryCount  = count(),\n    FirstSeen   = min(TimeGenerated),\n    LastSeen    = max(TimeGenerated),\n    SrcHostname = any(SrcHostname)\n  by SrcIpAddr, DnsQuery\n| where QueryCount >= 50\n| extend\n    SpanMinutes   = datetime_diff('minute', LastSeen, FirstSeen),\n    QueriesPerMin = round(todouble(QueryCount) / max_of(1, datetime_diff('minute', LastSeen, FirstSeen)), 2)\n| where SpanMinutes > 5\n| where QueriesPerMin >= 1",
+                "queryFrequency": "PT4H",
+                "queryPeriod": "PT4H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "CommandAndControl"
+                ],
+                "techniques": [
+                  "T1071",
+                  "T1132"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "DNS",
+                    "fieldMappings": [
+                      {
+                        "identifier": "DomainName",
+                        "columnName": "DnsQuery"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "QueryCount": "QueryCount",
+                  "QueriesPerMin": "QueriesPerMin",
+                  "BeaconDomain": "DnsQuery"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-03-ClickFix')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "ClickFix nslookup Payload Delivery via DNS",
+                "description": "Detects Feb 2026 ClickFix attack: nslookup with explicit attacker DNS server to retrieve PowerShell payload via DNS NAME field (ModeloRAT). MITRE: T1059, T1071",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "SecurityEvent\n| where TimeGenerated > ago(1d)\n| where EventID == 4688\n| where Process =~ \"nslookup.exe\"\n| where CommandLine has_any (\"-server\", \"/server\")\n      or CommandLine matches regex @\"nslookup\\s+\\S+\\s+\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\"\n      or CommandLine matches regex @\"nslookup\\s+-type=\\w+\\s+\\S+\\s+\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\"\n| project\n    TimeGenerated,\n    Computer,\n    Account,\n    CommandLine,\n    ParentProcessName",
+                "queryFrequency": "PT15M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Execution",
+                  "CommandAndControl"
+                ],
+                "techniques": [
+                  "T1059",
+                  "T1071",
+                  "T1204"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "Computer"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Name",
+                        "columnName": "Account"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "CommandLine": "CommandLine",
+                  "ParentProcess": "ParentProcessName"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-04-DGA')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "DGA - High-Entropy Subdomain Pattern (Domain Generation Algorithm)",
+                "description": "Detects DGA malware (Emotet, QakBot, Dridex) by analyzing consonant ratio and digit presence in second-level domains. MITRE: T1568",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "ASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(1h)\n| extend _p = split(DnsQuery, \".\")\n| extend SLD = tostring(_p[array_length(_p) - 2])\n| where strlen(SLD) between (10 .. 40)\n| extend\n    SLDLen         = strlen(SLD),\n    HasDigits      = SLD matches regex @\"\\d\",\n    ConsonantCount = countof(SLD, \"b\") + countof(SLD, \"c\") + countof(SLD, \"d\")\n                   + countof(SLD, \"f\") + countof(SLD, \"g\") + countof(SLD, \"h\")\n                   + countof(SLD, \"j\") + countof(SLD, \"k\") + countof(SLD, \"l\")\n                   + countof(SLD, \"m\") + countof(SLD, \"n\") + countof(SLD, \"p\")\n                   + countof(SLD, \"q\") + countof(SLD, \"r\") + countof(SLD, \"s\")\n                   + countof(SLD, \"t\") + countof(SLD, \"v\") + countof(SLD, \"w\")\n                   + countof(SLD, \"x\") + countof(SLD, \"y\") + countof(SLD, \"z\")\n| extend ConsonantRatio = todouble(ConsonantCount) / todouble(SLDLen)\n| where ConsonantRatio > 0.65\n     and HasDigits == true\n| summarize\n    DgaLikeDomains = dcount(DnsQuery),\n    QueryCount     = count(),\n    SampleDomains  = make_set(DnsQuery, 15),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| where DgaLikeDomains > 25",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "CommandAndControl"
+                ],
+                "techniques": [
+                  "T1568"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "DgaLikeDomains": "DgaLikeDomains",
+                  "SampleDomains": "SampleDomains"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-05-ZoneTransfer')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "DNS Zone Transfer (AXFR/IXFR) from Unauthorized Internal Host",
+                "description": "Detects AXFR/IXFR zone transfer from hosts NOT in the AuthorizedSecondaryDNS list. Populate the list to suppress legitimate replication and surface only attacker-initiated transfers. MITRE: T1590",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "let AuthorizedSecondaryDNS = dynamic([]);\nASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(1h)\n| where DnsQueryTypeName in~ (\"AXFR\", \"IXFR\")\n      or DnsQueryType in (252, 251)\n| where SrcIpAddr !in (AuthorizedSecondaryDNS)\n| summarize\n    TransferAttempts = count(),\n    TargetZones      = make_set(DnsQuery),\n    TargetServers    = make_set(DstIpAddr),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Reconnaissance"
+                ],
+                "techniques": [
+                  "T1590"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "TargetZones": "TargetZones",
+                  "TransferAttempts": "TransferAttempts"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-06-Amplification')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "DNS Amplification Attack - Open Resolver Abuse",
+                "description": "Detects high-volume ANY/DNSKEY queries consistent with DNS amplification/reflection DDoS. MITRE: T1498",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "ASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(15m)\n| where DnsQueryTypeName in~ (\"ANY\", \"DNSKEY\", \"RRSIG\", \"TXT\")\n      or DnsQueryType in (255, 48, 46)\n| summarize\n    AmpQueryCount   = count(),\n    UniqueTargets   = dcount(DnsQuery),\n    RecordTypes     = make_set(DnsQueryTypeName),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| where AmpQueryCount > 500\n| extend QueriesPerMinute = round(todouble(AmpQueryCount) / 15.0, 1)",
+                "queryFrequency": "PT15M",
+                "queryPeriod": "PT15M",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Impact"
+                ],
+                "techniques": [
+                  "T1498"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "AmpQueryCount": "AmpQueryCount",
+                  "QueriesPerMinute": "QueriesPerMinute"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-07-Rebinding')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "DNS Rebinding - Rapid Re-Resolution of Same Domain",
+                "description": "Detects DNS rebinding preparation: client rapidly re-resolves same domain (2+ times/min) allowing JavaScript to access internal services. MITRE: T1557, T1090",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "ASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(30m)\n| where EventResult =~ \"Success\"\n| where DnsResponseCode == 0\n| summarize\n    QueryCount      = count(),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated),\n    SrcHostname     = any(SrcHostname)\n  by SrcIpAddr, DnsQuery\n| where QueryCount >= 10\n| extend SpanSeconds = datetime_diff('second', LastSeen, FirstSeen)\n| where SpanSeconds > 0\n| extend ReResolutionRate = round(todouble(QueryCount) / todouble(SpanSeconds) * 60.0, 2)\n| where ReResolutionRate >= 2\n| project SrcIpAddr, SrcHostname, DnsQuery, QueryCount, ReResolutionRate, SpanSeconds, FirstSeen, LastSeen",
+                "queryFrequency": "PT30M",
+                "queryPeriod": "PT30M",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT2H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "CredentialAccess",
+                  "Collection"
+                ],
+                "techniques": [
+                  "T1557"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "DNS",
+                    "fieldMappings": [
+                      {
+                        "identifier": "DomainName",
+                        "columnName": "DnsQuery"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "ReResolutionRate": "ReResolutionRate",
+                  "TargetDomain": "DnsQuery"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-08-DataExfil')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "DNS Data Exfiltration via Long Subdomain Labels",
+                "description": "Detects data exfiltration by identifying >35-char subdomain labels used to encode data, estimating volume. MITRE: T1048",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "ASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(24h)\n| extend Labels = split(DnsQuery, \".\")\n| extend\n    Label0    = tostring(Labels[0]),\n    Label1    = tostring(Labels[1]),\n    Label2    = tostring(Labels[2])\n| extend MaxLabelLen = max_of(strlen(Label0), strlen(Label1), strlen(Label2))\n| where MaxLabelLen > 45\n| extend QuerySize = strlen(DnsQuery)\n| summarize\n    TotalQueries   = count(),\n    EstimatedBytes = sum(QuerySize),\n    MaxLabelSeen   = max(MaxLabelLen),\n    AvgLabelLen    = round(avg(MaxLabelLen), 1),\n    SampleDomains  = make_set(DnsQuery, 10),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| extend EstimatedKB = round(todouble(EstimatedBytes) / 1024.0, 1)\n| where EstimatedKB > 100",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Exfiltration",
+                  "CommandAndControl"
+                ],
+                "techniques": [
+                  "T1048",
+                  "T1071"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "EstimatedKB": "EstimatedKB",
+                  "MaxLabelSeen": "MaxLabelSeen",
+                  "TotalQueries": "TotalQueries"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-09-WPAD')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "WPAD Auto-Discovery DNS Lookup Abuse",
+                "description": "Detects high-volume WPAD/ISATAP lookups from multiple hosts - without a corporate WPAD server these are vulnerable to Responder/Inveigh NTLM capture. MITRE: T1557",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "ASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(1h)\n| where DnsQuery has \"wpad\" or DnsQuery has \"isatap\"\n| summarize\n    LookupCount  = count(),\n    UniqueHosts  = dcount(SrcIpAddr),\n    Hosts        = make_set(SrcHostname, 20),\n    ResponseCode = make_set(DnsResponseCode)\n  by DnsQuery\n| where UniqueHosts > 3",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "CredentialAccess",
+                  "Collection"
+                ],
+                "techniques": [
+                  "T1557"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "DNS",
+                    "fieldMappings": [
+                      {
+                        "identifier": "DomainName",
+                        "columnName": "DnsQuery"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "UniqueHosts": "UniqueHosts",
+                  "Hosts": "Hosts"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-10-InternalRecon')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "DNS-Based Internal Network Reconnaissance Sweep",
+                "description": "Detects post-compromise recon: single client resolving >300 unique domains in 30 min (BloodHound, ADRecon pattern). MITRE: T1018, T1046",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "ASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(30m)\n| summarize\n    UniqueDomains    = dcount(DnsQuery),\n    TotalQueries     = count(),\n    SampleDomains    = make_set(DnsQuery, 15),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| extend QueriesPerMinute = round(todouble(TotalQueries) / 30.0, 1)\n| where UniqueDomains > 750",
+                "queryFrequency": "PT30M",
+                "queryPeriod": "PT30M",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT2H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Discovery"
+                ],
+                "techniques": [
+                  "T1018",
+                  "T1046"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "UniqueDomains": "UniqueDomains",
+                  "QueriesPerMinute": "QueriesPerMinute"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-11-CertutilLOLBin')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "Certutil Decoding After DNS Lookup Chain (LOLBin DNS Staging)",
+                "description": "Detects nslookup (5+ calls) followed by certutil -decode within 10 min - classic DNS payload staging LOLBin chain. MITRE: T1218, T1027, T1071",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "let NslookupEvents =\n    SecurityEvent\n    | where TimeGenerated > ago(1h)\n    | where EventID == 4688\n    | where Process =~ \"nslookup.exe\"\n    | summarize\n        NslookupCount = count(),\n        NslookupTime  = min(TimeGenerated),\n        NslookupCmds  = make_set(CommandLine, 5)\n      by Computer, Account;\nlet CertutilEvents =\n    SecurityEvent\n    | where TimeGenerated > ago(1h)\n    | where EventID == 4688\n    | where Process =~ \"certutil.exe\"\n    | where CommandLine has_any (\"-decode\", \"-decodehex\", \"-urlcache\", \"-f\")\n    | summarize\n        CertutilCount = count(),\n        CertutilTime  = min(TimeGenerated),\n        CertutilCmds  = make_set(CommandLine, 5)\n      by Computer, Account;\nNslookupEvents\n| join kind=inner CertutilEvents on Computer, Account\n| where CertutilTime > NslookupTime\n    and (CertutilTime - NslookupTime) < 10m\n| where NslookupCount >= 10\n| project Computer, Account, NslookupCount, NslookupTime, CertutilTime, NslookupCmds, CertutilCmds, TimeDelta = CertutilTime - NslookupTime",
+                "queryFrequency": "PT15M",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Execution",
+                  "DefenseEvasion",
+                  "CommandAndControl"
+                ],
+                "techniques": [
+                  "T1218",
+                  "T1027",
+                  "T1071"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "Computer"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Name",
+                        "columnName": "Account"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "NslookupCount": "NslookupCount",
+                  "CertutilCmds": "CertutilCmds"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-12-NXDomainDGA')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "DGA Confirmed — NXDOMAIN Flood with High-Entropy Domain Pattern",
+                "description": "HIGH CONFIDENCE DGA: requires both >200 NXDOMAIN in 1h (>40% failure rate) AND consonant-ratio entropy >0.65 with embedded digits on failed domains. More specific than built-in Excessive NXDOMAIN (volume only) or Potential DGA (failure rate only). MITRE: T1568",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "// Signal 1: High NXDOMAIN volume with high failure rate\nlet NxdomainClients =\n    ASimDnsActivityLogs\n    | invoke ExcludeAllowlistedIPs_WindowsDNS()\n    | where TimeGenerated > ago(1h)\n    | summarize\n        TotalQueries  = count(),\n        NxdomainCount = countif(DnsResponseCode == 3),\n        UniqueDomains = dcount(DnsQuery),\n        FirstSeen     = min(TimeGenerated),\n        LastSeen      = max(TimeGenerated)\n      by SrcIpAddr, SrcHostname\n    | where NxdomainCount > 500\n    | extend NxdomainRate = round(todouble(NxdomainCount) / todouble(TotalQueries) * 100.0, 1)\n    | where NxdomainRate > 40;\n// Signal 2: Failed domains exhibit DGA consonant-ratio + digits pattern\nlet DgaEntropyClients =\n    ASimDnsActivityLogs\n    | invoke ExcludeAllowlistedIPs_WindowsDNS()\n    | where TimeGenerated > ago(1h)\n    | where DnsResponseCode == 3\n    | extend _p = split(DnsQuery, \".\")\n| extend SLD = tostring(_p[array_length(_p) - 2])\n    | where strlen(SLD) between (10 .. 40)\n    | extend\n        ConsonantCount = countof(SLD, \"b\") + countof(SLD, \"c\") + countof(SLD, \"d\")\n                       + countof(SLD, \"f\") + countof(SLD, \"g\") + countof(SLD, \"h\")\n                       + countof(SLD, \"j\") + countof(SLD, \"k\") + countof(SLD, \"l\")\n                       + countof(SLD, \"m\") + countof(SLD, \"n\") + countof(SLD, \"p\")\n                       + countof(SLD, \"q\") + countof(SLD, \"r\") + countof(SLD, \"s\")\n                       + countof(SLD, \"t\") + countof(SLD, \"v\") + countof(SLD, \"w\")\n                       + countof(SLD, \"x\") + countof(SLD, \"y\") + countof(SLD, \"z\"),\n        HasDigits = SLD matches regex @\"\\d\"\n    | extend ConsonantRatio = todouble(ConsonantCount) / todouble(strlen(SLD))\n    | where ConsonantRatio > 0.65 and HasDigits == true\n    | summarize\n        DgaLikeDomains = dcount(DnsQuery),\n        SampleDomains  = make_set(DnsQuery, 15)\n      by SrcIpAddr, SrcHostname\n    | where DgaLikeDomains > 5;\n// Both signals must fire on the same client  high confidence DGA\nNxdomainClients\n| join kind=inner DgaEntropyClients on SrcIpAddr\n| project\n    SrcIpAddr, SrcHostname, NxdomainCount, NxdomainRate,\n    UniqueDomains, DgaLikeDomains, SampleDomains, FirstSeen, LastSeen",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "CommandAndControl"
+                ],
+                "techniques": [
+                  "T1568"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "NxdomainCount": "NxdomainCount",
+                  "NxdomainRate": "NxdomainRate",
+                  "UniqueDomains": "UniqueDomains"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-13-NullAny')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "NULL and ANY DNS Record Type Queries - Tunneling Indicator",
+                "description": "Detects NULL (type 10) and ANY (type 255) record queries - near-zero legitimate use in corporate environments, primary DNS tunneling indicators. MITRE: T1071",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "ASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(1h)\n| where DnsQueryTypeName in~ (\"NULL\", \"ANY\")\n      or DnsQueryType in (10, 255)\n| summarize\n    NullAnyCount   = count(),\n    UniqueDomains  = dcount(DnsQuery),\n    RecordTypes    = make_set(DnsQueryTypeName),\n    SampleDomains  = make_set(DnsQuery, 10),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname\n| where NullAnyCount > 15",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "CommandAndControl",
+                  "Exfiltration"
+                ],
+                "techniques": [
+                  "T1071"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "NullAnyCount": "NullAnyCount",
+                  "RecordTypes": "RecordTypes"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-14-MXTunnel')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "DNS MX Record Abuse for Payload Staging",
+                "description": "Detects Octoberfest7-style MX record payload staging: high-volume MX queries with numeric subdomain prefixes (1.domain, 2.domain...) used to retrieve hex-encoded payload chunks. MITRE: T1071, T1132",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "ASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(1h)\n| where DnsQueryTypeName =~ \"MX\" or DnsQueryType == 15\n| extend _p = split(DnsQuery, \".\")\n| extend BaseDomain = strcat(\n      tostring(_p[array_length(_p) - 2]), \".\",\n      tostring(_p[array_length(_p) - 1])\n    )\n| extend SubdomainPrefix = tostring(split(DnsQuery, \".\")[0])\n| extend HasNumericPrefix = SubdomainPrefix matches regex @\"^\\d+$\"\n| summarize\n    MxQueryCount    = count(),\n    NumericPrefixed = countif(HasNumericPrefix),\n    UniquePrefixes  = dcount(SubdomainPrefix),\n    SampleDomains   = make_set(DnsQuery, 15),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname, BaseDomain\n| where MxQueryCount > 25 and NumericPrefixed > 5",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "CommandAndControl",
+                  "Exfiltration"
+                ],
+                "techniques": [
+                  "T1071",
+                  "T1132"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "DNS",
+                    "fieldMappings": [
+                      {
+                        "identifier": "DomainName",
+                        "columnName": "BaseDomain"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "BaseDomain": "BaseDomain",
+                  "MxQueryCount": "MxQueryCount",
+                  "NumericPrefixed": "NumericPrefixed"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-15-SubEnum')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "Subdomain Enumeration Burst - DNS Brute-Force Reconnaissance",
+                "description": "Detects automated DNS subdomain brute-force enumeration (dnsniper, sublist3r, amass) - single client resolving 30+ unique subdomains of same base domain/hour. MITRE: T1590, T1046",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "ASimDnsActivityLogs\n| invoke ExcludeAllowlistedIPs_WindowsDNS()\n| where TimeGenerated > ago(1h)\n| extend _p = split(DnsQuery, \".\")\n| extend BaseDomain = strcat(\n      tostring(_p[array_length(_p) - 2]), \".\",\n      tostring(_p[array_length(_p) - 1])\n    )\n| where isnotempty(BaseDomain) and BaseDomain !~ \".\"\n| summarize\n    SubdomainCount   = dcount(DnsQuery),\n    TotalQueries     = count(),\n    NxdomainCount    = countif(DnsResponseCode == 3),\n    SampleSubs       = make_set(DnsQuery, 15),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SrcIpAddr, SrcHostname, BaseDomain\n| where SubdomainCount > 75\n| extend NxdomainRate = round(todouble(NxdomainCount) / todouble(TotalQueries) * 100.0, 1)",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Reconnaissance",
+                  "Discovery"
+                ],
+                "techniques": [
+                  "T1590",
+                  "T1046"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "SrcHostname"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SrcIpAddr"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "DNS",
+                    "fieldMappings": [
+                      {
+                        "identifier": "DomainName",
+                        "columnName": "BaseDomain"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "SubdomainCount": "SubdomainCount",
+                  "BaseDomain": "BaseDomain",
+                  "NxdomainRate": "NxdomainRate"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-16-DNSAdminDLL')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "DNSAdmins Privilege Escalation via DLL Injection (dnscmd /serverlevelplugindll)",
+                "description": "Detects dnscmd.exe /serverlevelplugindll execution (registers malicious DLL into dns.exe/SYSTEM) correlated with DNS service restart within 60 min. Any DNSAdmins group member can execute. MITRE: T1574, T1078",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "let DnscmdAbuse =\n    SecurityEvent\n    | where TimeGenerated > ago(1h)\n    | where EventID == 4688\n    | where NewProcessName has \"dnscmd.exe\"\n    | where CommandLine has \"serverlevelplugindll\"\n    | project DnscmdTime = TimeGenerated, Computer, SubjectAccount = SubjectUserName, CommandLine;\nlet DnsServiceRestart =\n    SecurityEvent\n    | where TimeGenerated > ago(1h)\n    | where EventID == 7036 or EventID == 4697\n    | where Activity has \"DNS\" or ServiceName contains \"DNS\"\n    | project RestartTime = TimeGenerated, Computer, ServiceEvent = Activity;\nDnscmdAbuse\n| join kind=inner DnsServiceRestart on Computer\n| where abs(datetime_diff(\"minute\", DnscmdTime, RestartTime)) < 60\n| project DnscmdTime, Computer, SubjectAccount, CommandLine, RestartTime, ServiceEvent",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "PrivilegeEscalation",
+                  "Persistence"
+                ],
+                "techniques": [
+                  "T1574",
+                  "T1078"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "Computer"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Name",
+                        "columnName": "SubjectAccount"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "CommandLine": "CommandLine",
+                  "ServiceEvent": "ServiceEvent"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "DNSAdmins DLL Injection — {{SubjectAccount}} on {{Computer}} registered malicious DLL",
+                  "alertDescriptionFormat": "{{SubjectAccount}} on {{Computer}} ran dnscmd /serverlevelplugindll: '{{CommandLine}}'. DNS service restart within 60 min. Malicious DLL may have loaded at SYSTEM level."
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2022-12-01-preview",
+              "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/DNS-AR-17-ADIDNSWildcard')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "AD-Integrated DNS Wildcard Record Abuse (ADIDNS Poisoning)",
+                "description": "Detects ADIDNS wildcard record insertion: 5+ hostnames that returned NXDOMAIN in hour 1 suddenly resolve (NOERROR) in hour 2, indicating a wildcard A record was added to poison DNS for MiTM/credential capture. Ref: NetSPI ADIDNS. MITRE: T1557",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "let WindowStart = ago(2h);\nlet WindowMid   = ago(1h);\nlet PreviouslyNxdomain =\n    ASimDnsActivityLogs\n    | invoke ExcludeAllowlistedIPs_WindowsDNS()\n    | where TimeGenerated between (WindowStart .. WindowMid)\n    | where DnsResponseCode == 3\n    | where DnsQueryTypeName in~ (\"A\", \"AAAA\")\n    | summarize NxClients = dcount(SrcIpAddr) by DnsQuery\n    | where NxClients >= 2;\nlet NowResolved =\n    ASimDnsActivityLogs\n    | invoke ExcludeAllowlistedIPs_WindowsDNS()\n    | where TimeGenerated between (WindowMid .. now())\n    | where DnsResponseCode == 0\n    | where DnsQueryTypeName in~ (\"A\", \"AAAA\")\n    | summarize ResolvedClients = dcount(SrcIpAddr), AffectedHosts = make_set(SrcHostname, 15), FirstResolution = min(TimeGenerated) by DnsQuery\n    | where ResolvedClients >= 2;\nPreviouslyNxdomain\n| join kind=inner NowResolved on DnsQuery\n| summarize FlippedDomains = count(), SampleDomains = make_set(DnsQuery, 25), AffectedClients = max(ResolvedClients), FirstFlipTime = min(FirstResolution)\n| where FlippedDomains >= 10",
+                "queryFrequency": "PT30M",
+                "queryPeriod": "PT2H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT2H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "CredentialAccess",
+                  "Collection"
+                ],
+                "techniques": [
+                  "T1557"
+                ],
+                "customDetails": {
+                  "FlippedDomains": "FlippedDomains",
+                  "AffectedClients": "AffectedClients"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "ADIDNS Wildcard Abuse — {{FlippedDomains}} domains flipped NXDOMAIN to NOERROR",
+                  "alertDescriptionFormat": "{{FlippedDomains}} hostnames that returned NXDOMAIN now resolve (NOERROR) since {{FirstFlipTime}}, affecting {{AffectedClients}} clients. Possible wildcard A record injected into ADIDNS for MiTM/credential capture."
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
