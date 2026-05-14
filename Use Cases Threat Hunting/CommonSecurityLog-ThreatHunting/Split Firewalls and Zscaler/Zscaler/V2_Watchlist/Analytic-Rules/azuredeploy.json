@@ -1,0 +1,2084 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace where Microsoft Sentinel is deployed"
+      }
+    },
+    "enableAnalyticRules": {
+      "type": "bool",
+      "defaultValue": true
+    },
+    "watchlistAlias": {
+      "type": "string",
+      "defaultValue": "NetworkAllowlist"
+    },
+    "functionAlias": {
+      "type": "string",
+      "defaultValue": "ExcludeAllowlistedIPs_Zscaler"
+    },
+    "watchlistRawContent": {
+      "type": "string",
+      "defaultValue": ""
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/', parameters('watchlistAlias'))]",
+      "properties": {
+        "displayName": "[parameters('watchlistAlias')]",
+        "description": "Trusted IPs/CIDRs to exclude from Zscaler ZIA/ZPA detections.",
+        "provider": "Customer",
+        "source": "Local file",
+        "itemsSearchKey": "IPOrRange",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "[variables('watchlistEffectiveContent')]"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', parameters('functionAlias'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "ExcludeAllowlistedIPs_Zscaler",
+        "category": "Functions",
+        "query": "let _allow = toscalar(union isfuzzy=true (datatable(IPOrRange:string)[]), (_GetWatchlist('NetworkAllowlist') | project IPOrRange = tostring(IPOrRange)) | where isnotempty(IPOrRange) | summarize make_list(IPOrRange));\niif(isempty(ip) or array_length(_allow) == 0, false, coalesce(ipv4_is_in_any_range(ip, _allow), false))",
+        "functionAlias": "[parameters('functionAlias')]",
+        "functionParameters": "ip:string",
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q09')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q09 - Zscaler ZIA - Blocked Requests by Malicious Category",
+        "category": "Hunting Queries",
+        "query": "let MaliciousCategories = dynamic([\n    \"BOTNET_SITES\", \"MALWARE_SITES\", \"PHISHING\", \"SPYWARE_ADWARE_KEYLOGGERS\",\n    \"RANSOMWARE\", \"C2_SITES\", \"COMMAND_CONTROL\", \"SUSPICIOUS_DESTINATIONS\",\n    \"MALICIOUS_LINKS\", \"ANONYMOUS_PROXY\"]);\nCommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\"\n| where DeviceAction in (\"block\", \"BLOCK\", \"Blocked\", \"blocked\")\n| where DeviceCustomString2 in (MaliciousCategories)\n    or DeviceCustomString3 in (MaliciousCategories)\n    or RequestContext has_any (\"BOTNET\", \"MALWARE\", \"PHISHING\", \"COMMAND_CONTROL\", \"RANSOMWARE\")\n| summarize\n    BlockCount       = count(),\n    UniqueUsers      = dcount(SourceUserName),\n    UserList         = make_set(SourceUserName, 20),\n    DestinationURLs  = make_set(RequestURL, 20),\n    DestIPs          = make_set(DestinationIP, 10),\n    Categories       = make_set(DeviceCustomString2, 10),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by DeviceCustomString2, DeviceCustomString3\n| order by BlockCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surfaces all Zscaler blocked web requests for malicious/botnet/phishing/C2 URL categories."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q10')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q10 - Zscaler ZIA - Shadow IT and File-Sharing Access",
+        "category": "Hunting Queries",
+        "query": "let ShadowITCategories = dynamic([\n    \"PERSONAL_SITES_BLOGS\", \"FILE_HOST\", \"SHAREWARE_FREEWARE\",\n    \"SOCIAL_NETWORKING\", \"PERSONAL_EMAIL\", \"WEB_BASED_EMAIL\", \"CLOUD_STORAGE\",\n    \"ONLINE_STORAGE_AND_BACKUP\", \"GENERAL_FILESHARING\"]);\nCommonSecurityLog\n| where TimeGenerated > ago(7d)\n| where DeviceVendor == \"Zscaler\"\n| where DeviceCustomString2 in (ShadowITCategories)\n    or DeviceCustomString3 in (ShadowITCategories)\n| summarize\n    RequestCount     = count(),\n    TotalBytesSent   = sum(SentBytes),\n    TotalBytesRecv   = sum(ReceivedBytes),\n    UniqueURLs       = dcount(RequestURL),\n    URLSamples       = make_set(RequestURL, 10),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SourceUserName, DeviceCustomString2\n| extend TotalMBSent = round(toreal(TotalBytesSent) / 1048576, 2)\n| where TotalMBSent > 50 or RequestCount > 200\n| order by TotalMBSent desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identifies users accessing personal cloud storage or file-sharing exceeding volume thresholds."
+          },
+          {
+            "name": "tactics",
+            "value": "Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1567"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q11')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q11 - DNS Tunneling Indicators via Zscaler",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where Protocol in (\"DNS\", \"dns\") or DestinationPort == 53\n| where isnotempty(DestinationHostName)\n| extend\n    SubdomainLength = strlen(DestinationHostName),\n    SubdomainParts  = countof(DestinationHostName, \".\")\n| where SubdomainLength > 50 or SubdomainParts > 5\n| summarize\n    QueryCount       = count(),\n    UniqueSubdomains = dcount(DestinationHostName),\n    LongestQuery     = max(SubdomainLength),\n    SampleHosts      = make_set(DestinationHostName, 10),\n    SourceIPs        = make_set(SourceIP, 10)\n  by SourceIP, DeviceVendor\n| where QueryCount > 10\n| order by LongestQuery desc, QueryCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects unusually long hostnames (>50 chars) or high DNS query volume to the same domain."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071.004"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q18')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q18 - Zscaler - Impossible Travel Same User Multiple Countries",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\"\n| where isnotempty(SourceUserName)\n| where isnotempty(SourceIP)\n| extend\n    UserCountry = tostring(geo_info_from_ip_address(SourceIP).country),\n    HourBucket  = bin(TimeGenerated, 1h)\n| where isnotempty(UserCountry)\n| summarize\n    CountryCount     = dcount(UserCountry),\n    Countries        = make_set(UserCountry, 10),\n    RequestCount     = count(),\n    SourceIPs        = make_set(SourceIP, 10),\n    URLSamples       = make_set(RequestURL, 5)\n  by SourceUserName, HourBucket\n| where CountryCount > 1\n| order by CountryCount desc, RequestCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects the same Zscaler username generating requests from more than 1 country within a 1-hour window."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q21')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q21 - Slow and Low Exfiltration - Aggregated Small Transfers",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(7d)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\", \"Reset-Both\")\n| where ipv4_is_private(SourceIP) == true\n| where ipv4_is_private(DestinationIP) == false\n| where isnotempty(SourceUserName)\n| where SentBytes between (1024 .. 1048576)  // 1 KB \u00e2\u20ac\u201c 1 MB per individual session\n| summarize\n    TotalSessions    = count(),\n    TotalBytesSent   = sum(SentBytes),\n    UniqueDestIPs    = dcount(DestinationIP),\n    DestHosts        = make_set(DestinationHostName, 10),\n    DestIPs          = make_set(DestinationIP, 10),\n    ActiveDays       = dcount(startofday(TimeGenerated)),\n    Categories       = make_set(DeviceCustomString2, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SourceUserName, DestinationIP\n| extend TotalMBSent = round(toreal(TotalBytesSent) / 1048576, 2)\n| where TotalMBSent > 100 and TotalSessions > 50\n| where UniqueDestIPs <= 3  // concentrated on few destinations vs. random CDN scatter\n| order by TotalMBSent desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects many small sessions (1KB-1MB each) from the same user where 7-day aggregate exceeds 100 MB."
+          },
+          {
+            "name": "tactics",
+            "value": "Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1048.003"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q22')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q22 - LOTL Web C2 - GitHub Pastebin Google Docs as C2 Staging",
+        "category": "Hunting Queries",
+        "query": "let LotLDomains = dynamic([\n    \"raw.githubusercontent.com\", \"gist.githubusercontent.com\", \"gist.github.com\",\n    \"pastebin.com\", \"paste.ee\", \"hastebin.com\", \"ghostbin.com\", \"rentry.co\",\n    \"docs.google.com\", \"drive.google.com\",\n    \"cdn.discordapp.com\", \"media.discordapp.net\",\n    \"onedrive.live.com\", \"1drv.ms\"]);\nCommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\"\n| where isnotempty(DestinationHostName)\n| where DestinationHostName has_any (LotLDomains)\n| where isnotempty(SourceUserName)\n| summarize\n    RequestCount     = count(),\n    TotalBytesRecv   = sum(ReceivedBytes),\n    TotalBytesSent   = sum(SentBytes),\n    UniqueURLs       = dcount(RequestURL),\n    URLSamples       = make_set(RequestURL, 10),\n    UserAgents       = make_set(RequestClientApplication, 5),\n    SourceIPs        = make_set(SourceIP, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SourceUserName, DestinationHostName\n| extend TotalMBReceived = round(toreal(TotalBytesRecv) / 1048576, 2)\n| extend SuspiciousUA = iff(\n    UserAgents !has \"Mozilla\" and UserAgents !has \"Chrome\" and UserAgents !has \"Safari\",\n    true, false)\n| where TotalMBReceived > 20 or SuspiciousUA == true or RequestCount > 100\n| project\n    SourceUserName, DestinationHostName,\n    RequestCount, TotalMBReceived, TotalBytesSent,\n    URLSamples, UserAgents, SuspiciousUA,\n    FirstSeen, LastSeen\n| order by TotalMBReceived desc, RequestCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identifies abuse of legitimate public platforms to host payloads or receive C2 tasking."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1102,T1105"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q23')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q23 - Stealthy SaaS Attack - ZIA Proxy plus M365 Correlation",
+        "category": "Hunting Queries",
+        "query": "let ZIASaaSSessions =\n    CommonSecurityLog\n    | where TimeGenerated > ago(24h)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n    | where DeviceVendor == \"Zscaler\"\n    | where DeviceAction !in (\"block\", \"BLOCK\", \"Blocked\", \"blocked\")\n    | where isnotempty(SourceUserName)\n    | where DestinationHostName has_any (\n        \"sharepoint.com\", \"onedrive.com\", \"outlook.office.com\",\n        \"graph.microsoft.com\", \"office.com\", \"microsoftonline.com\",\n        \"drive.google.com\", \"mail.google.com\", \"gmail.com\",\n        \"box.com\", \"dropbox.com\", \"salesforce.com\",\n        \"slack.com\", \"teams.microsoft.com\")\n    | summarize\n        ZIA_RequestCount = count(),\n        ZIA_BytesSent    = sum(SentBytes),\n        ZIA_BytesRecv    = sum(ReceivedBytes),\n        ZIA_URLs         = make_set(RequestURL, 10),\n        ZIA_SrcIPs       = make_set(SourceIP, 5),\n        ZIA_FirstSeen    = min(TimeGenerated)\n      by UserName = tolower(SourceUserName), DestinationHostName;\nOfficeActivity\n| where TimeGenerated > ago(24h)\n| where isnotempty(UserId)\n| where Operation in (\n    \"FileDownloaded\", \"FileSyncDownloadedFull\", \"AnonymousLinkUsed\",\n    \"Set-Mailbox\", \"New-InboxRule\", \"AddedToGroup\",\n    \"Add OAuth2PermissionGrant\", \"Consent to application\",\n    \"MailItemsAccessed\", \"UserLoginFailed\")\n| summarize\n    O365_OpCount     = count(),\n    O365_Operations  = make_set(Operation, 10),\n    O365_ClientIPs   = make_set(ClientIP, 5),\n    O365_FirstSeen   = min(TimeGenerated)\n  by UserName = tolower(UserId)\n| join kind=inner ZIASaaSSessions on UserName\n| where abs(datetime_diff('minute', O365_FirstSeen, ZIA_FirstSeen)) <= 120\n| extend ZIA_TotalMBRecv = round(toreal(ZIA_BytesRecv) / 1048576, 2)\n| project\n    UserName, DestinationHostName,\n    ZIA_RequestCount, ZIA_TotalMBRecv, ZIA_URLs, ZIA_SrcIPs,\n    O365_OpCount, O365_Operations, O365_ClientIPs,\n    ZIA_FirstSeen, O365_FirstSeen\n| order by ZIA_TotalMBRecv desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Correlates ZIA SaaS traffic with anomalous M365 operations within the same 2-hour window."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078,T1528,T1114"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q24')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q24 - ZIA Allowed Traffic to TI-Listed Domains Categorized Unknown",
+        "category": "Hunting Queries",
+        "query": "let TI_IOCs =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n    | where isempty(ValidUntil) or ValidUntil > now()\n    | where (isnotnull(parse_ipv4(ObservableValue)) or ObservableKey has \"domain\")\n    | where isnotempty(ObservableValue)\n    | summarize\n        TI_ThreatTypes = make_set(Tags),\n        TI_Confidence  = max(Confidence),\n        TI_Tags        = make_set(Tags)\n      by IOC_Value = ObservableValue;\nCommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where DeviceVendor == \"Zscaler\"\n| where DeviceAction !in (\"block\", \"BLOCK\", \"Blocked\", \"blocked\")  // ALLOWED only\n| where DeviceCustomString2 in (\n    \"MISCELLANEOUS_OR_UNKNOWN\", \"UNKNOWN\", \"OTHER\",\n    \"NEWLY_REGISTERED_DOMAINS\", \"MISCELLANEOUS\")\n    or isempty(DeviceCustomString2)\n| where isnotempty(DestinationHostName) or isnotempty(DestinationIP)\n| extend MatchKey = coalesce(DestinationHostName, tostring(DestinationIP))\n| summarize\n    RequestCount     = count(),\n    UniqueUsers      = dcount(SourceUserName),\n    UserList         = make_set(SourceUserName, 10),\n    BytesRecv        = sum(ReceivedBytes),\n    BytesSent        = sum(SentBytes),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by MatchKey, DestinationIP, DestinationHostName\n| join kind=inner TI_IOCs on $left.MatchKey == $right.IOC_Value\n| project\n    MatchKey, DestinationHostName, DestinationIP,\n    RequestCount, UniqueUsers, UserList,\n    BytesRecv, BytesSent,\n    TI_ThreatTypes, TI_Confidence, TI_Tags,\n    FirstSeen, LastSeen\n| order by TI_Confidence desc, RequestCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects Zscaler-allowed traffic to uncategorized destinations matching active TI feed entries."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071,T1568"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q25')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q25 - ZIA C2 Block plus EDR SecurityAlert Escalation",
+        "category": "Hunting Queries",
+        "query": "let ZscalerC2Blocks =\n    CommonSecurityLog\n    | where TimeGenerated > ago(24h)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n    | where DeviceVendor == \"Zscaler\"\n    | where DeviceAction in (\"block\", \"BLOCK\", \"Blocked\", \"blocked\")\n    | where DeviceCustomString2 has_any (\n        \"BOTNET_SITES\", \"MALWARE_SITES\", \"C2_SITES\", \"COMMAND_CONTROL\",\n        \"RANSOMWARE\", \"PHISHING\", \"SPYWARE_ADWARE_KEYLOGGERS\")\n    | summarize\n        ZIA_BlockCount   = count(),\n        ZIA_DestHosts    = make_set(DestinationHostName, 10),\n        ZIA_Categories   = make_set(DeviceCustomString2, 5),\n        ZIA_DestIPs      = make_set(DestinationIP, 10),\n        ZIA_Users        = make_set(SourceUserName, 5),\n        ZIA_FirstSeen    = min(TimeGenerated)\n      by ZIA_SrcIP = SourceIP;\nSecurityAlert\n| where TimeGenerated > ago(24h)\n| where AlertSeverity in (\"High\", \"Medium\")\n| mv-expand todynamic(Entities)\n| extend\n    EntityIP   = tostring(Entities.Address),\n    EntityHost = tostring(Entities.HostName)\n| where isnotempty(EntityIP)\n| summarize\n    Alert_Count      = count(),\n    Alert_Names      = make_set(AlertName, 5),\n    Alert_Products   = make_set(ProductName, 5),\n    Alert_Severity   = make_set(AlertSeverity, 3),\n    Alert_FirstSeen  = min(TimeGenerated)\n  by EntityIP, EntityHost\n| join kind=inner ZscalerC2Blocks on $left.EntityIP == $right.ZIA_SrcIP\n| project\n    ZIA_SrcIP, EntityHost,\n    ZIA_BlockCount, ZIA_DestHosts, ZIA_Categories, ZIA_Users,\n    Alert_Count, Alert_Names, Alert_Products, Alert_Severity,\n    ZIA_FirstSeen, Alert_FirstSeen\n| order by ZIA_BlockCount desc, Alert_Count desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Requires corroboration from Zscaler C2 block AND a Defender/Sentinel alert on the same host."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071,T1078"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q26')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q26 - HTTP Tunneling - Long or Base64-Encoded URL Parameters",
+        "category": "Hunting Queries",
+        "query": "CommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n| where isnotempty(RequestURL)\n| extend\n    URLLength    = strlen(RequestURL),\n    QueryString  = iff(RequestURL contains \"?\",\n                       substring(RequestURL, indexof(RequestURL, \"?\") + 1), \"\")\n| extend QueryLength = strlen(QueryString)\n| where URLLength > 200 or QueryLength > 150\n| extend\n    HasBase64Pattern = QueryString matches regex @\"[A-Za-z0-9+/=]{40,}\",\n    HasPctEncoding   = QueryString contains \"%\"\n| summarize\n    RequestCount     = count(),\n    MaxURLLength     = max(URLLength),\n    MaxQueryLength   = max(QueryLength),\n    UniqueUsers      = dcount(SourceUserName),\n    Base64Hits       = countif(HasBase64Pattern == true),\n    URLSamples       = make_set(RequestURL, 5),\n    UserAgents       = make_set(RequestClientApplication, 5),\n    SourceIPs        = make_set(SourceIP, 5),\n    FirstSeen        = min(TimeGenerated)\n  by DestinationHostName, DestinationPort, DeviceVendor\n| where RequestCount > 5 or Base64Hits > 2\n| order by Base64Hits desc, MaxQueryLength desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Identifies HTTP-based C2 channels via URL query strings over 150 chars or base64-like patterns."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1071.001"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q27')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q27 - Domain Fronting - CDN SNI and Suspicious Path Detection",
+        "category": "Hunting Queries",
+        "query": "let CDNDomains = dynamic([\n    \"cloudflare.com\", \"cloudfront.net\", \"azureedge.net\", \"azurefd.net\",\n    \"fastly.net\", \"akamaihd.net\", \"akamaized.net\", \"akamai.net\",\n    \"cdn.jsdelivr.net\", \"unpkg.com\", \"cdn77.com\", \"stackpathcdn.com\"]);\nCommonSecurityLog\n| where TimeGenerated > ago(24h)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where DeviceAction !in (\"deny\", \"block\", \"drop\", \"BLOCK\", \"DROP\")\n| where isnotempty(RequestURL) and isnotempty(DestinationHostName)\n| where DestinationHostName has_any (CDNDomains)\n| extend\n    PathLength      = strlen(RequestURL),\n    // Flag: long alphanumeric paths lacking file extensions \u00e2\u20ac\u201d typical C2 routing paths\n    HasRandomPath   = RequestURL matches regex @\"/[A-Za-z0-9_\\-]{20,}(\\?|$|/)\"\n| summarize\n    RequestCount     = count(),\n    TotalBytesRecv   = sum(ReceivedBytes),\n    TotalBytesSent   = sum(SentBytes),\n    MaxPathLength    = max(PathLength),\n    RandomPathCount  = countif(HasRandomPath == true),\n    UniqueUsers      = dcount(SourceUserName),\n    URLSamples       = make_set(RequestURL, 5),\n    UserAgents       = make_set(RequestClientApplication, 5),\n    SourceIPs        = make_set(SourceIP, 5),\n    FirstSeen        = min(TimeGenerated)\n  by DestinationHostName, DestinationPort\n| extend TotalMBRecv = round(toreal(TotalBytesRecv) / 1048576, 2)\n| where RandomPathCount > 5\n    or (TotalMBRecv > 50 and UserAgents !has \"Mozilla\")\n| order by RandomPathCount desc, TotalMBRecv desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects domain fronting via CDN FQDNs with random/long path patterns or non-browser user agents."
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "techniques",
+            "value": "T1090.004"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q28')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q28 - ZPA plus ZIA Combined Insider Threat Hunt",
+        "category": "Hunting Queries",
+        "query": "let TimeWindow = 24h;\nlet ZPAActivity =\n    CommonSecurityLog\n    | where TimeGenerated > ago(TimeWindow)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n    | where DeviceProduct has \"ZPA\"\n    | where isnotempty(SourceUserName)\n    | summarize\n        ZPA_AppCount    = dcount(DestinationHostName),\n        ZPA_Apps        = make_set(DestinationHostName, 10),\n        ZPA_BytesRecv   = sum(ReceivedBytes),\n        ZPA_SrcIPs      = make_set(SourceIP, 5),\n        ZPA_GeoCountries = make_set(\n            tostring(geo_info_from_ip_address(SourceIP).country), 3),\n        ZPA_FirstSeen   = min(TimeGenerated)\n      by UserName = tolower(SourceUserName);\nlet ZIARiskyActivity =\n    CommonSecurityLog\n    | where TimeGenerated > ago(TimeWindow)\n    | where DeviceVendor == \"Zscaler\"\n    | where isnotempty(SourceUserName)\n    | where DeviceCustomString2 has_any (\n        \"REMOTE_ACCESS_TOOLS\", \"REMOTE_ADMINISTRATION\", \"TUNNELING_APPLICATIONS\",\n        \"ANONYMOUS_PROXY\", \"TOR\", \"PASTE_SITES\",\n        \"TUNNEL_SOCKS_PROXY\", \"ENCRYPTED_TUNNEL\", \"VPN_SERVICES\")\n    | summarize\n        ZIA_CategoryCount   = dcount(DeviceCustomString2),\n        ZIA_RiskyCategories = make_set(DeviceCustomString2, 10),\n        ZIA_Destinations    = make_set(DestinationHostName, 10),\n        ZIA_RequestCount    = count(),\n        ZIA_FirstSeen       = min(TimeGenerated)\n      by UserName = tolower(SourceUserName);\nZPAActivity\n| join kind=inner ZIARiskyActivity on UserName\n| project\n    UserName,\n    ZPA_AppCount, ZPA_Apps, ZPA_SrcIPs, ZPA_GeoCountries,\n    ZIA_CategoryCount, ZIA_RiskyCategories, ZIA_Destinations, ZIA_RequestCount,\n    ZPA_FirstSeen, ZIA_FirstSeen\n| order by ZPA_AppCount desc, ZIA_CategoryCount desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects stolen credential or insider scenario via simultaneous ZPA internal app access and ZIA risky categories."
+          },
+          {
+            "name": "tactics",
+            "value": "LateralMovement,Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1021,T1078"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q29')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q29 - Patient APT - Multi-Channel Low and Slow Exfiltration",
+        "category": "Hunting Queries",
+        "query": "let HuntWindow    = 30d;\nlet ExfilDomains  = dynamic([\n    // Non-corporate cloud storage\n    \"drive.google.com\", \"docs.google.com\", \"dropbox.com\", \"box.com\",\n    \"mega.nz\", \"mediafire.com\", \"sendspace.com\", \"wetransfer.com\",\n    \"4shared.com\", \"anonfiles.com\",\n    // Code-hosting platforms\n    \"github.com\", \"gitlab.com\", \"bitbucket.org\", \"gist.github.com\",\n    // Messaging apps\n    \"web.whatsapp.com\", \"telegram.org\", \"t.me\", \"discord.com\",\n    \"discordapp.com\", \"signal.org\",\n    // Personal webmail / misc\n    \"mail.google.com\", \"outlook.live.com\", \"protonmail.com\", \"tutanota.com\"]);\n// Step 1 \u00e2\u20ac\u201c ZIA daily upload activity per user to exfil-candidate domains\nlet ZIA_Daily =\n    CommonSecurityLog\n    | where TimeGenerated > ago(HuntWindow)\n    | where DeviceVendor == \"Zscaler\"\n    | where DeviceAction !in (\"block\", \"BLOCK\", \"Blocked\", \"blocked\", \"deny\")\n    | where isnotempty(SourceUserName)\n    | where DestinationHostName has_any (ExfilDomains)\n    | summarize\n        DaySentBytes    = sum(SentBytes),\n        DayRequestCount = count(),\n        DayDestinCount  = dcount(DestinationHostName)\n      by UserName = tolower(SourceUserName), Day = bin(TimeGenerated, 1d);\n// Step 2 \u00e2\u20ac\u201c Aggregate per user across the full hunt window\nlet ZIA_Users =\n    ZIA_Daily\n    | summarize\n        ZIA_TotalMBSent   = round(toreal(sum(DaySentBytes)) / 1048576, 2),\n        ZIA_ActiveDays    = dcount(Day),\n        ZIA_TotalRequests = sum(DayRequestCount),\n        ZIA_UniqueDestCnt = sum(DayDestinCount)\n      by UserName;\n// Step 3 \u00e2\u20ac\u201c Peer-group baseline statistics (all users in the same ZIA population)\nlet globalAvg = toscalar(ZIA_Users | summarize avg(ZIA_TotalMBSent));\nlet globalStd = toscalar(ZIA_Users | summarize stdev(ZIA_TotalMBSent));\n// Step 4 \u00e2\u20ac\u201c M365 OfficeActivity external-sharing / public-link events\nlet O365_Sharing =\n    OfficeActivity\n    | where TimeGenerated > ago(HuntWindow)\n    | where isnotempty(UserId)\n    | where Operation in (\n        \"FileDownloaded\", \"FileSyncDownloadedFull\", \"FileCopied\",\n        \"AnonymousLinkCreated\", \"AnonymousLinkUsed\",\n        \"SharingSet\", \"SharingInvitationCreated\",\n        \"AddedToSecureLink\", \"SecureLinkUsed\")\n    | summarize\n        O365_EventCount = count(),\n        O365_Operations = make_set(Operation, 10),\n        O365_AnonLinks  = countif(Operation has \"Anonymous\"),\n        O365_LastEvent  = max(TimeGenerated)\n      by UserName = tolower(UserId);\n// Step 5 \u00e2\u20ac\u201c Combine and flag statistical outliers\nZIA_Users\n| join kind=leftouter O365_Sharing on UserName\n| extend\n    O365_EventCount = coalesce(O365_EventCount, 0),\n    O365_AnonLinks  = coalesce(O365_AnonLinks, 0)\n| extend\n    Zscore = iff(globalStd > 0,\n                 round((ZIA_TotalMBSent - globalAvg) / globalStd, 2),\n                 0.0),\n    DistinctChannels = iff(ZIA_TotalMBSent > 5, 1, 0)\n                     + iff(O365_EventCount  > 0, 1, 0)\n| where Zscore >= 3.0\n    or (O365_AnonLinks  >= 3 and ZIA_TotalMBSent > 10)\n    or (ZIA_ActiveDays  >= 20 and ZIA_TotalMBSent > 50)\n| project\n    UserName,\n    ZIA_TotalMBSent, ZIA_ActiveDays, ZIA_TotalRequests, ZIA_UniqueDestCnt,\n    O365_EventCount, O365_AnonLinks, O365_Operations,\n    DistinctChannels, Zscore\n| order by Zscore desc, ZIA_TotalMBSent desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects exfiltration spread across multiple cloud channels over 30 days using statistical Z-score peer-group deviation."
+          },
+          {
+            "name": "tactics",
+            "value": "Collection,Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1041,T1567,T1567.002"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q30')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q30 - Perfect Impostor - Account Takeover in Normal Traffic",
+        "category": "Hunting Queries",
+        "query": "let baselineWindow = 14d;\nlet recentWindow   = 4h;\n// Baseline: known source countries per user via ZPA over the last 14 days\nlet ZPA_Baseline =\n    CommonSecurityLog\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n    | where DeviceVendor == \"Zscaler\" and DeviceProduct has \"ZPA\"\n    | where DeviceAction !in (\"block\", \"BLOCK\", \"Failed\")\n    | where isnotempty(SourceUserName)\n    | extend BaselineCountry = tostring(geo_info_from_ip_address(SourceIP).country)\n    | summarize\n        BaselineCountries = make_set(BaselineCountry, 20),\n        BaselineAppCount  = dcount(DestinationHostName)\n      by UserName = tolower(SourceUserName);\n// Recent ZPA activity (last 4 hours)\nlet ZPA_Recent =\n    CommonSecurityLog\n    | where TimeGenerated > ago(recentWindow)\n    | where DeviceVendor == \"Zscaler\" and DeviceProduct has \"ZPA\"\n    | where isnotempty(SourceUserName)\n    | extend RecentCountry = tostring(geo_info_from_ip_address(SourceIP).country)\n    | summarize\n        RecentCountries = make_set(RecentCountry, 5),\n        RecentApps      = make_set(DestinationHostName, 10),\n        RecentIPs       = make_set(SourceIP, 5),\n        RecentConnCount = count(),\n        ZPA_FirstSeen   = min(TimeGenerated)\n      by UserName = tolower(SourceUserName);\n// ZIA suspicious categories: remote admin / account creation / proxy / tunnels\nlet ZIA_Suspicious =\n    CommonSecurityLog\n    | where TimeGenerated > ago(recentWindow)\n    | where DeviceVendor == \"Zscaler\"\n    | where isnotempty(SourceUserName)\n    | where DeviceCustomString2 has_any (\n        \"REMOTE_ACCESS_TOOLS\", \"REMOTE_ADMINISTRATION\", \"WEB_BASED_ADMIN\",\n        \"ACCOUNT_CREATION\", \"TUNNEL_SOCKS_PROXY\", \"ANONYMOUS_PROXY\",\n        \"ONLINE_STORAGE\", \"FILE_SHARE\", \"TOR\", \"VPN_SERVICES\",\n        \"NEWLY_REGISTERED_DOMAINS\", \"PHISHING\")\n    | summarize\n        ZIA_Categories   = make_set(DeviceCustomString2, 10),\n        ZIA_Destinations = make_set(DestinationHostName, 10),\n        ZIA_RequestCount = count(),\n        ZIA_FirstSeen    = min(TimeGenerated)\n      by UserName = tolower(SourceUserName);\n// IdP / SaaS security changes: MFA, OAuth, mailbox rules, privilege escalation\nlet IdP_Changes =\n    OfficeActivity\n    | where TimeGenerated > ago(recentWindow)\n    | where isnotempty(UserId)\n    | where Operation in (\n        \"New-InboxRule\",                         // auto-forward / hide rules\n        \"Set-Mailbox\",                           // mailbox delegation\n        \"Add-MailboxPermission\",\n        \"Add OAuth2PermissionGrant\",             // OAuth consent grant\n        \"Consent to application\",\n        \"Add service principal credentials\",\n        \"Update user\",\n        \"Disable Strong Authentication\",         // MFA removal\n        \"Update StsRefreshTokenValidFrom\",       // token invalidation\n        \"Add member to role\")                    // privilege escalation\n    | summarize\n        IdP_EventCount = count(),\n        IdP_Operations = make_set(Operation, 10),\n        IdP_FirstSeen  = min(TimeGenerated)\n      by UserName = tolower(UserId);\n// Combine layers, flag users with any cross-layer anomaly\nZPA_Recent\n| join kind=inner ZPA_Baseline on UserName\n| extend NewCountries = set_difference(RecentCountries, BaselineCountries)\n| join kind=leftouter ZIA_Suspicious on UserName\n| join kind=leftouter IdP_Changes on UserName\n| extend\n    ZIA_RequestCount = coalesce(ZIA_RequestCount, 0),\n    IdP_EventCount   = coalesce(IdP_EventCount, 0)\n| extend ImpostorScore =\n    iff(array_length(NewCountries) > 0, 40, 0)\n  + (ZIA_RequestCount * 5)\n  + (IdP_EventCount * 30)\n| where ImpostorScore >= 40\n    or (IdP_EventCount >= 1 and ZIA_RequestCount >= 1)\n    or array_length(NewCountries) > 0\n| project\n    UserName,\n    NewCountries, RecentCountries, BaselineCountries,\n    RecentApps, RecentIPs, RecentConnCount,\n    ZIA_Categories, ZIA_Destinations, ZIA_RequestCount,\n    IdP_Operations, IdP_EventCount,\n    ImpostorScore,\n    ZPA_FirstSeen\n| order by ImpostorScore desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects stolen-credential scenario via ZPA new-country anomaly, ZIA suspicious categories, and IdP changes."
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence,PrivilegeEscalation"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078,T1098,T1114,T1556"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "name": "[concat(parameters('workspace'), '/CSL-Hunt-Q31')]",
+      "apiVersion": "2020-08-01",
+      "properties": {
+        "displayName": "CSL Hunt Q31 - APT Control Evasion - Degrading Zscaler and EDR Visibility",
+        "category": "Hunting Queries",
+        "query": "let baselineWindow            = 7d;\nlet recentWindow              = 4h;\nlet minBaselineRequestsPerDay = 10;\n// Hosts that had consistent ZIA activity during the baseline window\nlet ZIA_BaselineHosts =\n    CommonSecurityLog\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n    | where DeviceVendor == \"Zscaler\"\n    | where isnotempty(SourceIP) and isnotempty(SourceUserName)\n    | summarize\n        BaselineRequestsPerDay = round(toreal(count()) / (baselineWindow / 1d), 1),\n        BaselineUsers          = make_set(SourceUserName, 5)\n      by SourceIP\n    | where BaselineRequestsPerDay >= minBaselineRequestsPerDay;\n// Hosts that produced ANY ZIA traffic in the recent window\nlet ZIA_RecentActive =\n    CommonSecurityLog\n    | where TimeGenerated > ago(recentWindow)\n    | where DeviceVendor == \"Zscaler\"\n    | where isnotempty(SourceIP)\n    | distinct SourceIP;\n// Hosts that went silent: were in baseline but absent in recent window\nlet SilentHosts =\n    ZIA_BaselineHosts\n    | join kind=leftanti ZIA_RecentActive on SourceIP;\n// MDE DeviceEvents: Zscaler Client Connector or EDR agent tampering\nlet AgentTampering =\n    DeviceEvents\n    | where TimeGenerated > ago(recentWindow)\n    | where ActionType in (\n        \"ServiceUninstalled\", \"ServiceStopped\", \"DriverUnloaded\",\n        \"TamperingAttempt\", \"AntivirusScanFailed\")\n      or (ActionType == \"ProcessCreated\"\n          and InitiatingProcessCommandLine has_any (\n              \"ZscalerApp\", \"ZSATunnel\", \"ZSAUpdater\", \"ZscalerService\",\n              \"sc stop\", \"sc delete\", \"net stop\", \"taskkill\"))\n    | summarize\n        TamperEvents    = count(),\n        TamperActions   = make_set(ActionType, 10),\n        TamperCmds      = make_set(InitiatingProcessCommandLine, 5),\n        TamperFirstSeen = min(TimeGenerated)\n      by DeviceName;\n// SecurityEvent: Windows Service Control Manager \u00e2\u20ac\u201d service stop/delete events\nlet SvcTampering =\n    SecurityEvent\n    | where TimeGenerated > ago(recentWindow)\n    | where EventID in (7034, 7035, 7036, 7040, 7045)\n    | where ServiceName has_any (\n        \"ZscalerService\", \"ZSATunnel\", \"ZSAUpdater\",\n        \"MsSense\", \"SenseSvc\", \"WdFilter\", \"AADConnect\")\n    | summarize\n        SvcEvents      = count(),\n        SvcNames       = make_set(ServiceName, 10),\n        SvcStateChange = make_set(Activity, 5),\n        SvcFirstSeen   = min(TimeGenerated)\n      by Computer;\n// Final correlation: silent hosts enriched with tampering evidence\nSilentHosts\n| join kind=leftouter AgentTampering on $left.SourceIP == $right.DeviceName\n| join kind=leftouter SvcTampering   on $left.SourceIP == $right.Computer\n| extend\n    TamperEvents = coalesce(TamperEvents, 0),\n    SvcEvents    = coalesce(SvcEvents, 0)\n| extend EvasionScore =\n    toint(BaselineRequestsPerDay * 2)\n  + iff(TamperEvents > 0, 50, 0)\n  + iff(SvcEvents    > 0, 40, 0)\n| project\n    SourceIP, BaselineUsers, BaselineRequestsPerDay,\n    TamperEvents, TamperActions, TamperCmds,\n    SvcEvents, SvcNames, SvcStateChange,\n    EvasionScore,\n    TamperFirstSeen, SvcFirstSeen\n| order by EvasionScore desc, BaselineRequestsPerDay desc",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects hosts with healthy ZIA baseline that go silent combined with Zscaler or EDR agent tampering."
+          },
+          {
+            "name": "tactics",
+            "value": "DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1562,T1562.001,T1070"
+          },
+          {
+            "name": "createdBy",
+            "value": "CyberSOC Engineering"
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": "2026-03-18T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/CSL_Hunt_Q32_Zscaler_DoH_Egress')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "CSL Hunt Q32 - Zscaler DoH Egress to Non-Sanctioned Resolvers",
+        "category": "Hunting Queries",
+        "query": "// Q32 - ZIA DoH Egress to Non-Sanctioned Resolvers\nlet SanctionedDoH = dynamic([\"cloudflare-dns.com\",\"dns.google\",\"dns.quad9.net\"]);\nCommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\"\n| where DestinationPort == 443\n| where RequestURL has_any (\"/dns-query\",\"dns-message\",\"application/dns\") or DeviceCustomString5 has \"doh\"\n| where not(RequestURL has_any (SanctionedDoH))\n| summarize Hits = count(), Hosts = make_set(RequestURL, 20), Users = make_set(SourceUserName, 10)\n    by SourceIP\n| where Hits >= 20\n| order by Hits desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "CSL Hunt Q32 - Zscaler DoH Egress to Non-Sanctioned Resolvers"
+          },
+          {
+            "name": "tactics",
+            "value": "CommandAndControl"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/CSL_Hunt_Q33_Zscaler_Push_Phishing')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "CSL Hunt Q33 - Zscaler Browser-Push Notification Phishing",
+        "category": "Hunting Queries",
+        "query": "// Q33 - ZIA - Browser-Push Notification Phishing (push-style toolkits)\nCommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\"\n| where DeviceAction !in (\"block\",\"BLOCK\",\"Blocked\",\"blocked\")\n| where RequestURL has_any (\"/push.js\",\"pushnotif\",\"subscribePush\",\"notification.permission\")\n    or DeviceCustomString2 has_any (\"PHISH\",\"NEWLY_REGISTERED\",\"SUSPICIOUS\")\n| summarize Hits = count(), URLs = make_set(RequestURL, 25), Users = dcount(SourceUserName), UsersList = make_set(SourceUserName, 20)\n    by RequestClientApplication, DeviceCustomString2\n| where Users >= 3\n| order by Users desc, Hits desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "CSL Hunt Q33 - Zscaler Browser-Push Notification Phishing"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/CSL_Hunt_Q34_ZPA_App_Discovery_Sweep')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "CSL Hunt Q34 - ZPA Application Discovery Sweep (first-time)",
+        "category": "Hunting Queries",
+        "query": "// Q34 - ZPA - Application Discovery Sweep (first-time access to >N internal apps)\nlet Window = 7d;\nlet Recent = 1d;\nlet Baseline = CommonSecurityLog\n| where TimeGenerated between (ago(Window) .. ago(Recent))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\" and AdditionalExtensions has \"ZPA\"\n| summarize KnownApps = make_set(DeviceCustomString1, 500) by SourceUserName;\nCommonSecurityLog\n| where TimeGenerated > ago(Recent)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\" and AdditionalExtensions has \"ZPA\"\n| join kind=leftouter Baseline on SourceUserName\n| extend IsNew = isempty(KnownApps) or not(set_has_element(KnownApps, DeviceCustomString1))\n| where IsNew\n| summarize NewAppCount = dcount(DeviceCustomString1), NewApps = make_set(DeviceCustomString1, 50),\n    FirstSeen = min(TimeGenerated) by SourceUserName, SourceIP\n| where NewAppCount >= 10\n| order by NewAppCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "CSL Hunt Q34 - ZPA Application Discovery Sweep (first-time)"
+          },
+          {
+            "name": "tactics",
+            "value": "Discovery"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/CSL_Hunt_Q35_Zscaler_HTTP_Method_Anom')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "CSL Hunt Q35 - Zscaler HTTP Method Anomaly: Bulk PUT/DELETE",
+        "category": "Hunting Queries",
+        "query": "// Q35 - ZIA - HTTP Method Anomaly: Bulk PUT/DELETE from User Agent\nCommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\"\n| where RequestMethod in (\"PUT\",\"DELETE\",\"PROPFIND\",\"PROPPATCH\",\"MKCOL\")\n| where DeviceAction !in (\"block\",\"BLOCK\",\"Blocked\",\"blocked\")\n| summarize Count = count(), Methods = make_set(RequestMethod, 10), Hosts = make_set(RequestURL, 25)\n    by SourceUserName, SourceIP, RequestClientApplication\n| where Count >= 50\n| order by Count desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "CSL Hunt Q35 - Zscaler HTTP Method Anomaly: Bulk PUT/DELETE"
+          },
+          {
+            "name": "tactics",
+            "value": "Exfiltration, Impact"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/CSL_Hunt_Q36_OffHours_CloudStorage_Burst')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "CSL Hunt Q36 - Off-Hours Cloud Storage Upload Burst",
+        "category": "Hunting Queries",
+        "query": "// Q36 - ZIA - Off-Hours Cloud Storage Upload Burst (insider/exfil window)\nlet StoragePatterns = dynamic([\"dropbox\",\"box.com\",\"mega.nz\",\"wetransfer\",\"sendspace\",\"transfer.sh\",\"anonfiles\",\"file.io\"]);\nCommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\"\n| where DeviceAction !in (\"block\",\"BLOCK\",\"Blocked\",\"blocked\")\n| where RequestURL has_any (StoragePatterns) or DeviceCustomString2 in (\"FILE_STORAGE\",\"PERSONAL_STORAGE\")\n| extend Hour = hourofday(TimeGenerated), Dow = dayofweek(TimeGenerated)\n| where (Hour >= 20 or Hour < 6) or (Dow == 6d or Dow == 0d)\n| summarize UploadMB = sum(SentBytes)/1024.0/1024.0, Reqs = count(), Sites = make_set(RequestURL, 25)\n    by SourceUserName, SourceIP\n| where UploadMB >= 100\n| order by UploadMB desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "CSL Hunt Q36 - Off-Hours Cloud Storage Upload Burst"
+          },
+          {
+            "name": "tactics",
+            "value": "Exfiltration"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/CSL_Hunt_Q37_ZPA_EDR_AuthFail_Combo')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "CSL Hunt Q37 - ZPA + EDR Auth-Failure Correlation",
+        "category": "Hunting Queries",
+        "query": "// Q37 - ZPA + EDR: ZPA Auth Failures Followed by DeviceLogon Failures\nlet Window = 6h;\nlet ZPAFails = CommonSecurityLog\n    | where TimeGenerated > ago(Window)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n    | where DeviceVendor == \"Zscaler\" and AdditionalExtensions has \"ZPA\"\n    | where DeviceAction in (\"FAILED\",\"failure\",\"DENY\",\"deny\")\n    | summarize ZPAFailCount = count(), ZPAFirst = min(TimeGenerated), ZPALast = max(TimeGenerated),\n        Apps = make_set(DeviceCustomString1, 25) by SourceUserName, SourceIP;\nlet EDRFails = SecurityAlert\n    | where TimeGenerated > ago(Window)\n    | where AlertName has_any (\"logon\",\"failed sign-in\",\"brute\",\"credential\")\n    | extend ParsedEntities = parse_json(Entities)\n    | mv-expand E = ParsedEntities\n    | extend U = tostring(E.Name), I = tostring(E.Address)\n    | where isnotempty(U) or isnotempty(I)\n    | summarize EDRAlerts = count(), AlertNames = make_set(AlertName, 10) by U, I;\nZPAFails\n| join kind=inner EDRFails on $left.SourceUserName == $right.U\n| order by ZPAFailCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "CSL Hunt Q37 - ZPA + EDR Auth-Failure Correlation"
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2022-09-01",
+      "name": "deploy-Zscaler-AnalyticRules",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "parameters": {
+          "workspace": {
+            "value": "[parameters('workspace')]"
+          },
+          "enableAnalyticRules": {
+            "value": "[parameters('enableAnalyticRules')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "workspace": {
+              "type": "string"
+            },
+            "enableAnalyticRules": {
+              "type": "bool"
+            },
+            "location": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/c9d0e1f2-a3b4-4c5d-6e7f-8a9b0c1d2e3f')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - Blocked Request to Malicious / C2 Category",
+                "description": "Detects Zscaler blocked requests to botnet, malware, phishing, ransomware, or C2 categories. Persistent attempts despite blocking indicate active malware. MITRE ATT&CK: T1071.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT15M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "CommandAndControl"
+                ],
+                "techniques": [
+                  "T1071"
+                ],
+                "query": "let MaliciousCategories = dynamic([\n    \"BOTNET_SITES\", \"MALWARE_SITES\", \"PHISHING\", \"SPYWARE_ADWARE_KEYLOGGERS\",\n    \"RANSOMWARE\", \"C2_SITES\", \"COMMAND_CONTROL\", \"SUSPICIOUS_DESTINATIONS\",\n    \"MALICIOUS_LINKS\", \"ANONYMOUS_PROXY\"]);\nCommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\"\n| where DeviceAction in (\"block\", \"BLOCK\", \"Blocked\", \"blocked\")\n| where DeviceCustomString2 in (MaliciousCategories)\n    or DeviceCustomString3 in (MaliciousCategories)\n    or RequestContext has_any (\"BOTNET\", \"MALWARE\", \"PHISHING\", \"COMMAND_CONTROL\", \"RANSOMWARE\")\n| summarize\n    BlockCount       = count(),\n    UniqueUsers      = dcount(SourceUserName),\n    UserList         = make_set(SourceUserName, 20),\n    DestinationURLs  = make_set(RequestURL, 20),\n    DestIPs          = make_set(DestinationIP, 10),\n    Categories       = make_set(DeviceCustomString2, 10),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated),\n    RepresentativeUser = any(SourceUserName)\n  by DeviceCustomString2, DeviceCustomString3\n| order by BlockCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "RepresentativeUser"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "BlockCount": "BlockCount",
+                  "UniqueUsers": "UniqueUsers",
+                  "DeviceCustomString2": "DeviceCustomString2"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Zscaler Malicious Block - {{DeviceCustomString2}} ({{BlockCount}} attempts)",
+                  "alertDescriptionFormat": "{{BlockCount}} Zscaler requests blocked for malicious category {{DeviceCustomString2}} affecting {{UniqueUsers}} users. Possible malware C2 or phishing activity."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT6H",
+                    "matchingMethod": "AnyAlert",
+                    "groupByEntities": [],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": [
+                      "DeviceCustomString2"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/d0e1f2a3-b4c5-4d6e-7f8a-9b0c1d2e3f4a')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - Shadow IT and Unauthorized File Sharing - High Volume",
+                "description": "Detects users uploading >50 MB or making >200 requests to personal cloud storage or file-sharing via Zscaler. High volume to shadow IT is a data exfiltration indicator. MITRE ATT&CK: T1048.",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT6H",
+                "queryPeriod": "P7D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "Exfiltration"
+                ],
+                "techniques": [
+                  "T1048"
+                ],
+                "query": "let ShadowITCategories = dynamic([\n    \"PERSONAL_SITES_BLOGS\", \"FILE_HOST\", \"SHAREWARE_FREEWARE\",\n    \"SOCIAL_NETWORKING\", \"PERSONAL_EMAIL\", \"WEB_BASED_EMAIL\", \"CLOUD_STORAGE\",\n    \"ONLINE_STORAGE_AND_BACKUP\", \"GENERAL_FILESHARING\"]);\nCommonSecurityLog\n| where TimeGenerated > ago(7d)\n| where DeviceVendor == \"Zscaler\"\n| where DeviceCustomString2 in (ShadowITCategories)\n    or DeviceCustomString3 in (ShadowITCategories)\n| summarize\n    RequestCount     = count(),\n    TotalBytesSent   = sum(SentBytes),\n    TotalBytesRecv   = sum(ReceivedBytes),\n    UniqueURLs       = dcount(RequestURL),\n    URLSamples       = make_set(RequestURL, 10),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by SourceUserName, DeviceCustomString2\n| extend TotalMBSent = round(toreal(TotalBytesSent) / 1048576, 2)\n| where TotalMBSent > 50 or RequestCount > 200\n| order by TotalMBSent desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "SourceUserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "TotalMBSent": "TotalMBSent",
+                  "RequestCount": "RequestCount",
+                  "DeviceCustomString2": "DeviceCustomString2",
+                  "SourceUserName": "SourceUserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Shadow IT Upload Risk - {{SourceUserName}} sent {{TotalMBSent}} MB to {{DeviceCustomString2}}",
+                  "alertDescriptionFormat": "User {{SourceUserName}} sent {{TotalMBSent}} MB to shadow IT category {{DeviceCustomString2}}. Possible data exfiltration via consumer cloud service."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "P1D",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "DNS Tunneling Indicators - Anomalously Long Hostnames",
+                "description": "Detects DNS queries with hostnames longer than 50 characters or >5 subdomain levels, consistent with dnscat2 / iodine DNS tunneling. MITRE ATT&CK: T1071.004.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "CommandAndControl",
+                  "Exfiltration"
+                ],
+                "techniques": [
+                  "T1071"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor in (\"Fortinet\", \"Palo Alto Networks\", \"Zscaler\")\n| where Protocol in (\"DNS\", \"dns\") or DestinationPort == 53\n| where isnotempty(DestinationHostName)\n| extend\n    SubdomainLength = strlen(DestinationHostName),\n    SubdomainParts  = countof(DestinationHostName, \".\")\n| where SubdomainLength > 50 or SubdomainParts > 5\n| summarize\n    QueryCount       = count(),\n    UniqueSubdomains = dcount(DestinationHostName),\n    LongestQuery     = max(SubdomainLength),\n    SampleHosts      = make_set(DestinationHostName, 10),\n    SourceIPs        = make_set(SourceIP, 10)\n  by SourceIP, DeviceVendor\n| where QueryCount > 10\n| order by LongestQuery desc, QueryCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SourceIP"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "QueryCount": "QueryCount",
+                  "LongestQuery": "LongestQuery",
+                  "UniqueSubdomains": "UniqueSubdomains",
+                  "SourceIP": "SourceIP"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "DNS Tunneling Suspect - {{SourceIP}} ({{LongestQuery}}-char queries)",
+                  "alertDescriptionFormat": "Host {{SourceIP}} made {{QueryCount}} DNS queries with max hostname length {{LongestQuery}} chars. Abnormal subdomain structure is consistent with DNS tunneling tools."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT6H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "IP"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/f8a9b0c1-d2e3-4f4a-5b6c-7d8e9f0a1b2c')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - Impossible Travel (Same User, Multiple Locations in 1 Hour)",
+                "description": "Detects Zscaler users generating requests from >1 distinct geographic location within 1 hour. Impossible travel indicates credential compromise or proxy abuse. MITRE ATT&CK: T1078.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "InitialAccess",
+                  "DefenseEvasion"
+                ],
+                "techniques": [
+                  "T1078"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\"\n| where isnotempty(SourceUserName)\n| extend HourBucket = bin(TimeGenerated, 1h)\n| summarize\n    CountryCount     = dcount(DeviceCustomString6),\n    Countries        = make_set(DeviceCustomString6, 10),\n    RequestCount     = count(),\n    SourceIPs        = make_set(SourceIP, 10),\n    URLSamples       = make_set(RequestURL, 5)\n  by SourceUserName, HourBucket\n| where CountryCount > 1\n| order by CountryCount desc, RequestCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "SourceUserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "CountryCount": "CountryCount",
+                  "RequestCount": "RequestCount",
+                  "SourceUserName": "SourceUserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Impossible Travel - {{SourceUserName}} in {{CountryCount}} locations/hr",
+                  "alertDescriptionFormat": "User {{SourceUserName}} accessed Zscaler from {{CountryCount}} distinct locations within 1 hour across {{RequestCount}} requests. Possible credential compromise or proxy bypass."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT6H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/bb21d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - DLP Policy Violation - Blocked Sensitive Data Upload",
+                "description": "Detects Zscaler ZIA Data Loss Prevention (DLP) events where an upload or file transfer was blocked or flagged. DLP violations indicate a user attempted to send sensitive or restricted data to an external service \u00e2\u20ac\u201d cloud storage, file-sharing site, or personal webmail. Repeated violations may indicate intentional exfiltration or a compromised account being used for data theft. MITRE ATT&CK: T1048 (Exfiltration Over Alternative Protocol), T1567 (Exfiltration Over Web Service).",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT30M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "Exfiltration"
+                ],
+                "techniques": [
+                  "T1048",
+                  "T1567"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor == \"Zscaler\"\n| where DeviceAction in (\"block\", \"BLOCK\", \"Blocked\", \"blocked\", \"caution\", \"CAUTION\")\n| where DeviceCustomString2 has_any (\n    \"DLP\", \"FILE_SHARE\", \"DATA_LOSS_PREVENTION\",\n    \"DROPBOX\", \"BOX_NET\", \"GOOGLE_DRIVE\", \"ONEDRIVE\", \"SHAREPOINT\",\n    \"WETRANSFER\", \"PEER_FILE_SHARE\", \"CLOUD_STORAGE\")\n    or Activity has_any (\"DLP\", \"Data Loss\")\n| where isnotempty(SourceUserName)\n| summarize\n    ViolationCount    = count(),\n    MBUploaded        = round(sum(todouble(SentBytes)) / 1048576, 2),\n    UniqueDestDomains = dcount(DestinationHostName),\n    DestDomains       = make_set(DestinationHostName, 10),\n    URLSamples        = make_set(RequestURL, 5),\n    FirstViolation    = min(TimeGenerated),\n    LastViolation     = max(TimeGenerated)\n  by SourceUserName, DLPCategory = DeviceCustomString2\n| order by ViolationCount desc, MBUploaded desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "SourceUserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "ViolationCount": "ViolationCount",
+                  "MBUploaded": "MBUploaded",
+                  "DLPCategory": "DLPCategory",
+                  "SourceUserName": "SourceUserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Zscaler DLP Violation - {{SourceUserName}} ({{ViolationCount}} blocks)",
+                  "alertDescriptionFormat": "User {{SourceUserName}} violated DLP policy {{ViolationCount}} times. Category: {{DLPCategory}}."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT6H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/cc22e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - Advanced Threat Protection (ATP) / Sandbox Malicious File Blocked",
+                "description": "Detects Zscaler ZIA Advanced Threat Protection (ATP) or Sandbox events where a file download was blocked due to a malicious verdict. A sandbox block means Zscaler detonated the file and identified malicious behaviour \u00e2\u20ac\u201d ransomware, trojan, exploit, or C2 callback. Treat any sandbox block as a high-confidence malware delivery attempt requiring immediate endpoint investigation. MITRE ATT&CK: T1204 (User Execution), T1566 (Phishing \u00e2\u20ac\u201d Malicious File), T1071.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT15M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "InitialAccess",
+                  "Execution"
+                ],
+                "techniques": [
+                  "T1204",
+                  "T1566"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor == \"Zscaler\"\n| where DeviceAction in (\"block\", \"BLOCK\", \"Blocked\")\n| where DeviceCustomString2 has_any (\n    \"SANDBOX\", \"ADVANCED_THREAT\", \"MALWARE_DOWNLOAD_BLOCKED\",\n    \"ADVANCED_MALWARE_POLICY\", \"RANSOMWARE\", \"EXPLOIT\", \"ADVANCED_THREAT_C2\")\n    or DeviceCustomString1 has_any (\n    \"sandbox\", \"malicious\", \"virus\", \"trojan\",\n    \"ransomware\", \"exploit\", \"backdoor\", \"rat\")\n    or Activity has_any (\"Sandbox\", \"Advanced Threat Protection\", \"Malware\")\n| summarize\n    BlockCount     = count(),\n    UserCount      = dcount(SourceUserName),\n    UserList       = make_set(SourceUserName, 10),\n    BlockedDomains = make_set(DestinationHostName, 10),\n    BlockedURLs    = make_set(RequestURL, 10),\n    ThreatNames    = make_set(DeviceCustomString1, 10),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated),\n    RepUser        = any(SourceUserName)\n  by ThreatCategory = DeviceCustomString2\n| order by BlockCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "RepUser"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "BlockCount": "BlockCount",
+                  "UserCount": "UserCount",
+                  "ThreatCategory": "ThreatCategory"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Zscaler ATP Block - {{ThreatCategory}} ({{BlockCount}} events, {{UserCount}} users)",
+                  "alertDescriptionFormat": "Zscaler blocked {{BlockCount}} ATP or Sandbox events for category {{ThreatCategory}} affecting {{UserCount}} users."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT4H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/dd23f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f8a')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - Mass Cloud Storage Download - Data Staging Risk",
+                "description": "Detects users downloading more than 500 MB or performing more than 200 requests from cloud storage services (Dropbox, OneDrive, Google Drive, Box, WeTransfer, SharePoint) via Zscaler ZIA in a 24-hour window. Bulk downloads from cloud storage are a key indicator of data staging before exfiltration \u00e2\u20ac\u201d either by a malicious insider or a compromised account harvesting data. MITRE ATT&CK: T1530 (Data from Cloud Storage Object), T1048, T1213.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "Collection",
+                  "Exfiltration"
+                ],
+                "techniques": [
+                  "T1530",
+                  "T1048"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor == \"Zscaler\"\n| where DeviceAction !in (\"block\", \"BLOCK\", \"Blocked\", \"deny\", \"DROP\")\n| where DeviceCustomString2 has_any (\n    \"DROPBOX\", \"BOX_NET\", \"GOOGLEDRIVE\", \"GOOGLE_DRIVE\",\n    \"ONEDRIVE\", \"SHAREPOINT\", \"WETRANSFER\", \"CLOUD_STORAGE\", \"WEBDAV\")\n| where isnotempty(SourceUserName)\n| summarize\n    DownloadCount  = count(),\n    MBDownloaded   = round(sum(todouble(ReceivedBytes)) / 1048576, 2),\n    MBUploaded     = round(sum(todouble(SentBytes)) / 1048576, 2),\n    UniqueServices = dcount(DeviceCustomString2),\n    Services       = make_set(DeviceCustomString2, 5),\n    URLSamples     = make_set(RequestURL, 5),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated)\n  by SourceUserName\n| where MBDownloaded > 500 or DownloadCount > 200\n| extend RiskScore = case(\n    MBDownloaded > 5000, \"Critical\",\n    MBDownloaded > 2000 or DownloadCount > 1000, \"High\",\n    \"Medium\")\n| order by MBDownloaded desc, DownloadCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "SourceUserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "MBDownloaded": "MBDownloaded",
+                  "DownloadCount": "DownloadCount",
+                  "RiskScore": "RiskScore",
+                  "SourceUserName": "SourceUserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Zscaler Mass Cloud Download - {{SourceUserName}} ({{MBDownloaded}} MB, {{RiskScore}})",
+                  "alertDescriptionFormat": "User {{SourceUserName}} downloaded {{MBDownloaded}} MB from cloud storage services. Risk score: {{RiskScore}}."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT12H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/ee24a7b8-c9d0-4e1f-2a3b-4c5d6e7f8a9b')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - Uncategorized or Newly Registered Domain Request Spike",
+                "description": "Detects users or hosts generating a high volume of requests to uncategorized, newly registered, or dynamically-resolved domains through Zscaler ZIA. Legitimate users rarely contact large numbers of uncategorized domains; this pattern is a strong indicator of command-and-control (C2) traffic using domain generation algorithms (DGA), DNS-over-HTTPS tunneling, or attacker infrastructure that has not yet been categorized by Zscaler's cloud intelligence. MITRE ATT&CK: T1071.004, T1568 (Dynamic Resolution), T1071.",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "CommandAndControl"
+                ],
+                "techniques": [
+                  "T1071",
+                  "T1568"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor == \"Zscaler\"\n| where DeviceCustomString2 in (\n    \"NONE\", \"UNCATEGORIZED\", \"OTHER_MISCELLANEOUS\",\n    \"NEWLY_REGISTERED_DOMAINS\", \"DYNAMIC_DNS\")\n    or isempty(DeviceCustomString2)\n| where isnotempty(SourceUserName)\n| summarize\n    RequestCount       = count(),\n    UniqueDestinations = dcount(DestinationHostName),\n    Destinations       = make_set(DestinationHostName, 20),\n    URLSamples         = make_set(RequestURL, 10),\n    FirstSeen          = min(TimeGenerated),\n    LastSeen           = max(TimeGenerated)\n  by UserName = tolower(SourceUserName)\n| where RequestCount > 100 or UniqueDestinations > 20\n| order by UniqueDestinations desc, RequestCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "UserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "RequestCount": "RequestCount",
+                  "UniqueDestinations": "UniqueDestinations",
+                  "UserName": "UserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Zscaler Uncategorized Domain Spike - {{UserName}} ({{UniqueDestinations}} new destinations)",
+                  "alertDescriptionFormat": "User {{UserName}} contacted {{UniqueDestinations}} uncategorized or newly-registered domains via {{RequestCount}} requests \u00e2\u20ac\u201d possible covert C2 or DGA activity."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT6H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/ff25b8c9-d0e1-4f2a-3b4c-5d6e7f8a9b0c')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - Tunnel, SOCKS Proxy, or SSL Bypass Category Detected",
+                "description": "Detects Zscaler ZIA traffic matching tunnel, SOCKS proxy, VPN protocol, or SSL-bypass / proxy-avoidance URL categories. These categories indicate a user or host attempting to establish an encrypted channel that bypasses Zscaler's SSL inspection engine or to route traffic through an anonymizing proxy \u00e2\u20ac\u201d hiding true destination or preventing DLP and threat detection. MITRE ATT&CK: T1572 (Protocol Tunneling), T1090 (Proxy), T1562.007.",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "CommandAndControl",
+                  "DefenseEvasion"
+                ],
+                "techniques": [
+                  "T1572",
+                  "T1090"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor == \"Zscaler\"\n| where DeviceCustomString2 has_any (\n    \"TUNNEL\", \"PROXY_AVOIDANCE_ANONYMIZERS\", \"ENCRYPTED_TUNNEL\",\n    \"SECURE_TUNNELING\", \"VPN_PROTOCOLS\", \"TOR_PROXY\",\n    \"ANONYMIZING_UTILITIES\", \"PRIVACY_PROTECTION\")\n    or ApplicationProtocol has_any (\"TUNNEL\", \"SOCKS\", \"CONNECT\")\n| where isnotempty(SourceUserName)\n| summarize\n    TunnelAttempts = count(),\n    UniqueTargets  = dcount(DestinationHostName),\n    TargetDomains  = make_set(DestinationHostName, 10),\n    DevicePorts    = make_set(DestinationPort, 5),\n    Protocols      = make_set(ApplicationProtocol, 5),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated)\n  by SourceUserName, TunnelCategory = DeviceCustomString2\n| order by TunnelAttempts desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "SourceUserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "TunnelAttempts": "TunnelAttempts",
+                  "UniqueTargets": "UniqueTargets",
+                  "TunnelCategory": "TunnelCategory",
+                  "SourceUserName": "SourceUserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Zscaler Tunnel/Bypass - {{SourceUserName}} ({{TunnelAttempts}} attempts)",
+                  "alertDescriptionFormat": "User {{SourceUserName}} triggered {{TunnelAttempts}} tunneling or proxy-bypass events. Category: {{TunnelCategory}}."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT6H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/aa26c9d0-e1f2-4a3b-4c5d-6e7f8a9b0c1d')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - Off-Hours High-Volume Proxy Activity (Behavioral Anomaly)",
+                "description": "Detects Zscaler ZIA users generating more than 500 allowed proxy requests or downloading more than 100 MB between 10PM and 6AM local time. Most business users are inactive during these hours, so high-volume activity in this window is a strong behavioural anomaly \u00e2\u20ac\u201d it may indicate a compromised account being remote-controlled, an insider threat staging data for exfiltration, or automated malware activity. MITRE ATT&CK: T1078 (Valid Accounts), T1048, T1029.",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "Exfiltration",
+                  "DefenseEvasion"
+                ],
+                "techniques": [
+                  "T1078",
+                  "T1048"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor == \"Zscaler\"\n| where DeviceAction !in (\"block\", \"BLOCK\", \"Blocked\", \"deny\", \"DROP\")\n| where isnotempty(SourceUserName)\n| extend HourOfDay = hourofday(TimeGenerated)\n| where HourOfDay between (0 .. 6) or HourOfDay >= 22\n| summarize\n    OffHoursRequests   = count(),\n    MBDownloaded       = round(sum(todouble(ReceivedBytes)) / 1048576, 2),\n    MBUploaded         = round(sum(todouble(SentBytes)) / 1048576, 2),\n    UniqueDestinations = dcount(DestinationHostName),\n    Categories         = make_set(DeviceCustomString2, 5),\n    EarliestEvent      = min(TimeGenerated),\n    LatestEvent        = max(TimeGenerated)\n  by UserName = tolower(SourceUserName)\n| where OffHoursRequests > 500 or MBDownloaded > 100\n| order by MBDownloaded desc, OffHoursRequests desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "UserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "OffHoursRequests": "OffHoursRequests",
+                  "MBDownloaded": "MBDownloaded",
+                  "MBUploaded": "MBUploaded",
+                  "UserName": "UserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Zscaler Off-Hours Activity - {{UserName}} ({{OffHoursRequests}} reqs, {{MBDownloaded}} MB)",
+                  "alertDescriptionFormat": "User {{UserName}} made {{OffHoursRequests}} proxy requests and downloaded {{MBDownloaded}} MB outside business hours (10PM-6AM)."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT8H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/a127b2c3-d4e5-4f6a-7b8c-9d0e1f2a3b4c')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - Multi-User Phishing Campaign - Same Domain Hit by 3+ Users in 1 Hour",
+                "description": "Detects when 3 or more distinct users access the same destination domain within a 1-hour window and that domain is classified as a phishing, advanced security risk, botnet, or malware category by Zscaler ZIA. A single user clicking a phishing link is a user error; multiple users targeting the same domain in the same hour is a strong indicator of an active phishing campaign delivered via email or collaboration tools. MITRE ATT&CK: T1566 (Phishing), T1192 (Spearphishing Link).",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "InitialAccess"
+                ],
+                "techniques": [
+                  "T1566"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(1h)\n| where DeviceVendor == \"Zscaler\"\n| where isnotempty(DestinationHostName) and isnotempty(SourceUserName)\n| where DeviceCustomString2 has_any (\n    \"PHISHING\", \"ADVANCED_SECURITY_RISK\", \"BOTNET_SITES\",\n    \"MALWARE_SITES\", \"SUSPICIOUS_DESTINATIONS\", \"MALICIOUS_LINKS\")\n| summarize\n    UserCount    = dcount(SourceUserName),\n    Users        = make_set(SourceUserName, 20),\n    Actions      = make_set(DeviceAction, 5),\n    URLSamples   = make_set(RequestURL, 5),\n    Category     = any(DeviceCustomString2),\n    FirstHit     = min(TimeGenerated),\n    LastHit      = max(TimeGenerated),\n    RepURL       = any(DestinationHostName)\n  by DestinationHostName\n| where UserCount >= 3\n| order by UserCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "URL",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Url",
+                        "columnName": "RepURL"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "UserCount": "UserCount",
+                  "DestinationHostName": "DestinationHostName",
+                  "Category": "Category"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Zscaler Phishing Campaign - {{DestinationHostName}} ({{UserCount}} users in 1h)",
+                  "alertDescriptionFormat": "{{UserCount}} users accessed phishing/malicious domain {{DestinationHostName}} within 1 hour. Category: {{Category}}."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT2H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "URL"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/b228c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - High ThreatRiskLevel Browsing in Allowed Traffic",
+                "description": "Detects Zscaler ZIA allowed web requests where ThreatLabz has assigned a ThreatRiskLevel of 50 or higher to the destination. ThreatRiskLevel (DeviceCustomNumber1 in the NSS CEF feed) is a 0-100 score assigned by Zscaler's cloud intelligence \u00e2\u20ac\u201d scores >= 50 indicate suspicious or potentially malicious destinations. Allowed traffic with elevated risk scores may indicate policy gaps, miscategorized sites, or zero-day infrastructure not yet blocked. MITRE ATT&CK: T1071 (Application Layer Protocol), T1566.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "CommandAndControl",
+                  "InitialAccess"
+                ],
+                "techniques": [
+                  "T1071",
+                  "T1566"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(1d)\n| where DeviceVendor == \"Zscaler\"\n| where DeviceAction !in (\"block\", \"BLOCK\", \"Blocked\", \"blocked\", \"deny\", \"DROP\")\n| where isnotempty(DeviceCustomNumber1)\n| where toint(DeviceCustomNumber1) >= 50\n| where isnotempty(SourceUserName)\n| summarize\n    EventCount        = count(),\n    MaxRiskScore      = max(toint(DeviceCustomNumber1)),\n    UniqueDestinations= dcount(DestinationHostName),\n    HighRiskDomains   = make_set(DestinationHostName, 10),\n    Categories        = make_set(DeviceCustomString2, 5),\n    FirstSeen         = min(TimeGenerated),\n    LastSeen          = max(TimeGenerated)\n  by SourceUserName\n| order by MaxRiskScore desc, EventCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "SourceUserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "EventCount": "EventCount",
+                  "MaxRiskScore": "MaxRiskScore",
+                  "UniqueDestinations": "UniqueDestinations",
+                  "SourceUserName": "SourceUserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Zscaler High ThreatRisk Allowed - {{SourceUserName}} (score {{MaxRiskScore}})",
+                  "alertDescriptionFormat": "User {{SourceUserName}} browsed {{UniqueDestinations}} high-risk destinations (ThreatRiskLevel up to {{MaxRiskScore}}) without being blocked."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT6H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/c329d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - Sudden Category Shift - User Accessing New High-Risk URL Categories",
+                "description": "Detects users accessing URL categories they have never accessed in the previous 7 days, where those categories represent high-risk or policy-violating content: gambling, adult/pornography, proxy avoidance, personal VPN, dating, extremism, tasteless, or illegal content. A sudden category shift may indicate compromised credentials being used by an attacker browsing freely, a policy bypass attempt, or an insider threat. MITRE ATT&CK: T1078 (Valid Accounts), T1090 (Proxy), T1048.",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P7D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "InitialAccess",
+                  "CommandAndControl"
+                ],
+                "techniques": [
+                  "T1078",
+                  "T1090"
+                ],
+                "query": "let HighRiskCategories = dynamic([\n    \"GAMBLING\", \"ADULT_CONTENT\", \"NUDITY\", \"DATING\",\n    \"PROXY_AVOIDANCE_ANONYMIZERS\", \"PERSONAL_VPN\", \"ANONYMIZING_UTILITIES\",\n    \"EXTREMISM_ADVOCACY\", \"TASTELESS\", \"ILLEGAL_OR_QUESTIONABLE\"]);\nlet recentWindow    = 1h;\nlet baselineWindow  = 7d;\nlet baseline = CommonSecurityLog\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n    | where DeviceVendor == \"Zscaler\" and isnotempty(SourceUserName)\n    | summarize BaselineCategories = make_set(DeviceCustomString2)\n        by SourceUserName;\nlet recent = CommonSecurityLog\n    | where TimeGenerated > ago(recentWindow)\n    | where DeviceVendor == \"Zscaler\" and isnotempty(SourceUserName)\n    | where DeviceCustomString2 in (HighRiskCategories)\n    | summarize\n        RecentCategories = make_set(DeviceCustomString2),\n        RequestCount     = count(),\n        Domains          = make_set(DestinationHostName, 10)\n        by SourceUserName;\nrecent\n| join kind=leftouter baseline on SourceUserName\n| extend BaselineCategories = coalesce(BaselineCategories, dynamic([]))\n| extend NewCategories = set_difference(RecentCategories, BaselineCategories)\n| where array_length(NewCategories) > 0\n| project SourceUserName, NewCategories, RequestCount, Domains, RecentCategories\n| order by RequestCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "SourceUserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "RequestCount": "RequestCount",
+                  "NewCategories": "NewCategories",
+                  "SourceUserName": "SourceUserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Zscaler Category Shift - {{SourceUserName}} accessing new risk categories",
+                  "alertDescriptionFormat": "User {{SourceUserName}} accessed {{RequestCount}} requests in new high-risk categories not seen in past 7 days: {{NewCategories}}."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT6H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/d430e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA / ZPA - Visibility Loss - No Events Received in 2 Hours",
+                "description": "Detects when no Zscaler ZIA or ZPA events are received in the CommonSecurityLog table for 2 or more consecutive hours. Zscaler NSS feeds should produce a continuous stream of events during business hours. A complete gap in events indicates NSS Cloud Connector failure, CEF/Syslog forwarding disruption, Azure Monitor Agent issues, or \u00e2\u20ac\u201d in a threat scenario \u00e2\u20ac\u201d deliberate interference with the Zscaler integration to blind the SOC. This rule fires when the event count is 0 during the query window.MITRE ATT&CK: T1562 (Impair Defenses), T1562.001.",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT30M",
+                "queryPeriod": "PT2H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "DefenseEvasion"
+                ],
+                "techniques": [
+                  "T1562"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(2h)\n| where DeviceVendor == \"Zscaler\"\n| summarize EventCount = count()\n| where EventCount == 0\n| extend AppName = \"Zscaler NSS\"\n| extend AlertReason = \"No Zscaler ZIA/ZPA events received in the last 2 hours\"",
+                "entityMappings": [
+                  {
+                    "entityType": "CloudApplication",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Name",
+                        "columnName": "AppName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "EventCount": "EventCount",
+                  "AlertReason": "AlertReason"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Zscaler Visibility Loss - No NSS Events for 2 Hours",
+                  "alertDescriptionFormat": "No Zscaler ZIA/ZPA events received in CommonSecurityLog for 2 hours. NSS Cloud Connector or CEF forwarding may be broken."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT4H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "CloudApplication"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/e531f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f8a')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZPA - Access to Internal Application from Anomalous Geolocation",
+                "description": "Detects Zscaler Private Access (ZPA) connections to internal applications originating from countries the user has never accessed from in the previous 14 days. ZPA provides remote access to internal apps without a VPN; connections from unexpected geolocations indicate credential compromise, a threat actor using stolen credentials to access internal resources, or legitimate users travelling to unusual locations. MITRE ATT&CK: T1078 (Valid Accounts), T1133 (External Remote Services).",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P14D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "InitialAccess",
+                  "LateralMovement"
+                ],
+                "techniques": [
+                  "T1078",
+                  "T1133"
+                ],
+                "query": "let recentWindow   = 1h;\nlet baselineWindow = 14d;\nlet baseline = CommonSecurityLog\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n    | where DeviceVendor == \"Zscaler\" and DeviceProduct has \"ZPA\"\n    | where DeviceAction !in (\"block\", \"BLOCK\", \"Failed\")\n    | where isnotempty(SourceUserName) and isnotempty(SourceIP)\n    | extend SrcCountry = tostring(geo_info_from_ip_address(SourceIP).country)\n    | summarize BaselineCountries = make_set(SrcCountry)\n        by SourceUserName;\nlet recent = CommonSecurityLog\n    | where TimeGenerated > ago(recentWindow)\n    | where DeviceVendor == \"Zscaler\" and DeviceProduct has \"ZPA\"\n    | where DeviceAction !in (\"block\", \"BLOCK\", \"Failed\")\n    | where isnotempty(SourceUserName) and isnotempty(SourceIP)\n    | extend SrcCountry = tostring(geo_info_from_ip_address(SourceIP).country)\n    | summarize\n        RecentCountries = make_set(SrcCountry),\n        AccessedApps    = make_set(DestinationHostName, 10),\n        ConnectionCount = count(),\n        SrcIPs          = make_set(SourceIP, 5)\n        by SourceUserName;\nrecent\n| join kind=leftouter baseline on SourceUserName\n| extend BaselineCountries = coalesce(BaselineCountries, dynamic([]))\n| extend NewCountries = set_difference(RecentCountries, BaselineCountries)\n| where array_length(NewCountries) > 0\n| project SourceUserName, NewCountries, AccessedApps, ConnectionCount, SrcIPs\n| order by ConnectionCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "SourceUserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "ConnectionCount": "ConnectionCount",
+                  "NewCountries": "NewCountries",
+                  "AccessedApps": "AccessedApps",
+                  "SourceUserName": "SourceUserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "ZPA Anomalous Geolocation - {{SourceUserName}} from new countries",
+                  "alertDescriptionFormat": "ZPA user {{SourceUserName}} connected from {{NewCountries}} \u00e2\u20ac\u201d not seen in 14-day baseline. {{ConnectionCount}} connections to internal apps."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT6H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/f632a7b8-c9d0-4e1f-2a3b-4c5d6e7f8a9b')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZPA - Repeated Connection Failures - Possible Credential Spray Against Internal Apps",
+                "description": "Detects ZPA users or source IPs generating more than 20 failed or blocked connection attempts to internal applications in a 1-hour window. Unlike network-level brute force, ZPA connection failures can indicate password spraying targeting applications exposed via ZPA, repeated MFA denials, configuration errors causing mass reconnects, or an attacker probing internal app segments using compromised ZPA credentials. MITRE ATT&CK: T1110 (Brute Force), T1133 (External Remote Services).",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "CredentialAccess",
+                  "InitialAccess"
+                ],
+                "techniques": [
+                  "T1110",
+                  "T1133"
+                ],
+                "query": "CommonSecurityLog\n| where TimeGenerated > ago(1h)\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n| where DeviceVendor == \"Zscaler\" and DeviceProduct has \"ZPA\"\n| where DeviceAction in (\n    \"block\", \"BLOCK\", \"Blocked\", \"Failed\", \"Error\",\n    \"Closed\", \"denied\", \"DENIED\", \"reject\", \"REJECT\")\n| where isnotempty(SourceUserName) or isnotempty(SourceIP)\n| summarize\n    FailureCount = count(),\n    UniqueApps   = dcount(DestinationHostName),\n    TargetApps   = make_set(DestinationHostName, 10),\n    SourceIPs    = make_set(SourceIP, 5),\n    FirstFailure = min(TimeGenerated),\n    LastFailure  = max(TimeGenerated)\n  by SourceUserName\n| where FailureCount > 20\n| order by FailureCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "SourceUserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "FailureCount": "FailureCount",
+                  "UniqueApps": "UniqueApps",
+                  "TargetApps": "TargetApps",
+                  "SourceUserName": "SourceUserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "ZPA Connection Spray - {{SourceUserName}} ({{FailureCount}} failures)",
+                  "alertDescriptionFormat": "ZPA user {{SourceUserName}} generated {{FailureCount}} connection failures against {{UniqueApps}} internal apps in 1 hour."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT4H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/a033b1c2-d3e4-4f5a-6b7c-8d9e0f1a2b3c')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZPA - First-Time Access to Internal Application - Possible Lateral Movement",
+                "description": "Detects ZPA users successfully accessing internal applications they have never connected to in the previous 14 days. In a well-managed ZPA deployment, users have defined app segment policies; accessing new applications outside their normal pattern can indicate logical lateral movement \u00e2\u20ac\u201d an attacker using valid credentials to explore internal resources, privilege escalation that granted access to additional app segments, or a legitimate administrator testing new policies. MITRE ATT&CK: T1078 (Valid Accounts), T1021 (Remote Services).",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P14D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "LateralMovement",
+                  "InitialAccess"
+                ],
+                "techniques": [
+                  "T1078",
+                  "T1021"
+                ],
+                "query": "let recentWindow   = 1h;\nlet baselineWindow = 14d;\nlet baseline = CommonSecurityLog\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n    | where DeviceVendor == \"Zscaler\" and DeviceProduct has \"ZPA\"\n    | where DeviceAction !in (\"block\", \"BLOCK\", \"Blocked\", \"Failed\", \"Error\")\n    | where isnotempty(SourceUserName) and isnotempty(DestinationHostName)\n    | summarize HistoricApps = make_set(DestinationHostName)\n        by SourceUserName;\nlet recent = CommonSecurityLog\n    | where TimeGenerated > ago(recentWindow)\n    | where DeviceVendor == \"Zscaler\" and DeviceProduct has \"ZPA\"\n    | where DeviceAction !in (\"block\", \"BLOCK\", \"Blocked\", \"Failed\", \"Error\")\n    | where isnotempty(SourceUserName) and isnotempty(DestinationHostName)\n    | summarize\n        RecentApps      = make_set(DestinationHostName),\n        ConnectionCount = count(),\n        SourceIPs       = make_set(SourceIP, 5)\n        by SourceUserName;\nrecent\n| join kind=leftouter baseline on SourceUserName\n| extend HistoricApps = coalesce(HistoricApps, dynamic([]))\n| extend FirstTimeApps = set_difference(RecentApps, HistoricApps)\n| where array_length(FirstTimeApps) > 0\n| project SourceUserName, FirstTimeApps, ConnectionCount, SourceIPs, RecentApps\n| order by ConnectionCount desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "SourceUserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "ConnectionCount": "ConnectionCount",
+                  "FirstTimeApps": "FirstTimeApps",
+                  "SourceUserName": "SourceUserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "ZPA First-Time App Access - {{SourceUserName}} (new internal apps)",
+                  "alertDescriptionFormat": "ZPA user {{SourceUserName}} accessed {{ConnectionCount}} connections to internal apps never seen in 14-day baseline: {{FirstTimeApps}}."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT6H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/b134c2d3-e4f5-4a6b-7c8d-9e0f1a2b3c4d')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZPA - App Access Volume Spike - User Accessing Significantly More Apps Than Baseline",
+                "description": "Detects ZPA users whose distinct application access count in a 1-hour window exceeds their 14-day daily average by 3x or more. A single user suddenly accessing many more internal apps than usual is a strong indicator of automated reconnaissance, credential compromise where the attacker is enumerating internal resources, or an insider staging access before an exfiltration event. MITRE ATT&CK: T1046 (Network Service Discovery), T1078 (Valid Accounts).",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P14D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                  "Discovery",
+                  "InitialAccess"
+                ],
+                "techniques": [
+                  "T1046",
+                  "T1078"
+                ],
+                "query": "let recentWindow   = 1h;\nlet baselineWindow = 14d;\nlet baseline = CommonSecurityLog\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n    | where DeviceVendor == \"Zscaler\" and DeviceProduct has \"ZPA\"\n    | where DeviceAction !in (\"block\", \"BLOCK\", \"Blocked\", \"Failed\")\n    | where isnotempty(SourceUserName)\n    | summarize DailyApps = dcount(DestinationHostName)\n        by SourceUserName, Day = bin(TimeGenerated, 1d)\n    | summarize AvgDailyApps = avg(DailyApps)\n        by SourceUserName;\nlet recent = CommonSecurityLog\n    | where TimeGenerated > ago(recentWindow)\n    | where DeviceVendor == \"Zscaler\" and DeviceProduct has \"ZPA\"\n    | where DeviceAction !in (\"block\", \"BLOCK\", \"Blocked\", \"Failed\")\n    | where isnotempty(SourceUserName)\n    | summarize\n        RecentAppCount = dcount(DestinationHostName),\n        RecentApps     = make_set(DestinationHostName, 20),\n        RecentConns    = count()\n        by SourceUserName;\nrecent\n| join kind=inner baseline on SourceUserName\n| where AvgDailyApps > 0\n| extend SpikeRatio = round(toreal(RecentAppCount) / toreal(AvgDailyApps), 1)\n| where SpikeRatio >= 3.0 and RecentAppCount >= 5\n| project SourceUserName, RecentAppCount, AvgDailyApps, SpikeRatio, RecentApps, RecentConns\n| order by SpikeRatio desc",
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "SourceUserName"
+                      }
+                    ]
+                  }
+                ],
+                "customDetails": {
+                  "RecentAppCount": "RecentAppCount",
+                  "SpikeRatio": "SpikeRatio",
+                  "AvgDailyApps": "AvgDailyApps",
+                  "SourceUserName": "SourceUserName"
+                },
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "ZPA App Volume Spike - {{SourceUserName}} ({{SpikeRatio}}x baseline)",
+                  "alertDescriptionFormat": "ZPA user {{SourceUserName}} accessed {{RecentAppCount}} distinct apps in 1 hour \u00e2\u20ac\u201d {{SpikeRatio}}x above 14-day baseline."
+                },
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT6H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','f935a6b7-c8d9-4e0f-1a2b-3c4d5e6f7a8b')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - Patient APT: Multi-Channel Low & Slow Exfiltration",
+                "description": "Detects 'low and slow' multi-channel data exfiltration by users who gradually upload data across non-corporate cloud storage, code-hosting, and messaging platforms, staying below per-session DLP thresholds. Aggregates ZIA upload bytes to non-corporate destinations combined with M365 OfficeActivity external-sharing events. Users are flagged when upload volume deviates >=3 standard deviations from the peer group baseline, when external sharing includes anonymous public links, or when upload activity spans >=14 days. Characteristic of APT and insider-threat scenarios. MITRE ATT&CK: TA0009, T1041, T1567.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "\n    let HuntWindow   = 14d;\n    let ExfilDomains = dynamic([\n        \"drive.google.com\", \"docs.google.com\", \"dropbox.com\", \"box.com\",\n        \"mega.nz\", \"mediafire.com\", \"sendspace.com\", \"wetransfer.com\",\n        \"4shared.com\", \"anonfiles.com\",\n        \"github.com\", \"gitlab.com\", \"bitbucket.org\", \"gist.github.com\",\n        \"web.whatsapp.com\", \"telegram.org\", \"t.me\", \"discord.com\",\n        \"discordapp.com\", \"signal.org\",\n        \"mail.google.com\", \"outlook.live.com\", \"protonmail.com\", \"tutanota.com\"]);\n    let ZIA_Daily =\n        CommonSecurityLog\n        | where TimeGenerated > ago(HuntWindow)\n        | where DeviceVendor == \"Zscaler\"\n        | where DeviceAction !in (\"block\", \"BLOCK\", \"Blocked\", \"blocked\", \"deny\")\n        | where isnotempty(SourceUserName)\n        | where DestinationHostName has_any (ExfilDomains)\n        | summarize\n            DaySentBytes    = sum(SentBytes),\n            DayRequestCount = count(),\n            DayDestinCount  = dcount(DestinationHostName)\n          by UserName = tolower(SourceUserName), Day = bin(TimeGenerated, 1d);\n    let ZIA_Users =\n        ZIA_Daily\n        | summarize\n            ZIA_TotalMBSent   = round(toreal(sum(DaySentBytes)) / 1048576, 2),\n            ZIA_ActiveDays    = dcount(Day),\n            ZIA_TotalRequests = sum(DayRequestCount),\n            ZIA_UniqueDestCnt = sum(DayDestinCount)\n          by UserName;\n    let globalAvg = toscalar(ZIA_Users | summarize avg(ZIA_TotalMBSent));\n    let globalStd = toscalar(ZIA_Users | summarize stdev(ZIA_TotalMBSent));\n    let O365_Sharing =\n        OfficeActivity\n        | where TimeGenerated > ago(HuntWindow)\n        | where isnotempty(UserId)\n        | where Operation in (\n            \"FileDownloaded\", \"FileSyncDownloadedFull\", \"FileCopied\",\n            \"AnonymousLinkCreated\", \"AnonymousLinkUsed\",\n            \"SharingSet\", \"SharingInvitationCreated\",\n            \"AddedToSecureLink\", \"SecureLinkUsed\")\n        | summarize\n            O365_EventCount = count(),\n            O365_Operations = make_set(Operation, 10),\n            O365_AnonLinks  = countif(Operation has \"Anonymous\"),\n            O365_LastEvent  = max(TimeGenerated)\n          by UserName = tolower(UserId);\n    ZIA_Users\n    | join kind=leftouter O365_Sharing on UserName\n    | extend\n        O365_EventCount = coalesce(O365_EventCount, 0),\n        O365_AnonLinks  = coalesce(O365_AnonLinks, 0)\n    | extend\n        Zscore = iff(globalStd > 0,\n                     round((ZIA_TotalMBSent - globalAvg) / globalStd, 2),\n                     0.0),\n        DistinctChannels = iff(ZIA_TotalMBSent > 5, 1, 0)\n                         + iff(O365_EventCount  > 0, 1, 0)\n    | where Zscore >= 3.0\n        or (O365_AnonLinks  >= 3 and ZIA_TotalMBSent > 10)\n        or (ZIA_ActiveDays  >= 14 and ZIA_TotalMBSent > 50)\n    | project\n        UserName,\n        ZIA_TotalMBSent, ZIA_ActiveDays, ZIA_TotalRequests, ZIA_UniqueDestCnt,\n        O365_EventCount, O365_AnonLinks, O365_Operations,\n        DistinctChannels, Zscore\n    | order by Zscore desc, ZIA_TotalMBSent desc\n",
+                "queryFrequency": "P1D",
+                "queryPeriod": "P14D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Exfiltration"
+                ],
+                "techniques": [
+                  "T1041",
+                  "T1567"
+                ],
+                "alertRuleTemplateName": null,
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "P1D",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                },
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "UserName"
+                      }
+                    ]
+                  }
+                ],
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Low & Slow Exfil Candidate - {{UserName}} (z={{Zscore}}, {{ZIA_TotalMBSent}} MB)",
+                  "alertDescriptionFormat": "User {{UserName}} uploaded {{ZIA_TotalMBSent}} MB to non-corporate destinations (z-score: {{Zscore}}). Investigate for multi-channel low-and-slow exfiltration."
+                },
+                "customDetails": {
+                  "UserName": "UserName",
+                  "ZIA_TotalMBSent": "ZIA_TotalMBSent",
+                  "ZIA_ActiveDays": "ZIA_ActiveDays",
+                  "Zscore": "Zscore",
+                  "O365_AnonLinks": "O365_AnonLinks",
+                  "DistinctChannels": "DistinctChannels"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','a036b1c2-d3e4-4f5a-6b7c-8d9e0f1a2b3c')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZPA/ZIA - Perfect Impostor: Account Takeover Hiding Within Normal Traffic",
+                "description": "Detects a 'perfect impostor' scenario where an attacker using stolen credentials behaves almost identically to the real user but introduces subtle cross-layer anomalies: ZPA sessions from new countries not in the 14-day baseline; ZIA browsing to remote-admin tools, cloud admin portals, or tunnelling apps; and IdP/SaaS security-critical account changes (MFA removal, OAuth grants, inbox auto-forward rules, privilege escalation). Each layer is scored individually and cross-layer correlation drastically reduces false positives. MITRE ATT&CK: TA0003, TA0004, TA0005, TA0006, T1078, T1098, T1114, T1556.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "\n    let baselineWindow = 14d;\n    let recentWindow   = 4h;\n    let ZPA_Baseline =\n        CommonSecurityLog\n        | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n        | where DeviceVendor == \"Zscaler\" and DeviceProduct has \"ZPA\"\n        | where DeviceAction !in (\"block\", \"BLOCK\", \"Failed\")\n        | where isnotempty(SourceUserName)\n        | extend BaselineCountry = tostring(geo_info_from_ip_address(SourceIP).country)\n        | summarize\n            BaselineCountries = make_set(BaselineCountry, 20),\n            BaselineAppCount  = dcount(DestinationHostName)\n          by UserName = tolower(SourceUserName);\n    let ZPA_Recent =\n        CommonSecurityLog\n        | where TimeGenerated > ago(recentWindow)\n        | where DeviceVendor == \"Zscaler\" and DeviceProduct has \"ZPA\"\n        | where isnotempty(SourceUserName)\n        | extend RecentCountry = tostring(geo_info_from_ip_address(SourceIP).country)\n        | summarize\n            RecentCountries = make_set(RecentCountry, 5),\n            RecentApps      = make_set(DestinationHostName, 10),\n            RecentIPs       = make_set(SourceIP, 5),\n            RecentConnCount = count(),\n            ZPA_FirstSeen   = min(TimeGenerated)\n          by UserName = tolower(SourceUserName);\n    let ZIA_Suspicious =\n        CommonSecurityLog\n        | where TimeGenerated > ago(recentWindow)\n        | where DeviceVendor == \"Zscaler\"\n        | where isnotempty(SourceUserName)\n        | where DeviceCustomString2 has_any (\n            \"REMOTE_ACCESS_TOOLS\", \"REMOTE_ADMINISTRATION\", \"WEB_BASED_ADMIN\",\n            \"ACCOUNT_CREATION\", \"TUNNEL_SOCKS_PROXY\", \"ANONYMOUS_PROXY\",\n            \"ONLINE_STORAGE\", \"FILE_SHARE\", \"TOR\", \"VPN_SERVICES\",\n            \"NEWLY_REGISTERED_DOMAINS\", \"PHISHING\")\n        | summarize\n            ZIA_Categories   = make_set(DeviceCustomString2, 10),\n            ZIA_Destinations = make_set(DestinationHostName, 10),\n            ZIA_RequestCount = count(),\n            ZIA_FirstSeen    = min(TimeGenerated)\n          by UserName = tolower(SourceUserName);\n    let IdP_Changes =\n        OfficeActivity\n        | where TimeGenerated > ago(recentWindow)\n        | where isnotempty(UserId)\n        | where Operation in (\n            \"New-InboxRule\",\n            \"Set-Mailbox\",\n            \"Add-MailboxPermission\",\n            \"Add OAuth2PermissionGrant\",\n            \"Consent to application\",\n            \"Add service principal credentials\",\n            \"Update user\",\n            \"Disable Strong Authentication\",\n            \"Update StsRefreshTokenValidFrom\",\n            \"Add member to role\")\n        | summarize\n            IdP_EventCount = count(),\n            IdP_Operations = make_set(Operation, 10),\n            IdP_FirstSeen  = min(TimeGenerated)\n          by UserName = tolower(UserId);\n    ZPA_Recent\n    | join kind=inner ZPA_Baseline on UserName\n    | extend NewCountries = set_difference(RecentCountries, BaselineCountries)\n    | join kind=leftouter ZIA_Suspicious on UserName\n    | join kind=leftouter IdP_Changes on UserName\n    | extend\n        ZIA_RequestCount = coalesce(ZIA_RequestCount, 0),\n        IdP_EventCount   = coalesce(IdP_EventCount, 0)\n    | extend ImpostorScore =\n        iff(array_length(NewCountries) > 0, 40, 0)\n      + (ZIA_RequestCount * 5)\n      + (IdP_EventCount * 30)\n    | where ImpostorScore >= 40\n        or (IdP_EventCount >= 1 and ZIA_RequestCount >= 1)\n        or array_length(NewCountries) > 0\n    | project\n        UserName,\n        NewCountries, RecentCountries, BaselineCountries,\n        RecentApps, RecentIPs, RecentConnCount,\n        ZIA_Categories, ZIA_Destinations, ZIA_RequestCount,\n        IdP_Operations, IdP_EventCount,\n        ImpostorScore,\n        ZPA_FirstSeen\n    | order by ImpostorScore desc\n",
+                "queryFrequency": "PT4H",
+                "queryPeriod": "P14D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "InitialAccess",
+                  "Persistence",
+                  "PrivilegeEscalation",
+                  "DefenseEvasion",
+                  "CredentialAccess",
+                  "Collection"
+                ],
+                "techniques": [
+                  "T1078",
+                  "T1098",
+                  "T1114",
+                  "T1556"
+                ],
+                "alertRuleTemplateName": null,
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT8H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "Account"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                },
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "UserName"
+                      }
+                    ]
+                  }
+                ],
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Perfect Impostor Candidate - {{UserName}} (score: {{ImpostorScore}})",
+                  "alertDescriptionFormat": "User {{UserName}} - ImpostorScore: {{ImpostorScore}}. Cross-layer anomalies detected: {{ZIA_RequestCount}} ZIA suspicious requests and identity/account changes."
+                },
+                "customDetails": {
+                  "UserName": "UserName",
+                  "ImpostorScore": "ImpostorScore",
+                  "IdP_EventCount": "IdP_EventCount",
+                  "ZIA_RequestCount": "ZIA_RequestCount",
+                  "NewCountries": "NewCountries"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','b137c2d3-e4f5-4a6b-7c8d-9e0f1a2b3c4d')]",
+              "apiVersion": "2022-11-01-preview",
+              "kind": "Scheduled",
+              "location": "[resourceGroup().location]",
+              "properties": {
+                "displayName": "Zscaler ZIA - APT Control Evasion: Agent Tampering and Visibility Degradation",
+                "description": "Detects an attacker or insider attempting to degrade SOC visibility by breaking Zscaler or EDR telemetry. Correlates two streams: (1) VISIBILITY LOSS - hosts with consistent ZIA traffic in the 7-day baseline that produce zero ZIA telemetry in the most recent 4-hour window; (2) AGENT TAMPERING - MDE DeviceEvents service-stop/delete/driver-unload targeting ZscalerService, ZSATunnel, ZSAUpdater, MsSense, or SenseSvc; plus SecurityEvent ID 7034-7045 for the same services. Both streams are scored jointly. A disappearing host with corroborating tamper events is a critical indicator of deliberate control evasion. MITRE ATT&CK: TA0005, T1562, T1070.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "\n    let baselineWindow            = 7d;\n    let recentWindow              = 4h;\n    let minBaselineRequestsPerDay = 10;\n    let ZIA_BaselineHosts =\n        CommonSecurityLog\n        | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"SourceIP\",\"\"))))\n| where not(ExcludeAllowlistedIPs_Zscaler(tostring(column_ifexists(\"DestinationIP\",\"\"))))\n        | where DeviceVendor == \"Zscaler\"\n        | where isnotempty(SourceIP) and isnotempty(SourceUserName)\n        | summarize\n            BaselineRequestsPerDay = round(toreal(count()) / (baselineWindow / 1d), 1),\n            BaselineUsers          = make_set(SourceUserName, 5)\n          by SourceIP\n        | where BaselineRequestsPerDay >= minBaselineRequestsPerDay;\n    let ZIA_RecentActive =\n        CommonSecurityLog\n        | where TimeGenerated > ago(recentWindow)\n        | where DeviceVendor == \"Zscaler\"\n        | where isnotempty(SourceIP)\n        | distinct SourceIP;\n    let SilentHosts =\n        ZIA_BaselineHosts\n        | join kind=leftanti ZIA_RecentActive on SourceIP;\n    let AgentTampering =\n        DeviceEvents\n        | where TimeGenerated > ago(recentWindow)\n        | where ActionType in (\n            \"ServiceUninstalled\", \"ServiceStopped\", \"DriverUnloaded\",\n            \"TamperingAttempt\", \"AntivirusScanFailed\")\n          or (ActionType == \"ProcessCreated\"\n              and InitiatingProcessCommandLine has_any (\n                  \"ZscalerApp\", \"ZSATunnel\", \"ZSAUpdater\", \"ZscalerService\",\n                  \"sc stop\", \"sc delete\", \"net stop\", \"taskkill\"))\n        | summarize\n            TamperEvents    = count(),\n            TamperActions   = make_set(ActionType, 10),\n            TamperCmds      = make_set(InitiatingProcessCommandLine, 5),\n            TamperFirstSeen = min(TimeGenerated)\n          by DeviceName;\n    let SvcTampering =\n        SecurityEvent\n        | where TimeGenerated > ago(recentWindow)\n        | where EventID in (7034, 7035, 7036, 7040, 7045)\n        | where ServiceName has_any (\n            \"ZscalerService\", \"ZSATunnel\", \"ZSAUpdater\",\n            \"MsSense\", \"SenseSvc\", \"WdFilter\", \"AADConnect\")\n        | summarize\n            SvcEvents      = count(),\n            SvcNames       = make_set(ServiceName, 10),\n            SvcFirstSeen   = min(TimeGenerated)\n          by Computer;\n    SilentHosts\n    | join kind=leftouter AgentTampering on $left.SourceIP == $right.DeviceName\n    | join kind=leftouter SvcTampering   on $left.SourceIP == $right.Computer\n    | extend\n        TamperEvents = coalesce(TamperEvents, 0),\n        SvcEvents    = coalesce(SvcEvents, 0)\n    | extend EvasionScore =\n        toint(BaselineRequestsPerDay * 2)\n      + iff(TamperEvents > 0, 50, 0)\n      + iff(SvcEvents    > 0, 40, 0)\n    | project\n        SourceIP, BaselineUsers, BaselineRequestsPerDay,\n        TamperEvents, TamperActions, TamperCmds,\n        SvcEvents, SvcNames,\n        EvasionScore,\n        TamperFirstSeen, SvcFirstSeen\n    | order by EvasionScore desc, BaselineRequestsPerDay desc\n",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P7D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "DefenseEvasion"
+                ],
+                "techniques": [
+                  "T1562",
+                  "T1070"
+                ],
+                "alertRuleTemplateName": null,
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": true,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT4H",
+                    "matchingMethod": "Selected",
+                    "groupByEntities": [
+                      "IP"
+                    ],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                },
+                "entityMappings": [
+                  {
+                    "entityType": "IP",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Address",
+                        "columnName": "SourceIP"
+                      }
+                    ]
+                  }
+                ],
+                "alertDetailsOverride": {
+                  "alertDisplayNameFormat": "Control Evasion Detected - {{SourceIP}} (score: {{EvasionScore}}, was {{BaselineRequestsPerDay}} req/day)",
+                  "alertDescriptionFormat": "Host {{SourceIP}} went silent in ZIA (baseline: {{BaselineRequestsPerDay}} req/day). Agent tamper and/or service events detected. EvasionScore: {{EvasionScore}}."
+                },
+                "customDetails": {
+                  "SourceIP": "SourceIP",
+                  "EvasionScore": "EvasionScore",
+                  "BaselineRPDay": "BaselineRequestsPerDay",
+                  "TamperEvents": "TamperEvents",
+                  "SvcEvents": "SvcEvents"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "variables": {
+    "watchlistHeader": "IPOrRange,Description,Owner,AddedDate",
+    "watchlistDefaultRows": "10.0.0.0/8,RFC1918 Class A,Network,2026-01-01\r\n172.16.0.0/12,RFC1918 Class B,Network,2026-01-01\r\n192.168.0.0/16,RFC1918 Class C,Network,2026-01-01",
+    "watchlistEffectiveContent": "[if(empty(parameters('watchlistRawContent')), concat(variables('watchlistHeader'), '\r\n', variables('watchlistDefaultRows')), concat(variables('watchlistHeader'), '\r\n', parameters('watchlistRawContent')))]"
+  }
+}
