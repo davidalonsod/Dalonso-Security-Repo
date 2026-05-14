@@ -1,0 +1,45 @@
+id: 8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a08
+name: GWS Alerts - Account Warnings + Drive/Takeout Activity (Exfil Chain)
+description: |
+  Hunts for accounts that received a Google identity AccountWarning
+  (suspicious login / leaked password / suspended) and shortly after generated
+  a DLP, Drive ransomware, or Domain-wide Takeout alert. Possible
+  account-takeover-to-exfiltration chain.
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+tactics:
+  - InitialAccess
+  - Exfiltration
+relevantTechniques:
+  - T1078.004
+  - T1567
+  - T1530
+query: |
+  let warnings =
+      GWSAlerts_CL
+      | where Source == "Google identity" or AlertDataType endswith "AccountWarning"
+      | extend User = tostring(AlertData.email)
+      | project WarnTime = TimeGenerated, User, WarnType = AlertType, WarnId = AlertId;
+  let exfil =
+      GWSAlerts_CL
+      | where AlertDataType endswith_cs "DlpRuleViolation"
+           or AlertDataType endswith_cs "DriveSyncStateChanged"
+           or AlertDataType endswith_cs "DomainWideTakeoutInitiated"
+      | extend User = tostring(coalesce(AlertData.email,
+                                        AlertData.resourceOwner,
+                                        AlertData.initiator))
+      | project ExfilTime = TimeGenerated, User, ExfilType = AlertType,
+                ExfilSource = Source, ExfilId = AlertId,
+                ExfilLink = SecurityInvestigationToolLink;
+  warnings
+  | join kind=inner exfil on User
+  | where ExfilTime between (WarnTime .. WarnTime + 48h)
+  | project WarnTime, ExfilTime, User, WarnType, ExfilSource, ExfilType,
+            WarnId, ExfilId, ExfilLink
+  | order by ExfilTime desc
+tags:
+  - GoogleWorkspace
+  - AccountTakeover
+  - Exfiltration

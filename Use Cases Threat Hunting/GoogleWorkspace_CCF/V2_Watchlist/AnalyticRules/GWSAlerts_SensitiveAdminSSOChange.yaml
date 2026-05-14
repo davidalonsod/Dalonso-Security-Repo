@@ -1,0 +1,51 @@
+id: 7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f04
+name: GWS - Sensitive Admin Action - SSO / Super Admin Changes
+description: |
+  A sensitive admin action was performed: primary admin changed, super admin
+  password reset, or SSO profile added/updated/deleted. These are high-leverage
+  changes that have been used in IdP-relay and persistence attacks against
+  Workspace tenants. (See also GCP-Pentest-Checklist - IAM persistence patterns.)
+severity: High
+status: Available
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+queryFrequency: 10m
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Persistence
+  - PrivilegeEscalation
+  - DefenseEvasion
+relevantTechniques:
+  - T1556
+  - T1098
+  - T1484.002
+query: |
+  GWSAlerts_CL
+  | where Source == "Sensitive Admin Action"
+       or AlertDataType endswith "SensitiveAdminAction"
+       or AlertType has_any ("SSO profile", "Super admin password reset", "Primary admin changed")
+  | extend Actor = tostring(coalesce(AlertData.actorEmail, AlertData.email)),
+           Target = tostring(coalesce(AlertData.targetEmail, AlertData.target))
+  | project TimeGenerated, AlertId, MetadataSeverity, Source, AlertType,
+            Actor, Target, SecurityInvestigationToolLink, AlertData
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Actor
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Target
+  - entityType: URL
+    fieldMappings:
+      - identifier: Url
+        columnName: SecurityInvestigationToolLink
+incidentConfiguration:
+  createIncident: true
+version: 1.0.0
+kind: Scheduled

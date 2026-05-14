@@ -1,0 +1,41 @@
+id: 7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f03
+name: GWS - Potential Ransomware Detected on Drive
+description: |
+  Google's Drive Counter-Abuse system detected mass file changes consistent with
+  ransomware encryption. File syncing is auto-paused. Investigate the affected
+  user, endpoint, and recently shared/downloaded files.
+severity: High
+status: Available
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+queryFrequency: 10m
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Impact
+relevantTechniques:
+  - T1486
+query: |
+  GWSAlerts_CL
+  | where Source == "Drive Counter Abuse"
+       or AlertType has "ransomware"
+       or (AlertDataType endswith "DriveSyncStateChanged" and tostring(AlertData.state) =~ "PAUSED")
+  | extend AffectedUser = tostring(AlertData.email)
+  | project TimeGenerated, AlertId, MetadataSeverity, Source, AlertType,
+            AffectedUser, SecurityInvestigationToolLink, AlertData
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AffectedUser
+  - entityType: URL
+    fieldMappings:
+      - identifier: Url
+        columnName: SecurityInvestigationToolLink
+incidentConfiguration:
+  createIncident: true
+version: 1.0.0
+kind: Scheduled

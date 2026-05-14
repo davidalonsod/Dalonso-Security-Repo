@@ -1,0 +1,48 @@
+id: 8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a0a
+name: GWS Alerts - Cross-Tenant Correlation with Sentinel UEBA / Sign-in Logs
+description: |
+  Pivots Workspace Alert Center alerts against Entra ID sign-ins for the same
+  user (matched on UPN). Detects cross-IdP credential reuse and federated
+  identity abuse - e.g., Workspace alert + Entra anomalous sign-in for the same
+  identity in a short window.
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078
+  - T1078.004
+query: |
+  let gws =
+      GWSAlerts_CL
+      | where TimeGenerated > ago(7d)
+      | where Source has_any ("Google identity", "Mobile device management")
+           or AlertType has_any ("Suspicious login", "Leaked password",
+                                 "Device compromised")
+      | extend User = tolower(tostring(AlertData.email))
+      | project GWSTime = TimeGenerated, User, GWSAlertType = AlertType,
+                GWSAlertId = AlertId, GWSLink = SecurityInvestigationToolLink;
+  let entra =
+      SigninLogs
+      | where TimeGenerated > ago(7d)
+      | where ResultType != 0 or RiskLevelDuringSignIn in ("medium", "high")
+      | extend User = tolower(UserPrincipalName)
+      | project EntraTime = TimeGenerated, User, EntraApp = AppDisplayName,
+                EntraIp = IPAddress, EntraRisk = RiskLevelDuringSignIn,
+                EntraResult = ResultType;
+  gws
+  | join kind=inner entra on User
+  | where abs(datetime_diff('minute', GWSTime, EntraTime)) <= 60
+  | project GWSTime, EntraTime, User, GWSAlertType, EntraApp, EntraIp,
+            EntraRisk, EntraResult, GWSAlertId, GWSLink
+  | order by GWSTime desc
+tags:
+  - GoogleWorkspace
+  - EntraID
+  - CrossIdentity

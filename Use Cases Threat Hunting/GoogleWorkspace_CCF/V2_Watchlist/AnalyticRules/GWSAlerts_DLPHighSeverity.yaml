@@ -1,0 +1,44 @@
+id: 7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f06
+name: GWS - High-Severity DLP Rule Violation
+description: |
+  A Workspace DLP rule fired at HIGH severity (typically external sharing or
+  exfiltration of regulated data such as PII, PCI, source code, secrets).
+severity: High
+status: Available
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+queryFrequency: 10m
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Exfiltration
+  - Collection
+relevantTechniques:
+  - T1567.002
+  - T1530
+query: |
+  GWSAlerts_CL
+  | where Source == "Data Loss Prevention"
+       or AlertDataType endswith "DlpRuleViolation"
+  | where MetadataSeverity =~ "HIGH" or tostring(AlertData.severity) =~ "HIGH"
+  | extend ResourceOwner = tostring(coalesce(AlertData.resourceOwner, AlertData.email)),
+           RuleName = tostring(AlertData.ruleName),
+           ResourceTitle = tostring(AlertData.resourceTitle)
+  | project TimeGenerated, AlertId, MetadataSeverity, RuleName, ResourceOwner,
+            ResourceTitle, SecurityInvestigationToolLink, AlertData
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: ResourceOwner
+  - entityType: File
+    fieldMappings:
+      - identifier: Name
+        columnName: ResourceTitle
+incidentConfiguration:
+  createIncident: true
+version: 1.0.0
+kind: Scheduled

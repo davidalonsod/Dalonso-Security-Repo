@@ -1,0 +1,1163 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "enableAnalyticRules": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Set false for staged deploy: provision watchlist+function+hunts, baseline allowlist, then re-deploy with true."
+      }
+    },
+    "watchlistAlias": {
+      "type": "string",
+      "defaultValue": "NetworkAllowlist"
+    },
+    "functionAlias": {
+      "type": "string",
+      "defaultValue": "ExcludeAllowlistedIPs_GWS"
+    },
+    "watchlistRawContent": {
+      "type": "string",
+      "defaultValue": "IPOrRange,Description,Owner,AddedDate\n10.0.0.0/8,RFC1918 internal,NetOps,2026-05-01\n172.16.0.0/12,RFC1918 internal,NetOps,2026-05-01\n192.168.0.0/16,RFC1918 internal,NetOps,2026-05-01\n"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "apiVersion": "2024-09-01",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/', parameters('watchlistAlias'))]",
+      "properties": {
+        "displayName": "[parameters('watchlistAlias')]",
+        "source": "Local file",
+        "provider": "Microsoft",
+        "description": "Trusted/allow-listed IPs and CIDR ranges referenced by GoogleWorkspace_V2 hunts and rules via ExcludeAllowlistedIPs_GWS().",
+        "itemsSearchKey": "IPOrRange",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "[parameters('watchlistRawContent')]"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/ExcludeAllowlistedIPs_GWS')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "ExcludeAllowlistedIPs_GWS",
+        "category": "Functions",
+        "functionAlias": "[parameters('functionAlias')]",
+        "functionParameters": "ip:string",
+        "query": "let _allow = toscalar(union isfuzzy=true (datatable(IPOrRange:string)[]),\n    (_GetWatchlist('NetworkAllowlist') | project IPOrRange = tostring(IPOrRange))\n    | where isnotempty(IPOrRange) | summarize make_list(IPOrRange));\niif(isempty(ip) or array_length(_allow) == 0, false,\n    coalesce(ipv4_is_in_any_range(ip, _allow), false))",
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a08')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Alerts - Account Warnings + Drive/Takeout Activity (Exfil Chain)",
+        "category": "Hunting Queries",
+        "query": "let warnings =\n    GWSAlerts_CL\n    | where Source == \"Google identity\" or AlertDataType endswith \"AccountWarning\"\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n    | extend User = tostring(AlertData.email)\n    | project WarnTime = TimeGenerated, User, WarnType = AlertType, WarnId = AlertId;\nlet exfil =\n    GWSAlerts_CL\n    | where AlertDataType endswith_cs \"DlpRuleViolation\"\n         or AlertDataType endswith_cs \"DriveSyncStateChanged\"\n         or AlertDataType endswith_cs \"DomainWideTakeoutInitiated\"\n    | extend User = tostring(coalesce(AlertData.email,\n                                      AlertData.resourceOwner,\n                                      AlertData.initiator))\n    | project ExfilTime = TimeGenerated, User, ExfilType = AlertType,\n              ExfilSource = Source, ExfilId = AlertId,\n              ExfilLink = SecurityInvestigationToolLink;\nwarnings\n| join kind=inner exfil on User\n| where ExfilTime between (WarnTime .. WarnTime + 48h)\n| project WarnTime, ExfilTime, User, WarnType, ExfilSource, ExfilType,\n          WarnId, ExfilId, ExfilLink\n| order by ExfilTime desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Hunts for accounts that received a Google identity AccountWarning\n(suspicious login / leaked password / suspended) and shortly after generated\na DLP, Drive ransomware, or Domain-wide Takeout alert. Possible\naccount-takeover-to-exfiltration chain."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess, Exfiltration"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a04')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Alerts - SSO / Admin Persistence Cluster",
+        "category": "Hunting Queries",
+        "query": "GWSAlerts_CL\n| where TimeGenerated > ago(14d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| where Source in (\"Sensitive Admin Action\", \"User Changes\")\n     or AlertType has_any (\"SSO profile\", \"Super admin password reset\",\n                           \"Primary admin changed\", \"granted Admin\")\n| extend Actor = tostring(coalesce(AlertData.actorEmail, AlertData.email))\n| summarize DistinctTypes = dcount(AlertType),\n            AlertTypes = make_set(AlertType, 50),\n            FirstSeen = min(TimeGenerated),\n            LastSeen = max(TimeGenerated),\n            AlertCount = count()\n            by bin(TimeGenerated, 1d), Actor\n| where DistinctTypes >= 2\n| order by AlertCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Cluster of admin-persistence-related alerts within a 24-hour window per actor:\nSSO profile changes, super-admin password resets, primary admin changes,\nprivilege grants. Detects the classic IdP-relay / golden-account pattern from\nthe GCP Pentest Checkl..."
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence, PrivilegeEscalation"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a09')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Alerts - App Settings Changed (Calendar / Drive / Email / Mobile)",
+        "category": "Hunting Queries",
+        "query": "GWSAlerts_CL\n| where TimeGenerated > ago(30d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| where Source == \"App Settings Changed\" or AlertDataType endswith \"AppSettingsChanged\"\n| extend Actor = tostring(coalesce(AlertData.actorEmail, AlertData.email)),\n         SettingName = tostring(AlertData.settingName),\n         NewValue = tostring(AlertData.newValue),\n         OldValue = tostring(AlertData.oldValue),\n         App = tostring(AlertData.applicationName)\n| project TimeGenerated, AlertId, App, AlertType, Actor,\n          SettingName, OldValue, NewValue, SecurityInvestigationToolLink\n| order by TimeGenerated desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Tracks AppSettingsChanged alerts. Adversaries flip Drive sharing to \"anyone\nwith link\", relax Gmail external-forwarding, or weaken mobile policies as part\nof persistence/exfil setup."
+          },
+          {
+            "name": "tactics",
+            "value": "DefenseEvasion, Persistence"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a0a')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Alerts - Cross-Tenant Correlation with Sentinel UEBA / Sign-in Logs",
+        "category": "Hunting Queries",
+        "query": "let gws =\n    GWSAlerts_CL\n    | where TimeGenerated > ago(7d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n    | where Source has_any (\"Google identity\", \"Mobile device management\")\n         or AlertType has_any (\"Suspicious login\", \"Leaked password\",\n                               \"Device compromised\")\n    | extend User = tolower(tostring(AlertData.email))\n    | project GWSTime = TimeGenerated, User, GWSAlertType = AlertType,\n              GWSAlertId = AlertId, GWSLink = SecurityInvestigationToolLink;\nlet entra =\n    SigninLogs\n    | where TimeGenerated > ago(7d)\n    | where ResultType != 0 or RiskLevelDuringSignIn in (\"medium\", \"high\")\n    | extend User = tolower(UserPrincipalName)\n    | project EntraTime = TimeGenerated, User, EntraApp = AppDisplayName,\n              EntraIp = IPAddress, EntraRisk = RiskLevelDuringSignIn,\n              EntraResult = ResultType;\ngws\n| join kind=inner entra on User\n| where abs(datetime_diff('minute', GWSTime, EntraTime)) <= 60\n| project GWSTime, EntraTime, User, GWSAlertType, EntraApp, EntraIp,\n          EntraRisk, EntraResult, GWSAlertId, GWSLink\n| order by GWSTime desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Pivots Workspace Alert Center alerts against Entra ID sign-ins for the same\nuser (matched on UPN). Detects cross-IdP credential reuse and federated\nidentity abuse - e.g., Workspace alert + Entra anomalous sign-in for the same\nidentity in a short window."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess, CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a05')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Alerts - DLP Top Offenders & Sensitive File Hotspots",
+        "category": "Hunting Queries",
+        "query": "GWSAlerts_CL\n| where TimeGenerated > ago(30d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| where Source == \"Data Loss Prevention\" or AlertDataType endswith \"DlpRuleViolation\"\n| extend Owner = tostring(coalesce(AlertData.resourceOwner, AlertData.email)),\n         RuleName = tostring(AlertData.ruleName),\n         ResourceTitle = tostring(AlertData.resourceTitle),\n         Severity = tostring(coalesce(AlertData.severity, MetadataSeverity))\n| summarize Hits = count(),\n            Rules = make_set(RuleName, 25),\n            Resources = make_set(ResourceTitle, 25),\n            MaxSeverity = max(Severity)\n            by Owner\n| order by Hits desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Aggregates DLP rule violations to surface top offending users and the most\nfrequently flagged files / rules. Pivot for data-exfil hunts."
+          },
+          {
+            "name": "tactics",
+            "value": "Exfiltration, Collection"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a07')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Alerts - First-Seen Alert Types Per User (Anomaly Hunt)",
+        "category": "Hunting Queries",
+        "query": "let baseline = 60d;\nlet recent   = 1d;\nlet historical =\n    GWSAlerts_CL\n    | where TimeGenerated between (ago(baseline) .. ago(recent))\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n    | extend User = tostring(AlertData.email)\n    | distinct User, AlertType;\nGWSAlerts_CL\n| where TimeGenerated > ago(recent)\n| extend User = tostring(AlertData.email)\n| join kind=leftanti historical on User, AlertType\n| project TimeGenerated, AlertId, User, Source, AlertType, MetadataSeverity,\n          SecurityInvestigationToolLink\n| order by TimeGenerated desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surfaces (User, AlertType) pairs that have never been observed in the tenant\nbefore within the chosen baseline window. New alert categories on a user are\nworth a manual look."
+          },
+          {
+            "name": "tactics",
+            "value": "Discovery"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a01')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Alerts - Inventory Overview by Source / Type / Severity",
+        "category": "Hunting Queries",
+        "query": "GWSAlerts_CL\n| where TimeGenerated > ago(30d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| summarize Alerts = count(),\n            FirstSeen = min(TimeGenerated),\n            LastSeen = max(TimeGenerated),\n            UniqueAlertIds = dcount(AlertId)\n            by Source, AlertType, AlertDataType, MetadataSeverity\n| order by Alerts desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "High-level overview of all Workspace alerts ingested over a hunting horizon.\nUse as a starting pivot to spot anomalies in volume or new alert types\nappearing in the tenant for the first time."
+          },
+          {
+            "name": "tactics",
+            "value": "Discovery"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a06')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Alerts - Phishing User-Reported vs System-Detected Correlation",
+        "category": "Hunting Queries",
+        "query": "let userReported =\n    GWSAlerts_CL\n    | where AlertType has_any (\"User reported phishing\", \"Suspicious message reported\")\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n    | extend Subject = tostring(AlertData.messages[0].subject),\n             Sender = tostring(AlertData.messages[0].fromHeader)\n    | project ReportTime = TimeGenerated, Subject, Sender, ReportAlertId = AlertId;\nlet reclassified =\n    GWSAlerts_CL\n    | where AlertType has_any (\"Phishing reclassification\", \"Malware reclassification\")\n    | extend Subject = tostring(AlertData.messages[0].subject),\n             Sender = tostring(AlertData.messages[0].fromHeader)\n    | project ReclassifyTime = TimeGenerated, Subject, Sender, ReclassifyAlertId = AlertId;\nuserReported\n| join kind=inner reclassified on Subject, Sender\n| extend GapHours = (ReclassifyTime - ReportTime) / 1h\n| where GapHours > 0\n| project ReportTime, ReclassifyTime, GapHours, Subject, Sender,\n          ReportAlertId, ReclassifyAlertId\n| order by GapHours desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Joins user-reported phishing with system-detected phishing/malware reclassification\nto find campaigns where users reported messages BEFORE Google reclassified them.\nHighlights detection-gap windows."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a03')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Alerts - Stale / Unassigned Alerts (Triage Hygiene)",
+        "category": "Hunting Queries",
+        "query": "GWSAlerts_CL\n| where TimeGenerated > ago(60d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| where MetadataStatus in~ (\"NOT_STARTED\", \"IN_PROGRESS\", \"\")\n     or isempty(MetadataStatus)\n| where TimeGenerated < ago(7d)\n| extend User = tostring(AlertData.email)\n| project TimeGenerated, AlertId, Source, AlertType, MetadataSeverity,\n          MetadataStatus, MetadataAssignee, User, SecurityInvestigationToolLink\n| order by TimeGenerated asc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surfaces alerts that have not been resolved or assigned, including those still\nin NOT_STARTED or IN_PROGRESS metadata status for over 7 days. Useful for SOC\ntriage hygiene and SLA reporting."
+          },
+          {
+            "name": "tactics",
+            "value": "Discovery"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a02')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Alerts - Suspicious Programmatic Login (OAuth Abuse)",
+        "category": "Hunting Queries",
+        "query": "GWSAlerts_CL\n| where TimeGenerated > ago(14d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| where AlertType has_any (\"Suspicious programmatic login\",\n                           \"Suspicious login from a less secure app\")\n| extend User = tostring(AlertData.email),\n         ClientIp = tostring(AlertData.loginDetails.ipAddress),\n         AppName = tostring(coalesce(AlertData.appName, AlertData.applicationName))\n| summarize Alerts = count(),\n            IPs = make_set(ClientIp, 50),\n            Apps = make_set(AppName, 50),\n            FirstSeen = min(TimeGenerated),\n            LastSeen = max(TimeGenerated)\n            by User, AlertType\n| order by Alerts desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Hunt for \"Suspicious programmatic login\" alerts. These typically indicate token\ntheft, OAuth grant abuse, or service-account misuse - patterns documented in\nthe GCP Pentest Checklist (OAuth/IAM persistence section). Pivot on user and\nsource IP to find..."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess, CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_G11_Drive_External_Sharing_Spike')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Hunt G11 - Drive External Sharing Spike",
+        "category": "Hunting Queries",
+        "query": "// G11 - GWS Drive External Sharing Spike (potential data exposure)\nGWSAlerts_CL\n| where TimeGenerated > ago(7d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| where AlertType has_any (\"Drive settings\",\"External sharing\",\"Drive file shared\",\"file exposure\")\n    or Source has \"Drive\"\n| extend Actor = tostring(coalesce(AlertData.actorEmail, AlertData.email)),\n         Target = tostring(coalesce(AlertData.targetEmail, AlertData.recipientEmail)),\n         DocId = tostring(AlertData.docId)\n| summarize ShareCount = count(), Targets = make_set(Target, 50), Docs = make_set(DocId, 50),\n    First = min(TimeGenerated), Last = max(TimeGenerated) by Actor\n| where ShareCount >= 20\n| order by ShareCount desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "GWS Hunt G11 - Drive External Sharing Spike"
+          },
+          {
+            "name": "tactics",
+            "value": "Exfiltration, Collection"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_G12_OAuth_Token_Grant_Burst')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Hunt G12 - OAuth Token Grant Burst (Consent Phishing)",
+        "category": "Hunting Queries",
+        "query": "// G12 - GWS OAuth Token Grant Burst (consent phishing)\nGWSAlerts_CL\n| where TimeGenerated > ago(7d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| where AlertType has_any (\"OAuth\",\"App access\",\"Token grant\",\"3rd party app\")\n    or Source has_any (\"Apps\",\"OAuth\")\n| extend User = tostring(coalesce(AlertData.actorEmail, AlertData.email)),\n         App = tostring(coalesce(AlertData.appName, AlertData.applicationName, AlertData.clientId)),\n         Scopes = tostring(AlertData.scopes)\n| summarize Grants = count(), Apps = make_set(App, 25), ScopesList = make_set(Scopes, 25),\n    Users = dcount(User), UsersList = make_set(User, 50) by App\n| where Users >= 5\n| order by Users desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "GWS Hunt G12 - OAuth Token Grant Burst (Consent Phishing)"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess, CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_G13_Login_New_Country_PerUser')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Hunt G13 - Login from New Country per User",
+        "category": "Hunting Queries",
+        "query": "// G13 - GWS Login from New Country per User (geo-anomaly)\nlet Baseline = GWSAlerts_CL\n    | where TimeGenerated between (ago(30d) .. ago(1d))\n    | extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n    | where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n    | project-away _GwsIp\n    | extend User = tostring(coalesce(AlertData.email, AlertData.actorEmail)),\n             Country = tostring(coalesce(AlertData.loginDetails.country, AlertData.country))\n    | where isnotempty(User) and isnotempty(Country)\n    | summarize KnownCountries = make_set(Country, 50) by User;\nGWSAlerts_CL\n| where TimeGenerated > ago(1d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| extend User = tostring(coalesce(AlertData.email, AlertData.actorEmail)),\n         Country = tostring(coalesce(AlertData.loginDetails.country, AlertData.country))\n| where isnotempty(User) and isnotempty(Country)\n| join kind=leftouter Baseline on User\n| where isempty(KnownCountries) or not(set_has_element(KnownCountries, Country))\n| summarize Events = count(), FirstSeen = min(TimeGenerated), Last = max(TimeGenerated),\n    AlertTypes = make_set(AlertType, 10) by User, Country\n| order by FirstSeen desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "GWS Hunt G13 - Login from New Country per User"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_G14_Account_Recovery_Anomaly')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Hunt G14 - Account Recovery Anomaly (Potential ATO)",
+        "category": "Hunting Queries",
+        "query": "// G14 - GWS Account Recovery Anomaly (potential ATO via recovery flow)\nGWSAlerts_CL\n| where TimeGenerated > ago(7d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| where AlertType has_any (\"recovery\",\"password change\",\"2-Step\",\"backup code\",\"phone change\")\n    or Source has \"Recovery\"\n| extend User = tostring(coalesce(AlertData.email, AlertData.actorEmail))\n| summarize Events = count(), Types = make_set(AlertType, 25), Sources = make_set(Source, 10),\n    First = min(TimeGenerated), Last = max(TimeGenerated) by User\n| where Events >= 3\n| order by Events desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "GWS Hunt G14 - Account Recovery Anomaly (Potential ATO)"
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess, Persistence"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_G15_Calendar_External_Invite_Burst')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Hunt G15 - Calendar External Invite Burst",
+        "category": "Hunting Queries",
+        "query": "// G15 - GWS Calendar Invite to External Domains Burst (callback phishing / lures)\nGWSAlerts_CL\n| where TimeGenerated > ago(7d)\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| where AlertType has_any (\"Calendar\",\"Invite\",\"Meeting\") or Source has \"Calendar\"\n| extend Sender = tostring(coalesce(AlertData.actorEmail, AlertData.organizerEmail)),\n         Recipients = tostring(AlertData.attendees),\n         Subject = tostring(coalesce(AlertData.subject, AlertData.summary))\n| summarize Invites = count(), Recips = make_set(Recipients, 50), Subjects = make_set(Subject, 25)\n    by Sender\n| where Invites >= 25\n| order by Invites desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "GWS Hunt G15 - Calendar External Invite Burst"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/GWS_Hunt_G16_GWS_Entra_Cross_Cloud_Correlation')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "GWS Hunt G16 - GWS + Entra Cross-Cloud Identity Risk",
+        "category": "Hunting Queries",
+        "query": "// G16 - GWS + Entra Cross-Cloud Identity Risk Correlation (extended)\nlet GWSRisky = GWSAlerts_CL\n    | where TimeGenerated > ago(7d)\n    | extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n    | where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n    | project-away _GwsIp\n    | where AlertType has_any (\"Suspicious login\",\"Leaked password\",\"State-sponsored\",\"Device compromised\",\"Government-backed\")\n    | extend User = tolower(tostring(coalesce(AlertData.email, AlertData.actorEmail)))\n    | summarize GwsAlerts = count(), GwsTypes = make_set(AlertType, 10), GwsFirst = min(TimeGenerated) by User;\nlet EntraRisky = SigninLogs\n    | where TimeGenerated > ago(7d)\n    | where RiskLevelDuringSignIn in (\"medium\",\"high\") or ResultType != 0\n    | extend User = tolower(UserPrincipalName)\n    | summarize EntraEvents = count(), EntraIPs = make_set(IPAddress, 25),\n        EntraApps = make_set(AppDisplayName, 25), EntraFirst = min(TimeGenerated) by User;\nGWSRisky\n| join kind=inner EntraRisky on User\n| extend GapMinutes = datetime_diff('minute', EntraFirst, GwsFirst)\n| order by GwsAlerts + EntraEvents desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "GWS Hunt G16 - GWS + Entra Cross-Cloud Identity Risk"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess, CredentialAccess"
+          },
+          {
+            "name": "createdBy",
+            "value": ""
+          },
+          {
+            "name": "createdTimeUtc",
+            "value": ""
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2022-09-01",
+      "name": "deploy-GWS-AnalyticRules",
+      "properties": {
+        "mode": "Incremental",
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "parameters": {
+          "workspace": {
+            "value": "[parameters('workspace')]"
+          },
+          "enableAnalyticRules": {
+            "value": "[parameters('enableAnalyticRules')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "workspace": {
+              "type": "string"
+            },
+            "enableAnalyticRules": {
+              "type": "bool"
+            },
+            "location": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2024-09-01",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f05')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "GWS - User Granted Admin Privilege",
+                "description": "A user was granted admin privileges or a previously suspended user was\nreactivated. Common technique for persistence after account takeover.",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "GWSAlerts_CL\n| where Source == \"User Changes\"\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n     or AlertDataType endswith \"UserChanges\"\n| where AlertType has_any (\"granted Admin\", \"Suspended user made active\")\n| extend Actor = tostring(coalesce(AlertData.actorEmail, AlertData.email)),\n         Target = tostring(coalesce(AlertData.targetEmail, AlertData.userEmail))\n| project TimeGenerated, AlertId, MetadataSeverity, Source, AlertType,\n          Actor, Target, SecurityInvestigationToolLink, AlertData",
+                "queryFrequency": "PT30M",
+                "queryPeriod": "PT2H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Persistence",
+                  "PrivilegeEscalation"
+                ],
+                "techniques": [
+                  "T1098.003"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "Actor"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "Target"
+                      }
+                    ]
+                  }
+                ],
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": false,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT5H",
+                    "matchingMethod": "AllEntities",
+                    "groupByEntities": [],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2024-09-01",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f08')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "GWS - Misconfigured Email Allowlist Causing Phishing Delivery",
+                "description": "Gmail detected phishing reaching inboxes because of a misconfigured allowlist\n(BadWhitelist). Indicates a defense-evasion misconfiguration that must be\nremediated immediately.",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "GWSAlerts_CL\n| where AlertDataType endswith \"BadWhitelist\"\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n     or AlertType has \"Misconfigured whitelist\"\n| extend Domains = tostring(AlertData.domains),\n         Sources = tostring(AlertData.sourceIp)\n| project TimeGenerated, AlertId, MetadataSeverity, AlertType,\n          Domains, Sources, SecurityInvestigationToolLink, AlertData",
+                "queryFrequency": "PT30M",
+                "queryPeriod": "PT2H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "DefenseEvasion",
+                  "InitialAccess"
+                ],
+                "techniques": [
+                  "T1566.001",
+                  "T1562"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "URL",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Url",
+                        "columnName": "SecurityInvestigationToolLink"
+                      }
+                    ]
+                  }
+                ],
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": false,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT5H",
+                    "matchingMethod": "AllEntities",
+                    "groupByEntities": [],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2024-09-01",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f06')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "GWS - High-Severity DLP Rule Violation",
+                "description": "A Workspace DLP rule fired at HIGH severity (typically external sharing or\nexfiltration of regulated data such as PII, PCI, source code, secrets).",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "GWSAlerts_CL\n| where Source == \"Data Loss Prevention\"\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n     or AlertDataType endswith \"DlpRuleViolation\"\n| where MetadataSeverity =~ \"HIGH\" or tostring(AlertData.severity) =~ \"HIGH\"\n| extend ResourceOwner = tostring(coalesce(AlertData.resourceOwner, AlertData.email)),\n         RuleName = tostring(AlertData.ruleName),\n         ResourceTitle = tostring(AlertData.resourceTitle)\n| project TimeGenerated, AlertId, MetadataSeverity, RuleName, ResourceOwner,\n          ResourceTitle, SecurityInvestigationToolLink, AlertData",
+                "queryFrequency": "PT10M",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Exfiltration",
+                  "Collection"
+                ],
+                "techniques": [
+                  "T1567.002",
+                  "T1530"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "ResourceOwner"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "File",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Name",
+                        "columnName": "ResourceTitle"
+                      }
+                    ]
+                  }
+                ],
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": false,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT5H",
+                    "matchingMethod": "AllEntities",
+                    "groupByEntities": [],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2024-09-01",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f09')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "GWS - Mobile Device Compromised",
+                "description": "Workspace MDM flagged a managed mobile device as compromised (e.g., rooted/jailbroken,\nmalware-infected). Treat as endpoint compromise impacting Workspace data.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "GWSAlerts_CL\n| where Source == \"Mobile device management\"\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n     or AlertDataType endswith \"DeviceCompromised\"\n     or AlertType has \"Device compromised\"\n| extend User = tostring(AlertData.email),\n         DeviceId = tostring(AlertData.deviceId),\n         DeviceModel = tostring(AlertData.deviceModel)\n| project TimeGenerated, AlertId, MetadataSeverity, AlertType,\n          User, DeviceId, DeviceModel, SecurityInvestigationToolLink, AlertData",
+                "queryFrequency": "PT30M",
+                "queryPeriod": "PT2H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "InitialAccess",
+                  "Persistence"
+                ],
+                "techniques": [
+                  "T1078.004",
+                  "T1474"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "User"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "Host",
+                    "fieldMappings": [
+                      {
+                        "identifier": "HostName",
+                        "columnName": "DeviceId"
+                      }
+                    ]
+                  }
+                ],
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": false,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT5H",
+                    "matchingMethod": "AllEntities",
+                    "groupByEntities": [],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2024-09-01",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f02')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "GWS - Domain-Wide Takeout Initiated",
+                "description": "A super admin initiated a domain-wide data takeout. This exports every user's\ndata and is a high-impact action commonly observed in account-takeover and\ninsider exfiltration scenarios.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "GWSAlerts_CL\n| where Source == \"Domain wide takeout\"\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n     or AlertDataType endswith \"DomainWideTakeoutInitiated\"\n     or AlertType has \"takeout\"\n| extend Initiator = tostring(coalesce(AlertData.email, AlertData.initiator))\n| project TimeGenerated, AlertId, MetadataSeverity, Source, AlertType,\n          Initiator, SecurityInvestigationToolLink, AlertData",
+                "queryFrequency": "PT10M",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Exfiltration"
+                ],
+                "techniques": [
+                  "T1567",
+                  "T1530"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "Initiator"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "URL",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Url",
+                        "columnName": "SecurityInvestigationToolLink"
+                      }
+                    ]
+                  }
+                ],
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": false,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT5H",
+                    "matchingMethod": "AllEntities",
+                    "groupByEntities": [],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2024-09-01",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f03')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "GWS - Potential Ransomware Detected on Drive",
+                "description": "Google's Drive Counter-Abuse system detected mass file changes consistent with\nransomware encryption. File syncing is auto-paused. Investigate the affected\nuser, endpoint, and recently shared/downloaded files.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "GWSAlerts_CL\n| where Source == \"Drive Counter Abuse\"\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n     or AlertType has \"ransomware\"\n     or (AlertDataType endswith \"DriveSyncStateChanged\" and tostring(AlertData.state) =~ \"PAUSED\")\n| extend AffectedUser = tostring(AlertData.email)\n| project TimeGenerated, AlertId, MetadataSeverity, Source, AlertType,\n          AffectedUser, SecurityInvestigationToolLink, AlertData",
+                "queryFrequency": "PT10M",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Impact"
+                ],
+                "techniques": [
+                  "T1486"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "AffectedUser"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "URL",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Url",
+                        "columnName": "SecurityInvestigationToolLink"
+                      }
+                    ]
+                  }
+                ],
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": false,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT5H",
+                    "matchingMethod": "AllEntities",
+                    "groupByEntities": [],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2024-09-01",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f07')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "GWS - Leaked Password Followed by Suspicious Login (Chained)",
+                "description": "Correlation: a 'Leaked password' alert was followed within 24 hours by any\nsuspicious-login or programmatic-login alert for the same account.\nStrong indicator of credential-stuffing-driven account takeover.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "let leaks =\n    GWSAlerts_CL\n    | where AlertType has \"Leaked password\"\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n    | extend User = tostring(AlertData.email)\n    | project LeakTime = TimeGenerated, User, LeakAlertId = AlertId;\nlet logins =\n    GWSAlerts_CL\n    | where AlertType has_any (\"Suspicious login\", \"Suspicious programmatic login\")\n    | extend User = tostring(AlertData.email)\n    | project LoginTime = TimeGenerated, User, LoginAlertId = AlertId,\n              LoginAlertType = AlertType, LoginLink = SecurityInvestigationToolLink;\nleaks\n| join kind=inner logins on User\n| where LoginTime between (LeakTime .. LeakTime + 24h)\n| project LeakTime, LoginTime, User, LeakAlertId, LoginAlertId,\n          LoginAlertType, LoginLink",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT25H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "InitialAccess",
+                  "CredentialAccess"
+                ],
+                "techniques": [
+                  "T1078.004",
+                  "T1110.004"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "User"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "URL",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Url",
+                        "columnName": "LoginLink"
+                      }
+                    ]
+                  }
+                ],
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": false,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT5H",
+                    "matchingMethod": "AllEntities",
+                    "groupByEntities": [],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2024-09-01",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f0a')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "GWS - Phishing Alert Spike Across Multiple Users",
+                "description": "Five or more distinct users received phishing-related alerts in a 1-hour window.\nSuggests an active campaign hitting the tenant.",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "GWSAlerts_CL\n| where Source == \"Gmail phishing\" or AlertDataType endswith \"MailPhishing\"\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n| extend User = tostring(AlertData.email)\n| summarize Users = make_set(User, 100), AlertCount = count(),\n            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)\n            by bin(TimeGenerated, 1h)\n| where array_length(Users) >= 5\n| mv-expand User = Users to typeof(string)\n| project TimeGenerated, FirstSeen, LastSeen, AlertCount, User",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "InitialAccess"
+                ],
+                "techniques": [
+                  "T1566.001",
+                  "T1566.002"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "User"
+                      }
+                    ]
+                  }
+                ],
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": false,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT5H",
+                    "matchingMethod": "AllEntities",
+                    "groupByEntities": [],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2024-09-01",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f04')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "GWS - Sensitive Admin Action - SSO / Super Admin Changes",
+                "description": "A sensitive admin action was performed: primary admin changed, super admin\npassword reset, or SSO profile added/updated/deleted. These are high-leverage\nchanges that have been used in IdP-relay and persistence attacks against\nWorkspace tenants. (See also GCP-Pentest-Checklist - IAM persistence patterns.)",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "GWSAlerts_CL\n| where Source == \"Sensitive Admin Action\"\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n     or AlertDataType endswith \"SensitiveAdminAction\"\n     or AlertType has_any (\"SSO profile\", \"Super admin password reset\", \"Primary admin changed\")\n| extend Actor = tostring(coalesce(AlertData.actorEmail, AlertData.email)),\n         Target = tostring(coalesce(AlertData.targetEmail, AlertData.target))\n| project TimeGenerated, AlertId, MetadataSeverity, Source, AlertType,\n          Actor, Target, SecurityInvestigationToolLink, AlertData",
+                "queryFrequency": "PT10M",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Persistence",
+                  "PrivilegeEscalation",
+                  "DefenseEvasion"
+                ],
+                "techniques": [
+                  "T1556",
+                  "T1098",
+                  "T1484.002"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "Actor"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "Target"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "URL",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Url",
+                        "columnName": "SecurityInvestigationToolLink"
+                      }
+                    ]
+                  }
+                ],
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": false,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT5H",
+                    "matchingMethod": "AllEntities",
+                    "groupByEntities": [],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2024-09-01",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/7a3f2c8e-1d4b-4e5a-9c2f-8b1d7e6a4f01')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "GWS - Government-backed (State-Sponsored) Attack Warning",
+                "description": "Google Alert Center has issued a state-sponsored attack warning for an account\nin the tenant. Google sends these only when there is high-confidence evidence\nof nation-state targeting. Treat as critical and engage IR.",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "GWSAlerts_CL\n| where Source == \"Google identity\" or AlertType == \"Government attack warning\"\n| extend _GwsIp = coalesce(tostring(AlertData.loginDetails.ipAddress), tostring(AlertData.sourceIp), \"\")\n| where not(ExcludeAllowlistedIPs_GWS(_GwsIp))\n| project-away _GwsIp\n     or AlertDataType endswith \"StateSponsoredAttack\"\n| extend TargetUser = tostring(AlertData.email)\n| project TimeGenerated, AlertId, MetadataSeverity, Source, AlertType,\n          TargetUser, SecurityInvestigationToolLink, AlertData",
+                "queryFrequency": "PT10M",
+                "queryPeriod": "PT1H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "InitialAccess",
+                  "CredentialAccess"
+                ],
+                "techniques": [
+                  "T1078.004",
+                  "T1566"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "TargetUser"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "URL",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Url",
+                        "columnName": "SecurityInvestigationToolLink"
+                      }
+                    ]
+                  }
+                ],
+                "incidentConfiguration": {
+                  "createIncident": true,
+                  "groupingConfiguration": {
+                    "enabled": false,
+                    "reopenClosedIncident": false,
+                    "lookbackDuration": "PT5H",
+                    "matchingMethod": "AllEntities",
+                    "groupByEntities": [],
+                    "groupByAlertDetails": [],
+                    "groupByCustomDetails": []
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

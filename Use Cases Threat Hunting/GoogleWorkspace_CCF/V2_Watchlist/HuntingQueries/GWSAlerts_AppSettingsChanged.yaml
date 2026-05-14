@@ -1,0 +1,31 @@
+id: 8b4e3d9f-2c5d-4f6b-ad3e-9c2e8f7b5a09
+name: GWS Alerts - App Settings Changed (Calendar / Drive / Email / Mobile)
+description: |
+  Tracks AppSettingsChanged alerts. Adversaries flip Drive sharing to "anyone
+  with link", relax Gmail external-forwarding, or weaken mobile policies as part
+  of persistence/exfil setup.
+requiredDataConnectors:
+  - connectorId: GoogleWorkspaceDefinition
+    dataTypes:
+      - GWSAlerts_CL
+tactics:
+  - DefenseEvasion
+  - Persistence
+relevantTechniques:
+  - T1562
+  - T1098
+query: |
+  GWSAlerts_CL
+  | where TimeGenerated > ago(30d)
+  | where Source == "App Settings Changed" or AlertDataType endswith "AppSettingsChanged"
+  | extend Actor = tostring(coalesce(AlertData.actorEmail, AlertData.email)),
+           SettingName = tostring(AlertData.settingName),
+           NewValue = tostring(AlertData.newValue),
+           OldValue = tostring(AlertData.oldValue),
+           App = tostring(AlertData.applicationName)
+  | project TimeGenerated, AlertId, App, AlertType, Actor,
+            SettingName, OldValue, NewValue, SecurityInvestigationToolLink
+  | order by TimeGenerated desc
+tags:
+  - GoogleWorkspace
+  - DefenseEvasion
