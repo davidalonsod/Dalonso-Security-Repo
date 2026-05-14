@@ -1,0 +1,95 @@
+// =========================================================
+// RULE-09 | AD-DnsAdmins-DLL-Injection
+// Description : DnsAdmins DLL injection on DC — detects the
+//               chain of:
+//               1. A user added to the DnsAdmins group (4728)
+//               2. DNS Server service being restarted or a new
+//                  DLL path configured (WindowsEvent System
+//                  channel EventID 4 / 7045, or 4688 showing
+//                  dnscmd with /serverlevelplugindll)
+//               Members of DnsAdmins can set
+//               ServerLevelPluginDll on the DNS service,
+//               which runs as SYSTEM on the DC.  Restarting
+//               DNS loads the attacker's DLL as SYSTEM →
+//               instant DC compromise.
+// Severity    : High (DnsAdmins add) → Critical (dnscmd DLL
+//               config + DNS restart on same host)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1543.003 — Windows Service
+//               T1574.002 — DLL Side-Loading
+// Tables      : SecurityEvent, WindowsEvent (System channel)
+// =========================================================
+
+let LookBack = 15m;
+
+// --- Signal 1: User added to DnsAdmins group ---
+let DnsAdminsAdditions = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID in (4728, 4732, 4756)
+    | where TargetUserName =~ "DnsAdmins"
+    | project
+        AddTime    = TimeGenerated,
+        NewMember  = MemberName,
+        AddedBy    = SubjectUserName,
+        DC         = Computer;
+
+// --- Signal 2: dnscmd /serverlevelplugindll via process creation ---
+let DnscmdDLLConfig = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4688
+    | where CommandLine has_any ("dnscmd", "sc stop dns", "sc start dns",
+                                  "net stop dns", "net start dns")
+       and (CommandLine has "serverlevelplugindll"
+            or CommandLine has_any ("sc stop", "sc start", "net stop", "net start"))
+    | extend
+        DllPath    = extract(@"(?i)/serverlevelplugindll\s+(\S+)", 1, CommandLine)
+    | project
+        CmdTime    = TimeGenerated,
+        Actor      = SubjectUserName,
+        ActorDom   = SubjectDomainName,
+        CmdLine    = CommandLine,
+        DllPath,
+        Host       = Computer;
+
+// --- Signal 3: DNS service restart / new service from WindowsEvent ---
+let DnsServiceEvents = WindowsEvent
+    | where TimeGenerated > ago(LookBack)
+    | where Channel == "System"
+    | where EventID in (7036, 7040, 7045)        // Service started/stopped/installed
+    | where EventData has_any ("DNS Server", "dns")
+    | project
+        SvcTime    = TimeGenerated,
+        EventID_   = EventID,
+        SvcDetail  = EventData,
+        Host       = Computer;
+
+// --- Combine and correlate ---
+DnsAdminsAdditions
+| join kind=leftouter (DnscmdDLLConfig) on $left.DC == $right.Host
+| join kind=leftouter (DnsServiceEvents) on $left.DC == $right.Host
+| extend
+    HasDLLConfig   = isnotempty(CmdLine),
+    HasServiceEvt  = isnotempty(SvcDetail),
+    Severity = case(
+        HasDLLConfig and HasServiceEvt, "Critical",
+        HasDLLConfig,                   "Critical",
+        HasServiceEvt,                  "High",
+        "High"
+    ),
+    WhySuspicious = strcat(
+        "DnsAdmins_Member_Added: ", NewMember, "; ",
+        iff(HasDLLConfig,  strcat("DLL_Config_via_dnscmd: ", DllPath, "; "), ""),
+        iff(HasServiceEvt, "DNS_Service_Modified; ", "")
+    )
+| project
+    TimeGenerated    = AddTime,
+    Severity,
+    WhySuspicious,
+    NewMember,
+    AddedBy,
+    DC,
+    DllPath,
+    CmdLine,
+    HasDLLConfig,
+    HasServiceEvt
+| order by TimeGenerated desc

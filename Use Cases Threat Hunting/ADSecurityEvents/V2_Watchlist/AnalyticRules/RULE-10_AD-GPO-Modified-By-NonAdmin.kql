@@ -1,0 +1,85 @@
+// =========================================================
+// RULE-10 | AD-GPO-Modified-By-NonAdmin
+// Description : Group Policy Object (GPO) modification by a
+//               non-administrative account — Event 5136
+//               (Directory Service Object Modified) on a
+//               groupPolicyContainer object where the
+//               SubjectUserName is NOT in Domain Admins or
+//               Group Policy Creator Owners.
+//               GPO write access allows pushing scheduled
+//               tasks, startup scripts, local admin group
+//               membership, and registry changes to every
+//               machine in the linked OU — potentially
+//               thousands of endpoints.
+// Severity    : High → Critical when linked to high-value OUs
+//               (Domain Controllers, Tier-0 servers)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1484.001 — Group Policy Modification
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+// Known admin groups allowed to modify GPOs
+// Update this list to match your environment
+let AuthorisedGPOModifiers = datatable(Account:string)
+[
+    "Group Policy Creator Owners",
+    "Domain Admins",
+    "Enterprise Admins",
+    "SYSTEM"
+];
+
+// Collect recent GPO write events
+let GPOModEvents = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 5136
+    | where ObjectClass =~ "groupPolicyContainer"
+    | where OperationType == "%%14674"              // Write / attribute added/changed
+    | extend
+        ModifiedAttribute = AttributeLDAPDisplayName,
+        GPO_DN            = ObjectDN,
+        ActorAccount      = SubjectUserName,
+        ActorDomain       = SubjectDomainName;
+
+// Check if actor is in an authorised group via recent 4728 events
+let AuthorisedMembers = SecurityEvent
+    | where TimeGenerated > ago(30d)
+    | where EventID in (4728, 4732, 4756)
+    | where TargetUserName has_any ("Group Policy Creator Owners",
+                                    "Domain Admins", "Enterprise Admins")
+    | summarize by AuthMember = tolower(MemberName);
+
+// Filter out authorised modifiers
+GPOModEvents
+| extend ActorNorm = tolower(ActorAccount)
+| join kind=leftanti (AuthorisedMembers) on $left.ActorNorm == $right.AuthMember
+| where not(ActorAccount has_any ("SYSTEM", "S-1-5-18"))
+// Flag sensitivity of target OU based on GPO DN
+| extend
+    TargetHighValueOU = GPO_DN has_any (
+        "OU=Domain Controllers", "Tier-0", "Tier0",
+        "OU=Servers", "Critical"
+    ),
+    Severity = case(
+        GPO_DN has_any ("Domain Controllers", "Tier-0", "Tier0"), "Critical",
+        "High"
+    ),
+    WhySuspicious = strcat(
+        "GPO_Modified_By_NonAdmin; ",
+        "GPO: ", GPO_DN, "; ",
+        "Attribute: ", ModifiedAttribute, "; ",
+        "Actor: ", ActorAccount, "; ",
+        iff(TargetHighValueOU, "HighValue_OU_Linked; ", "")
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    ActorAccount,
+    ActorDomain,
+    GPO_DN,
+    ModifiedAttribute,
+    TargetHighValueOU,
+    Computer
+| order by TimeGenerated desc

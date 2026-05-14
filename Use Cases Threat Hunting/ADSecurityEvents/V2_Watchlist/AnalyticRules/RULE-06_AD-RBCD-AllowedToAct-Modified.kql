@@ -1,0 +1,76 @@
+// =========================================================
+// RULE-06 | AD-RBCD-AllowedToAct-Modified
+// Description : Resource-Based Constrained Delegation (RBCD)
+//               setup detection — Event 4742 (Computer Account
+//               Changed) or Event 5136 (DS Object Modified)
+//               showing a write to the attribute
+//               msDS-AllowedToActOnBehalfOfOtherIdentity on
+//               a computer object.
+//               Writing this attribute to a target computer
+//               allows an attacker-controlled account to use
+//               S4U2Self + S4U2Proxy to impersonate any user
+//               (including Domain Admins) to services on that
+//               computer.
+// Severity    : High → Critical when target is a DC or
+//               writer is non-admin
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1134.001 — Access Token Manipulation
+//               T1098      — Account Manipulation
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+// Detect via Event 4742 (Computer Account Changed)
+let Via4742 = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4742
+    | where AllowedToDelegateTo has "msDS-AllowedToActOnBehalfOfOtherIdentity"
+        or EventData has "msDS-AllowedToActOnBehalfOfOtherIdentity"
+    | extend
+        DetectionSource = "Event4742_ComputerAccountChanged",
+        ActorAccount    = strcat(SubjectDomainName, "\\", SubjectUserName),
+        TargetObject    = strcat(TargetDomainName, "\\", TargetUserName),
+        IsTargetDC      = TargetUserName has_any ("DC", "ADDC", "PDC", "BDC")
+    | project TimeGenerated, DetectionSource, ActorAccount,
+              SubjectUserName, SubjectDomainName, TargetObject,
+              IsTargetDC, Computer;
+
+// Detect via Event 5136 (DS Object Modified — more reliable)
+let Via5136 = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 5136
+    | where OperationType == "%%14674"
+    | where AttributeLDAPDisplayName =~ "msDS-AllowedToActOnBehalfOfOtherIdentity"
+    | extend
+        DetectionSource = "Event5136_DSObjectModified",
+        ActorAccount    = strcat(SubjectDomainName, "\\", SubjectUserName),
+        TargetObject    = ObjectDN,
+        IsTargetDC      = ObjectDN has_any ("OU=Domain Controllers", "CN=Domain Controllers")
+    | project TimeGenerated, DetectionSource, ActorAccount,
+              SubjectUserName, SubjectDomainName, TargetObject,
+              IsTargetDC, Computer;
+
+union Via4742, Via5136
+| extend
+    Severity = case(
+        IsTargetDC,          "Critical",
+        not(SubjectUserName has_any ("admin", "svc", "$")), "High",
+        "Medium"
+    ),
+    WhySuspicious = strcat(
+        "RBCD_AllowedToAct_Write; ",
+        iff(IsTargetDC, "Target_Is_DC; ", ""),
+        "Actor: ", SubjectUserName, "; ",
+        "Source: ", DetectionSource
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    ActorAccount,
+    TargetObject,
+    IsTargetDC,
+    DetectionSource,
+    Computer
+| order by TimeGenerated desc

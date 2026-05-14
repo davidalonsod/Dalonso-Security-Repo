@@ -1,0 +1,141 @@
+// ============================================================
+// RULE-32 | AD Security: Accessibility Feature / IFEO Backdoor
+// ============================================================
+// Description:
+//   Detects persistence/privilege escalation via Image File Execution Options
+//   (IFEO) debugger hijacking of Windows accessibility binaries (Sticky Keys,
+//   Utilman, Narrator, On-Screen Keyboard, Magnifier, Display Switch, ATBroker).
+//   Attackers (e.g., Sticky-Keys-Slayer) replace or redirect sethc.exe/utilman.exe
+//   to cmd.exe, allowing SYSTEM-level shell access from the Windows logon screen
+//   via the accessibility shortcut keys — no credentials required.
+//
+//   Detection covers TWO attack vectors:
+//     1. Registry modification to IFEO debugger key (EventID 4657)
+//     2. Suspicious process spawn where accessibility binary is parent (EventID 4688)
+//
+// Mitre ATT&CK:
+//   - T1546.008: Event Triggered Execution — Accessibility Features
+//   - T1543:     Create or Modify System Process
+//   - TA0003:    Persistence
+//   - TA0004:    Privilege Escalation
+//
+// Data Sources: SecurityEvent (EventID 4657, 4688), DeviceProcessEvents
+// Severity:     High
+// Frequency:    Every 10 minutes | Lookback 10 minutes
+// Alert Suppression: 4 hours per affected host
+// ============================================================
+
+// ──────────────────────────────────────────────────────────────
+// PART 1 — Registry IFEO Debugger Key Write (EventID 4657)
+//   Auditing prerequisite: Enable "Audit Registry" in Advanced Audit Policy
+// ──────────────────────────────────────────────────────────────
+let AccessibilityBinaries = dynamic([
+    "sethc.exe",        // Sticky Keys (Shift x5)
+    "utilman.exe",      // Utility Manager (Win+U)
+    "osk.exe",          // On-Screen Keyboard
+    "magnify.exe",      // Magnifier
+    "narrator.exe",     // Narrator
+    "displayswitch.exe",// Display Switch (Win+P)
+    "atbroker.exe"      // Assistive Technology Broker
+]);
+let SuspiciousDebuggers = dynamic([
+    "cmd.exe", "powershell.exe", "powershell_ise.exe",
+    "pwsh.exe", "mshta.exe", "wscript.exe", "cscript.exe",
+    "rundll32.exe", "regsvr32.exe", "msiexec.exe",
+    "net.exe", "whoami.exe"
+]);
+// --- Vector 1: IFEO registry write ---
+let IFEORegistryWrites = SecurityEvent
+| where TimeGenerated >= ago(10m)
+| where EventID == 4657
+| where ObjectName has_any (
+    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\sethc.exe",
+    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\utilman.exe",
+    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\osk.exe",
+    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\magnify.exe",
+    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\narrator.exe",
+    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\displayswitch.exe",
+    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\atbroker.exe"
+)
+| where ObjectValueName =~ "Debugger" or ObjectValueName =~ "GlobalFlag"
+| extend
+    Actor              = tolower(strcat(SubjectDomainName, "\\", SubjectUserName)),
+    AffectedHost       = Computer,
+    TargetKey          = ObjectName,
+    ValueName          = ObjectValueName,
+    NewValue           = NewValue,
+    OldValue           = OldValue,
+    DetectionVector    = "IFEO_RegistryWrite",
+    MITRE_Technique    = "T1546.008"
+| project
+    TimeGenerated, AffectedHost, Actor,
+    TargetKey, ValueName, OldValue, NewValue,
+    DetectionVector, MITRE_Technique;
+// --- Vector 2: Accessibility binary spawns shell (EventID 4688) ---
+let AccessibilityShellSpawn = SecurityEvent
+| where TimeGenerated >= ago(10m)
+| where EventID == 4688
+| extend
+    ParentProcess = tolower(tostring(extract(@"([^\\]+)$", 1, ParentProcessName))),
+    ChildProcess  = tolower(tostring(extract(@"([^\\]+)$", 1, NewProcessName)))
+| where ParentProcess in~ (AccessibilityBinaries)
+| where ChildProcess in~ (SuspiciousDebuggers)
+| extend
+    Actor              = tolower(strcat(SubjectDomainName, "\\", SubjectUserName)),
+    AffectedHost       = Computer,
+    TargetKey          = strcat("_AccessibilityParent:", ParentProcess),
+    ValueName          = "ProcessSpawn",
+    OldValue           = ParentProcess,
+    NewValue           = strcat(NewProcessName, " ", CommandLine),
+    DetectionVector    = "AccessibilityBinary_ShellSpawn",
+    MITRE_Technique    = "T1546.008"
+| project
+    TimeGenerated, AffectedHost, Actor,
+    TargetKey, ValueName, OldValue, NewValue,
+    DetectionVector, MITRE_Technique;
+// --- Vector 3: DeviceProcessEvents (MDE) - accessibility binary parent ---
+let MDEAccessibilitySpawn = DeviceProcessEvents
+| where TimeGenerated >= ago(10m)
+| extend
+    ParentBin = tolower(tostring(extract(@"([^\\]+)$", 1, InitiatingProcessFileName))),
+    ChildBin  = tolower(FileName)
+| where ParentBin in~ (AccessibilityBinaries)
+| where ChildBin in~ (SuspiciousDebuggers)
+| extend
+    Actor              = tolower(strcat(InitiatingProcessAccountDomain, "\\", InitiatingProcessAccountName)),
+    AffectedHost       = DeviceName,
+    TargetKey          = strcat("_AccessibilityParent:", ParentBin),
+    ValueName          = "ProcessSpawn",
+    OldValue           = InitiatingProcessFileName,
+    NewValue           = strcat(FolderPath, "\\", FileName, " | ", ProcessCommandLine),
+    DetectionVector    = "MDE_AccessibilitySpawn",
+    MITRE_Technique    = "T1546.008"
+| project
+    TimeGenerated, AffectedHost, Actor,
+    TargetKey, ValueName, OldValue, NewValue,
+    DetectionVector, MITRE_Technique;
+// ──────────────────────────────────────────────────────────────
+// UNION all vectors and finalize
+// ──────────────────────────────────────────────────────────────
+union IFEORegistryWrites, AccessibilityShellSpawn, MDEAccessibilitySpawn
+| summarize
+    FirstDetected   = min(TimeGenerated),
+    LastDetected    = max(TimeGenerated),
+    EventCount      = count(),
+    Vectors         = make_set(DetectionVector),
+    NewValues       = make_set(NewValue),
+    OldValues       = make_set(OldValue),
+    AffectedKeys    = make_set(TargetKey)
+    by AffectedHost, Actor, MITRE_Technique
+| extend
+    Severity = iff(
+        Vectors has "IFEO_RegistryWrite" and (Vectors has "AccessibilitySpawn" or Vectors has "MDE"),
+        "Critical",   // Both registry write AND spawn observed — confirmed exploitation
+        "High"        // Either vector alone is already high-confidence
+    ),
+    AlertName = strcat("Accessibility Feature Backdoor (IFEO): ", Actor, " on ", AffectedHost)
+| project-reorder
+    FirstDetected, LastDetected, Severity, AlertName,
+    AffectedHost, Actor,
+    Vectors, AffectedKeys, NewValues, OldValues,
+    EventCount, MITRE_Technique

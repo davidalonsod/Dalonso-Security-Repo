@@ -1,0 +1,88 @@
+// =========================================================
+// RULE-30 | AD-GoldenCertificate-CA-Backup
+// Description : Golden Certificate attack — CA private key
+//               backup or export detection. Event 4880
+//               (Certificate Services started — backup
+//               initiated), Event 4886 (Certificate Issued)
+//               combined with Event 4688 (Process Creation)
+//               showing certutil, certipy, or openssl
+//               performing a CA backup (-backup flag) or
+//               private key export.
+//               A stolen CA private key enables the attacker
+//               to forge ANY certificate for ANY user for the
+//               lifetime of the CA (typically 5–20 years).
+//               It survives password resets, krbtgt rotations,
+//               account removals, and even CA certificate
+//               revocation (unless the CA itself is rebuilt).
+// Severity    : Critical — any CA private key export/backup
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1553.004 — Subvert Trust Controls:
+//               Install Root Certificate
+//               T1649     — Steal or Forge Auth Certs
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+// Signal 1: Event 4880 — Certificate Services started in backup mode
+let Via4880 = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4880
+    | extend
+        Source = "Event4880_CA_Backup_Started",
+        Actor  = SubjectUserName,
+        Detail = EventData,
+        Host   = Computer;
+
+// Signal 2: CA backup commands via process creation
+let Via4688 = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4688
+    | where CommandLine has_any (
+        "certutil.*-backup", "certutil -backup",
+        "certutil.*-exportpfx", "certutil -exportpfx",
+        "certipy.*ca.*backup", "certipy ca -backup",
+        "openssl.*pkcs12", "openssl.*pfx",
+        "Export-PfxCertificate",
+        "certreq.*-export",
+        "Get-CertificateEnrollmentPolicyServer"
+      )
+      or (CommandLine has "certutil" and CommandLine has "-p " and CommandLine has ".pfx")
+    | extend
+        Source = "Event4688_CA_Key_Export_Cmd",
+        Actor  = SubjectUserName,
+        Detail = CommandLine,
+        Host   = Computer;
+
+// Signal 3: MDE DeviceProcessEvents CA backup
+let ViaMDE = DeviceProcessEvents
+    | where TimeGenerated > ago(LookBack)
+    | where ProcessCommandLine has_any (
+        "certutil.*-backup", "certipy.*ca.*backup",
+        "-exportpfx", "Export-PfxCertificate"
+      )
+    | extend
+        Source = "MDE_CA_Key_Backup",
+        Actor  = InitiatingProcessAccountName,
+        Detail = ProcessCommandLine,
+        Host   = DeviceName;
+
+union Via4880, Via4688, ViaMDE
+| extend
+    Severity = "Critical",
+    WhySuspicious = strcat(
+        "Golden_Certificate_CA_Private_Key_Backup_or_Export; ",
+        "Survives_krbtgt_rotation_and_password_resets; ",
+        "Source: ", Source, "; ",
+        "Actor: ", Actor, "; ",
+        "Detail: ", Detail
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    Actor,
+    Detail,
+    Source,
+    Host
+| order by TimeGenerated desc

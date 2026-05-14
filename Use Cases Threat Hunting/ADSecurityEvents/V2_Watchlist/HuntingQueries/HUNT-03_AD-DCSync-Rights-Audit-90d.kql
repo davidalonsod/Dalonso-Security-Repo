@@ -1,0 +1,96 @@
+// =========================================================
+// HUNT-03 | AD-DCSync-Rights-Audit-90d
+// Description : Identify all principals who have exercised
+//               DS-Replication-Get-Changes or
+//               DS-Replication-Get-Changes-All rights over
+//               the past 90 days, filtered to non-DC sources.
+//               Also surfaces any 5136 events that granted
+//               these rights on the domain root object.
+// Period      : 90 days
+// Use Case    : Privilege hygiene audit, post-breach exposure
+//               assessment, DCSync right holder inventory
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 90d;
+let ReplicateAllGUID = "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2";
+let ReplicateGUID    = "1131f6ac-9c07-11d1-f79f-00c04fc2dcd2";
+
+// Known DC machine accounts
+let KnownDCs = SecurityEvent
+    | where TimeGenerated > ago(7d)
+    | where EventID == 4768
+    | summarize by DC = toupper(Computer);
+
+// Event 4662: Replication rights exercised
+let DCsyncExercised = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4662
+    | where ObjectType has "domainDNS"
+    | where Properties has ReplicateAllGUID or Properties has ReplicateGUID
+    | where not(toupper(SubjectUserName) endswith "$"
+                and toupper(SubjectUserName) in~ (KnownDCs | extend v = strcat(DC, "$") | project v))
+    | extend
+        Source     = "4662_ReplicationRightExercised",
+        Actor      = strcat(SubjectDomainName, "\\", SubjectUserName),
+        RightUsed  = iff(Properties has ReplicateAllGUID,
+                         "DS-Replication-Get-Changes-All",
+                         "DS-Replication-Get-Changes")
+    | summarize
+        Count          = count(),
+        RightsUsed     = make_set(RightUsed),
+        Hosts          = make_set(Computer, 10),
+        FirstExercised = min(TimeGenerated),
+        LastExercised  = max(TimeGenerated),
+        RecentUse      = countif(TimeGenerated > ago(7d))
+        by Actor, SubjectUserName;
+
+// Event 5136: Replication rights granted on domain root
+let DCsyncGranted = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 5136
+    | where tostring(column_ifexists("ObjectClass", "")) =~ "domainDNS"
+    | where tostring(column_ifexists("AttributeValue", "")) has_any (ReplicateAllGUID, ReplicateGUID)
+    | extend
+        GrantedBy   = strcat(SubjectDomainName, "\\", SubjectUserName),
+        GrantedAt   = TimeGenerated,
+        GrantedRight = iff(tostring(column_ifexists("AttributeValue", "")) has ReplicateAllGUID,
+                           "DS-Replication-Get-Changes-All",
+                           "DS-Replication-Get-Changes");
+
+// Merge both perspectives
+DCsyncExercised
+| extend ActivityType = "Exercised_Replication_Right"
+| join kind=fullouter (
+    DCsyncGranted
+    | summarize
+        GrantCount  = count(),
+        GrantedRights = make_set(GrantedRight),
+        GrantedAt   = min(GrantedAt)
+        by GrantedBy, SubjectUserName
+    | extend ActivityType = "Replication_Right_Granted"
+    | project Actor = GrantedBy, SubjectUserName, GrantCount,
+              GrantedRights, GrantedAt, ActivityType
+) on Actor
+| extend
+    TotalSignals = coalesce(Count, 0) + coalesce(GrantCount, 0),
+    RiskIndicator = case(
+        RecentUse > 0 and GrantedAt > ago(7d), "Critical — Granted and Used Recently",
+        GrantedAt > ago(7d), "High — Recently Granted",
+        RecentUse > 0,       "High — Recently Exercised",
+        Count > 10,          "Medium — Frequent Historical Use",
+        "Low"
+    )
+| project
+    Actor,
+    RiskIndicator,
+    TotalSignals,
+    ExerciseCount   = Count,
+    RightsUsed,
+    RecentUse,
+    GrantedRights,
+    GrantedAt,
+    FirstExercised,
+    LastExercised,
+    Hosts
+| order by TotalSignals desc

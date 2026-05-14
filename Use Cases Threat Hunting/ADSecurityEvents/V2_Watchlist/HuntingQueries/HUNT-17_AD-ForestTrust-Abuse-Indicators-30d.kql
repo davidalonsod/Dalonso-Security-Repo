@@ -1,0 +1,122 @@
+// =========================================================
+// HUNT-17 | AD-ForestTrust-Abuse-Indicators-30d
+// Description : Hunts for inter-forest / inter-domain
+//               trust abuse patterns: anomalous cross-domain
+//               TGT requests (4768 with foreign ClientAddress),
+//               referral TGS tickets (4768/4769 for
+//               inter-realm krbtgt), unusual domain-to-domain
+//               authentication, and SID filtering disablement
+//               indicators (EventID 4706, 4707).
+// Period      : 30 days
+// Use Case    : Forest trust abuse, SID history across
+//               trusts, inter-realm Golden Ticket, trust
+//               relationship modifications
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 30d;
+
+// Known internal domain controllers (proxy via 4768 issuers)
+let KnownDCs = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4768
+    | summarize by KnownDC = toupper(Computer);
+
+// Trust creation and modification events
+let TrustChanges = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID in (4706, 4707)   // 4706=new trust, 4707=trust removed
+    | extend
+        TrustType  = EventID,
+        Actor      = strcat(SubjectDomainName, "\\", SubjectUserName),
+        TrustedDom = TargetDomainName,
+        EventType  = iff(EventID == 4706, "TrustCreated", "TrustRemoved");
+
+// Cross-realm TGT / referral ticket requests
+// These have a non-local domain suffix in TargetDomainName
+let CrossRealmTGT = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4768
+    | where TargetDomainName !has Computer   // requester domain != issuing DC domain suffix
+       and TargetDomainName !in~ ("", "-")
+    | extend
+        AccountNorm   = tolower(TargetUserName),
+        SourceDomain  = TargetDomainName,
+        SourceIP      = ClientAddress,
+        IsForwardable = tostring(column_ifexists("TicketOptions", "")) has "0x40800000";  // Forwardable TGT
+
+// Inter-realm TGS (referral path through krbtgt/<domain>)
+let InterRealmTGS = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4769
+    | where ServiceName startswith "krbtgt/"   // cross-domain referral
+    | extend
+        RequesterNorm  = tolower(SubjectUserName),
+        TargetRealm    = tostring(split(ServiceName, "/")[1]),
+        EncType        = tostring(column_ifexists("TicketEncryptionType", "")),
+        IsRC4          = tostring(column_ifexists("TicketEncryptionType", "")) == "0x17";  // RC4 inter-realm = suspicious
+
+// Summarise cross-realm TGT requests
+let CrossRealmSummary = CrossRealmTGT
+    | summarize
+        CrossRealmTGTCount  = count(),
+        SourceDomains       = make_set(SourceDomain, 10),
+        SourceIPs           = make_set(SourceIP, 10),
+        ForwardableTickets  = countif(IsForwardable),
+        LastSeen            = max(TimeGenerated)
+      by AccountNorm;
+
+// Summarise inter-realm TGS referrals
+let InterRealmSummary = InterRealmTGS
+    | summarize
+        InterRealmCount  = count(),
+        TargetRealms     = make_set(TargetRealm, 10),
+        RC4InterRealm    = countif(IsRC4),
+        LastReferral     = max(TimeGenerated)
+      by RequesterNorm;
+
+// Trust changes (always high risk)
+TrustChanges
+| summarize
+    TrustChangeCount = count(),
+    TrustEvents      = make_set(EventType, 5),
+    TrustedDomains   = make_set(TrustedDom, 10),
+    Actors           = make_set(Actor, 10),
+    LastChange       = max(TimeGenerated)
+  by Computer
+| extend
+    RiskLevel = "Critical - Trust_Relationship_Modified",
+    RiskScore = TrustChangeCount * 100
+| union (
+    CrossRealmSummary
+    | join kind=leftouter (InterRealmSummary)
+        on $left.AccountNorm == $right.RequesterNorm
+    | extend
+        RiskScore = (CrossRealmTGTCount * 10)
+                  + (iff(isnotnull(InterRealmCount), InterRealmCount * 15, 0))
+                  + (iff(isnotnull(RC4InterRealm) and RC4InterRealm > 0, 30, 0))
+                  + (ForwardableTickets * 20),
+        RiskLevel = case(
+            isnotnull(RC4InterRealm) and RC4InterRealm > 0 and ForwardableTickets > 0,
+                "Critical - RC4_Forwardable_InterRealm_Ticket",
+            isnotnull(RC4InterRealm) and RC4InterRealm > 0,
+                "High - RC4_InterRealm_Referral",
+            ForwardableTickets > 3,
+                "High - Multiple_Forwardable_CrossRealm_TGTs",
+            CrossRealmTGTCount > 10,
+                "Medium - High_CrossRealm_TGT_Volume",
+            "Low"
+        ),
+        TrustChangeCount = 0,
+        LastChange       = LastSeen
+    | project
+        Computer     = "CrossRealm",
+        TrustChangeCount,
+        TrustEvents  = pack_array("CrossRealm"),
+        TrustedDomains = SourceDomains,
+        Actors       = pack_array(AccountNorm),
+        LastChange,
+        RiskLevel,
+        RiskScore
+)
+| order by RiskScore desc

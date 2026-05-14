@@ -1,0 +1,77 @@
+// =========================================================
+// RULE-29 | AD-ADIDNS-Wildcard-Record-Inject
+// Description : ADIDNS (AD-Integrated DNS) wildcard record
+//               injection detection — Event 5137 (Directory
+//               Service Object Created) showing a new
+//               dnsNode object created with a wildcard (*)
+//               name, a duplicate of an existing hostname,
+//               or by a non-admin user in a DNS zone.
+//               By default any authenticated domain user can
+//               create DNS records via ADIDNS. Attackers
+//               create wildcard records or pre-register
+//               predictable names to:
+//               - Capture all unresolved names (MITM)
+//               - Force NTLM authentication to attacker IP
+//               - Pre-stage "DNS time bombs" for future
+//                 machine joins
+// Severity    : High (new DNS record by non-admin)
+//               Critical (wildcard record)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1557.001 — LLMNR/NBT-NS Poisoning and Relay
+//               T1071.004 — DNS
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+// Admin groups allowed to create DNS records
+let DNSAdminGroups = dynamic([
+    "DNSAdmins", "Domain Admins", "Enterprise Admins",
+    "Administrators", "SYSTEM"
+]);
+
+let AdminMembers = SecurityEvent
+    | where TimeGenerated > ago(30d)
+    | where EventID in (4728, 4732, 4756)
+    | where TargetUserName has_any (DNSAdminGroups)
+    | summarize by AdminMember = tolower(MemberName);
+
+// DNS node creation events in DomainDnsZones or ForestDnsZones NC
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID == 5137
+| where ObjectClass =~ "dnsNode"
+    or (ObjectDN has_any ("DomainDnsZones", "ForestDnsZones", "_msdcs")
+        and ObjectDN has "DC=")
+| extend
+    CreatorNorm      = tolower(SubjectUserName),
+    RecordName       = extract(@"DC=([^,]+)", 1, ObjectDN),
+    DNSZone          = extract(@"DC=([^,]+).*DnsZones", 0, ObjectDN),
+    IsWildcard       = (ObjectDN has "DC=*," or RecordName == "*")
+// Filter out admin creators
+| join kind=leftanti (AdminMembers) on $left.CreatorNorm == $right.AdminMember
+| where not(SubjectUserName has_any ("SYSTEM", "S-1-5-18"))
+| extend
+    Severity = case(
+        IsWildcard,  "Critical",
+        "High"
+    ),
+    WhySuspicious = strcat(
+        iff(IsWildcard, "Wildcard_DNS_Record_MITM_Risk; ", ""),
+        "ADIDNS_Record_Created_By_NonAdmin; ",
+        "RecordName: ", RecordName, "; ",
+        "Zone: ", DNSZone, "; ",
+        "Creator: ", SubjectUserName, "@", SubjectDomainName
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    SubjectUserName,
+    SubjectDomainName,
+    RecordName,
+    DNSZone,
+    ObjectDN,
+    IsWildcard,
+    Computer
+| order by Severity asc, TimeGenerated desc

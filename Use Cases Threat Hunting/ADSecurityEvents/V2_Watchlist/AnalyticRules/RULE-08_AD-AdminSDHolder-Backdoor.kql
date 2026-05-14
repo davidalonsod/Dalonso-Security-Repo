@@ -1,0 +1,67 @@
+// =========================================================
+// RULE-08 | AD-AdminSDHolder-Backdoor
+// Description : AdminSDHolder ACL backdoor detection —
+//               Event 5136 modifying the ntSecurityDescriptor
+//               (DACL) on the CN=AdminSDHolder,CN=System
+//               object.
+//               The SDProp process runs every 60 minutes and
+//               copies the AdminSDHolder ACL to ALL protected
+//               group and user objects (Domain Admins,
+//               Enterprise Admins, Backup Operators, etc.).
+//               Any ACE added here is "self-healing"
+//               persistence: even if defenders remove the
+//               attacker's ACE from Domain Admins, SDProp
+//               restores it from AdminSDHolder within 60 min.
+// Severity    : Critical (any modification)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1098 — Account Manipulation
+//               T1207 — Rogue Domain Controller
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+// Known AdminSDHolder DN patterns
+let AdminSDHolderPatterns = dynamic([
+    "CN=AdminSDHolder,CN=System",
+    "adminsdholder"
+]);
+
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID == 5136                     // DS Object Modified
+| where ObjectDN has_any (AdminSDHolderPatterns)
+    or (ObjectClass =~ "container"
+        and ObjectDN has "CN=System"
+        and toLower(ObjectDN) has "adminsdholder")
+| extend
+    ActorAccount     = strcat(SubjectDomainName, "\\", SubjectUserName),
+    TargetObject     = ObjectDN,
+    ModifiedAttrib   = AttributeLDAPDisplayName,
+    OperationDesc    = case(
+        OperationType == "%%14674", "Attribute Written",
+        OperationType == "%%14675", "Attribute Deleted",
+        OperationType == "%%14676", "Attribute Added",
+        OperationType
+    )
+| extend
+    Severity = "Critical",
+    WhySuspicious = strcat(
+        "AdminSDHolder_DACL_Modified; ",
+        "SDProp_will_propagate_to_all_protected_groups_in_60min; ",
+        "Actor: ", SubjectUserName, "; ",
+        "Operation: ", OperationDesc, "; ",
+        "Attribute: ", ModifiedAttrib
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    ActorAccount,
+    TargetObject,
+    ModifiedAttrib,
+    OperationDesc,
+    Computer,
+    SubjectUserName,
+    SubjectDomainName
+| order by TimeGenerated desc

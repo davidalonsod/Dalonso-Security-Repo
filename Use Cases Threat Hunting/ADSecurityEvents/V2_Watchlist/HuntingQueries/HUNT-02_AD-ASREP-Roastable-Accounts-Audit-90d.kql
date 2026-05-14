@@ -1,0 +1,81 @@
+// =========================================================
+// HUNT-02 | AD-ASREP-Roastable-Accounts-Audit-90d
+// Description : Full audit of all accounts with
+//               DONT_REQ_PREAUTH (AS-REP Roastable) and
+//               historical AS-REP request patterns. Surfaces
+//               accounts that have never required pre-auth,
+//               and correlates with actual roasting attempts.
+// Period      : 90 days
+// Use Case    : Attack surface exposure assessment,
+//               DONT_REQ_PREAUTH hygiene review
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 90d;
+
+// All 4768 events with tostring(column_ifexists("PreAuthType", "")) = 0 (no pre-auth required)
+let ASREPRequests = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4768
+    | where tostring(column_ifexists("PreAuthType", "")) == "0"
+    | where TargetUserName !endswith "$"
+    | extend
+        IsOffHours = hourofday(TimeGenerated) < 8 or hourofday(TimeGenerated) >= 19
+    | summarize
+        TotalASREP          = count(),
+        UniqueRequesters    = dcount(IpAddress),
+        RequestingIPs       = make_set(IpAddress, 20),
+        OffHoursRequests    = countif(IsOffHours),
+        FirstSeen           = min(TimeGenerated),
+        LastSeen            = max(TimeGenerated),
+        RecentRequests      = countif(TimeGenerated > ago(7d))
+        by RoastableAccount = TargetUserName,
+           AccountDomain    = TargetDomainName;
+
+// Normal 4768 events (with pre-auth, for baseline comparison)
+let NormalTGTs = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4768
+    | where tostring(column_ifexists("PreAuthType", "")) != "0"
+    | where TargetUserName !endswith "$"
+    | summarize NormalTGTCount = count()
+        by TargetUserName, TargetDomainName;
+
+ASREPRequests
+| join kind=leftouter (NormalTGTs) on
+    $left.RoastableAccount == $right.TargetUserName,
+    $left.AccountDomain    == $right.TargetDomainName
+| extend
+    OffHoursRatio    = round(todouble(OffHoursRequests) / todouble(TotalASREP), 2),
+    // If this account ONLY appears with tostring(column_ifexists("PreAuthType", ""))=0 it's permanently set DONT_REQ_PREAUTH
+    OnlySeenASREP    = isnull(NormalTGTCount) or NormalTGTCount == 0,
+    RiskScore        = (TotalASREP * 3)
+                     + (UniqueRequesters * 5)
+                     + iff(OffHoursRequests > 0, 10, 0)
+                     + iff(RecentRequests > 0, 20, 0)
+| extend
+    RiskLevel = case(
+        RiskScore >= 60,  "Critical",
+        RiskScore >= 25,  "High",
+        "Medium"
+    ),
+    Recommendation = case(
+        OnlySeenASREP,  "Set PreAuthentication required, rotate password immediately",
+        TotalASREP > 5, "Review why account lacks pre-authentication requirement",
+        "Monitor for further requests"
+    )
+| project
+    RoastableAccount,
+    AccountDomain,
+    RiskLevel,
+    RiskScore,
+    TotalASREP,
+    UniqueRequesters,
+    OffHoursRatio,
+    OnlySeenASREP,
+    RecentRequests,
+    FirstSeen,
+    LastSeen,
+    Recommendation,
+    RequestingIPs
+| order by RiskScore desc

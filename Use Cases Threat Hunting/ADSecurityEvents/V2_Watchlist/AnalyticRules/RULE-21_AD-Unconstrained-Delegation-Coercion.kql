@@ -1,0 +1,72 @@
+// =========================================================
+// RULE-21 | AD-Unconstrained-Delegation-Coercion
+// Description : Unconstrained Delegation + DC authentication
+//               (coercion) detection — Event 4624 (Type 3
+//               Kerberos) from a Domain Controller machine
+//               account ($) authenticating to a non-DC host
+//               that has TRUSTED_FOR_DELEGATION
+//               (userAccountControl flag 0x80000) set in
+//               the prior 14-day window.
+//               When an unconstrained delegation host receives
+//               a legitimate TGT from the DC (forced via
+//               PrinterBug / PetitPotam / DFSCoerce), the
+//               KDC includes the DC's full TGT in the service
+//               ticket. The attacker extracts it with Rubeus
+//               monitor and uses it for DCSync.
+// Severity    : Critical (any match)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1187 — Forced Authentication
+//               T1558.001 — Golden Ticket (TGT theft)
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+// Hosts with unconstrained delegation (from recent computer account flags)
+// TRUSTED_FOR_DELEGATION flag = 0x80000 in userAccountControl
+let UnconstrainedHosts = SecurityEvent
+    | where TimeGenerated > ago(14d)
+    | where EventID == 4742
+    | where AccountExpires != ""                // Computer account change
+    | where EventData has "0x80000"
+        or EventData has "TRUSTED_FOR_DELEGATION"
+    | summarize by UnconstHost = toupper(Computer);
+
+// Known DCs
+let KnownDCNames = SecurityEvent
+    | where TimeGenerated > ago(3d)
+    | where EventID == 4768
+    | summarize by DC = toupper(Computer);
+
+// DC machine account authenticates TO an unconstrained delegation host
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID == 4624
+| where LogonType == 3
+| where AuthenticationPackageName =~ "Kerberos"
+| where SubjectUserName endswith "$"                // Source = machine account
+| extend SourceAccountUpper = toupper(SubjectUserName)
+| where SourceAccountUpper in~ (                    // Source account IS a known DC
+    KnownDCNames | extend v = strcat(DC, "$") | project v
+  )
+| where not(toupper(Computer) in~ (KnownDCNames))   // Target host is NOT a DC
+| where toupper(Computer) in~ (UnconstrainedHosts)  // && IS an unconstrained host
+| extend
+    CoercedDC              = SubjectUserName,
+    UnconstrainedTarget    = Computer,
+    Severity               = "Critical",
+    WhySuspicious          = strcat(
+        "UnconstrainedDelegation_Coercion_DC_TGT_Theft; ",
+        "DC_", SubjectUserName, "_auth_to_unconstrained_host_", Computer, "; ",
+        "DC_TGT_cached_on_target_extract_with_Rubeus; "
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    CoercedDC,
+    UnconstrainedTarget,
+    IpAddress,
+    SubjectUserName,
+    SubjectDomainName
+| order by TimeGenerated desc

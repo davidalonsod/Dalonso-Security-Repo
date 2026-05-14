@@ -1,0 +1,113 @@
+// =========================================================
+// HUNT-13 | AD-CrossWorkload-Attack-Chain-Correlation-30d
+// Description : Correlates AD attack indicators across
+//               SecurityEvent (Kerberos/NTLM), SigninLogs
+//               (Azure AD risky sign-ins), and optionally
+//               OfficeActivity (impossible travel, MFA push
+//               fatigue) to surface multi-stage attack
+//               chains spanning hybrid environments.
+// Period      : 30 days
+// Use Case    : Hybrid AD/Azure attack chain, account
+//               takeover spanning on-prem + cloud,
+//               pass-the-hash → cloud pivot detection
+// Tables      : SecurityEvent, SigninLogs, OfficeActivity
+// =========================================================
+
+let Period = 30d;
+
+// ── On-prem: Kerberoasting indicators (RC4 TGS volume) ──
+let KerberoastSuspects = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4769
+    | where tostring(column_ifexists("TicketEncryptionType", "")) == "0x17"   // RC4
+    | where tostring(column_ifexists("TicketOptions", "")) !has "0x40810010"  // not machine account TGS
+    | where ServiceName !endswith "$"
+    | summarize
+        RC4TGSCount = count(),
+        RC4Services = make_set(ServiceName, 10)
+      by SuspectAccountNorm = tolower(SubjectUserName);
+
+// ── On-prem: successful privilege escalation (4672 special logon) ──
+let PrivLogons = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4672
+    | where SubjectLogonId !in ("0x3e7", "0x3e4", "0x3e5")   // exclude SYSTEM/LocalService/NetworkService
+    | where SubjectUserName !endswith "$"
+    | summarize
+        PrivLogonCount = count(),
+        LastPrivLogon  = max(TimeGenerated)
+      by PrivAccountNorm = tolower(SubjectUserName);
+
+// ── Cloud: risky sign-ins from SigninLogs ──
+let RiskySignIns = union isfuzzy=true (SigninLogs
+    | where TimeGenerated > ago(Period)
+    | where RiskLevelDuringSignIn in ("high", "medium")
+    | summarize
+        RiskySignInCount = count(),
+        RiskDetails      = make_set(RiskEventTypes_V2, 5),
+        SignInLocations  = make_set(LocationDetails, 5),
+        LastRiskySignIn  = max(TimeGenerated)
+      by CloudAccountNorm = tolower(UserPrincipalName)),
+    (print _placeholder = "" | where 1==0);
+
+// ── Cloud: optional OfficeActivity anomalies ──
+let O365Anomalies = union isfuzzy=true (OfficeActivity
+    | where TimeGenerated > ago(Period)
+    | where Operation in~ ("MailboxLogin", "FileDownloaded",
+                            "FileUploaded", "TeamsSessionStarted")
+    | where ClientIP !startswith "10." and ClientIP !startswith "192.168."
+    | summarize
+        O365ActivityCount  = count(),
+        O365Operations     = make_set(Operation, 10),
+        ExternalIPs        = make_set(ClientIP, 5)
+      by O365AccountNorm = tolower(UserId)),
+    (print _placeholder = "" | where 1==0);
+
+// ── Correlation: join on normalised account name ──
+// Note: UPN localpart vs. sAMAccountName may differ; extend with known UPN mapping
+KerberoastSuspects
+| join kind=inner (RiskySignIns) on $left.SuspectAccountNorm == $right.CloudAccountNorm
+| join kind=leftouter (PrivLogons)   on $left.SuspectAccountNorm == $right.PrivAccountNorm
+| join kind=leftouter (O365Anomalies) on $left.SuspectAccountNorm == $right.O365AccountNorm
+| extend
+    RiskScore = (RC4TGSCount * 10)
+              + (RiskySignInCount * 20)
+              + (iff(isnotnull(PrivLogonCount), PrivLogonCount * 15, 0))
+              + (iff(isnotnull(O365ActivityCount), O365ActivityCount * 5, 0))
+| extend    AttackChainStage = case(
+        isnotnull(PrivLogonCount) and O365ActivityCount > 0,
+            "Stage4_OnPremCompromised_CloudPivot",
+        isnotnull(PrivLogonCount),
+            "Stage3_OnPremPrivilegeEscalation",
+        RC4TGSCount >= 5,
+            "Stage2_Kerberoasting_InProgress",
+        RiskySignInCount > 0,
+            "Stage1_CloudAccountAtRisk",
+        "Stage0_Insufficient_Signal"
+    ),
+    RiskLevel = case(
+        RiskScore >= 150, "Critical",
+        RiskScore >= 75,  "High",
+        RiskScore >= 30,  "Medium",
+        "Low"
+    )
+| project
+    AccountNorm     = SuspectAccountNorm,
+    RiskLevel,
+    RiskScore,
+    AttackChainStage,
+    // On-prem signals
+    RC4TGSCount,
+    RC4Services,
+    PrivLogonCount,
+    LastPrivLogon,
+    // Cloud signals
+    RiskySignInCount,
+    RiskDetails,
+    LastRiskySignIn,
+    SignInLocations,
+    // M365 signals
+    O365ActivityCount,
+    O365Operations,
+    ExternalIPs
+| order by RiskScore desc

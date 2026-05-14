@@ -1,0 +1,82 @@
+// =========================================================
+// RULE-03 | AD-DCSync-NonDC-Replication
+// Description : DCSync detection — Event 4662 showing
+//               DS-Replication-Get-Changes-All (or -Get-Changes)
+//               access rights exercised by a source that is NOT
+//               a known Domain Controller computer account.
+//               Covers Mimikatz lsadump::dcsync, secretsdump,
+//               and impacket GetUserSPNs with -just-dc flag.
+// Severity    : Critical (any non-DC DCSync)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1003.006 — DCSync
+// Tables      : SecurityEvent
+// NOT duplicated: Sentinel built-in "Rare DCSync Activity" fires
+//               on volume; this rule fires on ANY non-DC source
+//               using exact DS-Replication GUIDs.
+// =========================================================
+
+let LookBack = 15m;
+
+// DS-Replication-Get-Changes-All GUID
+let ReplicationAllGUID = "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2";
+// DS-Replication-Get-Changes GUID
+let ReplicationGUID    = "1131f6ac-9c07-11d1-f79f-00c04fc2dcd2";
+
+// Build dynamic DC list from this workspace (KDC-issuing machines)
+let KnownDCNames = SecurityEvent
+    | where TimeGenerated > ago(3d)
+    | where EventID == 4768
+    | summarize by DCName = toupper(Computer)
+    | project DCName;
+
+let KnownDCAccounts = SecurityEvent
+    | where TimeGenerated > ago(3d)
+    | where EventID == 4768
+    | where TargetUserName endswith "$"
+    | summarize by MachineAcct = toupper(TargetUserName);
+
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID == 4662                           // Operation performed on AD object
+| where ObjectType has "domainDNS"
+| where AccessMask == "0x100"                     // Control Access
+| where Properties has ReplicationAllGUID
+    or Properties has ReplicationGUID
+// Exclude actual Domain Controllers
+| where not(toupper(SubjectUserName) endswith "$"
+            and toupper(SubjectUserName) in~ (KnownDCAccounts))
+| where not(toupper(Computer) in~ (KnownDCNames))
+| extend
+    ActorAccount      = strcat(SubjectDomainName, "\\", SubjectUserName),
+    IsServiceAccount  = SubjectUserName endswith "$",
+    ReplicationRight  = case(
+        Properties has ReplicationAllGUID, "DS-Replication-Get-Changes-All (Full DCSync)",
+        Properties has ReplicationGUID,    "DS-Replication-Get-Changes (Partial)",
+        "Unknown Replication Right"
+    )
+| summarize
+    DCsyncCount        = count(),
+    TargetObjects      = make_set(ObjectName, 10),
+    ReplicationRights  = make_set(ReplicationRight),
+    EarliestEvent      = min(TimeGenerated),
+    LatestEvent        = max(TimeGenerated)
+    by ActorAccount, SubjectUserName, SubjectDomainName, Computer, IsServiceAccount
+| extend
+    Severity = "Critical",
+    WhySuspicious = strcat(
+        "DCSync_From_NonDC; ",
+        iff(IsServiceAccount, "ServiceAccount_Source; ", "UserAccount_Source; "),
+        ReplicationRights
+    )
+| project
+    TimeGenerated    = LatestEvent,
+    Severity,
+    WhySuspicious,
+    ActorAccount,
+    Computer,
+    DCsyncCount,
+    ReplicationRights,
+    TargetObjects,
+    EarliestEvent,
+    LatestEvent
+| order by DCsyncCount desc

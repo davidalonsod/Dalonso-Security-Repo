@@ -1,0 +1,89 @@
+// =========================================================
+// HUNT-04 | AD-ACL-Sensitive-Object-Timeline-30d
+// Description : All DS Object Modification (5136) events on
+//               sensitive AD objects over 30 days, annotated
+//               with the likely attack technique for each
+//               attribute/object combination.
+//               Targets: AdminSDHolder, Domain root, DCs OU,
+//               DA/EA/BA groups, krbtgt, ADCS templates.
+// Period      : 30 days
+// Use Case    : Privilege escalation forensics,
+//               ACL backdoor audit, post-incident review
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 30d;
+
+// Sensitive object DN patterns and associated risk
+let SensitiveObjects = datatable(Pattern:string, ObjectDescription:string, BaseSeverity:string)
+[
+    "CN=AdminSDHolder,CN=System", "AdminSDHolder (SDProp target)", "Critical",
+    "CN=Domain Admins",           "Domain Admins group",           "Critical",
+    "CN=Enterprise Admins",       "Enterprise Admins group",       "Critical",
+    "CN=Schema Admins",           "Schema Admins group",           "Critical",
+    "CN=krbtgt",                  "krbtgt account",                "Critical",
+    "CN=Administrators,CN=Builtin","Built-in Administrators group", "Critical",
+    "CN=Backup Operators,CN=Builtin","Backup Operators group",     "High",
+    "CN=Account Operators,CN=Builtin","Account Operators group",   "High",
+    "CN=Server Operators,CN=Builtin", "Server Operators group",    "High",
+    "OU=Domain Controllers",      "Domain Controllers OU",         "Critical",
+    "CN=Certificate Templates",   "ADCS Certificate Templates",    "High",
+    "CN=Sites,CN=Configuration",  "AD Sites Configuration",        "High"
+];
+
+// Attribute-to-technique mapping
+let AttrTechniques = datatable(Attribute:string, Technique:string)
+[
+    "msDS-AllowedToActOnBehalfOfOtherIdentity", "RBCD Setup (T1134.001)",
+    "msDS-KeyCredentialLink",                   "Shadow Credentials (T1556.006)",
+    "sIDHistory",                               "SID History Injection (T1134.005)",
+    "ntSecurityDescriptor",                     "ACL Backdoor / WriteDACL",
+    "servicePrincipalName",                     "Targeted Kerberoasting (T1558.003)",
+    "userAccountControl",                       "Account Flag Modification",
+    "member",                                   "Group Membership Add (T1098)",
+    "pwdLastSet",                               "Password Reset (T1098)",
+    "scriptPath",                               "Logon Script Hijack (T1037.001)",
+    "profilePath",                              "Profile Path Coercion (NTLMv2 capture)",
+    "dNSHostName",                              "Certifried / DNS Manipulation",
+    "msPKI-Certificate-Name-Flag",              "ADCS ESC1 Template Modification",
+    "gPCFileSysPath",                           "GPO SYSVOL Path Modification (T1484.001)"
+];
+
+SecurityEvent
+| where TimeGenerated > ago(Period)
+| where EventID == 5136
+// Match against sensitive object patterns
+| extend _joinkey = 1
+| join kind=inner (SensitiveObjects | extend _joinkey = 1) on _joinkey
+| where ObjectName contains Pattern
+| project-away _joinkey, _joinkey1
+| extend
+    ActorAccount   = strcat(SubjectDomainName, "\\", SubjectUserName),
+    ModifiedAttrib = tostring(column_ifexists("AttributeLDAPDisplayName", ""))
+// Annotate with known technique
+| join kind=leftouter (AttrTechniques)
+    on $left.ModifiedAttrib == $right.Attribute
+| extend
+    AttackTechnique = coalesce(Technique, "Unknown — Review Manually"),
+    OperationDesc   = case(
+        OperationType == "%%14674", "Write/Add",
+        OperationType == "%%14675", "Delete",
+        OperationType == "%%14676", "Delete All Values",
+        OperationType
+    ),
+    EffectiveSeverity = case(
+        BaseSeverity == "Critical" and Technique != "",  "Critical",
+        BaseSeverity == "Critical",                      "High",
+        "Medium"
+    )
+| project
+    TimeGenerated,
+    EffectiveSeverity,
+    ObjectDescription,
+    AttackTechnique,
+    ModifiedAttrib,
+    OperationDesc,
+    ActorAccount,
+    ObjectName,
+    Computer
+| order by EffectiveSeverity asc, TimeGenerated desc

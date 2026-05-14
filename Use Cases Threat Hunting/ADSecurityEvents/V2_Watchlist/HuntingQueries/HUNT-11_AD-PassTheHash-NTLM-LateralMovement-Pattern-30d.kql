@@ -1,0 +1,118 @@
+// =========================================================
+// HUNT-11 | AD-PassTheHash-NTLM-LateralMovement-Pattern-30d
+// Description : Hunts for Pass-the-Hash indicators using
+//               EventID 4624 (Type 3, NTLM) combined with
+//               the absence of an interactive logon baseline
+//               for the same account→target host pair.
+//               Also correlates 4648 (explicit credential
+//               use) and 4776 (NTLM credential validation)
+//               to increase fidelity.
+// Period      : 30 days
+// Use Case    : Lateral movement hunting, credential reuse,
+//               NTLM relay and pass-the-hash detection
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period      = 30d;
+let BaselineDays = 21d;   // baseline = earlier 21 days
+let HuntDays     = 7d;    // hunt = most recent 7 days
+
+// Establish interactive logon baseline (Type 2 = console, Type 10 = RDP)
+let InteractiveBaseline = SecurityEvent
+    | where TimeGenerated between (ago(BaselineDays) .. ago(HuntDays))
+    | where EventID == 4624
+    | where LogonType in (2, 10)
+    | where TargetUserName !endswith "$"
+    | summarize
+        BaselineHosts   = make_set(WorkstationName, 50),
+        BaselineSourceIP = make_set(IpAddress, 50)
+      by AccountNorm = tolower(TargetUserName);
+
+// NTLM Type3 logons in hunt window
+let NTLMLogons = SecurityEvent
+    | where TimeGenerated > ago(HuntDays)
+    | where EventID == 4624
+    | where LogonType == 3
+    | where AuthenticationPackageName == "NTLM"
+    | where TargetUserName !endswith "$"
+    | where TargetUserName !in~ ("ANONYMOUS LOGON", "IUSR")
+    | extend
+        AccountNorm   = tolower(TargetUserName),
+        SourceHost    = WorkstationName,
+        TargetHost    = Computer,
+        SourceIP      = IpAddress,
+        IsOffHours    = hourofday(TimeGenerated) < 7 or hourofday(TimeGenerated) >= 20;
+
+// 4648 explicit credential use (used during PTH/PTT)
+let ExplicitCreds = SecurityEvent
+    | where TimeGenerated > ago(HuntDays)
+    | where EventID == 4648
+    | where TargetUserName !endswith "$"
+    | summarize ExplicitCredCount = count(),
+                ExplicitCredTargets = make_set(TargetServerName, 10)
+      by AccountNorm4648 = tolower(SubjectUserName);
+
+// 4776 NTLM validation failures — may indicate hash reuse failure
+let NTLMValidation = SecurityEvent
+    | where TimeGenerated > ago(HuntDays)
+    | where EventID == 4776
+    | where Status != "0x0"   // not success
+    | summarize FailedNTLMValidations = count()
+      by AccountNorm4776 = tolower(TargetUserName);
+
+// Join baseline to hunt to identify new/unexpected NTLM lateral movement
+NTLMLogons
+| join kind=leftouter (InteractiveBaseline) on AccountNorm
+// New = host the account has never interactively logged into
+| extend IsNewTargetHost = not(BaselineHosts has TargetHost)
+| join kind=leftouter (ExplicitCreds) on $left.AccountNorm == $right.AccountNorm4648
+| join kind=leftouter (NTLMValidation) on $left.AccountNorm == $right.AccountNorm4776
+| where IsNewTargetHost or ExplicitCredCount > 0
+| summarize
+    NTLMLogonCount     = count(),
+    UniqueTargets      = dcount(TargetHost),
+    UniqueSourceIPs    = dcount(SourceIP),
+    OffHoursLogons     = countif(IsOffHours),
+    NewTargetHosts     = make_set_if(TargetHost, IsNewTargetHost, 20),
+    AllTargets         = make_set(TargetHost, 20),
+    SourceHosts        = make_set(SourceHost, 10),
+    SourceIPs          = make_set(SourceIP, 10),
+    ExplicitCreds      = take_any(ExplicitCredCount),
+    FailedNTLMV        = take_any(FailedNTLMValidations)
+  by AccountNorm
+| extend
+    RiskScore = (array_length(NewTargetHosts) * 25)
+              + (OffHoursLogons * 5)
+              + (iff(isnotnull(ExplicitCreds) and ExplicitCreds > 0, 15, 0))
+              + (UniqueTargets * 5),
+    RiskLevel = case(
+        array_length(NewTargetHosts) >= 4, "Critical",
+        array_length(NewTargetHosts) >= 2, "High",
+        array_length(NewTargetHosts) >= 1 and OffHoursLogons > 0, "High",
+        array_length(NewTargetHosts) >= 1, "Medium",
+        "Low"
+    ),
+    AttackIndicator = case(
+        array_length(NewTargetHosts) >= 3 and ExplicitCreds > 0,
+            "HighConfidence_PassTheHash_LateralMovement",
+        array_length(NewTargetHosts) >= 2,
+            "Probable_PassTheHash_NewHostSpread",
+        array_length(NewTargetHosts) >= 1,
+            "Possible_PassTheHash_NewHost",
+        ExplicitCreds > 0,
+            "ExplicitCredentialUse_WithNTLM",
+        "Anomalous_NTLM_Pattern"
+    )
+| project
+    AccountNorm,
+    RiskLevel,
+    RiskScore,
+    AttackIndicator,
+    NTLMLogonCount,
+    UniqueTargets,
+    NewTargetHosts,
+    OffHoursLogons,
+    ExplicitCreds,
+    SourceHosts,
+    SourceIPs
+| order by RiskScore desc

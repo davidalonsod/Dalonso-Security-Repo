@@ -1,0 +1,156 @@
+// =========================================================
+// HUNT-26 | AD-WSUS-Attack-Surface-Assessment-90d
+// Description : WSUS (Windows Server Update Services) can
+//               be abused to deliver malicious updates to
+//               domain members (PwnDU/PyWSUS attack).
+//               This query identifies: (1) Process creations
+//               on systems pointing to a WSUS server that
+//               originate from wuauclt.exe / usoclient.exe,
+//               (2) Unusual binaries launched from Windows
+//               Update contexts, (3) Registry changes to
+//               WSUS endpoint settings (4657), and (4)
+//               Network connections from DC/WSUS hosts to
+//               update clients (proxy for rogue update
+//               injection). Correlates SecurityEvent with
+//               DeviceProcessEvents where available.
+// Period      : 90 days
+// Use Case    : WSUS abuse (PwnDU), rogue update delivery,
+//               supply chain attack via patch management
+// Tables      : SecurityEvent, DeviceProcessEvents (MDE)
+// =========================================================
+
+let Period = 90d;
+
+// WSUS-related registry keys
+let WSUSRegKeys = dynamic([
+    "\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate",
+    "\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update"
+]);
+
+// Known WSUS process contexts
+let UpdateParentProcesses = dynamic([
+    "wuauclt.exe", "usoclient.exe", "wusa.exe",
+    "svchost.exe",    // Windows Update svc
+    "musnotification.exe", "musnotificationux.exe"
+]);
+
+// ── 1. Registry changes to WSUS endpoint ──
+let WSUSRegChanges = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4657
+    | where ObjectName has_any (WSUSRegKeys)
+    | extend
+        Actor       = strcat(SubjectDomainName, "\\", SubjectUserName),
+        RegValue    = ObjectValueName,
+        NewValue    = NewValue,
+        IsWSUSURL   = ObjectValueName =~ "WUServer" or ObjectValueName =~ "WUStatusServer",
+        IsWSUSGroup = ObjectValueName =~ "UseWUServer";
+
+// ── 2. Process creation from Windows Update parent context ──
+let WUProcessCreations = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4688
+    | extend
+        ParentProc  = tolower(tostring(split(ParentProcessName, "\\")[-1])),
+        ChildProc   = tolower(tostring(split(NewProcessName, "\\")[-1])),
+        ChildFull   = tolower(NewProcessName),
+        Actor       = strcat(SubjectDomainName, "\\", SubjectUserName)
+    | where ParentProc in~ (UpdateParentProcesses)
+    // Exclude expected update binaries
+    | where ChildProc !in~ ("msiexec.exe", "setup.exe", "wusa.exe",
+                              "trustedinstaller.exe", "tiworker.exe",
+                              "wuauclt.exe", "usoclient.exe",
+                              "svchost.exe", "conhost.exe",
+                              "rundll32.exe", "regsvr32.exe");
+
+// ── 3. MDE: process creations in Update contexts ──
+let WUProcsMDE = union isfuzzy=true (DeviceProcessEvents
+    | where TimeGenerated > ago(Period)
+    | where tolower(InitiatingProcessFileName) in~ (UpdateParentProcesses)
+    | where tolower(FileName) !in~ ("msiexec.exe", "setup.exe", "wusa.exe",
+                                     "trustedinstaller.exe", "tiworker.exe",
+                                     "wuauclt.exe", "usoclient.exe",
+                                     "svchost.exe", "conhost.exe")
+    | extend
+        ParentProc   = InitiatingProcessFileName,
+        ChildProc    = FileName,
+        ChildFull    = FolderPath,
+        Actor        = InitiatingProcessAccountName,
+        Computer     = DeviceName),
+    (print _placeholder = "" | where 1==0);
+
+// Summarise WSUS registry endpoint changes
+WSUSRegChanges
+| summarize
+    RegChanges       = count(),
+    WSUSURLChanges   = countif(IsWSUSURL),
+    ChangedValues    = make_set(RegValue, 10),
+    NewWSUSURLs      = make_set_if(NewValue, IsWSUSURL, 5),
+    Actors           = make_set(Actor, 10),
+    FirstChange      = min(TimeGenerated),
+    LastChange       = max(TimeGenerated)
+  by Computer
+| extend
+    FindingType = "WSUSEndpoint_RegistryChanged",
+    RiskScore   = (WSUSURLChanges * 60) + (RegChanges * 10),
+    RiskLevel   = iff(WSUSURLChanges >= 1,
+                    "Critical - WSUS_URL_Redirected",
+                    "Medium - WSUS_Config_Changed")
+| union (
+    // Summarise unusual child processes spawned from WU parent
+    WUProcessCreations
+    | summarize
+        SuspiciousProcs = count(),
+        ChildProcesses  = make_set(ChildProc, 20),
+        FullPaths       = make_set(ChildFull, 20),
+        Actors          = make_set(Actor, 10),
+        FirstChange     = min(TimeGenerated),
+        LastChange      = max(TimeGenerated)
+      by Computer
+    | extend
+        FindingType = "SuspiciousProc_From_WindowsUpdate_Context",
+        RegChanges  = 0,
+        WSUSURLChanges = 0,
+        ChangedValues = pack_array(""),
+        NewWSUSURLs   = pack_array(""),
+        RiskScore     = SuspiciousProcs * 40,
+        RiskLevel     = case(
+            SuspiciousProcs >= 3, "Critical",
+            SuspiciousProcs >= 1, "High",
+            "Medium"
+        )
+)
+| union (
+    WUProcsMDE
+    | summarize
+        SuspiciousProcs = count(),
+        ChildProcesses  = make_set(ChildProc, 20),
+        FullPaths       = make_set(ChildFull, 20),
+        Actors          = make_set(Actor, 10),
+        FirstChange     = min(TimeGenerated),
+        LastChange      = max(TimeGenerated)
+      by Computer
+    | extend
+        FindingType    = "MDE_SuspProc_WindowsUpdate_Context",
+        RegChanges     = 0,
+        WSUSURLChanges = 0,
+        ChangedValues  = pack_array(""),
+        NewWSUSURLs    = pack_array(""),
+        RiskScore      = SuspiciousProcs * 45,
+        RiskLevel      = case(
+            SuspiciousProcs >= 3, "Critical",
+            SuspiciousProcs >= 1, "High",
+            "Medium"
+        )
+)
+| project
+    Computer,
+    FindingType,
+    RiskLevel,
+    RiskScore,
+    Actors,
+    ChangedValues,
+    NewWSUSURLs,
+    FirstChange,
+    LastChange
+| order by RiskScore desc

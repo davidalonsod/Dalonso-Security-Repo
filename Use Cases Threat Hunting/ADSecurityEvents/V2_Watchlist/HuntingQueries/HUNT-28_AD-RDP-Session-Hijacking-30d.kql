@@ -1,0 +1,220 @@
+// ============================================================
+// HUNT-28 | AD Hunting: RDP Session Hijacking and Reconnection Anomaly
+// ============================================================
+// Description:
+//   Hunts for RDP session hijacking patterns, primarily targeting the technique
+//   used by tools such as SharpRDPHijack — which takeovers disconnected RDP
+//   sessions of other users (including administrators) without needing credentials.
+//
+//   Attack chain:
+//     1. Attacker gains SYSTEM-level access (e.g., via SeImpersonatePrivilege or
+//        existing session)
+//     2. Attacker enumerates disconnected RDP sessions: `query session`
+//     3. Tools like tscon.exe redirect the target session to attacker's session
+//        — EventID 4778 fires on the DC/target for the "reconnect"
+//        — The original user (EventID 4779) shows a disconnect from their IP
+//        — The hijack shows the NEW source reconnecting to the same session
+//
+//   Key signals hunted:
+//     - Session reconnect (4778) immediately after disconnect (4779) for same account
+//       from a DIFFERENT source IP — the "handoff" pattern
+//     - tscon.exe or SharpRDPHijack process execution around session events
+//     - Privileged accounts (Domain Admins, svc-* accounts) subjected to session churn
+//     - RDP sessions opened to unexpected internal hosts (lateral movement indicator)
+//
+// Mitre ATT&CK:
+//   - T1563.002: Remote Service Session Hijacking — RDP Hijacking
+//   - T1078:     Valid Accounts (hijacked session runs as victim account)
+//   - TA0008:    Lateral Movement
+//   - TA0005:    Defense Evasion (operations appear under victim identity)
+//
+// Data Sources: SecurityEvent (EventID 4778, 4779, 4688), DeviceProcessEvents
+// Query Period: 30 days
+// Hunting Focus: Session IP shifts, tscon.exe execution, privileged account churn
+// ============================================================
+
+let LookbackPeriod = 30d;
+let SessionHandoffWindow = 5m;   // Max time between disconnect and hijack reconnect
+let KnownJumpHosts = dynamic([   // Legitimate IT jump boxes / VDI hosts — customize per environment
+    // "jumphost01", "vdi-gateway01"
+    ""
+]);
+let PrivilegedAccountPatterns = dynamic([
+    "admin", "svc-", "service", "backup", "-adm", "_adm"
+]);
+// ──────────────────────────────────────────────────────────────
+// PART 1 — EventID 4778 / 4779 Session Reconnect and Disconnect Events
+//   4778 = A session was reconnected to a Window Station
+//   4779 = A session was disconnected from a Window Station
+// ──────────────────────────────────────────────────────────────
+let SessionDisconnects = SecurityEvent
+| where TimeGenerated >= ago(LookbackPeriod)
+| where EventID == 4779
+| extend
+    SessionUser     = tolower(strcat(AccountDomain, "\\", AccountName)),
+    SessionHost     = Computer,
+    SessionName     = tostring(extract(@"SessionName:\s+(\S+)", 1, EventData)),
+    DisconnectIP    = IpAddress,
+    DisconnectTime  = TimeGenerated
+| project DisconnectTime, SessionUser, SessionHost, SessionName, DisconnectIP;
+let SessionReconnects = SecurityEvent
+| where TimeGenerated >= ago(LookbackPeriod)
+| where EventID == 4778
+| extend
+    SessionUser     = tolower(strcat(AccountDomain, "\\", AccountName)),
+    SessionHost     = Computer,
+    SessionName     = tostring(extract(@"SessionName:\s+(\S+)", 1, EventData)),
+    ReconnectIP     = IpAddress,
+    ReconnectTime   = TimeGenerated
+| project ReconnectTime, SessionUser, SessionHost, SessionName, ReconnectIP;
+// --- Join: Find disconnects followed by reconnects from different IP ---
+let SessionHandoff = SessionDisconnects
+| join kind=inner SessionReconnects on SessionUser, SessionHost
+| where ReconnectTime > DisconnectTime
+| where ReconnectTime < datetime_add("minute", toint(SessionHandoffWindow / 1m + 0.5), DisconnectTime)
+| where ReconnectIP != DisconnectIP                // Source IP changed — key hijack signal
+| where isnotempty(ReconnectIP)
+| where isnotempty(DisconnectIP)
+| where not(ReconnectIP has "127.0.0.1")
+| where not(SessionHost in~ (KnownJumpHosts))
+| extend
+    TimeDeltaSeconds = datetime_diff("second", ReconnectTime, DisconnectTime),
+    IsPrivilegedTarget = SessionUser has_any (PrivilegedAccountPatterns)
+| extend
+    HijackSignal = strcat(
+        SessionUser, " disconnected from ", DisconnectIP,
+        " → reconnected from ", ReconnectIP,
+        " within ", tostring(TimeDeltaSeconds), "s"
+    ),
+    MITRE_Technique = "T1563.002"
+| project
+    DisconnectTime, ReconnectTime, TimeDeltaSeconds,
+    SessionUser, SessionHost, SessionName,
+    DisconnectIP, ReconnectIP,
+    IsPrivilegedTarget, HijackSignal, MITRE_Technique;
+// ──────────────────────────────────────────────────────────────
+// PART 2 — tscon.exe Execution (the core mechanism for RDP session handoff)
+//   tscon.exe <sessionID> /dest:<current_session> redirects another session
+//   Legitimate use: reconnecting your own session — rare in production
+//   Attacker use: redirecting victim session to attacker terminal
+// ──────────────────────────────────────────────────────────────
+let TsconExecution = SecurityEvent
+| where TimeGenerated >= ago(LookbackPeriod)
+| where EventID == 4688
+| where NewProcessName endswith "\\tscon.exe"
+| extend
+    Actor           = tolower(strcat(SubjectDomainName, "\\", SubjectUserName)),
+    AffectedHost    = Computer,
+    CmdLine         = CommandLine,
+    SessionID_arg   = extract(@"tscon\.exe\s+(\d+)", 1, CommandLine),
+    Dest_arg        = extract(@"/dest:(\S+)", 1, CommandLine),
+    MITRE_Technique = "T1563.002"
+| where Actor !has "system"  // Filter out normal system-level tscon (e.g., logon service)
+| project
+    TimeGenerated, AffectedHost, Actor,
+    CmdLine, SessionID_arg, Dest_arg, MITRE_Technique;
+// --- MDE variant ---
+let MDETscon = union isfuzzy=true (DeviceProcessEvents
+| where TimeGenerated >= ago(LookbackPeriod)
+| where FileName =~ "tscon.exe"
+| extend
+    Actor           = tolower(strcat(InitiatingProcessAccountDomain, "\\", InitiatingProcessAccountName)),
+    AffectedHost    = DeviceName,
+    CmdLine         = ProcessCommandLine,
+    SessionID_arg   = extract(@"tscon\.exe\s+(\d+)", 1, ProcessCommandLine),
+    Dest_arg        = extract(@"/dest:(\S+)", 1, ProcessCommandLine),
+    MITRE_Technique = "T1563.002"
+| where Actor !has "system"
+| project
+    TimeGenerated, AffectedHost, Actor,
+    CmdLine, SessionID_arg, Dest_arg, MITRE_Technique),
+    (print _placeholder = "" | where 1==0);
+// ──────────────────────────────────────────────────────────────
+// PART 3 — High-frequency 4779 Disconnect (session churn — reconnaissance)
+//   Attacker using `query session` or SharpRDPHijack may cycle through sessions
+//   causing unusually high disconnect/reconnect rates on a given host
+// ──────────────────────────────────────────────────────────────
+let SessionChurn = SecurityEvent
+| where TimeGenerated >= ago(LookbackPeriod)
+| where EventID in (4778, 4779)
+| summarize
+    SessionEvents   = count(),
+    DisconnectCount = countif(EventID == 4779),
+    ReconnectCount  = countif(EventID == 4778),
+    UniqueIPs       = dcount(IpAddress),
+    IPList          = make_set(IpAddress, 10),
+    AffectedUsers   = make_set(strcat(AccountDomain, "\\", AccountName), 10)
+    by Computer, bin(TimeGenerated, 1h)
+| where DisconnectCount >= 5 or UniqueIPs >= 3   // Abnormal session churn
+| extend
+    AffectedHost    = Computer,
+    MITRE_Technique = "T1563.002",
+    HuntNote        = strcat(
+        tostring(DisconnectCount), " disconnects / ",
+        tostring(ReconnectCount), " reconnects in 1h window from ",
+        tostring(UniqueIPs), " unique source IPs"
+    )
+| project
+    TimeGenerated, AffectedHost, AffectedUsers,
+    DisconnectCount, ReconnectCount, UniqueIPs, IPList,
+    HuntNote, MITRE_Technique;
+// ──────────────────────────────────────────────────────────────
+// PART 4 — RDP Lateral Movement (RDP logons from non-standard hosts in internal network)
+//   Specifically: accounts logging in via RDP (Logon Type 10) to multiple hosts
+//   in short succession — lateral movement via hijacked or stolen sessions
+// ──────────────────────────────────────────────────────────────
+let RDPLateralMovement = SecurityEvent
+| where TimeGenerated >= ago(LookbackPeriod)
+| where EventID == 4624
+| where LogonType == 10  // RemoteInteractive = RDP
+| where AuthenticationPackageName =~ "Kerberos" or AuthenticationPackageName =~ "NTLM"
+| extend
+    Actor           = tolower(strcat(TargetDomainName, "\\", TargetUserName)),
+    TargetHost      = Computer,
+    SourceIP        = IpAddress
+| where Actor !endswith "$"  // Exclude machine self-auth
+| summarize
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated),
+    UniqueHosts     = dcount(TargetHost),
+    Hosts           = make_set(TargetHost, 20),
+    UniqueSourceIPs = dcount(SourceIP),
+    SourceIPs       = make_set(SourceIP, 10),
+    TotalRDPLogons  = count()
+    by Actor
+| where UniqueHosts >= 3   // RDP to 3+ hosts = lateral movement indicator
+| extend
+    MITRE_Technique = "T1563.002 + T1078",
+    HuntNote        = strcat(
+        tostring(UniqueHosts), " RDP targets from ",
+        tostring(UniqueSourceIPs), " source IPs over ",
+        tostring(TotalRDPLogons), " total sessions"
+    )
+| project-reorder
+    FirstSeen, LastSeen, Actor,
+    UniqueHosts, Hosts,
+    UniqueSourceIPs, SourceIPs,
+    TotalRDPLogons, HuntNote, MITRE_Technique;
+// ──────────────────────────────────────────────────────────────
+// AGGREGATE HUNTING OUTPUT — Session Handoff anomalies (primary signal)
+// ──────────────────────────────────────────────────────────────
+SessionHandoff
+| extend RiskScore = iff(IsPrivilegedTarget, "Critical", "High")
+| union (
+    TsconExecution | extend RiskScore = "High", HijackSignal = strcat("tscon.exe executed: ", CmdLine), IsPrivilegedTarget = false, SessionUser = Actor, SessionHost = AffectedHost, DisconnectIP = "", ReconnectIP = "", SessionName = "", DisconnectTime = TimeGenerated, ReconnectTime = TimeGenerated, TimeDeltaSeconds = 0
+)
+| union (
+    MDETscon | extend RiskScore = "High", HijackSignal = strcat("tscon.exe (MDE): ", CmdLine), IsPrivilegedTarget = false, SessionUser = Actor, SessionHost = AffectedHost, DisconnectIP = "", ReconnectIP = "", SessionName = "", DisconnectTime = TimeGenerated, ReconnectTime = TimeGenerated, TimeDeltaSeconds = 0
+)
+| project-reorder
+    DisconnectTime, ReconnectTime, RiskScore,
+    SessionUser, SessionHost, SessionName,
+    DisconnectIP, ReconnectIP, TimeDeltaSeconds,
+    IsPrivilegedTarget, HijackSignal, MITRE_Technique
+| sort by RiskScore asc, DisconnectTime desc
+// ──────────────────────────────────────────────────────────────
+// To run session churn or RDP lateral movement analyses, 
+// comment out the union above and run each sub-query individually:
+//   - SessionChurn
+//   - RDPLateralMovement
+// ──────────────────────────────────────────────────────────────

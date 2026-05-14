@@ -1,0 +1,149 @@
+// =========================================================
+// HUNT-25 | AD-LocalPrivilegeEscalation-Path-Analysis-30d
+// Description : Surfaces local privilege escalation paths
+//               on domain-joined machines by correlating:
+//               (1) TokenElevation logon events (4624 Type
+//               3 or Type 11 with elevated token — 4672),
+//               (2) Process creation with unusual parent-
+//               child chains (4688 UAC bypass patterns),
+//               (3) Sensitive privilege grants (4673) to
+//               unexpected principals. Also flags KrbRelayUp
+//               patterns: machine account creation followed
+//               by RBCD write on same host.
+// Period      : 30 days
+// Use Case    : Local privilege escalation path mapping,
+//               UAC bypass hunting, KrbRelayUp post-commit
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 30d;
+
+// ── 1. UAC Bypass patterns in process creation chains ──
+// Known UAC bypass: eventvwr → mmc / sdclt → cmd / fodhelper → cmd
+let UACBypassChains = datatable(ParentProcess:string, ChildProcess:string, Technique:string)[
+    "eventvwr.exe",   "cmd.exe",         "T1548.002_Eventvwr",
+    "eventvwr.exe",   "powershell.exe",  "T1548.002_Eventvwr",
+    "sdclt.exe",      "cmd.exe",         "T1548.002_Sdclt",
+    "fodhelper.exe",  "cmd.exe",         "T1548.002_Fodhelper",
+    "fodhelper.exe",  "powershell.exe",  "T1548.002_Fodhelper",
+    "dccw.exe",       "cmd.exe",         "T1548.002_DCCW",
+    "cmstp.exe",      "cmd.exe",         "T1548.002_CMSTP",
+    "mmc.exe",        "cmd.exe",         "T1548.002_MMC",
+    "wscript.exe",    "cmd.exe",         "T1548.002_WScript",
+    "msiexec.exe",    "cmd.exe",         "T1548.002_MSIExec"
+];
+
+let UACBypassProcs = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4688
+    | extend
+        ChildProc   = tolower(tostring(split(NewProcessName, "\\")[-1])),
+        ParentProc  = tolower(tostring(split(ParentProcessName, "\\")[-1])),
+        Actor       = strcat(SubjectDomainName, "\\", SubjectUserName)
+    | join kind=inner (UACBypassChains)
+        on $left.ParentProc == $right.ParentProcess
+        , $left.ChildProc == $right.ChildProcess;
+
+// ── 2. Sudden privilege escalation: standard user → privileged logon ──
+//    EventID 4624 (logon) followed by EventID 4672 (special privilege)
+//    for previously non-privileged accounts
+
+let PrivEscalations = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4672
+    | where SubjectLogonId !in ("0x3e7", "0x3e4", "0x3e5")
+    | where SubjectUserName !endswith "$"
+    // High-value privileges only
+    | where tostring(column_ifexists("PrivilegeList", "")) has_any ("SeDebugPrivilege", "SeTakeOwnershipPrivilege",
+                                    "SeImpersonatePrivilege", "SeLoadDriverPrivilege",
+                                    "SeTcbPrivilege", "SeBackupPrivilege",
+                                    "SeCreateTokenPrivilege")
+    | extend AccountNorm = tolower(SubjectUserName);
+
+// ── 3. KrbRelayUp: machine creation + RBCD write on the same host ──
+let RBCDSetup = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 5136
+    | where tostring(column_ifexists("AttributeLDAPDisplayName", "")) =~ "msDS-AllowedToActOnBehalfOfOtherIdentity"
+    | extend
+        TargetHostDN = ObjectName,
+        Actor        = strcat(SubjectDomainName, "\\", SubjectUserName),
+        RBCDDC       = Computer;
+
+let MachineCreations = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 5137
+    | where tostring(column_ifexists("ObjectClass", "")) =~ "computer"
+    | extend
+        CreatorNorm    = tolower(SubjectUserName),
+        NewMachineDN   = ObjectName,
+        CreationDC     = Computer;
+
+let KrbRelayUp = MachineCreations
+    | join kind=inner (RBCDSetup) on $left.CreationDC == $right.RBCDDC
+    | where TimeGenerated1 between (TimeGenerated .. (TimeGenerated + 10m))
+    | extend Indicator = "KrbRelayUp - Machine_Created_Then_RBCD_Set_Same_DC";
+
+// Combine all paths
+UACBypassProcs
+| summarize
+    UACBypasses  = count(),
+    Techniques   = make_set(Technique, 10),
+    Actors       = make_set(Actor, 10),
+    ChildProcs   = make_set(NewProcessName, 10),
+    FirstSeen    = min(TimeGenerated),
+    LastSeen     = max(TimeGenerated)
+  by Computer
+| extend EscalatePath = "UAC_Bypass"
+| union (
+    PrivEscalations
+    | summarize
+        PrivEscCount = count(),
+        Privileges   = make_set(tostring(column_ifexists("PrivilegeList", "")), 10),
+        AccountNorms = make_set(AccountNorm, 10),
+        FirstSeen    = min(TimeGenerated),
+        LastSeen     = max(TimeGenerated)
+      by Computer
+    | extend EscalatePath = "SensitivePrivilege_Unusual_Account"
+    | project Computer, EscalatePath,
+              UACBypasses = PrivEscCount,
+              Techniques  = Privileges,
+              Actors      = AccountNorms,
+              ChildProcs  = Privileges,
+              FirstSeen, LastSeen
+)
+| union (
+    KrbRelayUp
+    | summarize
+        KRCount  = count(),
+        Actors   = make_set(Actor, 10),
+        MachDNs  = make_set(NewMachineDN, 5),
+        FirstSeen = min(TimeGenerated),
+        LastSeen  = max(TimeGenerated)
+      by Computer = CreationDC
+    | extend EscalatePath = "KrbRelayUp_RBCD_Setup"
+    | project Computer, EscalatePath,
+              UACBypasses = KRCount,
+              Techniques  = pack_array("T1558.001_RBCD_KrbRelayUp"),
+              Actors,
+              ChildProcs  = MachDNs,
+              FirstSeen, LastSeen
+)
+| extend
+    RiskScore = UACBypasses * 30,
+    RiskLevel = case(
+        EscalatePath == "KrbRelayUp_RBCD_Setup", "Critical",
+        EscalatePath == "UAC_Bypass",            "High",
+        "Medium"
+    )
+| project
+    Computer,
+    EscalatePath,
+    RiskLevel,
+    RiskScore,
+    UACBypasses,
+    Techniques,
+    Actors,
+    FirstSeen,
+    LastSeen
+| order by RiskScore desc

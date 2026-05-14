@@ -1,0 +1,109 @@
+// =========================================================
+// HUNT-14 | AD-NTDS-VSS-Dump-History-90d
+// Description : Full historical audit of processes and
+//               commands (EventID 4688) consistent with
+//               NTDS.dit extraction via VSS, ntdsutil,
+//               diskshadow, esentutl, or reg save on DCs.
+//               Correlates with 4670 (sensitive object
+//               permission changes) and 4663 (Object Access)
+//               to reduce false positives.
+// Period      : 90 days
+// Use Case    : Forensic audit, credential theft
+//               post-incident investigation, NTDS dump paths
+// Tables      : SecurityEvent
+// =========================================================
+
+let Period = 90d;
+
+// Build DC list from historical TGT issuances
+let DCList = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4768
+    | summarize by DCName = toupper(Computer);
+
+// Process executions with NTDS dump signatures
+let DumpProcesses = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4688
+    | where Computer has_any (DCList) or Computer contains "DC"
+    | extend CmdLower = tolower(CommandLine)
+    | where CmdLower has_any (
+        "vssadmin create shadow",
+        "ntdsutil",
+        "diskshadow",
+        "esentutl",
+        "ifm",
+        "ntds.dit",
+        "system32\\config\\sam",
+        "reg save hklm\\sam",
+        "reg save hklm\\system",
+        "shadow copy",
+        "shadowcopy",
+        "\\windows\\temp\\",
+        "\\temp\\ntds",
+        "\\programdata\\ntds"
+    )
+    | extend
+        Actor         = strcat(SubjectDomainName, "\\", SubjectUserName),
+        ActorNorm     = tolower(SubjectUserName),
+        ParentProcess = ParentProcessName,
+        Process       = NewProcessName,
+        DumpMethod    = case(
+            CmdLower has "vssadmin",  "VSSAdmin_ShadowCopy",
+            CmdLower has "ntdsutil",  "Ntdsutil_IFM",
+            CmdLower has "diskshadow","DiskShadow",
+            CmdLower has "esentutl",  "Esentutl_JetDB",
+            CmdLower has "reg save",  "RegistryHive_SAM_SYSTEM",
+            "Generic_NTDS_Pattern"
+        );
+
+// Correlate with object access on NTDS-related paths (4663)
+let NTDSObjectAccess = SecurityEvent
+    | where TimeGenerated > ago(Period)
+    | where EventID == 4663
+    | where ObjectName has_any ("ntds.dit", "SAM", "SYSTEM", "SECURITY")
+    | summarize
+        NTDSAccessCount = count(),
+        AccessPaths     = make_set(ObjectName, 10)
+      by AccessHost = toupper(Computer);
+
+DumpProcesses
+| join kind=leftouter (NTDSObjectAccess) on $left.Computer == $right.AccessHost
+| summarize
+    DumpAttempts     = count(),
+    DumpMethods      = make_set(DumpMethod, 10),
+    CommandLines     = make_set(CommandLine, 20),
+    Actors           = make_set(Actor, 10),
+    Processes        = make_set(Process, 10),
+    ParentProcesses  = make_set(ParentProcess, 10),
+    NTDSFileAccess   = take_any(NTDSAccessCount),
+    AccessedPaths    = take_any(AccessPaths),
+    LastSeen         = max(TimeGenerated),
+    FirstSeen        = min(TimeGenerated)
+  by Computer
+| extend
+    ConfirmedDump = (isnotnull(NTDSFileAccess) and NTDSFileAccess > 0)
+| extend
+    RiskScore = (DumpAttempts * 20)
+              + iff(ConfirmedDump, 50, 0)
+              + (array_length(DumpMethods) * 10),
+    RiskLevel = case(
+        ConfirmedDump and DumpAttempts >= 2, "Critical - NTDS_Dumped_Confirmed",
+        ConfirmedDump,                       "Critical - NTDS_FileAccess_Detected",
+        DumpAttempts >= 3,                   "High - Multiple_Dump_Attempts",
+        DumpAttempts >= 1,                   "Medium - Dump_Command_Observed",
+        "Low"
+    )
+| project
+    Computer,
+    RiskLevel,
+    RiskScore,
+    ConfirmedDump,
+    DumpAttempts,
+    DumpMethods,
+    Actors,
+    CommandLines,
+    AccessedPaths,
+    FirstSeen,
+    LastSeen
+| order by RiskScore desc

@@ -1,0 +1,61 @@
+// =========================================================
+// RULE-02 | AD-ASREP-Roasting-NoPreAuth
+// Description : AS-REP Roasting — TGT issued without
+//               pre-authentication (DONT_REQ_PREAUTH flag).
+//               Event 4768 with Pre-Authentication Type = 0
+//               indicates an AS-REP roastable account
+//               requested a TGT — any domain user can request
+//               TGTs for any DONT_REQ_PREAUTH account without
+//               knowing the password.
+// Severity    : Medium (single event) → High (≥3 accounts/1h)
+// Frequency   : Every 1 hour, look-back 1 hour
+// MITRE       : T1558.004 — AS-REP Roasting
+// Tables      : SecurityEvent
+// NOT duplicated: No Sentinel built-in detects pre-auth type=0.
+// =========================================================
+
+let LookBack = 1h;
+
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID == 4768                          // AS-REQ / AS-REP
+| where PreAuthType == "0"                       // No pre-authentication required
+| where TargetUserName !endswith "$"             // Exclude machine accounts
+| where TargetUserName !in~ ("krbtgt")
+| extend
+    RequestingHost = ClientAddress,
+    TargetAccount  = strcat(TargetDomainName, "\\", TargetUserName),
+    EncType        = TicketEncryptionType
+| summarize
+    TotalRequests        = count(),
+    UniqueTargetAccounts = dcount(TargetUserName),
+    TargetAccounts       = make_set(TargetUserName, 20),
+    RequestingHosts      = make_set(ClientAddress, 10),
+    EarliestEvent        = min(TimeGenerated),
+    LatestEvent          = max(TimeGenerated)
+    by Computer, ClientAddress
+| extend
+    Severity = case(
+        UniqueTargetAccounts >= 5, "Critical",
+        UniqueTargetAccounts >= 3, "High",
+        UniqueTargetAccounts >= 1, "Medium",
+        "Low"
+    ),
+    WhySuspicious = strcat(
+        iff(UniqueTargetAccounts >= 5, "Mass_ASREP_>=5_accts; ", ""),
+        iff(UniqueTargetAccounts >= 3, "Bulk_ASREP_3-4_accts; ", ""),
+        iff(UniqueTargetAccounts == 1, "Single_ASREP_no_preauth; ", "")
+    )
+| project
+    TimeGenerated        = LatestEvent,
+    Severity,
+    WhySuspicious,
+    Computer,
+    ClientAddress,
+    UniqueTargetAccounts,
+    TotalRequests,
+    TargetAccounts,
+    RequestingHosts,
+    EarliestEvent,
+    LatestEvent
+| order by UniqueTargetAccounts desc

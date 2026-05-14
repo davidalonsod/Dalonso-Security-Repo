@@ -1,0 +1,62 @@
+// =========================================================
+// RULE-13 | AD-WDigest-Reenabled
+// Description : WDigest credential provider re-enabled —
+//               Event 4657 (Registry Value Modified) setting
+//               HKLM\SYSTEM\CurrentControlSet\Control\
+//               SecurityProviders\WDigest\UseLogonCredential
+//               to 1 (enabled).
+//               When UseLogonCredential = 1 Windows stores
+//               the user's plaintext password in LSASS memory
+//               instead of only the NT hash.  This is a
+//               deliberate attacker preparation step before
+//               credential dumping.
+// Severity    : High (any host) → Critical (on a DC or Tier-0)
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1556.002 — Modify Authentication Process:
+//               Password Filter DLL
+//               (most closely maps to T1112 — Modify Registry)
+// Tables      : SecurityEvent
+// =========================================================
+
+let LookBack = 15m;
+
+// Known DCs (lightweight — 3-day TGT window)
+let KnownDCNames = SecurityEvent
+    | where TimeGenerated > ago(3d)
+    | where EventID == 4768
+    | summarize by DC = toupper(Computer);
+
+SecurityEvent
+| where TimeGenerated > ago(LookBack)
+| where EventID == 4657                    // Registry Value Modified
+| where ObjectName has @"WDigest"
+    and ObjectValueName =~ "UseLogonCredential"
+// New value = 1 means WDigest enabled
+| where NewValue == "1" or NewValue == "0x00000001"
+| extend
+    ActorAccount  = strcat(SubjectDomainName, "\\", SubjectUserName),
+    RegPath       = ObjectName,
+    PreviousValue = OldValue,
+    NewRegValue   = NewValue,
+    IsOnDC        = (toupper(Computer) in~ (KnownDCNames))
+| extend
+    Severity = case(IsOnDC, "Critical", "High"),
+    WhySuspicious = strcat(
+        "WDigest_Enabled_UseLogonCredential=1; ",
+        iff(IsOnDC, "On_DC_Critical_Impact; ", "Workstation_or_Server; "),
+        "Actor: ", SubjectUserName, "; ",
+        "RegPath: ", RegPath
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    ActorAccount,
+    Computer,
+    RegPath,
+    PreviousValue,
+    NewRegValue,
+    IsOnDC,
+    SubjectUserName,
+    SubjectDomainName
+| order by TimeGenerated desc

@@ -1,0 +1,85 @@
+// =========================================================
+// RULE-27 | AD-SkeletonKey-LSASS-Patch
+// Description : Skeleton Key attack detection — Mimikatz
+//               misc::skeleton injects a master backdoor
+//               password into the running LSASS on each DC.
+//               Detected via:
+//               1. Event 4611 — Trusted Logon Process
+//                  Registered (LSA package injection signal)
+//               2. Event 4688 — Process Creation with
+//                  Mimikatz command misc::skeleton
+//               3. DeviceEvents (MDE) — LSASS write access
+//                  from an unexpected process
+//               Since this is in-memory only (no file on
+//               disk), it's lost on reboot — but very
+//               dangerous while active.
+// Severity    : Critical
+// Frequency   : Every 15 minutes, look-back 15 minutes
+// MITRE       : T1556.001 — Modify Authentication Process:
+//               Domain Controller Authentication
+// Tables      : SecurityEvent, DeviceEvents (MDE optional)
+// =========================================================
+
+let LookBack = 15m;
+
+// Signal 1: Event 4611 — new trusted logon process on DC
+// (unusual LSA package registration = possible SSP injection)
+let Via4611 = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4611
+    | where not(LogonProcessName has_any (
+        "Authz", "NTLM", "Kerberos", "MICROSOFT_AUTHENTICATION_PACKAGE_V1_0",
+        "NtLmSsp", "WDigest", "schannel", "msv1_0", "negotiate",
+        "CredSSP", "CREDSSP"
+    ))
+    | extend
+        Source     = "Event4611_UnknownLSAPackage",
+        Actor      = SubjectUserName,
+        Detail     = LogonProcessName,
+        Host       = Computer;
+
+// Signal 2: Mimikatz skeleton key command via process creation
+let Via4688 = SecurityEvent
+    | where TimeGenerated > ago(LookBack)
+    | where EventID == 4688
+    | where CommandLine has_any ("misc::skeleton", "skeleton",
+                                  "lsadump::lsp", "memssp")
+    | extend
+        Source     = "Event4688_Mimikatz_Skeleton",
+        Actor      = SubjectUserName,
+        Detail     = CommandLine,
+        Host       = Computer;
+
+// Signal 3: MDE — process writing to LSASS from suspicious process
+let ViaMDE = DeviceEvents
+    | where TimeGenerated > ago(LookBack)
+    | where ActionType == "OpenProcessApiCall"
+    | where FileName =~ "lsass.exe"
+    | where not(InitiatingProcessFileName in~ (
+        "MsMpEng.exe", "csrss.exe", "wininit.exe", "winlogon.exe",
+        "svchost.exe", "lsaiso.exe", "taskmgr.exe", "services.exe"
+    ))
+    | extend
+        Source     = "MDE_LSASS_Write_Suspicious",
+        Actor      = InitiatingProcessAccountName,
+        Detail     = strcat(InitiatingProcessFileName, " PID:", tostring(InitiatingProcessId)),
+        Host       = DeviceName;
+
+union Via4611, Via4688, ViaMDE
+| extend
+    Severity = "Critical",
+    WhySuspicious = strcat(
+        "SkeletonKey_LSASS_Injection_Indicator; ",
+        "Source: ", Source, "; ",
+        "Actor: ", Actor, "; ",
+        "Detail: ", Detail
+    )
+| project
+    TimeGenerated,
+    Severity,
+    WhySuspicious,
+    Actor,
+    Detail,
+    Source,
+    Host
+| order by TimeGenerated desc
