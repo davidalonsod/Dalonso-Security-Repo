@@ -1,0 +1,47 @@
+id: a1f00005-0005-4005-9005-adfs00000005
+name: HUNT-05 ADFS TOR / Threat-Intel IP History (90d)
+description: |
+  Joins ADFSSignInLogs against ThreatIntelIndicators (active IP IoCs, STIX 2.1 -
+  replaces deprecated ThreatIntelligenceIndicator) over 90 days. Surfaces
+  historical authentication attempts from known-bad infrastructure that may not
+  have triggered a real-time analytic rule.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - ADFSSignInLogs
+  - connectorId: ThreatIntelligence
+    dataTypes:
+      - ThreatIntelIndicators
+tactics:
+  - InitialAccess
+  - CommandAndControl
+relevantTechniques:
+  - T1090.003
+  - T1078
+query: |
+  let TIIPs = ThreatIntelIndicators
+    | where TimeGenerated > ago(30d)
+    | where IsActive == true
+    | where isempty(ValidUntil) or ValidUntil > now()
+    | where Pattern has "ipv4-addr:value"
+    | extend NetworkIP = extract(@"ipv4-addr:value\s*=\s*'([^']+)'", 1, tostring(Pattern))
+    | where isnotempty(NetworkIP)
+    | summarize
+        ThreatType  = make_set(Tags, 10),
+        Description = any(tostring(Data.description))
+      by NetworkIP;
+  ADFSSignInLogs
+  | invoke ExcludeAllowlistedIPs()
+  | where TimeGenerated > ago(90d)
+  | join kind=inner (TIIPs) on $left.IPAddress == $right.NetworkIP
+  | summarize
+      Attempts        = count(),
+      SuccessfulAuth  = countif(ResultType == 0),
+      UniqueUsers     = dcount(UserPrincipalName),
+      Users           = make_set(UserPrincipalName, 25),
+      ThreatTypes     = make_set(ThreatType, 10),
+      FirstSeen       = min(TimeGenerated),
+      LastSeen        = max(TimeGenerated)
+    by IPAddress
+  | order by SuccessfulAuth desc, Attempts desc
