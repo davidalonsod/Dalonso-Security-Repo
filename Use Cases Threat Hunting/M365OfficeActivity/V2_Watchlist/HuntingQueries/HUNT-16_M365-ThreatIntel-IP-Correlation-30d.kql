@@ -1,0 +1,82 @@
+// Hunt    : M365 - ThreatIntelligence IP Correlation with M365 Activity (30d)
+// Purpose : Proactively join all M365 OfficeActivity IPs against active Sentinel
+//           ThreatIntelIndicators entries over 30 days. Surfaces any historical
+//           access to mailboxes, SharePoint, OneDrive, or Teams from IPs associated
+//           with known threat actors, C2 infrastructure, or malware campaigns.
+//           Use this after a new TI feed ingestion to retroactively hunt for past
+//           exposure — "did this known-bad IP ever touch our tenant?"
+//           Note: uses ThreatIntelIndicators (STIX 2.1, replaces deprecated
+//           ThreatIntelligenceIndicator table).
+//
+// Tables  : OfficeActivity, ThreatIntelIndicators
+// Period  : P30D
+//==========================================================================================
+
+let LookbackDays = 30d;
+
+// Materialize active TI indicators (STIX 2.1 pattern extraction)
+let TIIndicators = ThreatIntelIndicators
+    | where TimeGenerated > ago(90d)
+    | where IsActive == true
+    | where isempty(ValidUntil) or ValidUntil > now()
+    | where Pattern has "ipv4-addr:value"
+    | extend TIIp = extract(@"ipv4-addr:value\s*=\s*'([^']+)'", 1, tostring(Pattern))
+    | where isnotempty(TIIp)
+    | summarize
+        ThreatType        = make_set(Tags, 5),
+        ConfidenceScore   = max(Confidence),
+        Description       = any(tostring(Data.description)),
+        IndicatorProvider = any(SourceSystem),
+        FirstTISeen       = min(TimeGenerated),
+        LastTISeen        = max(TimeGenerated)
+        by TIIp;
+
+// Join all M365 events
+OfficeActivity
+| where TimeGenerated > ago(LookbackDays)
+| where isnotempty(ClientIP)
+| join kind=inner TIIndicators on $left.ClientIP == $right.TIIp
+| extend
+    IsHighRiskOp = Operation in (
+        "FileDownloaded", "FileSyncDownloadedFull",
+        "MailItemsAccessed", "MessageViewed",
+        "New-InboxRule", "New-TransportRule",
+        "SharingInvitationCreated", "AnonymousLinkCreated",
+        "AnonymousLinkUsed", "Add-MailboxPermission",
+        "New-MailboxExportRequest", "MemberAdded",
+        "MessageCreated", "FileShared")
+| summarize
+    TotalHits         = count(),
+    HighRiskHits      = countif(IsHighRiskOp),
+    Operations        = make_set(Operation, 20),
+    AffectedUsers     = make_set(UserId, 10),
+    Workloads         = make_set(OfficeWorkload, 5),
+    FilesOrObjects    = make_set(coalesce(SourceFileName, OfficeObjectId), 10),
+    ThreatType        = any(ThreatType),
+    ConfidenceScore   = any(ConfidenceScore),
+    TIDescription     = any(Description),
+    IndicatorProvider = any(IndicatorProvider),
+    FirstSeen         = min(TimeGenerated),
+    LastSeen          = max(TimeGenerated)
+    by MaliciousIP = ClientIP
+| sort by HighRiskHits desc, TotalHits desc
+| extend RiskClassification = case(
+    HighRiskHits >= 5,   "Critical — Active Attacker Operations",
+    HighRiskHits >= 1,   "High — Sensitive Actions from TI IP",
+    TotalHits >= 10,     "Medium — High-Volume TI IP Access",
+    "Low — Single/Recon Access")
+| project
+    MaliciousIP,
+    ThreatType,
+    ConfidenceScore,
+    TIDescription,
+    IndicatorProvider,
+    TotalHits,
+    HighRiskHits,
+    AffectedUsers,
+    Operations,
+    Workloads,
+    FilesOrObjects,
+    RiskClassification,
+    FirstSeen,
+    LastSeen
