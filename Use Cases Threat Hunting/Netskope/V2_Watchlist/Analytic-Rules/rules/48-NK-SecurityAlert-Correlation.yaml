@@ -1,0 +1,87 @@
+id: e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b
+name: "Netskope + SecurityAlert Correlation - C2/Malware Corroboration"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Cross-correlates Netskope blocked malicious/C2 requests with concurrent Microsoft
+  Defender or Sentinel security alerts on the same source IP. Dual-source corroboration
+  provides high-confidence evidence of an active compromise.
+  MITRE ATT&CK: T1071 (Application Layer Protocol), T1078 (Valid Accounts)
+severity: High
+requiredDataConnectors:
+  - connectorId: NetskopeWebTransactions
+    dataTypes:
+      - NetskopeWebTx_CL
+  - connectorId: MicrosoftDefenderAdvancedThreatProtection
+    dataTypes:
+      - SecurityAlert
+queryFrequency: PT1H
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+  - DefenseEvasion
+relevantTechniques:
+  - T1071
+  - T1078
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];
+  let NetskopeBlocks =
+      union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL
+      | where TimeGenerated > ago(1d)
+      | where action_s in ("block", "Block", "blocked", "Blocked")
+      | where category_s has_any (
+          "Malware", "Phishing", "Botnet", "Command and Control",
+          "Ransomware", "Cryptomining", "Spyware/Adware")
+          or isnotempty(malware_name_s)
+      | summarize
+          NK_BlockCount    = count(),
+          NK_DestDomains   = make_set(domain_s, 10),
+          NK_Categories    = make_set(category_s, 5),
+          NK_MalwareNames  = make_set(malware_name_s, 5),
+          NK_Users         = make_set(user_s, 5),
+          NK_FirstSeen     = min(TimeGenerated)
+        by NK_SrcIP = srcip_s;
+  SecurityAlert
+  | where TimeGenerated > ago(1d)
+  | where AlertSeverity in ("High", "Medium")
+  | mv-expand todynamic(Entities)
+  | extend EntityIP = tostring(Entities.Address)
+  | where isnotempty(EntityIP)
+  | summarize
+      Alert_Count      = count(),
+      Alert_Names      = make_set(AlertName, 5),
+      Alert_Products   = make_set(ProductName, 5),
+      Alert_Severity   = make_set(AlertSeverity, 3),
+      Alert_FirstSeen  = min(TimeGenerated)
+    by EntityIP
+  | join kind=inner NetskopeBlocks on $left.EntityIP == $right.NK_SrcIP
+  | project
+      NK_SrcIP, NK_BlockCount, NK_DestDomains, NK_Categories,
+      NK_MalwareNames, NK_Users,
+      Alert_Count, Alert_Names, Alert_Products, Alert_Severity,
+      NK_FirstSeen, Alert_FirstSeen
+  | order by NK_BlockCount desc, Alert_Count desc
+entityMappings:
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: NK_SrcIP
+customDetails:
+  NK_BlockCount: NK_BlockCount
+  Alert_Count: Alert_Count
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope+Alert Correlation - {{NK_SrcIP}} ({{NK_BlockCount}} blocks + {{Alert_Count}} alerts)"
+  alertDescriptionFormat: "Host {{NK_SrcIP}} has {{NK_BlockCount}} Netskope C2 blocks AND {{Alert_Count}} security alerts. High-confidence compromise indicator."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - IP
+    groupByAlertDetails: []
+    groupByCustomDetails: []

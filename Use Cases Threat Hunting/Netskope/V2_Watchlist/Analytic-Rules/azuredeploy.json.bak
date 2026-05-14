@@ -1,0 +1,1545 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "workspace": {
+            "type": "string",
+            "metadata": {
+                "description": "Name of the Log Analytics workspace where Microsoft Sentinel is deployed"
+            }
+        }
+    },
+    "resources": [
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Blocked Request to Malicious / C2 Category",
+                "description": "Detects Netskope blocked web requests categorized as malware, phishing, botnet,",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT15M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "CommandAndControl"
+                ],
+                "techniques": [
+                    "T1071"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nlet MaliciousCategories = dynamic([\n    \"Malware\", \"Phishing\", \"Botnet\", \"Command and Control\",\n    \"Spyware/Adware\", \"Ransomware\", \"Cryptomining\",\n    \"Newly Observed Domain\", \"Newly Registered Domain\"]);\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where action_s in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| where category_s in (MaliciousCategories)\n    or severity_s in (\"high\", \"critical\")\n    or isnotempty(malware_name_s)\n| summarize\n    BlockCount       = count(),\n    UniqueUsers      = dcount(user_s),\n    UserList         = make_set(user_s, 20),\n    DestDomains      = make_set(domain_s, 20),\n    DestIPs          = make_set(dstip_s, 10),\n    Categories       = make_set(category_s, 10),\n    MalwareNames     = make_set(malware_name_s, 10),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by category_s, domain_s\n| order by BlockCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "DNS",
+                        "fieldMappings": [
+                            {
+                                "identifier": "DomainName",
+                                "columnName": "domain_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "BlockCount": "BlockCount",
+                    "UniqueUsers": "UniqueUsers",
+                    "Category": "category_s"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "AnyAlert",
+                        "groupByEntities": [],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": [
+                            "Category"
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - DLP Policy Violation - Blocked Sensitive Data Upload",
+                "description": "Detects Netskope DLP policy violations where an upload or file transfer was blocked",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT30M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "Exfiltration"
+                ],
+                "techniques": [
+                    "T1048",
+                    "T1567"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where action_s in (\"block\", \"Block\", \"blocked\", \"alert\", \"Alert\")\n| where isnotempty(dlp_rule_s) or isnotempty(dlp_profile_s)\n    or activity_s has_any (\"DLP\", \"Upload\", \"Share\")\n| where isnotempty(user_s)\n| summarize\n    ViolationCount    = count(),\n    MBUploaded        = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),\n    UniqueDestDomains = dcount(domain_s),\n    DestDomains       = make_set(domain_s, 10),\n    DLPRules          = make_set(dlp_rule_s, 10),\n    DLPProfiles       = make_set(dlp_profile_s, 5),\n    FileTypes         = make_set(file_type_s, 10),\n    ObjectSamples     = make_set(object_s, 5),\n    FirstViolation    = min(TimeGenerated),\n    LastViolation     = max(TimeGenerated)\n  by user_s, dlp_profile_s\n| order by ViolationCount desc, MBUploaded desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "ViolationCount": "ViolationCount",
+                    "MBUploaded": "MBUploaded",
+                    "DLPProfile": "dlp_profile_s"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/c3d4e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Threat Intelligence Domain/IP Correlation",
+                "description": "Correlates Netskope allowed web traffic against active Threat Intelligence indicators.",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "CommandAndControl"
+                ],
+                "techniques": [
+                    "T1071",
+                    "T1568"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nlet TI_IOCs =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where isempty(ValidUntil) or ValidUntil > now()\n    | where (isnotnull(parse_ipv4(ObservableValue)) or ObservableKey has \"domain\")\n    | where isnotempty(ObservableValue)\n    | summarize\n        TI_ThreatTypes = make_set(Tags),\n        TI_Confidence  = max(Confidence),\n        TI_Tags        = make_set(Tags)\n      by IOC_Value = ObservableValue;\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| where isnotempty(domain_s) or isnotempty(dstip_s)\n| extend MatchKey = coalesce(domain_s, tostring(dstip_s))\n| summarize\n    RequestCount     = count(),\n    UniqueUsers      = dcount(user_s),\n    UserList         = make_set(user_s, 10),\n    BytesRecv        = sum(todouble(bytes_downloaded_d)),\n    BytesSent        = sum(todouble(bytes_uploaded_d)),\n    Apps             = make_set(app_s, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by MatchKey, domain_s, dstip_s\n| join kind=inner TI_IOCs on $left.MatchKey == $right.IOC_Value\n| project\n    MatchKey, domain_s, dstip_s,\n    RequestCount, UniqueUsers, UserList,\n    BytesRecv, BytesSent, Apps,\n    TI_ThreatTypes, TI_Confidence, TI_Tags,\n    FirstSeen, LastSeen\n| order by TI_Confidence desc, RequestCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "DNS",
+                        "fieldMappings": [
+                            {
+                                "identifier": "DomainName",
+                                "columnName": "domain_s"
+                            }
+                        ]
+                    },
+                    {
+                        "entityType": "IP",
+                        "fieldMappings": [
+                            {
+                                "identifier": "Address",
+                                "columnName": "dstip_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "RequestCount": "RequestCount",
+                    "TI_Confidence": "TI_Confidence"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "DNS"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f8a')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Off-Hours High-Volume Web Activity",
+                "description": "Detects users generating unusually high web traffic volume through Netskope during",
+                "severity": "Medium",
+                "enabled": true,
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "Exfiltration"
+                ],
+                "techniques": [
+                    "T1029",
+                    "T1567"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(user_s)\n| where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| extend\n    HourOfDay  = hourofday(TimeGenerated),\n    DayOfWeek  = dayofweek(TimeGenerated)\n| where (HourOfDay >= 20 or HourOfDay < 6)\n    or (DayOfWeek == 6d or DayOfWeek == 0d)\n| summarize\n    RequestCount    = count(),\n    TotalMBUploaded = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),\n    TotalMBDownload = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),\n    UniqueDomains   = dcount(domain_s),\n    TopDomains      = make_set(domain_s, 10),\n    TopApps         = make_set(app_s, 10),\n    SourceIPs       = make_set(srcip_s, 5),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by user_s\n| where TotalMBUploaded > 100 or TotalMBDownload > 500 or RequestCount > 5000\n| order by TotalMBUploaded desc, RequestCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "RequestCount": "RequestCount",
+                    "TotalMBUploaded": "TotalMBUploaded",
+                    "TotalMBDownload": "TotalMBDownload"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8a9b')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Multi-User Phishing Campaign Detection",
+                "description": "Detects multiple users accessing the same phishing or newly registered domain within",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT15M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "InitialAccess"
+                ],
+                "techniques": [
+                    "T1566"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nlet PhishingCategories = dynamic([\n    \"Phishing\", \"Phishing and Other Frauds\", \"Newly Observed Domain\",\n    \"Newly Registered Domain\", \"Suspicious\", \"Malware\"]);\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where category_s in (PhishingCategories)\n    or severity_s in (\"high\", \"critical\")\n| where isnotempty(user_s) and isnotempty(domain_s)\n| summarize\n    UniqueUsers      = dcount(user_s),\n    UserList         = make_set(user_s, 30),\n    TotalRequests    = count(),\n    Blocked          = countif(action_s in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    Allowed          = countif(action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    Categories       = make_set(category_s, 5),\n    URLSamples       = make_set(url_s, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by domain_s\n| where UniqueUsers >= 3\n| extend CampaignDuration = datetime_diff('minute', LastSeen, FirstSeen)\n| order by UniqueUsers desc, TotalRequests desc",
+                "entityMappings": [
+                    {
+                        "entityType": "DNS",
+                        "fieldMappings": [
+                            {
+                                "identifier": "DomainName",
+                                "columnName": "domain_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "UniqueUsers": "UniqueUsers",
+                    "TotalRequests": "TotalRequests",
+                    "Allowed": "Allowed"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "DNS"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/f6a7b8c9-d0e1-4f2a-3b4c-5d6e7f8a9b0c')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - High-Confidence Threat Allowed Through",
+                "description": "Detects Netskope allowed traffic to destinations with high or critical threat severity",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT15M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "CommandAndControl",
+                    "Execution"
+                ],
+                "techniques": [
+                    "T1071",
+                    "T1204"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| where severity_s in (\"high\", \"critical\")\n    or isnotempty(malware_name_s)\n    or isnotempty(threat_name_s)\n| where isnotempty(user_s)\n| summarize\n    RequestCount     = count(),\n    UniqueUsers      = dcount(user_s),\n    UserList         = make_set(user_s, 20),\n    Domains          = make_set(domain_s, 10),\n    ThreatNames      = make_set(threat_name_s, 10),\n    MalwareNames     = make_set(malware_name_s, 10),\n    Categories       = make_set(category_s, 5),\n    Severities       = make_set(severity_s, 5),\n    TotalBytesRecv   = sum(todouble(bytes_downloaded_d)),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by domain_s, severity_s\n| extend TotalMBRecv = round(toreal(TotalBytesRecv) / 1048576, 2)\n| order by RequestCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "DNS",
+                        "fieldMappings": [
+                            {
+                                "identifier": "DomainName",
+                                "columnName": "domain_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "RequestCount": "RequestCount",
+                    "UniqueUsers": "UniqueUsers",
+                    "Severity": "severity_s"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "DNS"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/a7b8c9d0-e1f2-4a3b-4c5d-6e7f8a9b0c1d')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - ATP/Sandbox Malicious File Detection",
+                "description": "Detects files identified as malicious by Netskope Advanced Threat Protection (ATP) sandbox",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT15M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "Execution",
+                    "CommandAndControl"
+                ],
+                "techniques": [
+                    "T1105",
+                    "T1204"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(malware_name_s) or isnotempty(malware_type_s)\n    or threat_name_s has_any (\"malware\", \"trojan\", \"ransomware\", \"exploit\", \"worm\", \"adware\")\n| where isnotempty(user_s)\n| summarize\n    DetectionCount   = count(),\n    UniqueFiles      = dcount(object_s),\n    FileNames        = make_set(object_s, 10),\n    FileTypes        = make_set(file_type_s, 10),\n    MalwareNames     = make_set(malware_name_s, 10),\n    MalwareTypes     = make_set(malware_type_s, 5),\n    ThreatNames      = make_set(threat_name_s, 10),\n    ActionsTaken     = make_set(action_s, 5),\n    Domains          = make_set(domain_s, 10),\n    Apps             = make_set(app_s, 5),\n    Blocked          = countif(action_s in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    Allowed          = countif(action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by user_s, malware_name_s\n| order by Allowed desc, DetectionCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "DetectionCount": "DetectionCount",
+                    "MalwareName": "malware_name_s",
+                    "Allowed": "Allowed"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/b8c9d0e1-f2a3-4b4c-5d6e-7f8a9b0c1d2e')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Tunnel/Proxy/VPN Bypass Attempt",
+                "description": "Detects users attempting to access tunnel, SOCKS proxy, VPN, or anonymizer services",
+                "severity": "Medium",
+                "enabled": true,
+                "queryFrequency": "PT30M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "CommandAndControl",
+                    "DefenseEvasion"
+                ],
+                "techniques": [
+                    "T1090",
+                    "T1572"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nlet BypassCategories = dynamic([\n    \"Proxy Avoidance\", \"Anonymizers\", \"VPN\",\n    \"Remote Access\", \"Tunneling\", \"Tor\",\n    \"P2P File Sharing\", \"Web Proxy\"]);\nlet BypassApps = dynamic([\n    \"Tor\", \"NordVPN\", \"ExpressVPN\", \"Private Internet Access\",\n    \"Psiphon\", \"Ultrasurf\", \"Hotspot Shield\", \"Windscribe\",\n    \"ProtonVPN\", \"CyberGhost\", \"Shadowsocks\", \"WireGuard\"]);\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(user_s)\n| where category_s in (BypassCategories)\n    or app_s in (BypassApps)\n    or domain_s has_any (\"torproject.org\", \"psiphon\", \"ultrasurf\",\n        \"nordvpn\", \"expressvpn\", \"protonvpn\")\n| summarize\n    RequestCount     = count(),\n    UniqueApps       = dcount(app_s),\n    Apps             = make_set(app_s, 10),\n    Categories       = make_set(category_s, 10),\n    Domains          = make_set(domain_s, 10),\n    Actions          = make_set(action_s, 5),\n    Blocked          = countif(action_s in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    Allowed          = countif(action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    SourceIPs        = make_set(srcip_s, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by user_s\n| order by Allowed desc, RequestCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "RequestCount": "RequestCount",
+                    "Allowed": "Allowed"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/c9d0e1f2-a3b4-4c5d-6e7f-8a9b0c1d2e3a')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - User Visibility Loss - No Traffic Detected",
+                "description": "Detects users who previously had consistent Netskope web transaction activity but have",
+                "severity": "Medium",
+                "enabled": true,
+                "queryFrequency": "PT4H",
+                "queryPeriod": "P7D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "DefenseEvasion"
+                ],
+                "techniques": [
+                    "T1562"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nlet baselineWindow = 7d;\nlet recentWindow   = 4h;\nlet minBaselineReqsPerDay = 20;\n// Users with consistent Netskope activity in the baseline window\nlet BaselineUsers =\n    union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n    | where isnotempty(user_s)\n    | summarize\n        BaselineReqPerDay = round(toreal(count()) / (baselineWindow / 1d), 1),\n        BaselineApps           = make_set(app_s, 10),\n        BaselineIPs            = make_set(srcip_s, 5)\n      by user_s\n    | where BaselineReqPerDay >= minBaselineReqsPerDay;\n// Users with ANY activity in the recent window\nlet RecentActiveUsers =\n    union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n    | where TimeGenerated > ago(recentWindow)\n    | where isnotempty(user_s)\n    | distinct user_s;\n// Users who went silent\nBaselineUsers\n| join kind=leftanti RecentActiveUsers on user_s\n| project\n    user_s, BaselineReqPerDay, BaselineApps, BaselineIPs\n| order by BaselineReqPerDay desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "BaselineReqPerDay": "BaselineReqPerDay"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/d0e1f2a3-b4c5-4d6e-7f8a-9b0c1d2e3f4a')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - LOTL C2 via Legitimate Services (GitHub/Pastebin/Google Docs)",
+                "description": "Identifies potential Living-Off-The-Land C2 abuse via legitimate public platforms like",
+                "severity": "Medium",
+                "enabled": true,
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "CommandAndControl"
+                ],
+                "techniques": [
+                    "T1102",
+                    "T1105"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nlet LotLDomains = dynamic([\n    \"raw.githubusercontent.com\", \"gist.githubusercontent.com\", \"gist.github.com\",\n    \"pastebin.com\", \"paste.ee\", \"hastebin.com\", \"ghostbin.com\", \"rentry.co\",\n    \"docs.google.com\", \"drive.google.com\",\n    \"cdn.discordapp.com\", \"media.discordapp.net\",\n    \"onedrive.live.com\", \"1drv.ms\", \"transfer.sh\",\n    \"anonfiles.com\", \"gofile.io\", \"file.io\"]);\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(domain_s)\n| where domain_s has_any (LotLDomains)\n| where isnotempty(user_s)\n| where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| summarize\n    RequestCount     = count(),\n    TotalBytesRecv   = sum(todouble(bytes_downloaded_d)),\n    TotalBytesSent   = sum(todouble(bytes_uploaded_d)),\n    UniqueURLs       = dcount(url_s),\n    URLSamples       = make_set(url_s, 10),\n    FileTypes        = make_set(file_type_s, 5),\n    SourceIPs        = make_set(srcip_s, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by user_s, domain_s\n| extend TotalMBReceived = round(toreal(TotalBytesRecv) / 1048576, 2)\n| where TotalMBReceived > 20 or RequestCount > 100\n| project\n    user_s, domain_s,\n    RequestCount, TotalMBReceived, TotalBytesSent,\n    URLSamples, FileTypes,\n    FirstSeen, LastSeen\n| order by TotalMBReceived desc, RequestCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    },
+                    {
+                        "entityType": "DNS",
+                        "fieldMappings": [
+                            {
+                                "identifier": "DomainName",
+                                "columnName": "domain_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "RequestCount": "RequestCount",
+                    "TotalMBReceived": "TotalMBReceived"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope + SecurityAlert Correlation - C2/Malware Corroboration",
+                "description": "Cross-correlates Netskope blocked malicious/C2 requests with concurrent Microsoft",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "CommandAndControl",
+                    "DefenseEvasion"
+                ],
+                "techniques": [
+                    "T1071",
+                    "T1078"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nlet NetskopeBlocks =\n    union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n    | where TimeGenerated > ago(1d)\n    | where action_s in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n    | where category_s has_any (\n        \"Malware\", \"Phishing\", \"Botnet\", \"Command and Control\",\n        \"Ransomware\", \"Cryptomining\", \"Spyware/Adware\")\n        or isnotempty(malware_name_s)\n    | summarize\n        NK_BlockCount    = count(),\n        NK_DestDomains   = make_set(domain_s, 10),\n        NK_Categories    = make_set(category_s, 5),\n        NK_MalwareNames  = make_set(malware_name_s, 5),\n        NK_Users         = make_set(user_s, 5),\n        NK_FirstSeen     = min(TimeGenerated)\n      by NK_SrcIP = srcip_s;\nSecurityAlert\n| where TimeGenerated > ago(1d)\n| where AlertSeverity in (\"High\", \"Medium\")\n| mv-expand todynamic(Entities)\n| extend EntityIP = tostring(Entities.Address)\n| where isnotempty(EntityIP)\n| summarize\n    Alert_Count      = count(),\n    Alert_Names      = make_set(AlertName, 5),\n    Alert_Products   = make_set(ProductName, 5),\n    Alert_Severity   = make_set(AlertSeverity, 3),\n    Alert_FirstSeen  = min(TimeGenerated)\n  by EntityIP\n| join kind=inner NetskopeBlocks on $left.EntityIP == $right.NK_SrcIP\n| project\n    NK_SrcIP, NK_BlockCount, NK_DestDomains, NK_Categories,\n    NK_MalwareNames, NK_Users,\n    Alert_Count, Alert_Names, Alert_Products, Alert_Severity,\n    NK_FirstSeen, Alert_FirstSeen\n| order by NK_BlockCount desc, Alert_Count desc",
+                "entityMappings": [
+                    {
+                        "entityType": "IP",
+                        "fieldMappings": [
+                            {
+                                "identifier": "Address",
+                                "columnName": "NK_SrcIP"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "NK_BlockCount": "NK_BlockCount",
+                    "Alert_Count": "Alert_Count"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "IP"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/f2a3b4c5-d6e7-4f8a-9b0c-1d2e3f4a5b6c')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Low & Slow Multi-Channel Exfiltration",
+                "description": "Detects exfiltration spread across multiple cloud services over 7 days using statistical",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "P1D",
+                "queryPeriod": "P7D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "Exfiltration",
+                    "Collection"
+                ],
+                "techniques": [
+                    "T1041",
+                    "T1567"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nlet HuntWindow = 7d;\nlet ExfilCategories = dynamic([\n    \"Cloud Storage\", \"File Sharing\", \"Online Storage and Backup\",\n    \"Personal Sites & Blogs\", \"Webmail\", \"Social Networking\"]);\n// Step 1: Daily upload per user to exfil-candidate categories\nlet Daily =\n    union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n    | where TimeGenerated > ago(HuntWindow)\n    | where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n    | where isnotempty(user_s)\n    | where category_s in (ExfilCategories) or activity_s == \"Upload\"\n    | summarize\n        DaySentBytes    = sum(todouble(bytes_uploaded_d)),\n        DayRequestCount = count(),\n        DayDestCount    = dcount(domain_s)\n      by user_s, Day = bin(TimeGenerated, 1d);\n// Step 2: Aggregate per user\nlet Users =\n    Daily\n    | summarize\n        TotalMBSent   = round(toreal(sum(DaySentBytes)) / 1048576, 2),\n        ActiveDays    = dcount(Day),\n        TotalRequests = sum(DayRequestCount),\n        UniqueDestCnt = sum(DayDestCount)\n      by user_s;\n// Step 3: Peer-group statistics\nlet globalAvg = toscalar(Users | summarize avg(TotalMBSent));\nlet globalStd = toscalar(Users | summarize stdev(TotalMBSent));\n// Step 4: Flag statistical outliers\nUsers\n| extend\n    Zscore = iff(globalStd > 0,\n                 round((TotalMBSent - globalAvg) / globalStd, 2),\n                 0.0)\n| where Zscore >= 3.0\n    or (ActiveDays >= 5 and TotalMBSent > 100)\n| project\n    user_s,\n    TotalMBSent, ActiveDays, TotalRequests, UniqueDestCnt,\n    Zscore\n| order by Zscore desc, TotalMBSent desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "TotalMBSent": "TotalMBSent",
+                    "Zscore": "Zscore",
+                    "ActiveDays": "ActiveDays"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "P1D",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/a3b4c5d6-e7f8-4a9b-0c1d-2e3f4a5b6c7d')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Category Shift Anomaly - Domain Recategorization",
+                "description": "Detects domains that were previously categorized as benign but have recently shifted",
+                "severity": "Medium",
+                "enabled": true,
+                "queryFrequency": "P1D",
+                "queryPeriod": "P14D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "ResourceDevelopment"
+                ],
+                "techniques": [
+                    "T1584",
+                    "T1583"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nlet SuspiciousCategories = dynamic([\n    \"Uncategorized\", \"Unknown\", \"Newly Observed Domain\",\n    \"Newly Registered Domain\", \"Suspicious\", \"Parked\",\n    \"Dynamic DNS Host\"]);\nlet BenignCategories = dynamic([\n    \"Business\", \"Technology\", \"News/Media\", \"Education\",\n    \"Government\", \"Health\", \"Finance\", \"Shopping\",\n    \"Entertainment\", \"Reference\", \"Travel\", \"Sports\"]);\n// Baseline: domains seen with benign categories in older window\nlet BaselineDomains =\n    union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n    | where TimeGenerated between (ago(14d) .. ago(1d))\n    | where category_s in (BenignCategories)\n    | where isnotempty(domain_s)\n    | summarize\n        OldCategories = make_set(category_s, 5),\n        OldRequests   = count()\n      by domain_s;\n// Recent: same domains now appearing with suspicious categories\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where category_s in (SuspiciousCategories)\n| where isnotempty(domain_s)\n| summarize\n    NewCategory      = take_any(category_s),\n    RecentRequests   = count(),\n    UniqueUsers      = dcount(user_s),\n    UserList         = make_set(user_s, 10),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by domain_s\n| join kind=inner BaselineDomains on domain_s\n| project\n    domain_s, OldCategories, NewCategory,\n    OldRequests, RecentRequests, UniqueUsers, UserList,\n    FirstSeen, LastSeen\n| order by UniqueUsers desc, RecentRequests desc",
+                "entityMappings": [
+                    {
+                        "entityType": "DNS",
+                        "fieldMappings": [
+                            {
+                                "identifier": "DomainName",
+                                "columnName": "domain_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "OldCategories": "OldCategories",
+                    "NewCategory": "NewCategory",
+                    "UniqueUsers": "UniqueUsers"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "P1D",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "DNS"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/b4c5d6e7-f8a9-4b0c-1d2e-3f4a5b6c7d8e')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - DNS Tunneling via Long Hostnames",
+                "description": "Detects DNS tunneling indicators in Netskope traffic by identifying requests to",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "CommandAndControl"
+                ],
+                "techniques": [
+                    "T1071"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(domain_s)\n| extend\n    HostnameLength  = strlen(domain_s),\n    SubdomainParts  = countof(domain_s, \".\")\n| where HostnameLength > 50 or SubdomainParts > 5\n| summarize\n    QueryCount       = count(),\n    UniqueSubdomains = dcount(domain_s),\n    LongestHostname  = max(HostnameLength),\n    SampleDomains    = make_set(domain_s, 10),\n    Users            = make_set(user_s, 10),\n    SourceIPs        = make_set(srcip_s, 10),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by srcip_s\n| where QueryCount > 10\n| order by LongestHostname desc, QueryCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "IP",
+                        "fieldMappings": [
+                            {
+                                "identifier": "Address",
+                                "columnName": "srcip_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "QueryCount": "QueryCount",
+                    "LongestHostname": "LongestHostname"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "IP"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/c5d6e7f8-a9b0-4c1d-2e3f-4a5b6c7d8ea0')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Unauthorized Cloud App Access (Shadow IT)",
+                "description": "Detects users accessing unsanctioned cloud applications with low Cloud Confidence Level (CCL).",
+                "severity": "Medium",
+                "enabled": true,
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "Exfiltration",
+                    "DefenseEvasion"
+                ],
+                "techniques": [
+                    "T1567",
+                    "T1537"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];\nlet RiskyCCL = dynamic([\"poor\", \"low\", \"unknown\"]);\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(user_s) and isnotempty(app_s)\n| where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| where ccl_s in (RiskyCCL) or isempty(ccl_s)\n| where category_s !in (\"Business\", \"Technology\", \"Government\", \"Education\")\n| summarize\n    RequestCount      = count(),\n    TotalMBUploaded   = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),\n    TotalMBDownloaded = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),\n    UniqueApps        = dcount(app_s),\n    Apps              = make_set(app_s, 20),\n    Categories        = make_set(category_s, 10),\n    Domains           = make_set(domain_s, 20),\n    SourceIPs         = make_set(srcip_s, 5),\n    CCLValues         = make_set(ccl_s, 5),\n    FirstSeen         = min(TimeGenerated),\n    LastSeen          = max(TimeGenerated)\n  by user_s\n| where UniqueApps >= 3 or TotalMBUploaded > 50\n| order by UniqueApps desc, TotalMBUploaded desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "UniqueApps": "UniqueApps",
+                    "TotalMBUploaded": "TotalMBUploaded",
+                    "CCLValues": "CCLValues"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/d6e7f8a9-b0c1-4d2e-3f4a-5b6c7d8e9fa1')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Impossible Travel Detection",
+                "description": "Detects users generating Netskope web traffic from geographically distant source countries",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT30M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "InitialAccess",
+                    "CredentialAccess"
+                ],
+                "techniques": [
+                    "T1078"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];\nlet TravelWindow = 2h;\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(user_s) and isnotempty(src_country_s)\n| where src_country_s != \"Unknown\" and src_country_s != \"\"\n| summarize\n    Countries        = make_set(src_country_s, 10),\n    CountryCount     = dcount(src_country_s),\n    SourceIPs        = make_set(srcip_s, 20),\n    UniqueIPs        = dcount(srcip_s),\n    RequestCount     = count(),\n    Apps             = make_set(app_s, 10),\n    AccessMethods    = make_set(access_method_s, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by user_s, bin(TimeGenerated, TravelWindow)\n| where CountryCount >= 2\n| extend TravelWindowMinutes = datetime_diff('minute', LastSeen, FirstSeen)\n| project\n    user_s, Countries, CountryCount, SourceIPs, UniqueIPs,\n    RequestCount, Apps, AccessMethods,\n    TravelWindowMinutes, FirstSeen, LastSeen\n| order by CountryCount desc, UniqueIPs desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "CountryCount": "CountryCount",
+                    "Countries": "Countries",
+                    "UniqueIPs": "UniqueIPs"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/e7f8a9b0-c1d2-4e3f-4a5b-6c7d8e9f0a2c')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Credential Phishing Submission Detection",
+                "description": "Detects users who uploaded or submitted data (POST activity) to domains categorized as",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT15M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "InitialAccess",
+                    "CredentialAccess"
+                ],
+                "techniques": [
+                    "T1566",
+                    "T1056"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];\nlet PhishingCategories = dynamic([\n    \"Phishing\", \"Phishing and Other Frauds\", \"Suspicious\",\n    \"Newly Observed Domain\", \"Newly Registered Domain\"]);\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(user_s) and isnotempty(domain_s)\n| where category_s in (PhishingCategories)\n    or severity_s in (\"high\", \"critical\")\n| where activity_s has_any (\"Upload\", \"Post\", \"Submit\", \"Login\", \"FormSubmit\")\n    or todouble(bytes_uploaded_d) > 100\n| summarize\n    SubmissionCount   = count(),\n    TotalBytesPosted  = sum(todouble(bytes_uploaded_d)),\n    UniqueURLs        = dcount(url_s),\n    URLSamples        = make_set(url_s, 10),\n    Categories        = make_set(category_s, 5),\n    Activities        = make_set(activity_s, 5),\n    SourceIPs         = make_set(srcip_s, 5),\n    DstCountries      = make_set(dst_country_s, 5),\n    Actions           = make_set(action_s, 5),\n    FirstSeen         = min(TimeGenerated),\n    LastSeen          = max(TimeGenerated)\n  by user_s, domain_s\n| order by SubmissionCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    },
+                    {
+                        "entityType": "DNS",
+                        "fieldMappings": [
+                            {
+                                "identifier": "DomainName",
+                                "columnName": "domain_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "SubmissionCount": "SubmissionCount",
+                    "Categories": "Categories"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/f8a9b0c1-d2e3-4f4a-5b6c-7d8e9f0a1b3d')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Suspicious File Download from Uncategorized Domain",
+                "description": "Detects file downloads from newly registered, uncategorized, or suspicious domains.",
+                "severity": "Medium",
+                "enabled": true,
+                "queryFrequency": "PT30M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "Execution",
+                    "CommandAndControl"
+                ],
+                "techniques": [
+                    "T1105",
+                    "T1204"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];\nlet SuspiciousCategories = dynamic([\n    \"Uncategorized\", \"Unknown\", \"Newly Observed Domain\",\n    \"Newly Registered Domain\", \"Suspicious\", \"Parked\",\n    \"Dynamic DNS Host\"]);\nlet RiskyFileTypes = dynamic([\n    \"exe\", \"dll\", \"scr\", \"bat\", \"cmd\", \"ps1\", \"vbs\", \"js\",\n    \"hta\", \"msi\", \"iso\", \"img\", \"zip\", \"7z\", \"rar\"]);\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(user_s) and isnotempty(domain_s)\n| where activity_s has_any (\"Download\", \"download\")\n    or todouble(bytes_downloaded_d) > 1048576\n| where category_s in (SuspiciousCategories)\n| where isnotempty(file_type_s) or isnotempty(object_s)\n| summarize\n    DownloadCount     = count(),\n    TotalMBDownloaded = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),\n    UniqueFiles       = dcount(object_s),\n    FileNames         = make_set(object_s, 10),\n    FileTypes         = make_set(file_type_s, 10),\n    Domains           = make_set(domain_s, 10),\n    Categories        = make_set(category_s, 5),\n    URLSamples        = make_set(url_s, 5),\n    DstCountries      = make_set(dst_country_s, 5),\n    SourceIPs         = make_set(srcip_s, 5),\n    FirstSeen         = min(TimeGenerated),\n    LastSeen          = max(TimeGenerated)\n  by user_s\n| where DownloadCount >= 1\n| order by TotalMBDownloaded desc, DownloadCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "DownloadCount": "DownloadCount",
+                    "TotalMBDownloaded": "TotalMBDownloaded",
+                    "FileTypes": "FileTypes"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/a9b0c1d2-e3f4-4a5b-6c7d-8e9f0a1b2c4e')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - High-Volume Data Transfer to Risky Cloud App",
+                "description": "Detects high-volume data uploads to cloud applications with low or poor Cloud Confidence",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "Exfiltration",
+                    "Collection"
+                ],
+                "techniques": [
+                    "T1567",
+                    "T1537"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];\nlet RiskyCCL = dynamic([\"poor\", \"low\", \"unknown\"]);\nlet ExfilCategories = dynamic([\n    \"Cloud Storage\", \"File Sharing\", \"Online Storage and Backup\",\n    \"Personal Sites & Blogs\", \"Webmail\"]);\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(user_s) and isnotempty(app_s)\n| where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| where ccl_s in (RiskyCCL) or isempty(ccl_s)\n| where category_s in (ExfilCategories) or activity_s has_any (\"Upload\", \"Share\", \"Post\")\n| summarize\n    UploadCount       = count(),\n    TotalMBUploaded   = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),\n    UniqueFiles       = dcount(object_s),\n    FileNames         = make_set(object_s, 10),\n    FileTypes         = make_set(file_type_s, 10),\n    Apps              = make_set(app_s, 10),\n    Domains           = make_set(domain_s, 10),\n    Categories        = make_set(category_s, 5),\n    CCLValues         = make_set(ccl_s, 5),\n    SourceIPs         = make_set(srcip_s, 5),\n    FirstSeen         = min(TimeGenerated),\n    LastSeen          = max(TimeGenerated)\n  by user_s\n| where TotalMBUploaded > 100 or UploadCount > 50\n| order by TotalMBUploaded desc, UploadCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "TotalMBUploaded": "TotalMBUploaded",
+                    "UploadCount": "UploadCount",
+                    "Apps": "Apps"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/b0c1d2e3-f4a5-4b6c-7d8e-9f0a1b2c3d5f')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Geo Anomaly - Traffic to High-Risk Countries",
+                "description": "Detects web traffic routed to destination servers in high-risk countries. Identifies",
+                "severity": "Medium",
+                "enabled": true,
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "CommandAndControl",
+                    "Exfiltration"
+                ],
+                "techniques": [
+                    "T1071",
+                    "T1048"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];\nlet HighRiskCountries = dynamic([\n    \"RU\", \"CN\", \"KP\", \"IR\", \"SY\", \"CU\", \"VE\", \"BY\",\n    \"Russia\", \"China\", \"North Korea\", \"Iran\", \"Syria\", \"Cuba\", \"Venezuela\", \"Belarus\"]);\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(user_s) and isnotempty(dst_country_s)\n| where dst_country_s in (HighRiskCountries)\n| where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| summarize\n    RequestCount      = count(),\n    TotalMBUploaded   = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),\n    TotalMBDownloaded = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),\n    UniqueDomains     = dcount(domain_s),\n    Domains           = make_set(domain_s, 20),\n    DestIPs           = make_set(dstip_s, 10),\n    Apps              = make_set(app_s, 10),\n    Categories        = make_set(category_s, 10),\n    SourceIPs         = make_set(srcip_s, 5),\n    SrcIP             = take_any(srcip_s),\n    FirstSeen         = min(TimeGenerated),\n    LastSeen          = max(TimeGenerated)\n  by user_s, dst_country_s\n| where RequestCount >= 5\n| order by TotalMBUploaded desc, RequestCount desc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    },
+                    {
+                        "entityType": "IP",
+                        "fieldMappings": [
+                            {
+                                "identifier": "Address",
+                                "columnName": "SrcIP"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "RequestCount": "RequestCount",
+                    "DstCountry": "dst_country_s",
+                    "TotalMBUploaded": "TotalMBUploaded"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": [
+                            "DstCountry"
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e6a')]",
+            "apiVersion": "2022-11-01-preview",
+            "kind": "Scheduled",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "displayName": "Netskope - Multi-Protocol C2 Beaconing Pattern",
+                "description": "Detects regular-interval beaconing patterns to suspicious or low-reputation domains.",
+                "severity": "High",
+                "enabled": true,
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionEnabled": false,
+                "suppressionDuration": "PT5H",
+                "tactics": [
+                    "CommandAndControl"
+                ],
+                "techniques": [
+                    "T1071",
+                    "T1573"
+                ],
+                "query": "let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];\nlet SuspiciousCategories = dynamic([\n    \"Uncategorized\", \"Unknown\", \"Newly Observed Domain\",\n    \"Newly Registered Domain\", \"Suspicious\", \"Parked\",\n    \"Dynamic DNS Host\", \"Malware\", \"Command and Control\"]);\nlet RiskyCCL = dynamic([\"poor\", \"low\", \"unknown\"]);\nunion isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL\n| where TimeGenerated > ago(1d)\n| where isnotempty(user_s) and isnotempty(domain_s)\n| where category_s in (SuspiciousCategories) or ccl_s in (RiskyCCL)\n| summarize\n    RequestCount     = count(),\n    RequestTimes     = make_list(TimeGenerated, 200),\n    TotalBytesSent   = sum(todouble(bytes_uploaded_d)),\n    TotalBytesRecv   = sum(todouble(bytes_downloaded_d)),\n    SourceIPs        = make_set(srcip_s, 5),\n    Categories       = make_set(category_s, 5),\n    CCL              = take_any(ccl_s),\n    DstIPs           = make_set(dstip_s, 5),\n    DstCountries     = make_set(dst_country_s, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by user_s, domain_s\n| where RequestCount >= 20\n| extend\n    DurationMinutes  = datetime_diff('minute', LastSeen, FirstSeen),\n    AvgIntervalSec   = iff(RequestCount > 1,\n                           round(toreal(datetime_diff('second', LastSeen, FirstSeen)) / (RequestCount - 1), 1),\n                           0.0)\n| where DurationMinutes >= 60\n| where AvgIntervalSec between (10.0 .. 600.0)\n| project\n    user_s, domain_s, RequestCount,\n    AvgIntervalSec, DurationMinutes,\n    TotalBytesSent, TotalBytesRecv,\n    Categories, CCL, DstIPs, DstCountries, SourceIPs,\n    FirstSeen, LastSeen\n| order by RequestCount desc, AvgIntervalSec asc",
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "user_s"
+                            }
+                        ]
+                    },
+                    {
+                        "entityType": "DNS",
+                        "fieldMappings": [
+                            {
+                                "identifier": "DomainName",
+                                "columnName": "domain_s"
+                            }
+                        ]
+                    }
+                ],
+                "customDetails": {
+                    "RequestCount": "RequestCount",
+                    "AvgIntervalSec": "AvgIntervalSec",
+                    "CCL": "CCL"
+                },
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT6H",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account",
+                            "DNS"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ38-Netskope-BlockedRequestsbyMaliciousCategory')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ38 - Netskope - Netskope - Blocked Requests by Malicious Category",
+                "query": "let MaliciousCategories = dynamic([\n    \"Malware\", \"Phishing\", \"Botnet\", \"Command and Control\",\n    \"Spyware/Adware\", \"Ransomware\", \"Cryptomining\",\n    \"Newly Observed Domain\", \"Newly Registered Domain\"]);\nNetskopeWebTx_CL\n| where TimeGenerated > ago(24h)\n| where action_s in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| where category_s in (MaliciousCategories)\n    or severity_s in (\"high\", \"critical\")\n    or isnotempty(malware_name_s)\n| summarize\n    BlockCount       = count(),\n    UniqueUsers      = dcount(user_s),\n    UserList         = make_set(user_s, 20),\n    DestDomains      = make_set(domain_s, 20),\n    DestIPs          = make_set(dstip_s, 10),\n    Categories       = make_set(category_s, 10),\n    MalwareNames     = make_set(malware_name_s, 10),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by category_s, domain_s\n| order by BlockCount desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Surfaces all Netskope blocked web requests for malware/phishing/C2/botnet categories."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "CommandAndControl"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1071"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ39-Netskope-DLPViolationsDeepDive')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ39 - Netskope - Netskope - DLP Violations Deep Dive",
+                "query": "NetskopeWebTx_CL\n| where TimeGenerated > ago(7d)\n| where isnotempty(dlp_rule_s) or isnotempty(dlp_profile_s)\n| where isnotempty(user_s)\n| summarize\n    ViolationCount    = count(),\n    MBUploaded        = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),\n    UniqueFiles       = dcount(object_s),\n    FileNames         = make_set(object_s, 10),\n    FileTypes         = make_set(file_type_s, 10),\n    DestDomains       = make_set(domain_s, 10),\n    Apps              = make_set(app_s, 10),\n    Actions           = make_set(action_s, 5),\n    DLPProfiles       = make_set(dlp_profile_s, 5),\n    FirstViolation    = min(TimeGenerated),\n    LastViolation     = max(TimeGenerated)\n  by user_s, dlp_rule_s\n| order by ViolationCount desc, MBUploaded desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Surfaces all Netskope DLP policy violations with detailed rule/profile analysis."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "Exfiltration"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1048, T1567"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ40-Netskope-AllowedTraffictoTI-ListedDomainsIPs')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ40 - Netskope - Netskope - Allowed Traffic to TI-Listed Domains/IPs",
+                "query": "let TI_IOCs =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(30d)\n    | where isempty(ValidUntil) or ValidUntil > now()\n    | where (isnotnull(parse_ipv4(ObservableValue)) or ObservableKey has \"domain\")\n    | where isnotempty(ObservableValue)\n    | summarize\n        TI_ThreatTypes = make_set(Tags),\n        TI_Confidence  = max(Confidence),\n        TI_Tags        = make_set(Tags)\n      by IOC_Value = ObservableValue;\nNetskopeWebTx_CL\n| where TimeGenerated > ago(24h)\n| where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| where isnotempty(domain_s) or isnotempty(dstip_s)\n| extend MatchKey = coalesce(domain_s, tostring(dstip_s))\n| summarize\n    RequestCount     = count(),\n    UniqueUsers      = dcount(user_s),\n    UserList         = make_set(user_s, 10),\n    BytesRecv        = sum(todouble(bytes_downloaded_d)),\n    BytesSent        = sum(todouble(bytes_uploaded_d)),\n    Apps             = make_set(app_s, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by MatchKey, domain_s, dstip_s\n| join kind=inner TI_IOCs on $left.MatchKey == $right.IOC_Value\n| project\n    MatchKey, domain_s, dstip_s,\n    RequestCount, UniqueUsers, UserList,\n    BytesRecv, BytesSent, Apps,\n    TI_ThreatTypes, TI_Confidence, TI_Tags,\n    FirstSeen, LastSeen\n| order by TI_Confidence desc, RequestCount desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Correlates Netskope allowed traffic against active TI feed entries."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "CommandAndControl"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1071, T1568"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ41-Netskope-Off-HoursActivityProfiling')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ41 - Netskope - Netskope - Off-Hours Activity Profiling",
+                "query": "NetskopeWebTx_CL\n| where TimeGenerated > ago(7d)\n| where isnotempty(user_s)\n| where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| extend\n    HourOfDay  = hourofday(TimeGenerated),\n    DayOfWeek  = dayofweek(TimeGenerated)\n| where (HourOfDay >= 20 or HourOfDay < 6)\n    or (DayOfWeek == 6d or DayOfWeek == 0d)\n| summarize\n    RequestCount    = count(),\n    TotalMBUploaded = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),\n    TotalMBDownload = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),\n    UniqueDomains   = dcount(domain_s),\n    TopDomains      = make_set(domain_s, 10),\n    TopApps         = make_set(app_s, 10),\n    UniqueCategories = dcount(category_s),\n    SourceIPs       = make_set(srcip_s, 5),\n    ActiveDays      = dcount(startofday(TimeGenerated)),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by user_s\n| where TotalMBUploaded > 50 or TotalMBDownload > 200 or RequestCount > 2000\n| order by TotalMBUploaded desc, RequestCount desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Profiles user web activity outside business hours to detect exfiltration or unauthorized use."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "Exfiltration"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1029, T1567"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ42-Netskope-PhishingCampaignDetection-Multi-UserDomainAcce')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ42 - Netskope - Netskope - Phishing Campaign Detection - Multi-User Domain Access",
+                "query": "let PhishingCategories = dynamic([\n    \"Phishing\", \"Phishing and Other Frauds\", \"Newly Observed Domain\",\n    \"Newly Registered Domain\", \"Suspicious\", \"Malware\"]);\nNetskopeWebTx_CL\n| where TimeGenerated > ago(24h)\n| where category_s in (PhishingCategories)\n    or severity_s in (\"high\", \"critical\")\n| where isnotempty(user_s) and isnotempty(domain_s)\n| summarize\n    UniqueUsers      = dcount(user_s),\n    UserList         = make_set(user_s, 50),\n    TotalRequests    = count(),\n    Blocked          = countif(action_s in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    Allowed          = countif(action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    Categories       = make_set(category_s, 5),\n    URLSamples       = make_set(url_s, 10),\n    SourceIPs        = make_set(srcip_s, 20),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by domain_s\n| where UniqueUsers >= 2\n| extend CampaignDurationMinutes = datetime_diff('minute', LastSeen, FirstSeen)\n| order by UniqueUsers desc, Allowed desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Identifies phishing campaigns by detecting multiple users hitting the same phishing domain."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "InitialAccess"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1566, T1566.002"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ43-Netskope-ThreatSeverityAllowedTrafficAnalysis')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ43 - Netskope - Netskope - Threat Severity Allowed Traffic Analysis",
+                "query": "NetskopeWebTx_CL\n| where TimeGenerated > ago(24h)\n| where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| where severity_s in (\"high\", \"critical\")\n    or isnotempty(malware_name_s)\n    or isnotempty(threat_name_s)\n| summarize\n    RequestCount     = count(),\n    UniqueUsers      = dcount(user_s),\n    UserList         = make_set(user_s, 20),\n    Domains          = make_set(domain_s, 20),\n    ThreatNames      = make_set(threat_name_s, 10),\n    MalwareNames     = make_set(malware_name_s, 10),\n    Categories       = make_set(category_s, 10),\n    Apps             = make_set(app_s, 10),\n    TotalMBRecv      = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),\n    TotalMBSent      = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by severity_s\n| order by RequestCount desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Analyzes traffic that Netskope flagged with high/critical severity but allowed through."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "CommandAndControl, Execution"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1071, T1204"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ44-Netskope-ATPSandboxDetectionsSummary')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ44 - Netskope - Netskope - ATP/Sandbox Detections Summary",
+                "query": "NetskopeWebTx_CL\n| where TimeGenerated > ago(7d)\n| where isnotempty(malware_name_s) or isnotempty(malware_type_s)\n    or isnotempty(threat_name_s)\n| summarize\n    DetectionCount   = count(),\n    UniqueUsers      = dcount(user_s),\n    UniqueFiles      = dcount(object_s),\n    Users            = make_set(user_s, 20),\n    FileNames        = make_set(object_s, 20),\n    FileTypes        = make_set(file_type_s, 10),\n    MalwareTypes     = make_set(malware_type_s, 10),\n    ThreatNames      = make_set(threat_name_s, 10),\n    Domains          = make_set(domain_s, 10),\n    Apps             = make_set(app_s, 10),\n    Actions          = make_set(action_s, 5),\n    Blocked          = countif(action_s in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    Allowed          = countif(action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by malware_name_s\n| order by Allowed desc, DetectionCount desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Summarizes all malware/threat detections from Netskope ATP/sandbox for hunting analysis."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "Execution, CommandAndControl"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1105, T1204.002"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ45-Netskope-TunnelProxyVPNBypassHunting')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ45 - Netskope - Netskope - Tunnel/Proxy/VPN Bypass Hunting",
+                "query": "let BypassCategories = dynamic([\n    \"Proxy Avoidance\", \"Anonymizers\", \"VPN\",\n    \"Remote Access\", \"Tunneling\", \"Tor\",\n    \"P2P File Sharing\", \"Web Proxy\"]);\nNetskopeWebTx_CL\n| where TimeGenerated > ago(7d)\n| where isnotempty(user_s)\n| where category_s in (BypassCategories)\n    or domain_s has_any (\"torproject.org\", \"psiphon\", \"ultrasurf\",\n        \"nordvpn\", \"expressvpn\", \"protonvpn\", \"mullvad.net\",\n        \"windscribe\", \"surfshark\", \"cyberghost\")\n| summarize\n    RequestCount     = count(),\n    UniqueApps       = dcount(app_s),\n    Apps             = make_set(app_s, 10),\n    Categories       = make_set(category_s, 10),\n    Domains          = make_set(domain_s, 20),\n    Actions          = make_set(action_s, 5),\n    Blocked          = countif(action_s in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    Allowed          = countif(action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")),\n    SourceIPs        = make_set(srcip_s, 10),\n    ActiveDays       = dcount(startofday(TimeGenerated)),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by user_s\n| order by Allowed desc, RequestCount desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Hunts for users attempting to access VPN, proxy, anonymizer, or tunneling services."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "CommandAndControl, DefenseEvasion"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1090, T1572"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ46-Netskope-VisibilityLoss-UsersGoneSilent')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ46 - Netskope - Netskope - Visibility Loss - Users Gone Silent",
+                "query": "let baselineWindow = 7d;\nlet recentWindow   = 4h;\nlet minBaselineReqsPerDay = 20;\nlet BaselineUsers =\n    NetskopeWebTx_CL\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n    | where isnotempty(user_s)\n    | summarize\n        BaselineRequestsPerDay = round(toreal(count()) / (baselineWindow / 1d), 1),\n        BaselineApps           = make_set(app_s, 10),\n        BaselineIPs            = make_set(srcip_s, 5),\n        BaselineCategories     = make_set(category_s, 10)\n      by user_s\n    | where BaselineRequestsPerDay >= minBaselineReqsPerDay;\nlet RecentActiveUsers =\n    NetskopeWebTx_CL\n    | where TimeGenerated > ago(recentWindow)\n    | where isnotempty(user_s)\n    | distinct user_s;\nBaselineUsers\n| join kind=leftanti RecentActiveUsers on user_s\n| project\n    user_s, BaselineRequestsPerDay, BaselineApps, BaselineIPs, BaselineCategories\n| order by BaselineRequestsPerDay desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Detects users with baseline Netskope activity who stopped generating traffic."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "DefenseEvasion"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1562, T1562.001"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ47-Netskope-LOTLC2viaLegitimatePlatforms')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ47 - Netskope - Netskope - LOTL C2 via Legitimate Platforms",
+                "query": "let LotLDomains = dynamic([\n    \"raw.githubusercontent.com\", \"gist.githubusercontent.com\", \"gist.github.com\",\n    \"pastebin.com\", \"paste.ee\", \"hastebin.com\", \"ghostbin.com\", \"rentry.co\",\n    \"docs.google.com\", \"drive.google.com\",\n    \"cdn.discordapp.com\", \"media.discordapp.net\",\n    \"onedrive.live.com\", \"1drv.ms\", \"transfer.sh\",\n    \"anonfiles.com\", \"gofile.io\", \"file.io\"]);\nNetskopeWebTx_CL\n| where TimeGenerated > ago(24h)\n| where isnotempty(domain_s)\n| where domain_s has_any (LotLDomains)\n| where isnotempty(user_s)\n| where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n| summarize\n    RequestCount     = count(),\n    TotalBytesRecv   = sum(todouble(bytes_downloaded_d)),\n    TotalBytesSent   = sum(todouble(bytes_uploaded_d)),\n    UniqueURLs       = dcount(url_s),\n    URLSamples       = make_set(url_s, 10),\n    FileTypes        = make_set(file_type_s, 5),\n    SourceIPs        = make_set(srcip_s, 5),\n    FirstSeen        = min(TimeGenerated),\n    LastSeen         = max(TimeGenerated)\n  by user_s, domain_s\n| extend TotalMBReceived = round(toreal(TotalBytesRecv) / 1048576, 2)\n| where TotalMBReceived > 10 or RequestCount > 50\n| project\n    user_s, domain_s,\n    RequestCount, TotalMBReceived, TotalBytesSent,\n    URLSamples, FileTypes,\n    FirstSeen, LastSeen\n| order by TotalMBReceived desc, RequestCount desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Hunts for abuse of GitHub, Pastebin, Google Docs, Discord as C2 staging."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "CommandAndControl"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1102, T1105"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ48-NetskopeSecurityAlertCross-SourceCorroboration')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ48 - Netskope - Netskope + SecurityAlert Cross-Source Corroboration",
+                "query": "let NetskopeBlocks =\n    NetskopeWebTx_CL\n    | where TimeGenerated > ago(24h)\n    | where action_s in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n    | where category_s has_any (\n        \"Malware\", \"Phishing\", \"Botnet\", \"Command and Control\",\n        \"Ransomware\", \"Cryptomining\", \"Spyware/Adware\")\n        or isnotempty(malware_name_s)\n    | summarize\n        NK_BlockCount    = count(),\n        NK_DestDomains   = make_set(domain_s, 10),\n        NK_Categories    = make_set(category_s, 5),\n        NK_MalwareNames  = make_set(malware_name_s, 5),\n        NK_Users         = make_set(user_s, 5),\n        NK_FirstSeen     = min(TimeGenerated)\n      by NK_SrcIP = srcip_s;\nSecurityAlert\n| where TimeGenerated > ago(24h)\n| where AlertSeverity in (\"High\", \"Medium\")\n| mv-expand todynamic(Entities)\n| extend\n    EntityIP   = tostring(Entities.Address),\n    EntityHost = tostring(Entities.HostName)\n| where isnotempty(EntityIP)\n| summarize\n    Alert_Count      = count(),\n    Alert_Names      = make_set(AlertName, 5),\n    Alert_Products   = make_set(ProductName, 5),\n    Alert_Severity   = make_set(AlertSeverity, 3),\n    Alert_FirstSeen  = min(TimeGenerated)\n  by EntityIP, EntityHost\n| join kind=inner NetskopeBlocks on $left.EntityIP == $right.NK_SrcIP\n| project\n    NK_SrcIP, EntityHost,\n    NK_BlockCount, NK_DestDomains, NK_Categories, NK_Users,\n    Alert_Count, Alert_Names, Alert_Products, Alert_Severity,\n    NK_FirstSeen, Alert_FirstSeen\n| order by NK_BlockCount desc, Alert_Count desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Correlates Netskope C2 blocks with Defender/Sentinel security alerts on the same host."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "CommandAndControl"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1071, T1078"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+            "name": "[concat(parameters('workspace'), '/NK-HQ49-Netskope-LowSlowExfiltrationStatisticalZ-Score')]",
+            "apiVersion": "2020-08-01",
+            "properties": {
+                "category": "Hunting Queries",
+                "displayName": "HQ49 - Netskope - Netskope - Low & Slow Exfiltration (Statistical Z-Score)",
+                "query": "let HuntWindow = 7d;\nlet ExfilCategories = dynamic([\n    \"Cloud Storage\", \"File Sharing\", \"Online Storage and Backup\",\n    \"Personal Sites & Blogs\", \"Webmail\", \"Social Networking\"]);\nlet Daily =\n    NetskopeWebTx_CL\n    | where TimeGenerated > ago(HuntWindow)\n    | where action_s !in (\"block\", \"Block\", \"blocked\", \"Blocked\")\n    | where isnotempty(user_s)\n    | where category_s in (ExfilCategories) or activity_s == \"Upload\"\n    | summarize\n        DaySentBytes    = sum(todouble(bytes_uploaded_d)),\n        DayRequestCount = count(),\n        DayDestCount    = dcount(domain_s)\n      by user_s, Day = bin(TimeGenerated, 1d);\nlet Users =\n    Daily\n    | summarize\n        TotalMBSent   = round(toreal(sum(DaySentBytes)) / 1048576, 2),\n        ActiveDays    = dcount(Day),\n        TotalRequests = sum(DayRequestCount),\n        UniqueDestCnt = sum(DayDestCount)\n      by user_s;\nlet globalAvg = toscalar(Users | summarize avg(TotalMBSent));\nlet globalStd = toscalar(Users | summarize stdev(TotalMBSent));\nUsers\n| extend\n    Zscore = iff(globalStd > 0,\n                 round((TotalMBSent - globalAvg) / globalStd, 2),\n                 0.0)\n| where Zscore >= 2.5\n    or (ActiveDays >= 5 and TotalMBSent > 50)\n| project\n    user_s,\n    TotalMBSent, ActiveDays, TotalRequests, UniqueDestCnt,\n    Zscore\n| order by Zscore desc, TotalMBSent desc",
+                "tags": [
+                    {
+                        "name": "description",
+                        "value": "Detects exfiltration via small sessions across multiple cloud channels using Z-score deviation."
+                    },
+                    {
+                        "name": "tactics",
+                        "value": "Exfiltration"
+                    },
+                    {
+                        "name": "techniques",
+                        "value": "T1041, T1567.002"
+                    }
+                ]
+            }
+        }
+    ]
+}

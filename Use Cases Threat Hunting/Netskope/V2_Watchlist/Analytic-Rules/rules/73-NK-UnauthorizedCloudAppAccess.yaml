@@ -1,0 +1,72 @@
+id: c5d6e7f8-a9b0-4c1d-2e3f-4a5b6c7d8ea0
+name: "Netskope - Unauthorized Cloud App Access (Shadow IT)"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects users accessing unsanctioned cloud applications with low Cloud Confidence Level (CCL).
+  Shadow IT usage exposes the organization to data leakage, compliance risks, and potential
+  supply-chain compromise through unvetted SaaS platforms.
+  Uses the custom NetskopeWebTx_CL table via Blob Storage ingestion.
+  MITRE ATT&CK: T1567 (Exfiltration Over Web Service), T1537 (Transfer Data to Cloud Account)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: NetskopeWebTransactions
+    dataTypes:
+      - NetskopeWebTx_CL
+queryFrequency: PT1H
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Exfiltration
+  - DefenseEvasion
+relevantTechniques:
+  - T1567
+  - T1537
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  let RiskyCCL = dynamic(["poor", "low", "unknown"]);
+  union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL
+  | where TimeGenerated > ago(1d)
+  | where isnotempty(user_s) and isnotempty(app_s)
+  | where action_s !in ("block", "Block", "blocked", "Blocked")
+  | where ccl_s in (RiskyCCL) or isempty(ccl_s)
+  | where category_s !in ("Business", "Technology", "Government", "Education")
+  | summarize
+      RequestCount      = count(),
+      TotalMBUploaded   = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),
+      TotalMBDownloaded = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),
+      UniqueApps        = dcount(app_s),
+      Apps              = make_set(app_s, 20),
+      Categories        = make_set(category_s, 10),
+      Domains           = make_set(domain_s, 20),
+      SourceIPs         = make_set(srcip_s, 5),
+      CCLValues         = make_set(ccl_s, 5),
+      FirstSeen         = min(TimeGenerated),
+      LastSeen          = max(TimeGenerated)
+    by user_s
+  | where UniqueApps >= 3 or TotalMBUploaded > 50
+  | order by UniqueApps desc, TotalMBUploaded desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+customDetails:
+  UniqueApps: UniqueApps
+  TotalMBUploaded: TotalMBUploaded
+  CCLValues: CCLValues
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope Shadow IT - {{user_s}} ({{UniqueApps}} unsanctioned apps)"
+  alertDescriptionFormat: "User {{user_s}} accessed {{UniqueApps}} unsanctioned cloud apps with low CCL, uploading {{TotalMBUploaded}} MB."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

@@ -1,0 +1,77 @@
+id: b8c9d0e1-f2a3-4b4c-5d6e-7f8a9b0c1d2e
+name: "Netskope - Tunnel/Proxy/VPN Bypass Attempt"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects users attempting to access tunnel, SOCKS proxy, VPN, or anonymizer services
+  through Netskope, indicating potential attempts to bypass security controls and establish
+  encrypted channels outside corporate visibility.
+  MITRE ATT&CK: T1090 (Proxy), T1572 (Protocol Tunneling)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: NetskopeWebTransactions
+    dataTypes:
+      - NetskopeWebTx_CL
+queryFrequency: PT30M
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+  - DefenseEvasion
+relevantTechniques:
+  - T1090
+  - T1572
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];
+  let BypassCategories = dynamic([
+      "Proxy Avoidance", "Anonymizers", "VPN",
+      "Remote Access", "Tunneling", "Tor",
+      "P2P File Sharing", "Web Proxy"]);
+  let BypassApps = dynamic([
+      "Tor", "NordVPN", "ExpressVPN", "Private Internet Access",
+      "Psiphon", "Ultrasurf", "Hotspot Shield", "Windscribe",
+      "ProtonVPN", "CyberGhost", "Shadowsocks", "WireGuard"]);
+  union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL
+  | where TimeGenerated > ago(1d)
+  | where isnotempty(user_s)
+  | where category_s in (BypassCategories)
+      or app_s in (BypassApps)
+      or domain_s has_any ("torproject.org", "psiphon", "ultrasurf",
+          "nordvpn", "expressvpn", "protonvpn")
+  | summarize
+      RequestCount     = count(),
+      UniqueApps       = dcount(app_s),
+      Apps             = make_set(app_s, 10),
+      Categories       = make_set(category_s, 10),
+      Domains          = make_set(domain_s, 10),
+      Actions          = make_set(action_s, 5),
+      Blocked          = countif(action_s in ("block", "Block", "blocked", "Blocked")),
+      Allowed          = countif(action_s !in ("block", "Block", "blocked", "Blocked")),
+      SourceIPs        = make_set(srcip_s, 5),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+    by user_s
+  | order by Allowed desc, RequestCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+customDetails:
+  RequestCount: RequestCount
+  Allowed: Allowed
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope Bypass Attempt - {{user_s}} ({{Allowed}} allowed)"
+  alertDescriptionFormat: "User {{user_s}} attempted to use tunnel/proxy/VPN services. {{Allowed}} requests allowed, {{Blocked}} blocked."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

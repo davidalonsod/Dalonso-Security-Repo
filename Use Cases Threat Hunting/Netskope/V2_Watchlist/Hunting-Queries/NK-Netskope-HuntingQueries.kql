@@ -1,0 +1,412 @@
+// =============================================================================
+// Netskope Web Transactions - Threat Hunting Queries
+// Vendor: Netskope
+// Table: NetskopeWebTx_CL (Netskope Web Transaction Events)
+// Generated: 2026-04-15
+// Queries: 12 | Complement Netskope Content Hub built-in rules
+// =============================================================================
+
+// =============================================================================
+// HQ38 - Netskope - Blocked Requests by Malicious Category
+// MITRE Techniques: T1071
+// Tactics        : CommandAndControl
+// Description    : Surfaces all Netskope blocked web requests for malware/phishing/C2/botnet categories.
+// =============================================================================
+let MaliciousCategories = dynamic([
+    "Malware", "Phishing", "Botnet", "Command and Control",
+    "Spyware/Adware", "Ransomware", "Cryptomining",
+    "Newly Observed Domain", "Newly Registered Domain"]);
+NetskopeWebTx_CL
+| where TimeGenerated > ago(24h)
+| where action_s in ("block", "Block", "blocked", "Blocked")
+| where category_s in (MaliciousCategories)
+    or severity_s in ("high", "critical")
+    or isnotempty(malware_name_s)
+| summarize
+    BlockCount       = count(),
+    UniqueUsers      = dcount(user_s),
+    UserList         = make_set(user_s, 20),
+    DestDomains      = make_set(domain_s, 20),
+    DestIPs          = make_set(dstip_s, 10),
+    Categories       = make_set(category_s, 10),
+    MalwareNames     = make_set(malware_name_s, 10),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by category_s, domain_s
+| order by BlockCount desc
+
+// =============================================================================
+// HQ39 - Netskope - DLP Violations Deep Dive
+// MITRE Techniques: T1048, T1567
+// Tactics        : Exfiltration
+// Description    : Surfaces all Netskope DLP policy violations with detailed rule/profile analysis.
+// =============================================================================
+NetskopeWebTx_CL
+| where TimeGenerated > ago(7d)
+| where isnotempty(dlp_rule_s) or isnotempty(dlp_profile_s)
+| where isnotempty(user_s)
+| summarize
+    ViolationCount    = count(),
+    MBUploaded        = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),
+    UniqueFiles       = dcount(object_s),
+    FileNames         = make_set(object_s, 10),
+    FileTypes         = make_set(file_type_s, 10),
+    DestDomains       = make_set(domain_s, 10),
+    Apps              = make_set(app_s, 10),
+    Actions           = make_set(action_s, 5),
+    DLPProfiles       = make_set(dlp_profile_s, 5),
+    FirstViolation    = min(TimeGenerated),
+    LastViolation     = max(TimeGenerated)
+  by user_s, dlp_rule_s
+| order by ViolationCount desc, MBUploaded desc
+
+// =============================================================================
+// HQ40 - Netskope - Allowed Traffic to TI-Listed Domains/IPs
+// MITRE Techniques: T1071, T1568
+// Tactics        : CommandAndControl
+// Description    : Correlates Netskope allowed traffic against active TI feed entries.
+// =============================================================================
+let TI_IOCs =
+    ThreatIntelIndicators
+    | where TimeGenerated > ago(30d)
+    | where isempty(ValidUntil) or ValidUntil > now()
+    | where (isnotnull(parse_ipv4(ObservableValue)) or ObservableKey has "domain")
+    | where isnotempty(ObservableValue)
+    | summarize
+        TI_ThreatTypes = make_set(Tags),
+        TI_Confidence  = max(Confidence),
+        TI_Tags        = make_set(Tags)
+      by IOC_Value = ObservableValue;
+NetskopeWebTx_CL
+| where TimeGenerated > ago(24h)
+| where action_s !in ("block", "Block", "blocked", "Blocked")
+| where isnotempty(domain_s) or isnotempty(dstip_s)
+| extend MatchKey = coalesce(domain_s, tostring(dstip_s))
+| summarize
+    RequestCount     = count(),
+    UniqueUsers      = dcount(user_s),
+    UserList         = make_set(user_s, 10),
+    BytesRecv        = sum(todouble(bytes_downloaded_d)),
+    BytesSent        = sum(todouble(bytes_uploaded_d)),
+    Apps             = make_set(app_s, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by MatchKey, domain_s, dstip_s
+| join kind=inner TI_IOCs on $left.MatchKey == $right.IOC_Value
+| project
+    MatchKey, domain_s, dstip_s,
+    RequestCount, UniqueUsers, UserList,
+    BytesRecv, BytesSent, Apps,
+    TI_ThreatTypes, TI_Confidence, TI_Tags,
+    FirstSeen, LastSeen
+| order by TI_Confidence desc, RequestCount desc
+
+// =============================================================================
+// HQ41 - Netskope - Off-Hours Activity Profiling
+// MITRE Techniques: T1029, T1567
+// Tactics        : Exfiltration
+// Description    : Profiles user web activity outside business hours to detect exfiltration or unauthorized use.
+// =============================================================================
+NetskopeWebTx_CL
+| where TimeGenerated > ago(7d)
+| where isnotempty(user_s)
+| where action_s !in ("block", "Block", "blocked", "Blocked")
+| extend
+    HourOfDay  = hourofday(TimeGenerated),
+    DayOfWeek  = dayofweek(TimeGenerated)
+| where (HourOfDay >= 20 or HourOfDay < 6)
+    or (DayOfWeek == 6d or DayOfWeek == 0d)
+| summarize
+    RequestCount    = count(),
+    TotalMBUploaded = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),
+    TotalMBDownload = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),
+    UniqueDomains   = dcount(domain_s),
+    TopDomains      = make_set(domain_s, 10),
+    TopApps         = make_set(app_s, 10),
+    UniqueCategories = dcount(category_s),
+    SourceIPs       = make_set(srcip_s, 5),
+    ActiveDays      = dcount(startofday(TimeGenerated)),
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated)
+  by user_s
+| where TotalMBUploaded > 50 or TotalMBDownload > 200 or RequestCount > 2000
+| order by TotalMBUploaded desc, RequestCount desc
+
+// =============================================================================
+// HQ42 - Netskope - Phishing Campaign Detection - Multi-User Domain Access
+// MITRE Techniques: T1566, T1566.002
+// Tactics        : InitialAccess
+// Description    : Identifies phishing campaigns by detecting multiple users hitting the same phishing domain.
+// =============================================================================
+let PhishingCategories = dynamic([
+    "Phishing", "Phishing and Other Frauds", "Newly Observed Domain",
+    "Newly Registered Domain", "Suspicious", "Malware"]);
+NetskopeWebTx_CL
+| where TimeGenerated > ago(24h)
+| where category_s in (PhishingCategories)
+    or severity_s in ("high", "critical")
+| where isnotempty(user_s) and isnotempty(domain_s)
+| summarize
+    UniqueUsers      = dcount(user_s),
+    UserList         = make_set(user_s, 50),
+    TotalRequests    = count(),
+    Blocked          = countif(action_s in ("block", "Block", "blocked", "Blocked")),
+    Allowed          = countif(action_s !in ("block", "Block", "blocked", "Blocked")),
+    Categories       = make_set(category_s, 5),
+    URLSamples       = make_set(url_s, 10),
+    SourceIPs        = make_set(srcip_s, 20),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by domain_s
+| where UniqueUsers >= 2
+| extend CampaignDurationMinutes = datetime_diff('minute', LastSeen, FirstSeen)
+| order by UniqueUsers desc, Allowed desc
+
+// =============================================================================
+// HQ43 - Netskope - Threat Severity Allowed Traffic Analysis
+// MITRE Techniques: T1071, T1204
+// Tactics        : CommandAndControl, Execution
+// Description    : Analyzes traffic that Netskope flagged with high/critical severity but allowed through.
+// =============================================================================
+NetskopeWebTx_CL
+| where TimeGenerated > ago(24h)
+| where action_s !in ("block", "Block", "blocked", "Blocked")
+| where severity_s in ("high", "critical")
+    or isnotempty(malware_name_s)
+    or isnotempty(threat_name_s)
+| summarize
+    RequestCount     = count(),
+    UniqueUsers      = dcount(user_s),
+    UserList         = make_set(user_s, 20),
+    Domains          = make_set(domain_s, 20),
+    ThreatNames      = make_set(threat_name_s, 10),
+    MalwareNames     = make_set(malware_name_s, 10),
+    Categories       = make_set(category_s, 10),
+    Apps             = make_set(app_s, 10),
+    TotalMBRecv      = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),
+    TotalMBSent      = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by severity_s
+| order by RequestCount desc
+
+// =============================================================================
+// HQ44 - Netskope - ATP/Sandbox Detections Summary
+// MITRE Techniques: T1105, T1204.002
+// Tactics        : Execution, CommandAndControl
+// Description    : Summarizes all malware/threat detections from Netskope ATP/sandbox for hunting analysis.
+// =============================================================================
+NetskopeWebTx_CL
+| where TimeGenerated > ago(7d)
+| where isnotempty(malware_name_s) or isnotempty(malware_type_s)
+    or isnotempty(threat_name_s)
+| summarize
+    DetectionCount   = count(),
+    UniqueUsers      = dcount(user_s),
+    UniqueFiles      = dcount(object_s),
+    Users            = make_set(user_s, 20),
+    FileNames        = make_set(object_s, 20),
+    FileTypes        = make_set(file_type_s, 10),
+    MalwareTypes     = make_set(malware_type_s, 10),
+    ThreatNames      = make_set(threat_name_s, 10),
+    Domains          = make_set(domain_s, 10),
+    Apps             = make_set(app_s, 10),
+    Actions          = make_set(action_s, 5),
+    Blocked          = countif(action_s in ("block", "Block", "blocked", "Blocked")),
+    Allowed          = countif(action_s !in ("block", "Block", "blocked", "Blocked")),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by malware_name_s
+| order by Allowed desc, DetectionCount desc
+
+// =============================================================================
+// HQ45 - Netskope - Tunnel/Proxy/VPN Bypass Hunting
+// MITRE Techniques: T1090, T1572
+// Tactics        : CommandAndControl, DefenseEvasion
+// Description    : Hunts for users attempting to access VPN, proxy, anonymizer, or tunneling services.
+// =============================================================================
+let BypassCategories = dynamic([
+    "Proxy Avoidance", "Anonymizers", "VPN",
+    "Remote Access", "Tunneling", "Tor",
+    "P2P File Sharing", "Web Proxy"]);
+NetskopeWebTx_CL
+| where TimeGenerated > ago(7d)
+| where isnotempty(user_s)
+| where category_s in (BypassCategories)
+    or domain_s has_any ("torproject.org", "psiphon", "ultrasurf",
+        "nordvpn", "expressvpn", "protonvpn", "mullvad.net",
+        "windscribe", "surfshark", "cyberghost")
+| summarize
+    RequestCount     = count(),
+    UniqueApps       = dcount(app_s),
+    Apps             = make_set(app_s, 10),
+    Categories       = make_set(category_s, 10),
+    Domains          = make_set(domain_s, 20),
+    Actions          = make_set(action_s, 5),
+    Blocked          = countif(action_s in ("block", "Block", "blocked", "Blocked")),
+    Allowed          = countif(action_s !in ("block", "Block", "blocked", "Blocked")),
+    SourceIPs        = make_set(srcip_s, 10),
+    ActiveDays       = dcount(startofday(TimeGenerated)),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by user_s
+| order by Allowed desc, RequestCount desc
+
+// =============================================================================
+// HQ46 - Netskope - Visibility Loss - Users Gone Silent
+// MITRE Techniques: T1562, T1562.001
+// Tactics        : DefenseEvasion
+// Description    : Detects users with baseline Netskope activity who stopped generating traffic.
+// =============================================================================
+let baselineWindow = 7d;
+let recentWindow   = 4h;
+let minBaselineReqsPerDay = 20;
+let BaselineUsers =
+    NetskopeWebTx_CL
+    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+    | where isnotempty(user_s)
+    | summarize
+        BaselineRequestsPerDay = round(toreal(count()) / (baselineWindow / 1d), 1),
+        BaselineApps           = make_set(app_s, 10),
+        BaselineIPs            = make_set(srcip_s, 5),
+        BaselineCategories     = make_set(category_s, 10)
+      by user_s
+    | where BaselineRequestsPerDay >= minBaselineReqsPerDay;
+let RecentActiveUsers =
+    NetskopeWebTx_CL
+    | where TimeGenerated > ago(recentWindow)
+    | where isnotempty(user_s)
+    | distinct user_s;
+BaselineUsers
+| join kind=leftanti RecentActiveUsers on user_s
+| project
+    user_s, BaselineRequestsPerDay, BaselineApps, BaselineIPs, BaselineCategories
+| order by BaselineRequestsPerDay desc
+
+// =============================================================================
+// HQ47 - Netskope - LOTL C2 via Legitimate Platforms
+// MITRE Techniques: T1102, T1105
+// Tactics        : CommandAndControl
+// Description    : Hunts for abuse of GitHub, Pastebin, Google Docs, Discord as C2 staging.
+// =============================================================================
+let LotLDomains = dynamic([
+    "raw.githubusercontent.com", "gist.githubusercontent.com", "gist.github.com",
+    "pastebin.com", "paste.ee", "hastebin.com", "ghostbin.com", "rentry.co",
+    "docs.google.com", "drive.google.com",
+    "cdn.discordapp.com", "media.discordapp.net",
+    "onedrive.live.com", "1drv.ms", "transfer.sh",
+    "anonfiles.com", "gofile.io", "file.io"]);
+NetskopeWebTx_CL
+| where TimeGenerated > ago(24h)
+| where isnotempty(domain_s)
+| where domain_s has_any (LotLDomains)
+| where isnotempty(user_s)
+| where action_s !in ("block", "Block", "blocked", "Blocked")
+| summarize
+    RequestCount     = count(),
+    TotalBytesRecv   = sum(todouble(bytes_downloaded_d)),
+    TotalBytesSent   = sum(todouble(bytes_uploaded_d)),
+    UniqueURLs       = dcount(url_s),
+    URLSamples       = make_set(url_s, 10),
+    FileTypes        = make_set(file_type_s, 5),
+    SourceIPs        = make_set(srcip_s, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by user_s, domain_s
+| extend TotalMBReceived = round(toreal(TotalBytesRecv) / 1048576, 2)
+| where TotalMBReceived > 10 or RequestCount > 50
+| project
+    user_s, domain_s,
+    RequestCount, TotalMBReceived, TotalBytesSent,
+    URLSamples, FileTypes,
+    FirstSeen, LastSeen
+| order by TotalMBReceived desc, RequestCount desc
+
+// =============================================================================
+// HQ48 - Netskope + SecurityAlert Cross-Source Corroboration
+// MITRE Techniques: T1071, T1078
+// Tactics        : CommandAndControl
+// Description    : Correlates Netskope C2 blocks with Defender/Sentinel security alerts on the same host.
+// =============================================================================
+let NetskopeBlocks =
+    NetskopeWebTx_CL
+    | where TimeGenerated > ago(24h)
+    | where action_s in ("block", "Block", "blocked", "Blocked")
+    | where category_s has_any (
+        "Malware", "Phishing", "Botnet", "Command and Control",
+        "Ransomware", "Cryptomining", "Spyware/Adware")
+        or isnotempty(malware_name_s)
+    | summarize
+        NK_BlockCount    = count(),
+        NK_DestDomains   = make_set(domain_s, 10),
+        NK_Categories    = make_set(category_s, 5),
+        NK_MalwareNames  = make_set(malware_name_s, 5),
+        NK_Users         = make_set(user_s, 5),
+        NK_FirstSeen     = min(TimeGenerated)
+      by NK_SrcIP = srcip_s;
+SecurityAlert
+| where TimeGenerated > ago(24h)
+| where AlertSeverity in ("High", "Medium")
+| mv-expand todynamic(Entities)
+| extend
+    EntityIP   = tostring(Entities.Address),
+    EntityHost = tostring(Entities.HostName)
+| where isnotempty(EntityIP)
+| summarize
+    Alert_Count      = count(),
+    Alert_Names      = make_set(AlertName, 5),
+    Alert_Products   = make_set(ProductName, 5),
+    Alert_Severity   = make_set(AlertSeverity, 3),
+    Alert_FirstSeen  = min(TimeGenerated)
+  by EntityIP, EntityHost
+| join kind=inner NetskopeBlocks on $left.EntityIP == $right.NK_SrcIP
+| project
+    NK_SrcIP, EntityHost,
+    NK_BlockCount, NK_DestDomains, NK_Categories, NK_Users,
+    Alert_Count, Alert_Names, Alert_Products, Alert_Severity,
+    NK_FirstSeen, Alert_FirstSeen
+| order by NK_BlockCount desc, Alert_Count desc
+
+// =============================================================================
+// HQ49 - Netskope - Low & Slow Exfiltration (Statistical Z-Score)
+// MITRE Techniques: T1041, T1567.002
+// Tactics        : Exfiltration
+// Description    : Detects exfiltration via small sessions across multiple cloud channels using Z-score deviation.
+// =============================================================================
+let HuntWindow = 7d;
+let ExfilCategories = dynamic([
+    "Cloud Storage", "File Sharing", "Online Storage and Backup",
+    "Personal Sites & Blogs", "Webmail", "Social Networking"]);
+let Daily =
+    NetskopeWebTx_CL
+    | where TimeGenerated > ago(HuntWindow)
+    | where action_s !in ("block", "Block", "blocked", "Blocked")
+    | where isnotempty(user_s)
+    | where category_s in (ExfilCategories) or activity_s == "Upload"
+    | summarize
+        DaySentBytes    = sum(todouble(bytes_uploaded_d)),
+        DayRequestCount = count(),
+        DayDestCount    = dcount(domain_s)
+      by user_s, Day = bin(TimeGenerated, 1d);
+let Users =
+    Daily
+    | summarize
+        TotalMBSent   = round(toreal(sum(DaySentBytes)) / 1048576, 2),
+        ActiveDays    = dcount(Day),
+        TotalRequests = sum(DayRequestCount),
+        UniqueDestCnt = sum(DayDestCount)
+      by user_s;
+let globalAvg = toscalar(Users | summarize avg(TotalMBSent));
+let globalStd = toscalar(Users | summarize stdev(TotalMBSent));
+Users
+| extend
+    Zscore = iff(globalStd > 0,
+                 round((TotalMBSent - globalAvg) / globalStd, 2),
+                 0.0)
+| where Zscore >= 2.5
+    or (ActiveDays >= 5 and TotalMBSent > 50)
+| project
+    user_s,
+    TotalMBSent, ActiveDays, TotalRequests, UniqueDestCnt,
+    Zscore
+| order by Zscore desc, TotalMBSent desc

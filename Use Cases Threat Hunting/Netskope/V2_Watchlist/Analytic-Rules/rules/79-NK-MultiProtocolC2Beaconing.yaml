@@ -1,0 +1,91 @@
+id: c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e6a
+name: "Netskope - Multi-Protocol C2 Beaconing Pattern"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects regular-interval beaconing patterns to suspicious or low-reputation domains.
+  C2 implants often call back at fixed intervals. This rule identifies users with
+  high-frequency, evenly-spaced requests to domains with low CCL or suspicious categories.
+  Uses the custom NetskopeWebTx_CL table via Blob Storage ingestion.
+  MITRE ATT&CK: T1071 (Application Layer Protocol), T1573 (Encrypted Channel)
+severity: High
+requiredDataConnectors:
+  - connectorId: NetskopeWebTransactions
+    dataTypes:
+      - NetskopeWebTx_CL
+queryFrequency: PT1H
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+relevantTechniques:
+  - T1071
+  - T1573
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  let SuspiciousCategories = dynamic([
+      "Uncategorized", "Unknown", "Newly Observed Domain",
+      "Newly Registered Domain", "Suspicious", "Parked",
+      "Dynamic DNS Host", "Malware", "Command and Control"]);
+  let RiskyCCL = dynamic(["poor", "low", "unknown"]);
+  union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL
+  | where TimeGenerated > ago(1d)
+  | where isnotempty(user_s) and isnotempty(domain_s)
+  | where category_s in (SuspiciousCategories) or ccl_s in (RiskyCCL)
+  | summarize
+      RequestCount     = count(),
+      RequestTimes     = make_list(TimeGenerated, 200),
+      TotalBytesSent   = sum(todouble(bytes_uploaded_d)),
+      TotalBytesRecv   = sum(todouble(bytes_downloaded_d)),
+      SourceIPs        = make_set(srcip_s, 5),
+      Categories       = make_set(category_s, 5),
+      CCL              = take_any(ccl_s),
+      DstIPs           = make_set(dstip_s, 5),
+      DstCountries     = make_set(dst_country_s, 5),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+    by user_s, domain_s
+  | where RequestCount >= 20
+  | extend
+      DurationMinutes  = datetime_diff('minute', LastSeen, FirstSeen),
+      AvgIntervalSec   = iff(RequestCount > 1,
+                             round(toreal(datetime_diff('second', LastSeen, FirstSeen)) / (RequestCount - 1), 1),
+                             0.0)
+  | where DurationMinutes >= 60
+  | where AvgIntervalSec between (10.0 .. 600.0)
+  | project
+      user_s, domain_s, RequestCount,
+      AvgIntervalSec, DurationMinutes,
+      TotalBytesSent, TotalBytesRecv,
+      Categories, CCL, DstIPs, DstCountries, SourceIPs,
+      FirstSeen, LastSeen
+  | order by RequestCount desc, AvgIntervalSec asc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+  - entityType: DNS
+    fieldMappings:
+      - identifier: DomainName
+        columnName: domain_s
+customDetails:
+  RequestCount: RequestCount
+  AvgIntervalSec: AvgIntervalSec
+  CCL: CCL
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope C2 Beaconing - {{user_s}} → {{domain_s}} ({{AvgIntervalSec}}s interval)"
+  alertDescriptionFormat: "User {{user_s}} shows beaconing pattern to {{domain_s}} with {{RequestCount}} requests at ~{{AvgIntervalSec}}s intervals."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+      - DNS
+    groupByAlertDetails: []
+    groupByCustomDetails: []

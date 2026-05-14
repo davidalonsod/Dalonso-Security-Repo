@@ -1,0 +1,72 @@
+id: c9d0e1f2-a3b4-4c5d-6e7f-8a9b0c1d2e3a
+name: "Netskope - User Visibility Loss - No Traffic Detected"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects users who previously had consistent Netskope web transaction activity but have
+  generated zero traffic in the recent window. Visibility loss may indicate the Netskope
+  Client has been uninstalled, disabled, or bypassed, or the user is routing traffic
+  through an alternate channel to avoid inspection.
+  MITRE ATT&CK: T1562 (Impair Defenses), T1562.001 (Disable or Modify Tools)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: NetskopeWebTransactions
+    dataTypes:
+      - NetskopeWebTx_CL
+queryFrequency: PT4H
+queryPeriod: P7D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - DefenseEvasion
+relevantTechniques:
+  - T1562
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string)[];
+  let baselineWindow = 7d;
+  let recentWindow   = 4h;
+  let minBaselineReqsPerDay = 20;
+  // Users with consistent Netskope activity in the baseline window
+  let BaselineUsers =
+      union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL
+      | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+      | where isnotempty(user_s)
+      | summarize
+          BaselineReqPerDay = round(toreal(count()) / (baselineWindow / 1d), 1),
+          BaselineApps           = make_set(app_s, 10),
+          BaselineIPs            = make_set(srcip_s, 5)
+        by user_s
+      | where BaselineReqPerDay >= minBaselineReqsPerDay;
+  // Users with ANY activity in the recent window
+  let RecentActiveUsers =
+      union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL
+      | where TimeGenerated > ago(recentWindow)
+      | where isnotempty(user_s)
+      | distinct user_s;
+  // Users who went silent
+  BaselineUsers
+  | join kind=leftanti RecentActiveUsers on user_s
+  | project
+      user_s, BaselineReqPerDay, BaselineApps, BaselineIPs
+  | order by BaselineReqPerDay desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+customDetails:
+  BaselineReqPerDay: BaselineReqPerDay
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope Visibility Loss - {{user_s}} went silent"
+  alertDescriptionFormat: "User {{user_s}} had {{BaselineRequestsPerDay}} requests/day baseline but generated zero Netskope traffic in last 4 hours."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

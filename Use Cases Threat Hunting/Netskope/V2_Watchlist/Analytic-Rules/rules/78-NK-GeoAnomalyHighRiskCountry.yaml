@@ -1,0 +1,79 @@
+id: b0c1d2e3-f4a5-4b6c-7d8e-9f0a1b2c3d5f
+name: "Netskope - Geo Anomaly - Traffic to High-Risk Countries"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects web traffic routed to destination servers in high-risk countries. Identifies
+  users whose traffic terminates in sanctioned or known adversary-aligned nations,
+  which may indicate C2 communication, data exfiltration, or compromised infrastructure.
+  Uses the custom NetskopeWebTx_CL table via Blob Storage ingestion.
+  MITRE ATT&CK: T1071 (Application Layer Protocol), T1048 (Exfiltration Over Alternative Protocol)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: NetskopeWebTransactions
+    dataTypes:
+      - NetskopeWebTx_CL
+queryFrequency: PT1H
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CommandAndControl
+  - Exfiltration
+relevantTechniques:
+  - T1071
+  - T1048
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  let HighRiskCountries = dynamic([
+      "RU", "CN", "KP", "IR", "SY", "CU", "VE", "BY",
+      "Russia", "China", "North Korea", "Iran", "Syria", "Cuba", "Venezuela", "Belarus"]);
+  union isfuzzy=true _NetskopeEmpty, NetskopeWebTx_CL
+  | where TimeGenerated > ago(1d)
+  | where isnotempty(user_s) and isnotempty(dst_country_s)
+  | where dst_country_s in (HighRiskCountries)
+  | where action_s !in ("block", "Block", "blocked", "Blocked")
+  | summarize
+      RequestCount      = count(),
+      TotalMBUploaded   = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),
+      TotalMBDownloaded = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),
+      UniqueDomains     = dcount(domain_s),
+      Domains           = make_set(domain_s, 20),
+      DestIPs           = make_set(dstip_s, 10),
+      Apps              = make_set(app_s, 10),
+      Categories        = make_set(category_s, 10),
+      SourceIPs         = make_set(srcip_s, 5),
+      SrcIP             = take_any(srcip_s),
+      FirstSeen         = min(TimeGenerated),
+      LastSeen          = max(TimeGenerated)
+    by user_s, dst_country_s
+  | where RequestCount >= 5
+  | order by TotalMBUploaded desc, RequestCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SrcIP
+customDetails:
+  RequestCount: RequestCount
+  DstCountry: dst_country_s
+  TotalMBUploaded: TotalMBUploaded
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope Geo Anomaly - {{user_s}} → {{dst_country_s}} ({{RequestCount}} requests)"
+  alertDescriptionFormat: "User {{user_s}} sent {{RequestCount}} requests to high-risk country {{dst_country_s}}, uploading {{TotalMBUploaded}} MB."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails:
+      - DstCountry
