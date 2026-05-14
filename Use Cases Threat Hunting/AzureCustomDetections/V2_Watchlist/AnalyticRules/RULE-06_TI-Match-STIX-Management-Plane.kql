@@ -1,0 +1,98 @@
+﻿// Rule    : Azure - Threat Intelligence Match on Management Plane Caller IP (STIX)
+// Severity: High
+// Tactics : InitialAccess, Persistence, Impact
+// MITRE   : T1078, T1098, T1496
+// Freq    : PT1H   Period: P1D
+//==========================================================================================
+
+let LookbackWindow = 1d;
+let PrivateRanges = dynamic(["10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "127.", "169.254.", "168.63."]);
+// --- STIX 2.1 IPv4 TI Indicators from ThreatIntelIndicators ---
+let TIIPIndicators = ThreatIntelIndicators
+    | where TimeGenerated > ago(LookbackWindow)
+    | where IsActive == true
+    | where Revoked == false
+    | where IsDeleted == false
+    | where ValidUntil > now()
+    | where Confidence >= 75
+    | where ObservableKey =~ "ipv4-addr:value"
+    | where isnotempty(ObservableValue)
+    | where not(ObservableValue has_any (PrivateRanges))
+    | summarize
+        ThreatType = any(tostring(Data.indicator_types)),
+        TI_Description = any(tostring(Data.description)),
+        ConfidenceScore = max(Confidence),
+        ActivityGroupNames = any(Tags),
+        TLPLevel = any(tostring(AdditionalFields.TLPLevel)),
+        TI_Pattern = any(Pattern)
+        by TI_IP = ObservableValue;
+// --- Azure Management Plane events from TI-matched IPs ---
+let MgmtPlaneHits = AzureActivity
+    | where TimeGenerated > ago(LookbackWindow)
+    | where ActivityStatusValue =~ "Success"
+    | where isnotempty(CallerIpAddress)
+    | where not(CallerIpAddress has_any (PrivateRanges))
+    | join kind=inner TIIPIndicators on $left.CallerIpAddress == $right.TI_IP
+    | project
+        ActivityTime = TimeGenerated,
+        Caller,
+        CallerIpAddress,
+        OperationNameValue,
+        ResourceId,
+        ResourceGroup,
+        SubscriptionId,
+        TI_IP,
+        ThreatType,
+        TI_Description,
+        ConfidenceScore,
+        ActivityGroupNames,
+        TLPLevel,
+        TI_Pattern;
+// --- Corroborate with human sign-in from same TI IP (SigninLogs) ---
+let UserSigninsFromTIIPs = SigninLogs
+    | where TimeGenerated > ago(LookbackWindow)
+    | where ResultType == "0"
+    | where isnotempty(IPAddress)
+    | where not(IPAddress has_any (PrivateRanges))
+    | join kind=inner TIIPIndicators on $left.IPAddress == $right.TI_IP
+    | project SigninTime = TimeGenerated, UserPrincipalName, SigninIP = IPAddress, UserDisplayName, AppDisplayName, RiskLevelAggregated;
+// --- Corroborate with SP sign-in from same TI IP (AADServicePrincipalSignInLogs) ---
+let SPSigninsFromTIIPs = AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(LookbackWindow)
+    | where ResultType == "0"
+    | where isnotempty(IPAddress)
+    | where not(IPAddress has_any (PrivateRanges))
+    | join kind=inner TIIPIndicators on $left.IPAddress == $right.TI_IP
+    | project SPSigninTime = TimeGenerated, ServicePrincipalName, ServicePrincipalId, SPSigninIP = IPAddress, AppId;
+// --- Aggregate management plane hits per caller ---
+MgmtPlaneHits
+| summarize
+    OperationCount = count(),
+    Operations = make_set(OperationNameValue, 10),
+    SubscriptionIds = make_set(SubscriptionId, 5),
+    ResourceGroups = make_set(ResourceGroup, 5),
+    AffectedResources = make_set(ResourceId, 10),
+    CallerIP = any(CallerIpAddress),
+    ThreatType = any(ThreatType),
+    TI_Description = any(TI_Description),
+    ConfidenceScore = max(ConfidenceScore),
+    ActivityGroupNames = any(ActivityGroupNames),
+    TLPLevel = any(TLPLevel),
+    FirstSeen = min(ActivityTime),
+    LastSeen = max(ActivityTime)
+    by Caller, TI_IP
+// --- Left join to capture corroborating sign-ins (presence elevates confidence) ---
+| join kind=leftouter (
+    UserSigninsFromTIIPs
+    | summarize UserSigninCount = count(), SigninUsers = make_set(UserPrincipalName, 5), MaxUserRisk = max(RiskLevelAggregated) by SigninIP
+  ) on $left.TI_IP == $right.SigninIP
+| join kind=leftouter (
+    SPSigninsFromTIIPs
+    | summarize SPSigninCount = count(), SigninSPs = make_set(ServicePrincipalName, 5) by SPSigninIP
+  ) on $left.TI_IP == $right.SPSigninIP
+| extend
+    CorroboratedBySignin = isnotempty(UserSigninCount) or isnotempty(SPSigninCount),
+    TotalSigninCount = coalesce(UserSigninCount, 0) + coalesce(SPSigninCount, 0),
+    AccountName = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])
+| project-away SigninIP, SPSigninIP

@@ -1,0 +1,31 @@
+// Rule    : Azure - Network Security Group Deleted
+// Severity: High
+// Tactics : DefenseEvasion
+// MITRE   : T1562.007
+// Freq    : PT1H   Period: PT2H
+//==========================================================================================
+
+let KnownIaCPatterns = dynamic(["terraform", "bicep", "pipeline", "github", "pulumi",
+    "devops", "arm-deployment", "cleanup", "deprovisioner"]);
+// NSG rule-change ops are lower severity; only full NSG DELETE is escalated here
+let NSGDeleteOp = "MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/DELETE";
+AzureActivity
+| where TimeGenerated > ago(2h)
+| where OperationNameValue =~ NSGDeleteOp
+| where ActivityStatusValue =~ "Success"
+| where not(tolower(Caller) has_any (KnownIaCPatterns))
+| where isnotempty(CallerIpAddress)
+| where CallerIpAddress !startswith "168.63." and CallerIpAddress !startswith "169.254."
+| summarize
+    DeletionCount         = count(),
+    DeletedNSGs           = make_set(ResourceId, 20),
+    AffectedSubscriptions = make_set(SubscriptionId, 5),
+    AffectedResourceGroups = make_set(ResourceGroup, 5),
+    SourceIPs             = make_set(CallerIpAddress, 5),
+    CallerIP              = any(CallerIpAddress),
+    FirstSeen             = min(TimeGenerated),
+    LastSeen              = max(TimeGenerated)
+    by Caller
+| extend
+    AccountName      = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])

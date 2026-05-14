@@ -1,0 +1,32 @@
+// Hunt     : Hunt - NSG Deletion and Firewall Rule Modification History (30 Days)
+// Tactics  : DefenseEvasion
+// MITRE    : T1562.007
+// Purpose  : Show the complete history of NSG deletions AND individual security rule modifications (inbound/outbound allow-all rules added) over 30 days. Helps determine whether Rule-14 alerts are isolated events or part of a broader network exposure campaign.
+//==========================================================================================
+
+let NSGOps = dynamic([
+    "MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/DELETE",
+    "MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/WRITE",
+    "MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/SECURITYRULES/WRITE",
+    "MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/SECURITYRULES/DELETE"
+]);
+AzureActivity
+| where TimeGenerated > ago(30d)
+| where OperationNameValue has_any (NSGOps)
+| where ActivityStatusValue =~ "Success"
+| extend ChangeType = case(
+    OperationNameValue has "DELETE" and OperationNameValue has "NETWORKSECURITYGROUPS/DELETE", "NSG Deleted",
+    OperationNameValue has "SECURITYRULES/DELETE", "Security Rule Deleted",
+    OperationNameValue has "SECURITYRULES/WRITE",  "Security Rule Modified/Added",
+    OperationNameValue has "NETWORKSECURITYGROUPS/WRITE", "NSG Created/Modified",
+    "Other")
+| project
+    TimeGenerated,
+    Caller,
+    CallerIpAddress,
+    ChangeType,
+    ResourceId,
+    ResourceGroup,
+    SubscriptionId,
+    Properties
+| order by TimeGenerated desc

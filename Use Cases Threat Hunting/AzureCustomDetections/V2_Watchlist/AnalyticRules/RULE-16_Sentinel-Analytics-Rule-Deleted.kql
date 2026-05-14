@@ -1,0 +1,38 @@
+// Rule    : Azure Sentinel - Analytics Rule Deleted or Disabled
+// Severity: High
+// Tactics : DefenseEvasion
+// MITRE   : T1562
+// Freq    : PT1H   Period: PT2H
+//==========================================================================================
+
+let KnownIaCPatterns = dynamic(["terraform", "bicep", "pipeline", "github", "pulumi", "devops"]);
+// Alert rule DELETE = removal; WRITE can cover status change to disabled — both are suspicious
+let SentinelRuleOps = dynamic([
+    "MICROSOFT.SECURITYINSIGHTS/ALERTRULES/DELETE",
+    "MICROSOFT.SECURITYINSIGHTS/ALERTRULES/WRITE"
+]);
+AzureActivity
+| where TimeGenerated > ago(2h)
+| where OperationNameValue has_any (SentinelRuleOps)
+| where ActivityStatusValue =~ "Success"
+| where not(tolower(Caller) has_any (KnownIaCPatterns))
+| where isnotempty(CallerIpAddress)
+| where CallerIpAddress !startswith "168.63." and CallerIpAddress !startswith "169.254."
+// Separate deletions from modifications to differentiate severity in the alert
+| extend OperationType = iff(OperationNameValue has "DELETE", "Delete", "Modify/Disable")
+| summarize
+    OperationCount     = count(),
+    DeleteCount        = countif(OperationType == "Delete"),
+    ModifyCount        = countif(OperationType == "Modify/Disable"),
+    AffectedRules      = make_set(ResourceId, 20),
+    Operations         = make_set(OperationNameValue, 5),
+    AffectedWorkspaces = make_set(ResourceGroup, 5),
+    SourceIPs          = make_set(CallerIpAddress, 5),
+    CallerIP           = any(CallerIpAddress),
+    FirstSeen          = min(TimeGenerated),
+    LastSeen           = max(TimeGenerated)
+    by Caller, SubscriptionId
+| where DeleteCount >= 1 or ModifyCount >= 3    // any delete or 3+ modifications
+| extend
+    AccountName      = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])

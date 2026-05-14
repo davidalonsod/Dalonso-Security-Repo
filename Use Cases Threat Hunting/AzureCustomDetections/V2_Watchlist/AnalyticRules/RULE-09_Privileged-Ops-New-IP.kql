@@ -1,0 +1,43 @@
+﻿// Rule    : Azure - Privileged Management Operations from a New Source IP for Established Identity
+// Severity: Medium
+// Tactics : InitialAccess, Persistence
+// MITRE   : T1078
+// Freq    : PT6H   Period: P14D
+//==========================================================================================
+
+let PrivilegedOps = dynamic([
+    "MICROSOFT.AUTHORIZATION/ROLEASSIGNMENTS/WRITE",
+    "MICROSOFT.AUTHORIZATION/ROLEASSIGNMENTS/DELETE",
+    "MICROSOFT.KEYVAULT/VAULTS/WRITE",
+    "MICROSOFT.KEYVAULT/VAULTS/DELETE",
+    "MICROSOFT.COMPUTE/VIRTUALMACHINES/WRITE",
+    "MICROSOFT.INSIGHTS/DIAGNOSTICSETTINGS/DELETE",
+    "MICROSOFT.AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/WRITE",
+    "MICROSOFT.AUTHORIZATION/LOCKS/DELETE"
+]);
+let HistoricalCallerIPs = AzureActivity
+    | where TimeGenerated between (ago(14d) .. ago(6h))
+    | where OperationNameValue has_any (PrivilegedOps)
+    | where ActivityStatusValue =~ "Success"
+    | where isnotempty(Caller) and isnotempty(CallerIpAddress)
+    | summarize HistoricalIPs = make_set(CallerIpAddress, 50) by Caller;
+AzureActivity
+| where TimeGenerated > ago(6h)
+| where OperationNameValue has_any (PrivilegedOps)
+| where ActivityStatusValue =~ "Success"
+| where isnotempty(CallerIpAddress)
+| where CallerIpAddress !startswith "168.63." and CallerIpAddress !startswith "169.254."
+| join kind=inner HistoricalCallerIPs on Caller
+| where not(set_has_element(HistoricalIPs, CallerIpAddress))
+| summarize
+    OperationCount = count(),
+    Operations = make_set(OperationNameValue, 10),
+    AffectedResources = make_set(ResourceId, 10),
+    CallerIP = any(CallerIpAddress),
+    SourceIPs = make_set(CallerIpAddress, 5),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by Caller, SubscriptionId
+| extend
+    AccountName = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])

@@ -1,0 +1,35 @@
+﻿// Rule    : Azure Cryptojacking - High-Compute VM Deployed by New Identity
+// Severity: High
+// Tactics : Impact
+// MITRE   : T1496
+// Freq    : PT6H   Period: P14D
+//==========================================================================================
+
+let GPUSKUs = dynamic(["Standard_NC", "Standard_NV", "Standard_ND", "Standard_NP", "Standard_HB", "Standard_HC"]);
+let KnownAutoPatterns = dynamic(["terraform", "bicep", "pipeline", "github", "pulumi", "devops", "arm-deployment"]);
+let PriorGPUDeployers = AzureActivity
+    | where TimeGenerated between (ago(14d) .. ago(6h))
+    | where OperationNameValue has_any ("VIRTUALMACHINES/WRITE", "VIRTUALMACHINESCALESETS/WRITE")
+    | where Properties has_any (GPUSKUs)
+    | where ActivityStatusValue =~ "Success"
+    | distinct Caller;
+AzureActivity
+| where TimeGenerated > ago(6h)
+| where ActivityStatusValue =~ "Success"
+| where OperationNameValue has_any ("VIRTUALMACHINES/WRITE", "VIRTUALMACHINESCALESETS/WRITE")
+| where Properties has_any (GPUSKUs)
+| where not(tolower(Caller) has_any (KnownAutoPatterns))
+| where isnotempty(CallerIpAddress)
+| where CallerIpAddress !startswith "168.63." and CallerIpAddress !startswith "169.254."
+| where Caller !in (PriorGPUDeployers)
+| summarize
+    DeploymentCount = count(),
+    DeployedResources = make_set(ResourceId, 10),
+    SourceIPs = make_set(CallerIpAddress, 5),
+    CallerIP = any(CallerIpAddress),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by Caller, ResourceGroup, SubscriptionId
+| extend
+    AccountName = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])

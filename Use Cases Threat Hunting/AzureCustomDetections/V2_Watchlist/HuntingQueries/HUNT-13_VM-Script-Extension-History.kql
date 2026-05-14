@@ -1,0 +1,44 @@
+// Hunt     : Hunt - VM Script Extension and Run Command Execution History (30 Days)
+// Tactics  : Execution, Persistence
+// MITRE    : T1059, T1059.009
+// Purpose  : Enumerate all Custom Script Extension deployments and Run Command executions across all VMs for the last 30 days. Use to identify unusual actors, one-off script injections, or scripts deployed outside known IaC patterns. Cross-reference with Rule-15 alerts to investigate full scope.
+//==========================================================================================
+
+let ScriptExtTypes = dynamic([
+    "CustomScriptExtension", "CustomScriptForLinux",
+    "RunCommandHandler", "RunCommand",
+    "Microsoft.Compute.CustomScriptExtension",
+    "Microsoft.Azure.Extensions.CustomScript"
+]);
+AzureActivity
+| where TimeGenerated > ago(30d)
+| where OperationNameValue =~ "MICROSOFT.COMPUTE/VIRTUALMACHINES/EXTENSIONS/WRITE"
+    or  OperationNameValue =~ "MICROSOFT.COMPUTE/VIRTUALMACHINES/RUNCOMMAND/ACTION"
+| where ActivityStatusValue =~ "Success"
+| where Properties has_any (ScriptExtTypes)
+    or  OperationNameValue has "RUNCOMMAND"
+| extend PropsParsed   = todynamic(Properties)
+| extend ExtensionType = coalesce(
+    tostring(PropsParsed["type"]),
+    tostring(PropsParsed.type),
+    iff(OperationNameValue has "RUNCOMMAND", "RunCommand", "Unknown"))
+| extend VMName        = tostring(split(ResourceId, "/")[8])
+| project
+    TimeGenerated,
+    Caller,
+    CallerIpAddress,
+    VMName,
+    ExtensionType,
+    ResourceId,
+    ResourceGroup,
+    SubscriptionId
+| summarize
+    ExecCount     = count(),
+    DistinctVMs   = dcount(VMName),
+    VMNames       = make_set(VMName, 20),
+    ExtensionTypes = make_set(ExtensionType, 5),
+    SourceIPs     = make_set(CallerIpAddress, 5),
+    FirstSeen     = min(TimeGenerated),
+    LastSeen      = max(TimeGenerated)
+    by Caller, ResourceGroup, SubscriptionId
+| order by ExecCount desc

@@ -1,0 +1,32 @@
+﻿// Rule    : Azure - Mass Privileged Role Assignments by Single Identity
+// Severity: High
+// Tactics : PrivilegeEscalation, Persistence
+// MITRE   : T1098
+// Freq    : PT30M   Period: PT1H
+//==========================================================================================
+
+let ExcludedCallerPatterns = dynamic(["ms-pim", "privilegedidentity", "identitygovernance", "aadidentitygovernance"]);
+let ReadOnlyRoleIds = dynamic(["acdd72a7-3385-48ef-bd42-f606fba81ae7", "fa23ad8b-c56e-40d8-ac0c-ce449e1d2c64", "72fafb9e-0641-4937-9268-a91bfd8191a3"]);
+AzureActivity
+| where TimeGenerated > ago(1h)
+| where OperationNameValue =~ "MICROSOFT.AUTHORIZATION/ROLEASSIGNMENTS/WRITE"
+| where ActivityStatusValue =~ "Success"
+| where not(tolower(Caller) has_any (ExcludedCallerPatterns))
+| where isnotempty(CallerIpAddress)
+| where CallerIpAddress !startswith "168.63."
+| extend RoleDefId = tolower(tostring(parse_json(Properties).requestbody.properties.roleDefinitionId))
+| where not(RoleDefId has_any (ReadOnlyRoleIds))
+| summarize
+    AssignmentCount = count(),
+    DistinctRoles = dcount(RoleDefId),
+    AssignedRoles = make_set(RoleDefId, 10),
+    AffectedScopes = make_set(ResourceGroup, 10),
+    SourceIPs = make_set(CallerIpAddress, 5),
+    CallerIP = any(CallerIpAddress),
+    FirstAssignment = min(TimeGenerated),
+    LastAssignment = max(TimeGenerated)
+    by Caller, SubscriptionId, bin(TimeGenerated, 30m)
+| where AssignmentCount >= 5
+| extend
+    AccountName = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])

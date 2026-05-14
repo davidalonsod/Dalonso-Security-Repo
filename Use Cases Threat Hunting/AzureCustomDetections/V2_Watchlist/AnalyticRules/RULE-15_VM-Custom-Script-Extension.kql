@@ -1,0 +1,49 @@
+// Rule    : Azure - Custom Script Extension or Run Command Executed on Virtual Machine
+// Severity: High
+// Tactics : Execution, Persistence
+// MITRE   : T1059, T1059.009
+// Freq    : PT1H   Period: PT2H
+//==========================================================================================
+
+let KnownIaCPatterns = dynamic(["terraform", "bicep", "pipeline", "github", "pulumi",
+    "devops", "arm-deployment", "chef", "puppet", "ansible", "dsc"]);
+// Extension type values observed in AzureActivity Properties field
+let ScriptExtTypes = dynamic([
+    "CustomScriptExtension",
+    "CustomScriptForLinux",
+    "RunCommandHandler",
+    "RunCommand",
+    "Microsoft.Compute.CustomScriptExtension",
+    "Microsoft.Azure.Extensions.CustomScript"
+]);
+AzureActivity
+| where TimeGenerated > ago(2h)
+| where OperationNameValue =~ "MICROSOFT.COMPUTE/VIRTUALMACHINES/EXTENSIONS/WRITE"
+    or  OperationNameValue =~ "MICROSOFT.COMPUTE/VIRTUALMACHINES/RUNCOMMAND/ACTION"
+| where ActivityStatusValue =~ "Success"
+| where Properties has_any (ScriptExtTypes)
+    or  OperationNameValue =~ "MICROSOFT.COMPUTE/VIRTUALMACHINES/RUNCOMMAND/ACTION"
+| where not(tolower(Caller) has_any (KnownIaCPatterns))
+| where isnotempty(CallerIpAddress)
+| where CallerIpAddress !startswith "168.63." and CallerIpAddress !startswith "169.254."
+| extend PropsParsed    = todynamic(Properties)
+| extend ExtensionType  = coalesce(
+    tostring(PropsParsed["type"]),
+    tostring(PropsParsed.type),
+    iff(OperationNameValue has "RUNCOMMAND", "RunCommand", ""))
+| extend VMName         = tostring(split(ResourceId, "/")[8])
+| extend ExtensionName  = iff(array_length(split(ResourceId, "/")) > 10,
+    tostring(split(ResourceId, "/")[10]), "")
+| summarize
+    ExecutionCount   = count(),
+    AffectedVMs      = make_set(VMName, 10),
+    ExtensionTypes   = make_set(ExtensionType, 5),
+    AffectedResources = make_set(ResourceId, 10),
+    SourceIPs        = make_set(CallerIpAddress, 5),
+    CallerIP         = any(CallerIpAddress),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+    by Caller, ResourceGroup, SubscriptionId
+| extend
+    AccountName      = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])

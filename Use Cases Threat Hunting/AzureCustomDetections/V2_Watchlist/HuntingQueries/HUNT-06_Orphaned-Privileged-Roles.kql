@@ -1,0 +1,24 @@
+﻿// Hunt     : Hunt - Privileged Role Assignments Matching Disabled or Deleted AAD Identities
+// Tactics  : Persistence,PrivilegeEscalation
+// MITRE    : T1098.003
+// Purpose  : Finds role assignments made AFTER the target identity was disabled or deleted. This indicates either an attacker re-using a known principal ID to maintain access, or a cleanup gap creating a dormant privilege.
+//==========================================================================================
+
+let DisabledUsers = AuditLogs
+    | where TimeGenerated > ago(90d)
+    | where OperationName has_any ("Disable account", "Delete user", "Update user")
+    | where Result =~ "success"
+    | where OperationName !has "Enable"
+    | extend TargetId = tostring(TargetResources[0].id), TargetUPN = tostring(TargetResources[0].userPrincipalName)
+    | summarize DisabledAt = max(ActivityDateTime) by TargetId, TargetUPN;
+AzureActivity
+| where TimeGenerated > ago(90d)
+| where OperationNameValue =~ "MICROSOFT.AUTHORIZATION/ROLEASSIGNMENTS/WRITE"
+| where ActivityStatusValue =~ "Success"
+| extend AssignedPrincipalId = tostring(parse_json(Properties).requestbody.properties.principalId)
+| extend RoleDefId = tostring(parse_json(Properties).requestbody.properties.roleDefinitionId)
+| where isnotempty(AssignedPrincipalId)
+| join kind=inner DisabledUsers on $left.AssignedPrincipalId == $right.TargetId
+| where TimeGenerated > DisabledAt
+| project TimeGenerated, Caller, AssignedPrincipalId, TargetUPN, RoleDefId, ResourceGroup, SubscriptionId, DisabledAt
+| order by TimeGenerated desc
