@@ -1,0 +1,68 @@
+id: 9c0d1e2f-3a4b-4c5d-6e7f-8a9b0c1d2e36
+name: "Netskope (Built-in) - User Visibility Loss - No Traffic Detected"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects users with consistent baseline activity who stopped generating Netskope traffic,
+  indicating possible client bypass, disable, or credential compromise.
+  Uses the built-in NetskopeEvents_CL table.
+  MITRE ATT&CK: T1562 (Impair Defenses), T1562.001 (Disable or Modify Tools)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: NetskopeDataConnector
+    dataTypes:
+      - NetskopeEvents_CL
+queryFrequency: PT4H
+queryPeriod: P7D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - DefenseEvasion
+relevantTechniques:
+  - T1562
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  let baselineWindow = 7d;
+  let recentWindow   = 4h;
+  let minBaselineReqsPerDay = 20;
+  let BaselineUsers =
+      union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+      | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+      | where isnotempty(user_s)
+      | summarize
+          BaselineReqPerDay = round(toreal(count()) / (baselineWindow / 1d), 1),
+          BaselineApps           = make_set(app_s, 10),
+          BaselineIPs            = make_set(srcip_s, 5)
+        by user_s
+      | where BaselineReqPerDay >= minBaselineReqsPerDay;
+  let RecentActiveUsers =
+      union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+      | where TimeGenerated > ago(recentWindow)
+      | where isnotempty(user_s)
+      | distinct user_s;
+  BaselineUsers
+  | join kind=leftanti RecentActiveUsers on user_s
+  | project
+      user_s, BaselineReqPerDay, BaselineApps, BaselineIPs
+  | order by BaselineReqPerDay desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+customDetails:
+  BaselineReqPerDay: BaselineReqPerDay
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope BI Visibility Loss - {{user_s}} ({{BaselineReqPerDay}} req/day baseline)"
+  alertDescriptionFormat: "User {{user_s}} had {{BaselineReqPerDay}} req/day baseline but generated no traffic in last 4 hours."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

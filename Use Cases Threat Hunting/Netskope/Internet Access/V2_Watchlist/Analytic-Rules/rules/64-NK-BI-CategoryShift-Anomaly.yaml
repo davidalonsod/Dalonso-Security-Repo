@@ -1,0 +1,82 @@
+id: 3a4b5c6d-7e8f-4a9b-0c1d-2e3f4a5b6c7a
+name: "Netskope (Built-in) - Category Shift Anomaly - Domain Recategorization"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects domains that shifted from benign to suspicious/uncategorized categories,
+  indicating potential domain compromise or infrastructure takeover.
+  Uses the built-in NetskopeEvents_CL table.
+  MITRE ATT&CK: T1584 (Compromise Infrastructure), T1583 (Acquire Infrastructure)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: NetskopeDataConnector
+    dataTypes:
+      - NetskopeEvents_CL
+queryFrequency: P1D
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - ResourceDevelopment
+relevantTechniques:
+  - T1584
+  - T1583
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  let SuspiciousCategories = dynamic([
+      "Uncategorized", "Unknown", "Newly Observed Domain",
+      "Newly Registered Domain", "Suspicious", "Parked",
+      "Dynamic DNS Host"]);
+  let BenignCategories = dynamic([
+      "Business", "Technology", "News/Media", "Education",
+      "Government", "Health", "Finance", "Shopping",
+      "Entertainment", "Reference", "Travel", "Sports"]);
+  let BaselineDomains =
+      union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+      | where TimeGenerated between (ago(14d) .. ago(1d))
+      | where category_s in (BenignCategories)
+      | where isnotempty(domain_s)
+      | summarize
+          OldCategories = make_set(category_s, 5),
+          OldRequests   = count()
+        by domain_s;
+  union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+  | where TimeGenerated > ago(1d)
+  | where category_s in (SuspiciousCategories)
+  | where isnotempty(domain_s)
+  | summarize
+      NewCategory      = take_any(category_s),
+      RecentRequests   = count(),
+      UniqueUsers      = dcount(user_s),
+      UserList         = make_set(user_s, 10),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+    by domain_s
+  | join kind=inner BaselineDomains on domain_s
+  | project
+      domain_s, OldCategories, NewCategory,
+      OldRequests, RecentRequests, UniqueUsers, UserList,
+      FirstSeen, LastSeen
+  | order by UniqueUsers desc, RecentRequests desc
+entityMappings:
+  - entityType: DNS
+    fieldMappings:
+      - identifier: DomainName
+        columnName: domain_s
+customDetails:
+  NewCategory: NewCategory
+  UniqueUsers: UniqueUsers
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope BI Category Shift - {{domain_s}} → {{NewCategory}}"
+  alertDescriptionFormat: "Domain {{domain_s}} shifted to {{NewCategory}} from its previous benign category. {{UniqueUsers}} users affected."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: P1D
+    matchingMethod: Selected
+    groupByEntities:
+      - DNS
+    groupByAlertDetails: []
+    groupByCustomDetails: []

@@ -1,0 +1,80 @@
+id: f8a9b0c1-d2e3-4f4a-5b6c-7d8e9f0a1b2c
+name: "Netskope IA - Suspicious File Download from Uncategorized Domain"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects file downloads from newly registered, uncategorized, or suspicious domains.
+  Attackers frequently stage payloads on disposable domains that have not yet been
+  categorized by URL classification engines.
+  Uses the built-in NetskopeEvents_CL table from the Netskope Internet Access data connector.
+  MITRE ATT&CK: T1105 (Ingress Tool Transfer), T1204.002 (User Execution: Malicious File)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: NetskopeDataConnector
+    dataTypes:
+      - NetskopeEvents_CL
+queryFrequency: PT30M
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Execution
+  - CommandAndControl
+relevantTechniques:
+  - T1105
+  - T1204
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  let SuspiciousCategories = dynamic([
+      "Uncategorized", "Unknown", "Newly Observed Domain",
+      "Newly Registered Domain", "Suspicious", "Parked",
+      "Dynamic DNS Host"]);
+  let RiskyFileTypes = dynamic([
+      "exe", "dll", "scr", "bat", "cmd", "ps1", "vbs", "js",
+      "hta", "msi", "iso", "img", "zip", "7z", "rar"]);
+  union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+  | where TimeGenerated > ago(1d)
+  | where isnotempty(user_s) and isnotempty(domain_s)
+  | where activity_s has_any ("Download", "download")
+      or todouble(bytes_downloaded_d) > 1048576
+  | where category_s in (SuspiciousCategories)
+  | where isnotempty(file_type_s) or isnotempty(object_s)
+  | summarize
+      DownloadCount     = count(),
+      TotalMBDownloaded = round(sum(todouble(bytes_downloaded_d)) / 1048576, 2),
+      UniqueFiles       = dcount(object_s),
+      FileNames         = make_set(object_s, 10),
+      FileTypes         = make_set(file_type_s, 10),
+      Domains           = make_set(domain_s, 10),
+      Categories        = make_set(category_s, 5),
+      URLSamples        = make_set(url_s, 5),
+      DstCountries      = make_set(dst_country_s, 5),
+      SourceIPs         = make_set(srcip_s, 5),
+      FirstSeen         = min(TimeGenerated),
+      LastSeen          = max(TimeGenerated)
+    by user_s
+  | where DownloadCount >= 1
+  | order by TotalMBDownloaded desc, DownloadCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+customDetails:
+  DownloadCount: DownloadCount
+  TotalMBDownloaded: TotalMBDownloaded
+  FileTypes: FileTypes
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope IA Suspicious Download - {{user_s}} ({{DownloadCount}} files, {{TotalMBDownloaded}} MB)"
+  alertDescriptionFormat: "User {{user_s}} downloaded {{DownloadCount}} files ({{TotalMBDownloaded}} MB) from uncategorized/suspicious domains."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

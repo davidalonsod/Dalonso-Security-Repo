@@ -1,0 +1,72 @@
+id: d6e7f8a9-b0c1-4d2e-3f4a-5b6c7d8e9f0a
+name: "Netskope IA - Impossible Travel Detection"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects users generating Netskope Internet Access traffic from geographically distant
+  source countries within a short time window, indicating potential credential compromise
+  or VPN/proxy abuse. Flags when the same user appears from different countries within 2 hours.
+  Uses the built-in NetskopeEvents_CL table from the Netskope Internet Access data connector.
+  MITRE ATT&CK: T1078 (Valid Accounts), T1078.004 (Cloud Accounts)
+severity: High
+requiredDataConnectors:
+  - connectorId: NetskopeDataConnector
+    dataTypes:
+      - NetskopeEvents_CL
+queryFrequency: PT30M
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  let TravelWindow = 2h;
+  union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+  | where TimeGenerated > ago(1d)
+  | where isnotempty(user_s) and isnotempty(src_country_s)
+  | where src_country_s != "Unknown" and src_country_s != ""
+  | summarize
+      Countries        = make_set(src_country_s, 10),
+      CountryCount     = dcount(src_country_s),
+      SourceIPs        = make_set(srcip_s, 20),
+      UniqueIPs        = dcount(srcip_s),
+      RequestCount     = count(),
+      Apps             = make_set(app_s, 10),
+      AccessMethods    = make_set(access_method_s, 5),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+    by user_s, bin(TimeGenerated, TravelWindow)
+  | where CountryCount >= 2
+  | extend TravelWindowMinutes = datetime_diff('minute', LastSeen, FirstSeen)
+  | project
+      user_s, Countries, CountryCount, SourceIPs, UniqueIPs,
+      RequestCount, Apps, AccessMethods,
+      TravelWindowMinutes, FirstSeen, LastSeen
+  | order by CountryCount desc, UniqueIPs desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+customDetails:
+  CountryCount: CountryCount
+  Countries: Countries
+  UniqueIPs: UniqueIPs
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope IA Impossible Travel - {{user_s}} ({{CountryCount}} countries)"
+  alertDescriptionFormat: "User {{user_s}} accessed from {{CountryCount}} different countries within a 2-hour window: {{Countries}}."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

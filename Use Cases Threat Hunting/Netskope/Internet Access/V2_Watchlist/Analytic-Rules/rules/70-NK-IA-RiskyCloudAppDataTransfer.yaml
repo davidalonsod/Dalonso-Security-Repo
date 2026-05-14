@@ -1,0 +1,76 @@
+id: a9b0c1d2-e3f4-4a5b-6c7d-8e9f0a1b2c3d
+name: "Netskope IA - High-Volume Data Transfer to Risky Cloud App"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects high-volume data uploads to cloud applications with low or poor Cloud Confidence
+  Level (CCL). Large data transfers to unvetted cloud storage or file sharing apps may
+  indicate data exfiltration or policy-violating shadow IT data movement.
+  Uses the built-in NetskopeEvents_CL table from the Netskope Internet Access data connector.
+  MITRE ATT&CK: T1567.002 (Exfiltration to Cloud Storage), T1537 (Transfer Data to Cloud Account)
+severity: High
+requiredDataConnectors:
+  - connectorId: NetskopeDataConnector
+    dataTypes:
+      - NetskopeEvents_CL
+queryFrequency: PT1H
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Exfiltration
+  - Collection
+relevantTechniques:
+  - T1567
+  - T1537
+query: |
+  let _NetskopeEmpty = datatable(TimeGenerated:datetime, action_s:string, category_s:string, severity_s:string, malware_name_s:string, malware_type_s:string, threat_name_s:string, user_s:string, domain_s:string, dstip_s:string, srcip_s:string, bytes_uploaded_d:real, bytes_downloaded_d:real, app_s:string, url_s:string, dlp_rule_s:string, dlp_profile_s:string, activity_s:string, file_type_s:string, object_s:string, dst_country_s:string, src_country_s:string, ccl_s:string, access_method_s:string, traffic_type_s:string)[];
+  let RiskyCCL = dynamic(["poor", "low", "unknown"]);
+  let ExfilCategories = dynamic([
+      "Cloud Storage", "File Sharing", "Online Storage and Backup",
+      "Personal Sites & Blogs", "Webmail"]);
+  union isfuzzy=true _NetskopeEmpty, NetskopeEvents_CL
+  | where TimeGenerated > ago(1d)
+  | where isnotempty(user_s) and isnotempty(app_s)
+  | where action_s !in ("block", "Block", "blocked", "Blocked")
+  | where ccl_s in (RiskyCCL) or isempty(ccl_s)
+  | where category_s in (ExfilCategories) or activity_s has_any ("Upload", "Share", "Post")
+  | summarize
+      UploadCount       = count(),
+      TotalMBUploaded   = round(sum(todouble(bytes_uploaded_d)) / 1048576, 2),
+      UniqueFiles       = dcount(object_s),
+      FileNames         = make_set(object_s, 10),
+      FileTypes         = make_set(file_type_s, 10),
+      Apps              = make_set(app_s, 10),
+      Domains           = make_set(domain_s, 10),
+      Categories        = make_set(category_s, 5),
+      CCLValues         = make_set(ccl_s, 5),
+      SourceIPs         = make_set(srcip_s, 5),
+      FirstSeen         = min(TimeGenerated),
+      LastSeen          = max(TimeGenerated)
+    by user_s
+  | where TotalMBUploaded > 100 or UploadCount > 50
+  | order by TotalMBUploaded desc, UploadCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: user_s
+customDetails:
+  TotalMBUploaded: TotalMBUploaded
+  UploadCount: UploadCount
+  Apps: Apps
+alertDetailsOverride:
+  alertDisplayNameFormat: "Netskope IA Risky Cloud Upload - {{user_s}} ({{TotalMBUploaded}} MB)"
+  alertDescriptionFormat: "User {{user_s}} uploaded {{TotalMBUploaded}} MB in {{UploadCount}} requests to risky cloud apps with low CCL."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
