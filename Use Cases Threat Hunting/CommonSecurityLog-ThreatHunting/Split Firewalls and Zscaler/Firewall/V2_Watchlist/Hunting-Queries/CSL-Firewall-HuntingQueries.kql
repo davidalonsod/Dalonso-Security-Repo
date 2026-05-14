@@ -1,0 +1,505 @@
+﻿// =============================================================================
+// CommonSecurityLog - Firewall Threat Hunting Queries (Fortinet / Palo Alto / All Vendors)
+// Vendor: Fortinet FortiGate, Palo Alto Networks, All Vendors
+// Generated: 2026-03-18
+// Queries: 16 | Table: CommonSecurityLog
+// =============================================================================
+
+// =============================================================================
+// Q01 - Beaconing Detection - All Vendors
+// MITRE Techniques: T1071,T1571
+// Tactics        : CommandAndControl
+// Description    : Detects internal hosts making regular high-frequency connections to the same external IP across multiple hours. Beacon score = connections / hourly buckets.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP", "Reset-Both")
+| where isnotempty(DestinationIP)
+| where ipv4_is_private(DestinationIP) == false
+| where isnotempty(SourceIP)
+| summarize
+    ConnectionCount  = count(),
+    BytesSent        = sum(SentBytes),
+    BytesReceived    = sum(ReceivedBytes),
+    HourlyBuckets    = dcount(bin(TimeGenerated, 1h)),
+    Ports            = make_set(DestinationPort, 10),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by SourceIP, DestinationIP, DeviceVendor
+| where ConnectionCount > 20 and HourlyBuckets >= 3
+| extend BeaconScore = round(toreal(ConnectionCount) / toreal(HourlyBuckets), 1)
+| where BeaconScore > 5
+| order by BeaconScore desc
+
+// =============================================================================
+// Q02 - Data Exfiltration - Anomalous Outbound Volume
+// MITRE Techniques: T1048
+// Tactics        : Exfiltration
+// Description    : Detects internal hosts sending more than 500 MB to external destinations in 24 hours.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP", "Reset-Both")
+| where isnotempty(SourceIP) and isnotempty(DestinationIP)
+| where ipv4_is_private(SourceIP) == true
+| where ipv4_is_private(DestinationIP) == false
+| summarize
+    TotalBytesSent    = sum(SentBytes),
+    TotalBytesRecv    = sum(ReceivedBytes),
+    SessionCount      = count(),
+    DestIPs           = make_set(DestinationIP, 20),
+    DestPorts         = make_set(DestinationPort, 10),
+    HourlyBuckets     = dcount(bin(TimeGenerated, 1h)),
+    DeviceVendors     = make_set(DeviceVendor)
+  by SourceIP
+| extend TotalMBSent = round(toreal(TotalBytesSent) / 1048576, 2)
+| where TotalMBSent > 500
+| order by TotalMBSent desc
+
+// =============================================================================
+// Q03 - Threat Intelligence IP Correlation
+// MITRE Techniques: T1071
+// Tactics        : CommandAndControl,InitialAccess
+// Description    : Matches allowed firewall traffic source/dest IPs against active ThreatIntelIndicators entries.
+// =============================================================================
+let TI_IPs =
+    ThreatIntelIndicators
+    | where TimeGenerated > ago(30d)
+    | where isempty(ValidUntil) or ValidUntil > now()
+    | where isnotnull(parse_ipv4(ObservableValue))
+    | where isnotempty(ObservableValue)
+    | summarize ThreatTypes = make_set(Tags), ConfidenceScore = max(Confidence)
+        by TI_IP = ObservableValue;
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP", "Reset-Both")
+| where isnotempty(DestinationIP) or isnotempty(SourceIP)
+| extend CheckIP = iff(ipv4_is_private(DestinationIP) == false, DestinationIP, SourceIP)
+| join kind=inner TI_IPs on $left.CheckIP == $right.TI_IP
+| summarize
+    HitCount         = count(),
+    InternalIPs      = make_set(SourceIP, 20),
+    DeviceVendors    = make_set(DeviceVendor),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated),
+    ThreatTypes      = make_set(ThreatTypes),
+    ConfidenceScore  = max(ConfidenceScore)
+  by TI_IP
+| order by HitCount desc
+
+// =============================================================================
+// Q04 - Port Scanning - Single Source to Many Destinations
+// MITRE Techniques: T1046
+// Tactics        : Discovery
+// Description    : Detects port sweep or host sweep: source IP hitting more than 30 unique dest ports or 50 unique dest IPs in 1 hour.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(1h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where isnotempty(SourceIP) and isnotempty(DestinationIP)
+| summarize
+    UniqueDestPorts = dcount(DestinationPort),
+    UniqueDestIPs   = dcount(DestinationIP),
+    TotalAttempts   = count(),
+    Actions         = make_set(DeviceAction, 5),
+    Protocols       = make_set(Protocol, 5),
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated)
+  by SourceIP, DeviceVendor
+| where UniqueDestPorts > 30 or UniqueDestIPs > 50
+| extend ScanType = case(
+    UniqueDestPorts > 30 and UniqueDestIPs <= 10, "Vertical Scan (port sweep, single host)",
+    UniqueDestIPs   > 50 and UniqueDestPorts <= 5, "Horizontal Scan (host sweep, single port)",
+    "Combined Scan")
+| order by UniqueDestPorts desc, UniqueDestIPs desc
+
+// =============================================================================
+// Q05 - High-Risk Country Inbound and Outbound Traffic
+// MITRE Techniques: T1078
+// Tactics        : InitialAccess,Exfiltration
+// Description    : Detects allowed firewall traffic to/from APT-associated countries.
+// =============================================================================
+let HighRiskCountries = dynamic([
+    "China", "Russia", "North Korea", "Iran", "Syria",
+    "Cuba", "Belarus", "Venezuela", "Afghanistan", "Libya"]);
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP", "Reset-Both")
+| where isnotempty(DestinationIP) or isnotempty(SourceIP)
+| extend
+    DstCountry = tostring(geo_info_from_ip_address(DestinationIP).country),
+    SrcCountry = tostring(geo_info_from_ip_address(SourceIP).country)
+| where DstCountry in (HighRiskCountries) or SrcCountry in (HighRiskCountries)
+| summarize
+    ConnectionCount  = count(),
+    BytesSent        = sum(SentBytes),
+    InternalIPs      = make_set(SourceIP, 20),
+    ExternalIPs      = make_set(DestinationIP, 20),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by DstCountry, SrcCountry, DeviceVendor
+| order by ConnectionCount desc
+
+// =============================================================================
+// Q06 - Lateral Movement - Internal Port Sweep
+// MITRE Techniques: T1021
+// Tactics        : LateralMovement
+// Description    : Detects an internal IP connecting to many internal hosts on SMB, RDP, WinRM, SSH, or database ports.
+// =============================================================================
+let LateralPorts = dynamic([22, 23, 135, 139, 445, 3389, 5985, 5986, 1433, 3306, 5432]);
+CommonSecurityLog
+| where TimeGenerated > ago(6h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks")
+| where ipv4_is_private(SourceIP) == true
+| where ipv4_is_private(DestinationIP) == true
+| where DestinationPort in (LateralPorts)
+| summarize
+    UniqueTargets   = dcount(DestinationIP),
+    UniquePorts     = dcount(DestinationPort),
+    TotalAttempts   = count(),
+    TargetIPs       = make_set(DestinationIP, 30),
+    PortsUsed       = make_set(DestinationPort, 10),
+    Actions         = make_set(DeviceAction, 5),
+    FirstSeen       = min(TimeGenerated),
+    LastSeen        = max(TimeGenerated)
+  by SourceIP, DeviceVendor
+| where UniqueTargets > 5
+| order by UniqueTargets desc
+
+// =============================================================================
+// Q07 - Fortinet - IPS and Application Control Blocks
+// MITRE Techniques: T1190,T1059
+// Tactics        : InitialAccess,Execution
+// Description    : Surfaces Fortinet IPS events grouped by signature name and source IP.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Fortinet"
+| where DeviceEventClassID has_any ("IPS", "anomaly", "signature")
+    or Activity has_any ("ips-packet", "app-ctrl", "anomaly")
+| summarize
+    HitCount         = count(),
+    SourceIPs        = make_set(SourceIP, 20),
+    DestinationIPs   = make_set(DestinationIP, 20),
+    ProtocolsUsed    = make_set(Protocol, 5),
+    SeverityValues   = make_set(LogSeverity, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by Activity, DeviceEventClassID
+| order by HitCount desc
+
+// =============================================================================
+// Q08 - Palo Alto - Threat Logs Breakdown
+// MITRE Techniques: T1203
+// Tactics        : Execution
+// Description    : Surfaces all Palo Alto threat-type events grouped by threat name and source IP.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Palo Alto Networks"
+| where DeviceEventClassID has_any ("THREAT", "threat", "WILDFIRE-VIRUS", "SPYWARE", "VULNERABILITY")
+    or Activity has_any ("threat", "wildfire", "spyware", "vulnerability", "virus")
+| summarize
+    HitCount         = count(),
+    SourceIPs        = make_set(SourceIP, 20),
+    DestinationIPs   = make_set(DestinationIP, 20),
+    DestinationURLs  = make_set(RequestURL, 10),
+    SeverityValues   = make_set(LogSeverity, 5),
+    Actions          = make_set(DeviceAction, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by Activity, DeviceEventClassID
+| order by HitCount desc
+
+// =============================================================================
+// Q12 - New and First-Seen External IP Allowed Through Firewall
+// MITRE Techniques: T1071
+// Tactics        : CommandAndControl
+// Description    : Identifies external destination IPs not seen in the prior 7 days that appeared in the last 24 hours.
+// =============================================================================
+let HistoricalIPs =
+    CommonSecurityLog
+    | where TimeGenerated between (ago(7d) .. ago(1d))
+    | where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+    | where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+    | where ipv4_is_private(DestinationIP) == false
+    | summarize by DestinationIP;
+CommonSecurityLog
+| where TimeGenerated > ago(1d)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+| where ipv4_is_private(DestinationIP) == false
+| where isnotempty(DestinationIP)
+| summarize
+    ConnectionCount  = count(),
+    SourceIPs        = make_set(SourceIP, 20),
+    BytesSent        = sum(SentBytes),
+    Ports            = make_set(DestinationPort, 10),
+    Protocols        = make_set(Protocol, 5),
+    DeviceVendors    = make_set(DeviceVendor),
+    FirstSeen        = min(TimeGenerated)
+  by DestinationIP
+| where ConnectionCount > 5
+| join kind=leftanti HistoricalIPs on DestinationIP
+| order by ConnectionCount desc
+
+// =============================================================================
+// Q13 - Firewall Allow plus Azure AD Sign-In Correlation
+// MITRE Techniques: T1078
+// Tactics        : InitialAccess
+// Description    : Correlates firewall-allowed external IPs against Azure AD successful sign-ins from the same IP.
+// =============================================================================
+let FirewallExternalIPs =
+    CommonSecurityLog
+    | where TimeGenerated > ago(24h)
+    | where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+    | where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+    | where ipv4_is_private(DestinationIP) == false
+    | summarize
+        FW_Connections = count(),
+        FW_Sources     = make_set(SourceIP, 10),
+        FW_BytesSent   = sum(SentBytes),
+        FW_Vendors     = make_set(DeviceVendor)
+      by ExternalIP = DestinationIP;
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == 0
+| where isnotempty(IPAddress)
+| summarize
+    AAD_SignInCount  = count(),
+    AAD_Users        = make_set(UserPrincipalName, 20),
+    AAD_AppNames     = make_set(AppDisplayName, 10),
+    AAD_Countries    = make_set(Location, 5),
+    AAD_RiskLevels   = make_set(RiskLevelDuringSignIn, 5)
+  by IPAddress
+| join kind=inner FirewallExternalIPs on $left.IPAddress == $right.ExternalIP
+| project
+    IPAddress,
+    AAD_SignInCount,
+    AAD_Users,
+    AAD_Countries,
+    AAD_RiskLevels,
+    FW_Connections,
+    FW_Sources,
+    FW_BytesSent,
+    FW_Vendors
+| order by FW_Connections desc
+
+// =============================================================================
+// Q14 - CommonSecurityLog plus SecurityAlert IOC Correlation
+// MITRE Techniques: T1071
+// Tactics        : CommandAndControl
+// Description    : Identifies firewall IPs that also appear in active Security Alerts from Defender or Sentinel.
+// =============================================================================
+let AlertIPs =
+    SecurityAlert
+    | where TimeGenerated > ago(7d)
+    | where AlertSeverity in ("High", "Medium")
+    | mv-expand todynamic(Entities)
+    | where Entities.Type == "ip"
+    | extend AlertIP = tostring(Entities.Address)
+    | where isnotempty(AlertIP)
+    | summarize
+        AlertCount    = count(),
+        AlertNames    = make_set(AlertName, 10),
+        Severities    = make_set(AlertSeverity, 3),
+        Products      = make_set(ProductName, 5)
+      by AlertIP;
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where isnotempty(SourceIP) or isnotempty(DestinationIP)
+| extend CheckIP = iff(ipv4_is_private(DestinationIP) == false, DestinationIP, SourceIP)
+| summarize
+    FW_HitCount     = count(),
+    FW_Actions      = make_set(DeviceAction, 5),
+    FW_InternalIPs  = make_set(SourceIP, 10),
+    FW_Vendors      = make_set(DeviceVendor),
+    FW_FirstSeen    = min(TimeGenerated),
+    FW_LastSeen     = max(TimeGenerated)
+  by CheckIP
+| join kind=inner AlertIPs on $left.CheckIP == $right.AlertIP
+| project
+    IOC_IP        = CheckIP,
+    AlertCount,
+    AlertNames,
+    Severities,
+    Products,
+    FW_HitCount,
+    FW_Actions,
+    FW_InternalIPs,
+    FW_Vendors,
+    FW_FirstSeen,
+    FW_LastSeen
+| order by AlertCount desc
+
+// =============================================================================
+// Q15 - CommonSecurityLog plus ThreatIntelligence Domain Match
+// MITRE Techniques: T1071
+// Tactics        : CommandAndControl
+// Description    : Joins firewall traffic against TI feed URLs and domains across all three vendors.
+// =============================================================================
+let TI_Domains =
+    ThreatIntelIndicators
+    | where TimeGenerated > ago(30d)
+    | where isempty(ValidUntil) or ValidUntil > now()
+    | where ObservableKey has "domain"
+    | where isnotempty(ObservableValue)
+    | summarize
+        TI_ThreatTypes = make_set(Tags),
+        TI_Confidence  = max(Confidence)
+      by DomainName = ObservableValue;
+let TI_URLs =
+    ThreatIntelIndicators
+    | where TimeGenerated > ago(30d)
+    | where isempty(ValidUntil) or ValidUntil > now()
+    | where ObservableKey has "url"
+    | where isnotempty(ObservableValue)
+    | summarize
+        TI_ThreatTypes = make_set(Tags),
+        TI_Confidence  = max(Confidence)
+      by Url = ObservableValue;
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where isnotempty(DestinationHostName) or isnotempty(RequestURL)
+| extend MatchKey = coalesce(DestinationHostName, RequestURL)
+| join kind=inner TI_Domains on $left.MatchKey == $right.DomainName
+| summarize
+    FW_HitCount    = count(),
+    FW_Users       = make_set(SourceUserName, 10),
+    FW_SourceIPs   = make_set(SourceIP, 10),
+    FW_Actions     = make_set(DeviceAction, 5),
+    FW_Vendors     = make_set(DeviceVendor),
+    TI_ThreatTypes = make_set(TI_ThreatTypes),
+    TI_Confidence  = max(TI_Confidence),
+    FirstSeen      = min(TimeGenerated),
+    LastSeen       = max(TimeGenerated)
+  by MatchKey
+| order by FW_HitCount desc
+
+// =============================================================================
+// Q16 - Palo Alto - Zone Transfer Violations and Policy Denies
+// MITRE Techniques: T1190
+// Tactics        : InitialAccess
+// Description    : Surfaces Palo Alto deny events from inter-zone policy grouped by source/destination zone pair.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Palo Alto Networks"
+| where DeviceAction in ("deny", "drop", "reset-client", "reset-server", "reset-both",
+                         "Reset-Both", "Drop", "Deny")
+| where isnotempty(DeviceCustomString1) or isnotempty(DeviceCustomString2) // zone fields
+| summarize
+    DenyCount        = count(),
+    SourceIPs        = make_set(SourceIP, 20),
+    DestinationIPs   = make_set(DestinationIP, 20),
+    Ports            = make_set(DestinationPort, 10),
+    Protocols        = make_set(Protocol, 5),
+    PolicyNames      = make_set(DeviceCustomString1, 10),
+    SourceZones      = make_set(DeviceCustomString2, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by DeviceCustomString1, DeviceCustomString2, DeviceAction
+| order by DenyCount desc
+
+// =============================================================================
+// Q17 - Fortinet - Repeated Auth Failures SSL-VPN and Admin
+// MITRE Techniques: T1110
+// Tactics        : CredentialAccess
+// Description    : Detects brute force or credential stuffing against Fortinet VPN infrastructure.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor == "Fortinet"
+| where DeviceEventClassID has_any ("32001", "32002", "39424", "39952")
+    or Activity has_any ("ssl-vpn-tunnel", "vpn", "admin-login", "loginfailed",
+                         "login failure", "authentication failed")
+    or DeviceAction has_any ("failed", "denied", "reject", "failure")
+| summarize
+    FailureCount     = count(),
+    UniqueUsers      = dcount(SourceUserName),
+    UserList         = make_set(SourceUserName, 20),
+    DestinationIPs   = make_set(DestinationIP, 5),
+    SourcePorts      = make_set(SourcePort, 5),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by SourceIP, DeviceEventClassID
+| where FailureCount > 5
+| order by FailureCount desc
+
+// =============================================================================
+// Q19 - Protocol Anomaly - HTTP and HTTPS on Non-Standard Ports
+// MITRE Techniques: T1571
+// Tactics        : CommandAndControl
+// Description    : Detects HTTP/HTTPS running on non-standard ports, common in C2 malware evasion techniques.
+// =============================================================================
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+| where (ApplicationProtocol in ("HTTP", "http") and DestinationPort !in (80, 8080, 8000, 3128))
+    or (ApplicationProtocol in ("HTTPS", "https", "SSL", "ssl") and DestinationPort !in (443, 8443))
+    or (Protocol in ("HTTP", "http") and DestinationPort !in (80, 8080, 8000, 3128))
+    or (Protocol in ("HTTPS", "https") and DestinationPort !in (443, 8443))
+| summarize
+    ConnectionCount  = count(),
+    SourceIPs        = make_set(SourceIP, 20),
+    DestIPs          = make_set(DestinationIP, 20),
+    BytesSent        = sum(SentBytes),
+    URLSamples       = make_set(RequestURL, 10),
+    DeviceVendors    = make_set(DeviceVendor),
+    FirstSeen        = min(TimeGenerated),
+    LastSeen         = max(TimeGenerated)
+  by DestinationPort, ApplicationProtocol, Protocol
+| order by ConnectionCount desc
+
+// =============================================================================
+// Q20 - Firewall plus IdentityInfo Risky User Correlation
+// MITRE Techniques: T1078
+// Tactics        : InitialAccess,Exfiltration
+// Description    : Matches firewall traffic source users against IdentityInfo to surface high-risk accounts.
+// =============================================================================
+let RiskyIdentities =
+    IdentityInfo
+    | where TimeGenerated > ago(14d)
+    | where isnotempty(AccountUPN)
+    | summarize
+        RiskScore        = max(InvestigationPriority),
+        JobTitle         = any(JobTitle),
+        Department       = any(Department),
+        Manager          = any(Manager),
+        IsAccountEnabled = any(IsAccountEnabled)
+      by AccountUPN;
+CommonSecurityLog
+| where TimeGenerated > ago(24h)
+| where DeviceVendor in ("Fortinet", "Palo Alto Networks", "Zscaler")
+| where DeviceAction !in ("deny", "block", "drop", "BLOCK", "DROP")
+| where isnotempty(SourceUserName)
+| summarize
+    FW_RequestCount  = count(),
+    FW_BytesSent     = sum(SentBytes),
+    FW_BytesRecv     = sum(ReceivedBytes),
+    FW_DestIPs       = dcount(DestinationIP),
+    FW_Vendors       = make_set(DeviceVendor),
+    FW_SrcIPs        = make_set(SourceIP, 5),
+    FW_FirstSeen     = min(TimeGenerated)
+  by UserName = tolower(SourceUserName)
+| join kind=inner RiskyIdentities on $left.UserName == $right.AccountUPN
+| extend TotalMBSent = round(toreal(FW_BytesSent) / 1048576, 2)
+| project
+    UserName,
+    JobTitle,
+    Department,
+    RiskScore,
+    FW_RequestCount,
+    TotalMBSent,
+    FW_DestIPs,
+    FW_Vendors,
+    FW_SrcIPs
+| order by RiskScore desc, TotalMBSent desc
+
