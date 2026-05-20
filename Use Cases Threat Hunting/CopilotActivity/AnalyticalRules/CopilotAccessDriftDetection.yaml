@@ -1,0 +1,105 @@
+id: 1f6c2a5e-9c2f-4f4b-b1d3-3a7d5e8b9c01
+name: Microsoft 365 Copilot - AI agent access drift outside baseline
+description: |
+  Detects when A Microsoft 365 Copilot agent suddenly invokes tools or accesses
+  data sources that fall outside its 14-day behavioural baseline.
+
+  Agent permissions tend to expand quietly as agents take on new
+  tasks. An agent that has only ever read SharePoint documents
+  unexpectedly invoking an Exchange or Graph data-write tool is a
+  strong signal of access drift or scope abuse and should be
+  reviewed by an analyst.
+severity: Medium
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- PrivilegeEscalation
+- Discovery
+relevantTechniques:
+- T1098
+- T1087
+query: |
+  // Confirmed schema: LLMEventData.AccessedResources[].Type / .SiteUrl
+  // Drift is computed on the resource-type set per user across a 14d window.
+  let lookback = 14d;
+  let recentWindow = 1h;
+  let events =
+      CopilotActivity
+      | where TimeGenerated > ago(lookback)
+      | where RecordType == "CopilotInteraction"
+      | mv-expand r = LLMEventData.AccessedResources
+      | extend
+          ResourceType = tostring(r.Type),
+          SiteUrl = tolower(tostring(r.SiteUrl)),
+          ResourceAction = tostring(r.Action)
+      | where isnotempty(ResourceType);
+  let baseline =
+      events
+      | where TimeGenerated between (ago(lookback) .. ago(recentWindow))
+      | summarize BaselineTypes = make_set(ResourceType, 64) by ActorUserId;
+  let recent =
+      events
+      | where TimeGenerated > ago(recentWindow);
+  recent
+  | join kind=leftouter baseline on ActorUserId
+  | extend BaselineTypes = coalesce(BaselineTypes, dynamic([]))
+  | where array_index_of(BaselineTypes, ResourceType) < 0
+  | summarize
+      DriftCount = count(),
+      NewResourceTypes = make_set(ResourceType, 16),
+      SampleSites = make_set(SiteUrl, 16),
+      SampleActions = make_set(ResourceAction, 8),
+      AgentNames = make_set(AgentName, 8),
+      AgentIds = make_set(AgentId, 8),
+      AnyActor = take_any(ActorName),
+      ClientIPs = make_set(SrcIpAddr, 16),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by ActorUserId, TenantId
+  | extend
+      AgentName = tostring(AgentNames[0]),
+      AgentId = tostring(AgentIds[0]),
+      ActorName = AnyActor,
+      SrcIpAddr = tostring(ClientIPs[0])
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: Selected
+    groupByEntities:
+    - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI

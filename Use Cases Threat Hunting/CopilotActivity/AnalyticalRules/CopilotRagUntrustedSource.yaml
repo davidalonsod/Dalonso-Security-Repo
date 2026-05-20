@@ -1,0 +1,88 @@
+id: 9ec07108-7eb1-8fc2-d1b3-405e6f8190a5
+name: Microsoft 365 Copilot - Untrusted RAG source used to ground agent response
+description: |
+  Detects A Microsoft 365 Copilot agent grounding its response on a retrieval
+  source that is not on the approved corpus list. Used to surface
+  RAG poisoning and "context smuggling" attacks where an attacker
+  plants content in a shared store the agent indexes.
+
+  The trusted corpus is sourced from the "CopilotTrustedRagSources"
+  watchlist (alias: CopilotTrustedRagSources, column: SourceUri).
+  Populate that watchlist with the URIs / hostnames of approved
+  document repositories before enabling the rule.
+severity: Medium
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- DefenseEvasion
+relevantTechniques:
+- T1195
+- T1199
+query: |
+  let trusted =
+      _GetWatchlist('CopilotTrustedRagSources')
+      | project SourceUri = tolower(tostring(column_ifexists('SourceUri', '')))
+      | where isnotempty(SourceUri);
+  CopilotActivity
+  | where TimeGenerated > ago(1h)
+  | where RecordType == "CopilotInteraction"
+  | extend AccessedResources = LLMEventData.AccessedResources
+  | mv-expand AccessedResources
+  | extend
+      SourceUri = tolower(tostring(AccessedResources.SiteUrl)),
+      Action    = tostring(AccessedResources.Action),
+      ResourceType = tostring(AccessedResources.Type)
+  | where isnotempty(SourceUri)
+  | join kind=leftanti trusted on SourceUri
+  | summarize
+      UntrustedHits = count(),
+      UntrustedSources = make_set(SourceUri, 64),
+      Actions = make_set(Action, 16),
+      ClientIPs = make_set(SrcIpAddr, 16),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by AgentId, AgentName, ActorName, TenantId
+  | extend SrcIpAddr = tostring(ClientIPs[0])
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: Selected
+    groupByEntities:
+    - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI

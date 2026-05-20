@@ -1,0 +1,90 @@
+id: 3c5b8d29-4e7f-4b1a-9c2d-8f7e6a5b4c30
+name: Microsoft 365 Copilot - Indirect prompt injection (XPIA) detected
+description: |
+  Detects Microsoft 365 Copilot interactions where the cross-prompt injection
+  attack (XPIA) classifier flagged a grounding resource. This is Microsoft's
+  native indirect prompt injection signal exposed on the
+  LLMEventData.AccessedResources[].XPIADetected boolean.
+
+  An XPIA hit means an attacker planted instructions (typically markdown or
+  hidden text) in a document, web page, email, or chat that Copilot grounded
+  on, attempting to hijack the agent's behaviour on behalf of the legitimate
+  user. This rule surfaces the affected user, agent, and the source URLs the
+  poisoned content came from.
+severity: High
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- Execution
+relevantTechniques:
+- T1566
+- T1059
+query: |
+  // Confirmed schema: LLMEventData.AccessedResources[].XPIADetected
+  // (Microsoft's native XPIA / indirect prompt injection classifier).
+  CopilotActivity
+  | where TimeGenerated > ago(1h)
+  | where RecordType == "CopilotInteraction"
+  | extend ThreadId = tostring(LLMEventData.ThreadId)
+  | mv-expand r = LLMEventData.AccessedResources
+  | extend
+      SiteUrl = tostring(r.SiteUrl),
+      ResourceType = tostring(r.Type),
+      ResourceAction = tostring(r.Action),
+      XPIADetected = tobool(r.XPIADetected)
+  | where XPIADetected == true
+  | summarize
+      XpiaHits = count(),
+      Sites = make_set(SiteUrl, 16),
+      ResourceTypes = make_set(ResourceType, 8),
+      Actions = make_set(ResourceAction, 8),
+      Threads = make_set(ThreadId, 16),
+      ClientIPs = make_set(SrcIpAddr, 16),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by AgentId, AgentName, ActorName, ActorUserId, TenantId
+  | extend SrcIpAddr = tostring(ClientIPs[0])
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: Selected
+    groupByEntities:
+    - CloudApplication
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI

@@ -1,0 +1,128 @@
+id: 7a9f2b6d-1e8a-4f0a-d4b5-2c1a0f9e8d74
+name: Microsoft 365 Copilot - Automated red-team / fuzzing pacing
+description: |
+  Detects the pacing fingerprint left by automated LLM red-team /
+  fuzzing frameworks (e.g. Microsoft PyRIT, Confident-AI DeepTeam,
+  custom adversarial scripts) targeting Microsoft 365 Copilot.
+  Real attackers wielding these frameworks - and red-teamers exercising
+  them - generate distinctive volumetric patterns that differ from
+  normal interactive use.
+
+  Three independent sub-signals are evaluated against a one-hour window;
+  any one firing raises the alert. Two or more firing simultaneously is
+  a strong indicator of automated abuse rather than a busy human user.
+
+    1. ThreadFanOut       - one actor opens >=10 distinct ThreadIds
+                            in a 10-minute bucket (parallel attack runs)
+    2. JailbreakHammer    - one actor accumulates >=5 Prompt Shield
+                            JailbreakDetected verdicts in 1h
+    3. SustainedHighRate  - one actor sustains >=30 messages/min for
+                            >=5 minutes (mass fuzzing)
+
+  Tune the thresholds to your tenant: heavy power-users of Copilot for
+  Sales / Service can legitimately produce high rates, but they
+  generally do not fan out across many parallel threads while doing so.
+
+  Tagged against OWASP LLM Top 10:
+    - LLM01 Prompt Injection (multi-turn / hammering sub-signal)
+    - LLM10 Unbounded Consumption (fan-out + sustained rate sub-signals)
+severity: Medium
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Discovery
+- Impact
+relevantTechniques:
+- T1526
+- T1499
+query: |
+  let window = 1h;
+  let burstWindow = 10m;
+  let base =
+      CopilotActivity
+      | where TimeGenerated > ago(window)
+      | where RecordType == "CopilotInteraction"
+      | extend
+          ThreadId = tostring(LLMEventData.ThreadId),
+          InteractionMessages = array_length(LLMEventData.Messages);
+  let threadFanOut =
+      base
+      | summarize Threads = dcount(ThreadId)
+          by ActorUserId, AgentId, AgentName, ActorName, TenantId,
+             Bucket = bin(TimeGenerated, burstWindow)
+      | where Threads >= 10
+      | extend Signal = "ThreadFanOut", Value = todouble(Threads);
+  let jailbreakHammer =
+      base
+      | mv-expand m = LLMEventData.Messages
+      | extend JbHit = tobool(m.JailbreakDetected)
+      | summarize JbCount = countif(JbHit)
+          by ActorUserId, AgentId, AgentName, ActorName, TenantId,
+             Bucket = bin(TimeGenerated, window)
+      | where JbCount >= 5
+      | extend Signal = "JailbreakHammer", Value = todouble(JbCount);
+  let sustainedRate =
+      base
+      | summarize MsgPerMin = sum(InteractionMessages)
+          by ActorUserId, AgentId, AgentName, ActorName, TenantId,
+             Minute = bin(TimeGenerated, 1m)
+      | where MsgPerMin >= 30
+      | summarize HighRateMinutes = count(), MaxRate = max(MsgPerMin)
+          by ActorUserId, AgentId, AgentName, ActorName, TenantId
+      | where HighRateMinutes >= 5
+      | extend
+          Signal = "SustainedHighRate",
+          Value = todouble(MaxRate),
+          Bucket = bin(now(), 1m);
+  union threadFanOut, jailbreakHammer, sustainedRate
+  | summarize
+      Signals = make_set(Signal, 4),
+      SignalDetails = make_bag(pack(Signal, Value)),
+      FirstSeen = min(Bucket),
+      LastSeen = max(Bucket)
+      by ActorUserId, AgentId, AgentName, ActorName, TenantId
+  | extend SignalCount = array_length(Signals)
+  | extend Confidence = iff(SignalCount >= 2, "High", "Medium")
+  | order by SignalCount desc, LastSeen desc
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI
+- OWASP-LLM01
+- OWASP-LLM10
+- PyRIT
+- DeepTeam

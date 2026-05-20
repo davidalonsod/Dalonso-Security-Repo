@@ -1,0 +1,91 @@
+id: 7cae5f86-5c8f-6da0-bf91-2e3c4d5e6f73
+name: Microsoft 365 Copilot - Anomalous token / cost spike per agent
+description: |
+  Detects A Microsoft 365 Copilot agent whose token consumption in the last
+  hour exceeds three times its 7-day per-hour median. Useful for
+  catching token abuse, runaway agent loops, and cost-driven
+  denial-of-service / wallet-drain attacks.
+
+  Pair with the trace-anomaly hunting query to confirm whether
+  the spike is a legitimate workload or a tight tool-call loop.
+severity: Medium
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: P7D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Impact
+relevantTechniques:
+- T1496
+- T1499
+query: |
+  // TotalTokens is not exposed in CopilotActivity today, so we use the
+  // sum of Messages[] cardinality per hour per agent+user as a usage proxy.
+  // Pair with CopilotTraceLevelAnomalies hunting query for context.
+  let lookback = 7d;
+  let recentWindow = 1h;
+  let perHour =
+      CopilotActivity
+      | where TimeGenerated > ago(lookback)
+      | where RecordType == "CopilotInteraction"
+      | extend MsgCount = array_length(LLMEventData.Messages)
+      | summarize
+          HourMessages = sum(MsgCount),
+          HourInteractions = count(),
+          AnyActor = take_any(ActorName)
+          by AgentId, AgentName, ActorUserId, Hour = bin(TimeGenerated, 1h);
+  let baseline =
+      perHour
+      | where Hour < bin(now(), 1h) - recentWindow
+      | summarize
+          MedianHourMessages = percentile(HourMessages, 50),
+          P95HourMessages = percentile(HourMessages, 95)
+          by AgentId, AgentName, ActorUserId;
+  let recent =
+      perHour
+      | where Hour >= bin(now(), 1h) - recentWindow;
+  recent
+  | join kind=leftouter baseline on AgentId, ActorUserId
+  | extend
+      MedianHourMessages = coalesce(todouble(MedianHourMessages), 0.0),
+      P95HourMessages = coalesce(todouble(P95HourMessages), 0.0)
+  | extend SpikeRatio = iff(MedianHourMessages > 0, todouble(HourMessages) / MedianHourMessages, todouble(HourMessages))
+  | where HourMessages > 100
+      and (SpikeRatio >= 3.0 or HourMessages > P95HourMessages * 2)
+  | extend ActorName = AnyActor
+  | project
+      Hour, AgentId, AgentName, ActorName, ActorUserId,
+      HourInteractions, HourMessages, MedianHourMessages,
+      P95HourMessages, SpikeRatio
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI

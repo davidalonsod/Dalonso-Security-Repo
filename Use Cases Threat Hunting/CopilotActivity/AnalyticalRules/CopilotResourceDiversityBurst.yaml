@@ -1,0 +1,105 @@
+id: 5e7d0f4b-9c6e-4d8e-b2f3-0a9e8d7c6b52
+name: Microsoft 365 Copilot - Resource diversity burst per user
+description: |
+  Detects sudden bursts in the breadth of grounding sources a single
+  user touches in a one-hour window via Microsoft 365 Copilot. Used to
+  surface enumeration / cross-department reconnaissance patterns where
+  an actor (or a compromised agent acting on their behalf) is fanning
+  out across a large number of SharePoint sites, OneDrive locations,
+  and other repositories that they don't normally touch together.
+
+  Different from CopilotAccessDriftDetection (which surfaces newly-seen
+  resource TYPES vs a 14d baseline): this rule surfaces a spike in the
+  COUNT of distinct grounding sites in a single hour vs the user's own
+  14d-hourly P95.
+
+  Limitation: department / business-unit metadata is not exposed on
+  AccessedResources, so we use the SharePoint / OneDrive hostname as a
+  proxy. Tune the floor (DistinctSitesFloor) to your tenant.
+severity: Medium
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Discovery
+- Collection
+relevantTechniques:
+- T1087
+- T1213
+- T1083
+query: |
+  let lookback = 14d;
+  let recentWindow = 1h;
+  let floorSites = 10;          // minimum sites/hour to even consider
+  let spikeMultiplier = 3.0;     // hour must exceed P95 by this factor
+  let perUserHour =
+      CopilotActivity
+      | where TimeGenerated > ago(lookback)
+      | where RecordType == "CopilotInteraction"
+      | mv-expand r = LLMEventData.AccessedResources
+      | extend SiteUrl = tostring(r.SiteUrl)
+      | where isnotempty(SiteUrl)
+      | summarize
+          DistinctSites = dcount(SiteUrl),
+          AnyAgentName = take_any(AgentName),
+          AnyAgentId = take_any(AgentId),
+          AnyActor = take_any(ActorName)
+          by ActorUserId, TenantId, Hour = bin(TimeGenerated, 1h);
+  let baseline =
+      perUserHour
+      | where Hour < bin(now(), 1h) - recentWindow
+      | summarize
+          P95Sites = todouble(percentile(DistinctSites, 95)),
+          MedianSites = todouble(percentile(DistinctSites, 50))
+          by ActorUserId;
+  let recent =
+      perUserHour
+      | where Hour >= bin(now(), 1h) - recentWindow;
+  recent
+  | join kind=leftouter baseline on ActorUserId
+  | extend
+      P95Sites = coalesce(P95Sites, 0.0),
+      MedianSites = coalesce(MedianSites, 0.0)
+  | extend SpikeRatio = iff(P95Sites > 0, todouble(DistinctSites) / P95Sites, todouble(DistinctSites))
+  | where DistinctSites >= floorSites and DistinctSites > P95Sites * spikeMultiplier
+  | project
+      Hour, ActorUserId, ActorName = AnyActor, AgentId = AnyAgentId,
+      AgentName = AnyAgentName, DistinctSites, P95Sites, MedianSites,
+      SpikeRatio, TenantId
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI

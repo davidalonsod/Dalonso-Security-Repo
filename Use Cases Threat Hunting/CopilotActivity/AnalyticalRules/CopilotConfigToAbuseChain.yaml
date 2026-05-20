@@ -1,0 +1,133 @@
+id: 6f8e1a5c-0d7f-4e9f-c3a4-1b0f9e8d7c63
+name: Microsoft 365 Copilot - Config change followed by abuse signal
+description: |
+  Correlates a Copilot administrative configuration change (settings,
+  plugin, prompt-book) with subsequent abuse-class signals (Prompt
+  Shield jailbreak verdict, XPIA / indirect prompt injection verdict,
+  or DLP policy hit) by the same actor or on the same agent within a
+  24-hour window.
+
+  This is the chained kill-chain shape: an admin (or a compromised
+  account) widens the attack surface, then either the same actor or
+  any user of the changed agent immediately exercises it. Either side
+  alone is already covered by CopilotSystemPromptOverride,
+  CopilotJailbreakAttemptDetection, CopilotIndirectPromptInjection
+  and CopilotSensitiveDataExposure; this rule surfaces only the chain.
+
+  Limitation: the correlation key is AgentId where available on the
+  config event, otherwise ActorUserId. If a plugin is installed
+  tenant-wide and abused by a different actor on a different agent,
+  this rule will not connect them.
+severity: High
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Persistence
+- DefenseEvasion
+- Execution
+relevantTechniques:
+- T1098
+- T1556
+- T1059
+query: |
+  let configRecordTypes = dynamic([
+      "UpdateCopilotSettings",
+      "CreateCopilotPlugin", "UpdateCopilotPlugin",
+      "EnableCopilotPlugin", "DisableCopilotPlugin",
+      "CreateCopilotPromptBook", "UpdateCopilotPromptBook",
+      "DeleteCopilotPromptBook"
+  ]);
+  let window = 1d;
+  let recentWindow = 1h;
+  let configEvents =
+      CopilotActivity
+      | where TimeGenerated > ago(window)
+      | where RecordType in (configRecordTypes)
+      | project
+          ConfigTime = TimeGenerated,
+          ConfigKind = RecordType,
+          ConfigAgentId = AgentId,
+          ConfigAgentName = AgentName,
+          ConfigActor = ActorName,
+          ConfigActorUserId = ActorUserId,
+          TenantId;
+  let abuseEvents =
+      CopilotActivity
+      | where TimeGenerated > ago(recentWindow)
+      | where RecordType == "CopilotInteraction"
+      | extend
+          ThreadId = tostring(LLMEventData.ThreadId),
+          DlpDeferred = tobool(LLMEventData.DLPEvaluationDeferred)
+      | mv-expand r = LLMEventData.AccessedResources, m = LLMEventData.Messages
+      | extend
+          XpiaHit = tobool(r.XPIADetected),
+          DlpHit = (isnotempty(tostring(r.PolicyDetails))
+                    and tostring(r.PolicyDetails) !in ("[]", "{}", "null"))
+                    or DlpDeferred,
+          JbHit = tobool(m.JailbreakDetected)
+      | where XpiaHit or DlpHit or JbHit
+      | summarize
+          AbuseTime = max(TimeGenerated),
+          AbuseKinds = make_set(case(XpiaHit, "XPIA", DlpHit, "DLP", JbHit, "Jailbreak", ""), 4),
+          AbuseThreads = make_set(ThreadId, 8),
+          AbuseSites = make_set(tostring(r.SiteUrl), 16)
+          by AgentId, AgentName, ActorName, ActorUserId, TenantId;
+  abuseEvents
+  | join kind=inner (
+      configEvents
+      | project-rename
+          ConfigAgentIdJ = ConfigAgentId,
+          ConfigActorUserIdJ = ConfigActorUserId
+  ) on $left.TenantId == $right.TenantId
+  | where ConfigTime <= AbuseTime
+      and AbuseTime - ConfigTime <= window
+      and (
+          (isnotempty(AgentId) and AgentId == ConfigAgentIdJ)
+          or (isnotempty(ActorUserId) and ActorUserId == ConfigActorUserIdJ)
+      )
+  | extend ChainGapMin = datetime_diff('minute', AbuseTime, ConfigTime)
+  | project
+      ConfigTime, ConfigKind, ConfigActor, ConfigAgentName,
+      AbuseTime, AbuseKinds, AbuseThreads, AbuseSites,
+      AgentId, AgentName, ActorName, ActorUserId,
+      ChainGapMin, TenantId
+  | order by AbuseTime desc, ChainGapMin asc
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT24H
+    matchingMethod: Selected
+    groupByEntities:
+    - CloudApplication
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI

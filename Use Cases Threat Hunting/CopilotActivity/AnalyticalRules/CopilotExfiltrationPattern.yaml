@@ -1,0 +1,110 @@
+id: 4d6c9e3a-8b5f-4c7d-a1e2-9f8d7c6b5a41
+name: Microsoft 365 Copilot - Exfiltration pattern (sensitive + cross-repo + large synthesis)
+description: |
+  Detects the classic data-exfiltration shape on a Microsoft 365 Copilot
+  thread: a sensitive-resource hit (DLP PolicyDetails or
+  DLPEvaluationDeferred), combined with cross-repository aggregation
+  (many distinct grounding sites), combined with a large multi-document
+  synthesis (high total message count on the thread).
+
+  None of these signals on their own is necessarily malicious; the
+  combination is. Tune the thresholds to match how your tenant uses
+  Copilot - the defaults below assume a workforce that does not
+  routinely synthesise 5+ document repositories in a single thread.
+
+  Limitation: this rule only sees the structural fields exposed in
+  LLMEventData. It cannot detect explicit export / send / forward
+  intents because raw prompt and response text are not surfaced.
+severity: High
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: PT6H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Collection
+- Exfiltration
+relevantTechniques:
+- T1213
+- T1530
+- T1567
+query: |
+  // Per-thread combo: DLP hit + >=5 distinct sites + >=50 total messages.
+  CopilotActivity
+  | where TimeGenerated > ago(6h)
+  | where RecordType == "CopilotInteraction"
+  | extend
+      ThreadId = tostring(LLMEventData.ThreadId),
+      DlpDeferred = tobool(LLMEventData.DLPEvaluationDeferred),
+      InteractionMessages = array_length(LLMEventData.Messages)
+  | where isnotempty(ThreadId)
+  | mv-expand r = LLMEventData.AccessedResources
+  | extend
+      SiteUrl = tostring(r.SiteUrl),
+      ResourceType = tostring(r.Type),
+      PolicyDetailsStr = tostring(r.PolicyDetails),
+      HasPolicyHit = isnotempty(tostring(r.PolicyDetails))
+          and tostring(r.PolicyDetails) !in ("[]", "{}", "null")
+  | summarize
+      DlpHits = countif(HasPolicyHit or DlpDeferred),
+      DistinctSites = dcount(SiteUrl),
+      DistinctTypes = dcount(ResourceType),
+      TotalMessages = sum(InteractionMessages),
+      Interactions = dcount(strcat(tostring(TimeGenerated))),
+      Sites = make_set(SiteUrl, 32),
+      ResourceTypes = make_set(ResourceType, 16),
+      Policies = make_set(PolicyDetailsStr, 16),
+      AgentIds = make_set(AgentId, 4),
+      AgentNames = make_set(AgentName, 4),
+      Actors = make_set(ActorName, 4),
+      ActorUserIds = make_set(ActorUserId, 4),
+      ClientIPs = make_set(SrcIpAddr, 16),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by ThreadId, TenantId
+  | where DlpHits >= 1 and DistinctSites >= 5 and TotalMessages >= 50
+  | extend
+      AgentId = tostring(AgentIds[0]),
+      AgentName = tostring(AgentNames[0]),
+      ActorName = tostring(Actors[0]),
+      ActorUserId = tostring(ActorUserIds[0]),
+      SrcIpAddr = tostring(ClientIPs[0])
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI

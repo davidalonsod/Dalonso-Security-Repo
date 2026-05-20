@@ -1,0 +1,90 @@
+id: 5a8c3f64-3a6d-4b8e-9d7f-0c1a2b3c4d51
+name: Microsoft 365 Copilot - Jailbreak attempt against AI agent
+description: |
+  Detects prompts that contain known jailbreak markers (persona
+  takeovers such as DAN / DUDE / STAN, "ignore safety", "developer
+  mode", policy-bypass framings) or that ask the agent to disclose
+  its own system prompt.
+
+  Jailbreaks are the precursor to most agent-driven exfiltration
+  and toxic-output incidents. Surfaces successful or attempted
+  jailbreaks so SOC can revoke the session and review what tools
+  the agent invoked afterwards.
+severity: High
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT15M
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- DefenseEvasion
+- InitialAccess
+- Execution
+relevantTechniques:
+- T1562
+- T1059
+query: |
+  // Uses Microsoft's native Prompt Shield verdict surfaced in
+  // LLMEventData.Messages[].JailbreakDetected (confirmed by schema probe).
+  CopilotActivity
+  | where TimeGenerated > ago(1h)
+  | where RecordType == "CopilotInteraction"
+  | extend ThreadId = tostring(LLMEventData.ThreadId)
+  | extend AppHost = tostring(LLMEventData.AppHost)
+  | mv-expand m = LLMEventData.Messages
+  | extend
+      MessageId = tostring(m.Id),
+      IsPrompt = tobool(m.isPrompt),
+      JailbreakDetected = tobool(m.JailbreakDetected)
+  | where JailbreakDetected == true
+  | summarize
+      JailbreakHits = count(),
+      PromptHits = countif(IsPrompt),
+      Threads = make_set(ThreadId, 16),
+      MessageIds = make_set(MessageId, 32),
+      AppHosts = make_set(AppHost, 8),
+      ClientIPs = make_set(SrcIpAddr, 16),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by AgentId, AgentName, ActorName, ActorUserId, TenantId
+  | extend SrcIpAddr = tostring(ClientIPs[0])
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI

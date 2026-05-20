@@ -1,0 +1,94 @@
+id: 6b9d4e75-4b7e-5c9f-ae80-1d2b3c4d5e62
+name: Microsoft 365 Copilot - Toxic or unsafe agent output
+description: |
+  Detects Microsoft 365 Copilot responses that the platform safety classifier
+  flagged (hate, sexual, self-harm, violence, weapons, malware) or
+  that contain toxic / harassing language patterns. Acts as a
+  defence-in-depth signal in case downstream content filters in
+  the calling app fail open.
+
+  An agent producing toxic or harmful content typically indicates
+  one of: a successful jailbreak, a misconfigured / unsafe system
+  prompt, model drift, or RAG poisoning. Triage by pivoting to
+  the prompt and tool sequence in the same conversation.
+severity: High
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT15M
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Impact
+relevantTechniques:
+- T1496
+query: |
+  let toxicCategories = dynamic([
+      "hate", "sexual", "self-harm", "selfharm", "violence",
+      "weapons", "malware", "harassment", "extremism"
+  ]);
+  let toxicMarkers = dynamic([
+      "kill yourself", "subhuman", "racial slur",
+      "build a bomb", "make ricin", "synthesise vx",
+      "ransomware payload", "wiper script"
+  ]);
+  CopilotActivity
+  | where TimeGenerated > ago(1h)
+  | extend
+      SafetyVerdict = tostring(LLMEventData.SafetyVerdict),
+      SafetyCategories = tostring(LLMEventData.SafetyCategories),
+      Response = tostring(LLMEventData.Response),
+      ConversationId = tostring(LLMEventData.ConversationId)
+  | extend LowerResponse = tolower(Response)
+  | where SafetyVerdict in~ ("blocked", "flagged", "unsafe")
+      or SafetyCategories has_any (toxicCategories)
+      or LowerResponse has_any (toxicMarkers)
+  | summarize
+      UnsafeOutputCount = count(),
+      Verdicts = make_set(SafetyVerdict, 16),
+      Categories = make_set(SafetyCategories, 16),
+      Conversations = make_set(ConversationId, 16),
+      SampleResponses = make_set(Response, 8),
+      ClientIPs = make_set(SrcIpAddr, 16),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by AgentId, AgentName, ActorName, TenantId
+  | extend SrcIpAddr = tostring(ClientIPs[0])
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: Selected
+    groupByEntities:
+    - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI

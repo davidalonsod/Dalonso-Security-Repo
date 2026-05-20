@@ -1,0 +1,96 @@
+id: 2b4e9d31-7a8c-4d2f-8c7e-6e1b9a3f4d12
+name: Microsoft 365 Copilot - Sensitive data exposure via AI agent
+description: |
+  Detects A Microsoft 365 Copilot agent reading or returning content tagged
+  with a sensitivity label of Confidential or higher, or content
+  carrying DLP-style classifiers (PII, PCI, secrets).
+
+  A misconfigured or prompt-injected agent can serve as an
+  exfiltration path: a single crafted prompt can pull regulated
+  data through an over-permissioned agent. This rule alerts on
+  the data-access leg of that path so SOC can trace prompt -> tool
+  -> data and contain the agent identity quickly.
+severity: High
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT15M
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Collection
+- Exfiltration
+relevantTechniques:
+- T1530
+- T1213
+- T1567
+query: |
+  // Confirmed schema: AccessedResources[].PolicyDetails (DLP policy hits)
+  // and the top-level LLMEventData.DLPEvaluationDeferred boolean.
+  CopilotActivity
+  | where TimeGenerated > ago(1h)
+  | where RecordType == "CopilotInteraction"
+  | extend
+      ThreadId = tostring(LLMEventData.ThreadId),
+      DlpDeferred = tobool(LLMEventData.DLPEvaluationDeferred)
+  | mv-expand r = LLMEventData.AccessedResources
+  | extend
+      SiteUrl = tostring(r.SiteUrl),
+      ResourceType = tostring(r.Type),
+      ResourceAction = tostring(r.Action),
+      PolicyDetails = r.PolicyDetails,
+      PolicyDetailsStr = tostring(r.PolicyDetails)
+  | where DlpDeferred
+      or (isnotempty(PolicyDetailsStr) and PolicyDetailsStr !in ("[]", "{}", "null"))
+  | summarize
+      SensitiveHits = count(),
+      SiteHits = make_set(SiteUrl, 32),
+      ResourceTypes = make_set(ResourceType, 16),
+      Actions = make_set(ResourceAction, 8),
+      Policies = make_set(PolicyDetails, 16),
+      DlpDeferredCount = countif(DlpDeferred),
+      Threads = make_set(ThreadId, 16),
+      ClientIPs = make_set(SrcIpAddr, 16),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by AgentId, AgentName, ActorName, ActorUserId, TenantId
+  | extend SrcIpAddr = tostring(ClientIPs[0])
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI

@@ -1,0 +1,93 @@
+id: 8dbf6097-6da0-7eb1-c0a2-3f4d5e6f8084
+name: Microsoft 365 Copilot - Agent system prompt or model override
+description: |
+  Detects events where A Microsoft 365 Copilot agent's effective system
+  prompt, model identifier, model version, or safety policy is
+  changed - whether via an admin update record or via a runtime
+  override embedded in the request.
+
+  Model and system-prompt tampering is the highest-impact agent
+  attack: it can disable safety filters, redirect tool calls,
+  and weaken downstream RAG grounding. This rule alerts on every
+  detected change so the SOC can verify it was intentional.
+severity: High
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT15M
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- DefenseEvasion
+- Persistence
+relevantTechniques:
+- T1562
+- T1098
+query: |
+  // Confirmed RecordType values surfaced by the Copilot connector:
+  //   UpdateCopilotSettings, *CopilotPlugin (Create/Update/Enable/Disable),
+  //   *CopilotPromptBook (Create/Update/Delete).
+  // ModelTransparencyDetails on CopilotInteraction events carries the
+  // model identity + safety policy in effect for each interaction.
+  let configRecordTypes = dynamic([
+      "UpdateCopilotSettings",
+      "CreateCopilotPlugin", "UpdateCopilotPlugin",
+      "EnableCopilotPlugin", "DisableCopilotPlugin",
+      "CreateCopilotPromptBook", "UpdateCopilotPromptBook",
+      "DeleteCopilotPromptBook"
+  ]);
+  CopilotActivity
+  | where TimeGenerated > ago(1h)
+  | where RecordType in (configRecordTypes)
+  | extend ModelDetails = tostring(LLMEventData.ModelTransparencyDetails)
+  | extend ChangeKind = case(
+      RecordType == "UpdateCopilotSettings", "Tenant Copilot settings change",
+      RecordType in ("CreateCopilotPlugin", "EnableCopilotPlugin"), "Plugin enabled / created",
+      RecordType == "DisableCopilotPlugin", "Plugin disabled",
+      RecordType == "UpdateCopilotPlugin", "Plugin configuration updated",
+      RecordType startswith "Create", "PromptBook created",
+      RecordType startswith "Update", "PromptBook updated",
+      RecordType startswith "Delete", "PromptBook deleted",
+      "Other Copilot config change")
+  | project
+      TimeGenerated, AgentId, AgentName, ActorName, ActorUserId,
+      ChangeKind, RecordType, ModelDetails, SrcIpAddr, TenantId
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: Selected
+    groupByEntities:
+    - CloudApplication
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI
