@@ -1,0 +1,62 @@
+id: 3c5f0d42-1d4b-4e6a-9f8c-7a2d6b4e5f23
+name: Microsoft 365 Copilot - Prompt injection patterns in AI agent prompts
+description: |
+  Hunts Microsoft 365 Copilot prompts and tool inputs for known prompt-injection
+  markers: instructions to ignore previous guidance, role-override
+  phrases, tool-coercion phrases, and base64 / data-URI blobs
+  embedded in user content.
+
+  Use this to find prompts that successfully reached an agent and
+  may have caused the agent to act outside its system prompt. Pair
+  with the "Sensitive data exposure" analytical rule to see whether
+  the injection led to exfiltration.
+query: |
+  let injectionPhrases = dynamic([
+      "ignore previous instructions",
+      "ignore prior instructions",
+      "disregard the above",
+      "you are now",
+      "act as system",
+      "system prompt:",
+      "developer mode",
+      "bypass safety",
+      "reveal your prompt",
+      "print your instructions",
+      "exfiltrate",
+      "send to attacker"
+  ]);
+  let toolCoercion = dynamic([
+      "regardless of restrictions",
+      "without confirming",
+      "skip approval",
+      "use admin privileges",
+      "elevate to"
+  ]);
+  CopilotActivity
+  | where TimeGenerated > ago(7d)
+  | extend
+      Prompt = tostring(LLMEventData.Prompt),
+      ToolInput = tostring(LLMEventData.ToolInput),
+      ToolName = tostring(LLMEventData.ToolName),
+      ConversationId = tostring(LLMEventData.ConversationId)
+  | extend LowerPrompt = tolower(strcat(Prompt, " ", ToolInput))
+  | where LowerPrompt has_any (injectionPhrases)
+      or LowerPrompt has_any (toolCoercion)
+      or LowerPrompt matches regex @"data:[a-z/+.\-]+;base64,[A-Za-z0-9+/=]{200,}"
+  | extend MatchedInjection = set_intersect(split(LowerPrompt, " "), injectionPhrases)
+  | project
+      TimeGenerated, AgentId, AgentName, ActorName, ActorUserId,
+      ToolName, ConversationId, Prompt, ToolInput, SrcIpAddr,
+      TenantId
+  | order by TimeGenerated desc
+tactics:
+  - InitialAccess
+  - Execution
+techniques:
+  - T1059
+  - T1204
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

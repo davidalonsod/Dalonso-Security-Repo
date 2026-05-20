@@ -1,0 +1,54 @@
+id: 4d35c65d-c306-d417-2608-95b5c6d5e5fa
+name: Microsoft 365 Copilot - Trace-level interaction-path anomalies
+description: |
+  Hunts for Microsoft 365 Copilot conversations whose execution trace is
+  abnormal: excessive trace length, tight tool-call loops (the
+  same tool fired more than ten times in five minutes), or
+  retry storms on a single tool. These are the trace-level
+  signatures of runaway agents, prompt-injected loops, and
+  agent-exploitation campaigns that try to wedge the model into
+  a stuck state.
+
+  Pair this query with the token-spike analytical rule to
+  separate legitimate heavy workloads from genuine misbehaviour.
+query: |
+  // Confirmed schema has no TraceStepId; we use ThreadId + per-interaction
+  // cardinality (Messages, AISystemPlugin, AccessedResources) as proxies
+  // for trace shape. Long threads, rapid-fire bursts, and sustained high
+  // message rates are surfaced.
+  let window = 1d;
+  CopilotActivity
+  | where TimeGenerated > ago(window)
+  | where RecordType == "CopilotInteraction"
+  | extend ThreadId = tostring(LLMEventData.ThreadId)
+  | where isnotempty(ThreadId)
+  | extend
+      InteractionMessages = array_length(LLMEventData.Messages),
+      InteractionPlugins = array_length(LLMEventData.AISystemPlugin),
+      InteractionResources = array_length(LLMEventData.AccessedResources)
+  | summarize
+      Interactions = count(),
+      TotalMessages = sum(InteractionMessages),
+      TotalPlugins = sum(InteractionPlugins),
+      TotalResources = sum(InteractionResources),
+      Plugins = make_set(tostring(LLMEventData.AISystemPlugin), 16),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by ThreadId, AgentId, AgentName, ActorUserId
+  | extend DurationMin = datetime_diff('minute', LastSeen, FirstSeen)
+  | extend MsgPerMin = iff(DurationMin > 0, todouble(TotalMessages) / DurationMin, todouble(TotalMessages))
+  | where (TotalMessages > 100)
+      or (Interactions > 50 and DurationMin < 60)
+      or (MsgPerMin > 5 and DurationMin >= 5)
+  | order by TotalMessages desc, MsgPerMin desc
+tactics:
+  - Impact
+  - Execution
+techniques:
+  - T1499
+  - T1059
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

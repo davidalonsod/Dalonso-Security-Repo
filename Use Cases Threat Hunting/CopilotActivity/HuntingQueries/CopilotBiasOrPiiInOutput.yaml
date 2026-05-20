@@ -1,0 +1,54 @@
+id: 5e46d76e-d417-e528-3719-a6c6d7e6f60b
+name: Microsoft 365 Copilot - PII or biased content emitted in agent output
+description: |
+  Hunts for Microsoft 365 Copilot agent responses that contain PII patterns
+  (email addresses, e.164 phone numbers, IBAN, credit-card-like
+  PANs, government IDs) or bias / discriminatory phrasing not
+  filtered by the platform safety classifier.
+
+  Acts as a last-mile detection for execution-layer PII leakage
+  and bias / toxicity slipping past upstream guards. Treat hits
+  as priority triage for any agent that interacts with customer-
+  facing surfaces.
+query: |
+  let biasMarkers = dynamic([
+      "all women are", "all men are", "people of",
+      "those people", "you people", "inferior race",
+      "superior race", "lazy ethnic", "criminal ethnic"
+  ]);
+  CopilotActivity
+  | where TimeGenerated > ago(7d)
+  | extend
+      Response = tostring(LLMEventData.Response),
+      ConversationId = tostring(LLMEventData.ConversationId)
+  | extend
+      EmailHits = extract_all(@"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})", Response),
+      PhoneHits = extract_all(@"(\+?\d{1,3}[\s\-\.]?\(?\d{2,4}\)?[\s\-\.]?\d{3,4}[\s\-\.]?\d{3,4})", Response),
+      IbanHits = extract_all(@"([A-Z]{2}\d{2}[A-Z0-9]{11,30})", Response),
+      PanHits = extract_all(@"(\b(?:\d[ -]*?){13,19}\b)", Response)
+  | extend LowerResponse = tolower(Response)
+  | extend BiasHit = LowerResponse has_any (biasMarkers)
+  | where array_length(EmailHits) > 0
+      or array_length(PhoneHits) > 0
+      or array_length(IbanHits) > 0
+      or array_length(PanHits) > 0
+      or BiasHit
+  | project
+      TimeGenerated, AgentId, AgentName, ActorName, ConversationId,
+      EmailHitCount = array_length(EmailHits),
+      PhoneHitCount = array_length(PhoneHits),
+      IbanHitCount = array_length(IbanHits),
+      PanHitCount = array_length(PanHits),
+      BiasHit, Response, TenantId
+  | order by TimeGenerated desc
+tactics:
+  - Collection
+  - Exfiltration
+techniques:
+  - T1530
+  - T1213
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

@@ -1,0 +1,66 @@
+id: 7d2f1081-ae5c-4143-2f60-4c9d1e2f5061
+name: Microsoft 365 Copilot - Adversarial paraphrase loop after refusal
+description: |
+  Hunts for users who keep paraphrasing the same forbidden request after
+  Copilot refused — a classic jailbreak-refinement loop. Detected by:
+  (1) a refusal signal in the response, immediately followed by
+  (2) >= 3 prompts from the same actor in the next 15 minutes
+  that are semantically close (token overlap) to the refused prompt.
+
+  Token overlap is approximated by Jaccard similarity over the prompt's
+  lowercased word set — cheap, no embeddings required.
+query: |
+  let window = 15m;
+  let refusalMarkers = dynamic([
+      "i can't help with that", "i cannot assist", "i won't help",
+      "i'm not able to provide", "that request can't be processed",
+      "as an ai, i can't", "sorry, i can't", "policy prevents me"
+  ]);
+  let conv =
+      CopilotActivity
+      | where TimeGenerated > ago(7d)
+      | where RecordType == "CopilotInteraction"
+      | extend
+          ActorUpn = tolower(tostring(coalesce(column_ifexists('ActorUPN', ''), ActorName))),
+          Prompt   = tostring(LLMEventData.Prompt),
+          ResponseLower = tolower(tostring(LLMEventData.Response)),
+          ConversationId = tostring(LLMEventData.ConversationId);
+  let refusals =
+      conv
+      | where ResponseLower has_any (refusalMarkers)
+      | extend RefusedPromptTokens = set_difference(extract_all(@"([a-z]{4,})", tolower(Prompt)), dynamic([]))
+      | project RefusalTime = TimeGenerated, ActorUpn, AgentId, AgentName,
+                ConversationId, RefusedPrompt = Prompt, RefusedPromptTokens;
+  refusals
+  | join kind=inner (
+        conv
+        | extend FollowupTokens = set_difference(extract_all(@"([a-z]{4,})", tolower(Prompt)), dynamic([]))
+        | project FollowupTime = TimeGenerated, ActorUpn, AgentId, ConversationId,
+                  FollowupPrompt = Prompt, FollowupTokens
+    ) on ActorUpn, AgentId, ConversationId
+  | where FollowupTime > RefusalTime and FollowupTime - RefusalTime <= window
+  | extend
+      Intersection = array_length(set_intersect(RefusedPromptTokens, FollowupTokens)),
+      Union        = array_length(set_union(RefusedPromptTokens, FollowupTokens))
+  | extend Jaccard = iff(Union > 0, todouble(Intersection) / todouble(Union), 0.0)
+  | where Jaccard >= 0.4
+  | summarize
+      ParaphraseCount = count(),
+      FirstFollowup   = min(FollowupTime),
+      LastFollowup    = max(FollowupTime),
+      SampleFollowups = make_set(FollowupPrompt, 5),
+      MaxJaccard      = max(Jaccard)
+      by RefusalTime, ActorUpn, AgentId, AgentName, ConversationId, RefusedPrompt
+  | where ParaphraseCount >= 3
+  | order by ParaphraseCount desc, MaxJaccard desc
+tactics:
+  - DefenseEvasion
+  - InitialAccess
+techniques:
+  - T1059
+  - T1204
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

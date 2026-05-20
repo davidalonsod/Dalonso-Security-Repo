@@ -1,0 +1,56 @@
+id: 3c24b54c-b2f5-c306-15f7-84a4b5c4d4e9
+name: Microsoft 365 Copilot - Hallucination and output quality drift signals
+description: |
+  Hunts for Microsoft 365 Copilot responses that show quality-degradation
+  signals: low model-reported confidence, self-contradiction
+  markers, refusal-then-comply patterns, or hallucination markers
+  such as citing non-existent URLs / files that did not appear in
+  the conversation's RAG retrieval set.
+
+  Quality drift is the soft side of model tampering, RAG
+  poisoning, and silent model swaps. Useful for triage after a
+  toxic-output or system-prompt-override alert.
+query: |
+  let hallucinationMarkers = dynamic([
+      "as an ai", "i am not sure but", "i made that up",
+      "i cannot verify", "according to my knowledge",
+      "i don't have real-time", "i hallucinated"
+  ]);
+  let contradictionMarkers = dynamic([
+      "actually, that was wrong",
+      "scratch that", "ignore my previous answer",
+      "correction:", "i misspoke", "let me revise"
+  ]);
+  let confidenceThreshold = 0.4;
+  CopilotActivity
+  | where TimeGenerated > ago(7d)
+  | extend
+      Response = tostring(LLMEventData.Response),
+      Confidence = toreal(LLMEventData.ResponseConfidence),
+      RagSources = LLMEventData.RagSources,
+      ConversationId = tostring(LLMEventData.ConversationId)
+  | extend
+      LowerResponse = tolower(Response),
+      CitedUrls = extract_all(@"(https?://[^\s\)\""<]+)", Response)
+  | extend
+      RagUriSet = tolower(tostring(RagSources))
+  | extend
+      UncitedUrls = set_difference(CitedUrls, dynamic([])),
+      HasHallucinationMarker = LowerResponse has_any (hallucinationMarkers),
+      HasContradictionMarker = LowerResponse has_any (contradictionMarkers),
+      LowConfidence = isnotnull(Confidence) and Confidence < confidenceThreshold
+  | where HasHallucinationMarker or HasContradictionMarker or LowConfidence
+  | project
+      TimeGenerated, AgentId, AgentName, ActorName, ConversationId,
+      Confidence, HasHallucinationMarker, HasContradictionMarker,
+      LowConfidence, CitedUrls, Response, TenantId
+  | order by TimeGenerated desc
+tactics:
+  - Impact
+techniques:
+  - T1496
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

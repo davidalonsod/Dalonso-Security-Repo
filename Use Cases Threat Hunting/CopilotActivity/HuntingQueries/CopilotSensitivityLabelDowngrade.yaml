@@ -1,0 +1,51 @@
+id: 6c1e0f70-9d4b-4032-1e5f-3b8c0d1e4f50
+name: Microsoft 365 Copilot - Sensitivity label downgrade in agent output
+description: |
+  Hunts for Microsoft 365 Copilot responses that reference highly
+  classified grounding documents (Confidential, Highly Confidential,
+  Restricted) but produce output sent to a lower-trust surface
+  (external recipient, public site, personal OneDrive, chat with guest
+  users) without preserving the label.
+
+  Detects label-stripping data leaks that bypass the platform's
+  built-in label inheritance.
+query: |
+  let highLabels = dynamic([
+      "confidential", "highly confidential", "restricted",
+      "internal only", "secret", "top secret"
+  ]);
+  let lowerTrustSinks = dynamic([
+      "/personal/", "guest", "external", "anonymous",
+      "outlook.com", "gmail.com", "hotmail.com",
+      "proton.me", "yahoo.com"
+  ]);
+  CopilotActivity
+  | where TimeGenerated > ago(7d)
+  | where RecordType == "CopilotInteraction"
+  | extend
+      RagSourcesText = tolower(tostring(LLMEventData.RagSources)),
+      ResponseText   = tolower(tostring(LLMEventData.Response)),
+      OutputLabel    = tolower(tostring(column_ifexists('OutputSensitivityLabel', ''))),
+      RecipientsText = tolower(tostring(column_ifexists('Recipients', ''))),
+      DestinationUri = tolower(tostring(column_ifexists('DestinationUri', '')))
+  | extend
+      SourceHasHighLabel = RagSourcesText has_any (highLabels),
+      OutputHasHighLabel = OutputLabel has_any (highLabels),
+      ToLowerTrustSink   = RecipientsText has_any (lowerTrustSinks)
+                          or DestinationUri has_any (lowerTrustSinks)
+  | where SourceHasHighLabel and (not(OutputHasHighLabel) or ToLowerTrustSink)
+  | project TimeGenerated, AgentId, AgentName, ActorName,
+            SourceHasHighLabel, OutputHasHighLabel, ToLowerTrustSink,
+            OutputLabel, RecipientsText, DestinationUri, TenantId
+  | order by TimeGenerated desc
+tactics:
+  - Exfiltration
+  - Collection
+techniques:
+  - T1530
+  - T1213
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

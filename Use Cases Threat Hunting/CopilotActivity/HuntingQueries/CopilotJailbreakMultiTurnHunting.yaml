@@ -1,0 +1,51 @@
+id: 1a02932a-90d3-a1e4-f3d5-628293a2b2c7
+name: Microsoft 365 Copilot - Multi-turn jailbreak escalation hunting
+description: |
+  Hunts for Microsoft 365 Copilot conversations where a single user gradually
+  escalates the prompts against an agent: starting with benign
+  questions, then adding role-play / persona language, then asking
+  for policy-bypass output. Multi-turn jailbreaks evade single-turn
+  detectors and are described in the OWASP Top 10 for Agents 2026
+  multi-turn-attack category.
+
+  Surfaces conversations with three or more escalation steps over
+  a one-day window so an analyst can review the full transcript.
+query: |
+  // Confirmed schema: per-message JailbreakDetected aggregated by ThreadId.
+  // A thread with two or more flagged messages is a multi-turn jailbreak
+  // attempt (single-turn jailbreaks are already covered by the analytic).
+  let window = 1d;
+  CopilotActivity
+  | where TimeGenerated > ago(window)
+  | where RecordType == "CopilotInteraction"
+  | extend ThreadId = tostring(LLMEventData.ThreadId)
+  | mv-expand m = LLMEventData.Messages
+  | extend
+      MessageId = tostring(m.Id),
+      IsPrompt = tobool(m.isPrompt),
+      JbDetected = tobool(m.JailbreakDetected)
+  | summarize
+      Messages = count(),
+      Prompts = countif(IsPrompt),
+      JailbreakHits = countif(JbDetected),
+      PromptJailbreakHits = countif(JbDetected and IsPrompt),
+      Agents = make_set(AgentName, 4),
+      Actors = make_set(ActorName, 4),
+      JbMessageIds = make_set_if(MessageId, JbDetected, 32),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by ThreadId, TenantId
+  | where JailbreakHits >= 2
+  | extend EscalationRatio = todouble(JailbreakHits) / todouble(Messages)
+  | order by JailbreakHits desc, EscalationRatio desc, LastSeen desc
+tactics:
+  - DefenseEvasion
+  - InitialAccess
+techniques:
+  - T1562
+  - T1059
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

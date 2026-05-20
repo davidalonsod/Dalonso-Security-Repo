@@ -1,0 +1,85 @@
+id: 8e3a2192-bf6d-4254-3071-5d0e2f306172
+name: Microsoft 365 Copilot - Plugin or connector install anomaly
+description: |
+  Hunts for new Microsoft 365 Copilot plugins / connectors / declarative
+  agents enabled by an actor that has not previously installed any, or
+  installed at a rate sharply higher than baseline. Catches:
+  - Mass plugin enablement before exfiltration.
+  - Installation of plugins absent from the CopilotApprovedPlugins watchlist.
+  - User-consented plugins on a tenant that mandates admin consent.
+query: |
+  let lookback = 30d;
+  let recentWindow = 1d;
+  let pluginEvents =
+      union isfuzzy=true
+          (AuditLogs
+           | extend
+               _OperationName = tostring(OperationName),
+               _RecordType    = "AuditLogs",
+               _Initiator     = tolower(tostring(InitiatedBy.user.userPrincipalName)),
+               _TargetName    = tostring(TargetResources[0].displayName)),
+          (OfficeActivity
+           | extend
+               _OperationName = tostring(Operation),
+               _RecordType    = tostring(RecordType),
+               _Initiator     = tolower(tostring(UserId)),
+               _TargetName    = tostring(coalesce(column_ifexists('ItemName', ''), Operation))),
+          (CopilotAdminActivity
+           | extend
+               _OperationName = tostring(column_ifexists('OperationName', '')),
+               _RecordType    = "CopilotAdminActivity",
+               _Initiator     = tolower(tostring(coalesce(column_ifexists('ActorUPN', ''),
+                                                          column_ifexists('ActorName', '')))),
+               _TargetName    = tostring(coalesce(column_ifexists('PluginName', ''),
+                                                  column_ifexists('ResourceName', ''))))
+      | where TimeGenerated > ago(lookback)
+      | where (_OperationName has_any ("Install", "Add", "Enable")
+               and _OperationName has_any ("Plugin", "Connector", "Agent", "App", "Extension"))
+              or _RecordType in ("MicrosoftCopilotAdminAction", "CopilotAdminActivity")
+      | project TimeGenerated, ActorUpn = _Initiator, PluginName = _TargetName,
+                LowerPlugin = tolower(_TargetName), _OperationName, _RecordType;
+  let approved =
+      _GetWatchlist('CopilotApprovedPlugins')
+      | project ApprovedPlugin = tolower(tostring(column_ifexists('PluginName', '')))
+      | where isnotempty(ApprovedPlugin);
+  let baseline =
+      pluginEvents
+      | where TimeGenerated between (ago(lookback) .. ago(recentWindow))
+      | summarize BaselineInstalls = count() by ActorUpn;
+  let recent =
+      pluginEvents
+      | where TimeGenerated > ago(recentWindow)
+      | summarize
+          RecentInstalls   = count(),
+          DistinctPlugins  = dcount(LowerPlugin),
+          PluginSample     = make_set(PluginName, 25)
+          by ActorUpn;
+  recent
+  | join kind=leftouter baseline on ActorUpn
+  | extend BaselineInstalls = coalesce(BaselineInstalls, 0)
+  | extend SpikeRatio = iff(BaselineInstalls > 0,
+                            todouble(RecentInstalls) / todouble(BaselineInstalls),
+                            todouble(RecentInstalls))
+  | where (BaselineInstalls == 0 and RecentInstalls >= 3)
+       or SpikeRatio >= 5.0
+       or DistinctPlugins >= 5
+  | join kind=leftouter (
+        pluginEvents
+        | where TimeGenerated > ago(recentWindow)
+        | join kind=leftanti approved on $left.LowerPlugin == $right.ApprovedPlugin
+        | summarize UnapprovedPlugins = make_set(PluginName, 25) by ActorUpn
+    ) on ActorUpn
+  | project TimeGenerated = now(), ActorUpn, RecentInstalls, BaselineInstalls,
+            SpikeRatio, DistinctPlugins, PluginSample, UnapprovedPlugins
+  | order by SpikeRatio desc, RecentInstalls desc
+tactics:
+  - Persistence
+  - PrivilegeEscalation
+techniques:
+  - T1098
+  - T1505
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

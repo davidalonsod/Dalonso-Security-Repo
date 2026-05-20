@@ -1,0 +1,101 @@
+id: 9f4b32a3-c07e-4365-4182-6e1f30417283
+name: Microsoft 365 Copilot - Agent memory or context poisoning persistence
+description: |
+  Hunts for indicators that an agent's persistent memory, custom instructions,
+  or grounding context has been poisoned and is influencing subsequent
+  unrelated conversations:
+    - Custom-instruction / memory write events from non-owner actors.
+    - The same suspicious phrase appearing in many distinct conversations
+      against the same agent within a short window (carry-over via memory).
+    - Suspicious tokens (override directives, role-swap markers, exfil
+      instructions) embedded in stored memory or system prompt.
+  Memory poisoning is a stealth persistence technique for AI agents
+  (D3FEND: Agent Persistence; analogous to T1546-style event-triggered exec).
+query: |
+  let poisonTokens = dynamic([
+      "ignore previous instructions", "ignore all prior",
+      "you are now", "from now on you", "act as",
+      "system override", "developer mode",
+      "exfiltrate", "send to attacker", "leak to",
+      "do not refuse", "bypass safety", "remove restrictions"
+  ]);
+  let recentWindow = 7d;
+  // 1) Memory / instruction writes by non-owner actors
+  let writes =
+      union isfuzzy=true
+          (AuditLogs
+           | extend
+               _OperationName = tostring(OperationName),
+               _Initiator     = tolower(tostring(InitiatedBy.user.userPrincipalName)),
+               _TargetId      = tostring(TargetResources[0].id),
+               _TargetName    = tostring(TargetResources[0].displayName),
+               _OwnerUpn      = "",
+               _Payload       = tolower(tostring(TargetResources[0].modifiedProperties))),
+          (CopilotAdminActivity
+           | extend
+               _OperationName = tostring(column_ifexists('OperationName', '')),
+               _Initiator     = tolower(tostring(coalesce(column_ifexists('ActorUPN', ''),
+                                                          column_ifexists('ActorName', '')))),
+               _TargetId      = tostring(column_ifexists('AgentId', '')),
+               _TargetName    = tostring(column_ifexists('AgentName', '')),
+               _OwnerUpn      = tolower(tostring(column_ifexists('AgentOwnerUPN', ''))),
+               _Payload       = tolower(tostring(coalesce(column_ifexists('NewValue', ''),
+                                                          column_ifexists('ModifiedProperties', '')))))
+      | where TimeGenerated > ago(recentWindow)
+      | where (_OperationName has_any ("Memory", "Instruction", "SystemPrompt",
+                                       "CustomInstruction", "GroundingSource"))
+              and (_OperationName has_any ("Update", "Set", "Add", "Write", "Modify"))
+      | extend
+          ActorUpn      = _Initiator,
+          AgentId       = _TargetId,
+          AgentName     = _TargetName,
+          OwnerUpn      = _OwnerUpn,
+          Payload       = _Payload,
+          ByNonOwner    = isnotempty(_OwnerUpn) and _Initiator != _OwnerUpn,
+          HasPoisonText = _Payload has_any (poisonTokens)
+      | where ByNonOwner or HasPoisonText
+      | project WriteTime = TimeGenerated, ActorUpn, AgentId, AgentName,
+                OwnerUpn, ByNonOwner, HasPoisonText, OperationName = _OperationName, Payload;
+  // 2) Repeated suspicious phrase across distinct conversations of one agent
+  let carryOver =
+      CopilotActivity
+      | where TimeGenerated > ago(recentWindow)
+      | where RecordType == "CopilotInteraction"
+      | extend
+          ResponseLower = tolower(tostring(LLMEventData.Response)),
+          ConvId        = tostring(LLMEventData.ConversationId)
+      | mv-apply tok = poisonTokens to typeof(string) on (
+            where ResponseLower has tok
+          | project Token = tok
+        )
+      | summarize
+          DistinctConvs = dcount(ConvId),
+          AffectedActors = make_set(tostring(coalesce(column_ifexists('ActorUPN', ''), ActorName)), 50),
+          SampleConvs    = make_set(ConvId, 10),
+          Hits           = count()
+          by AgentId, AgentName, Token
+      | where DistinctConvs >= 3;
+  union
+      (writes | extend Source = 'instruction-write'),
+      (carryOver | extend Source = 'cross-conversation-carryover',
+                   WriteTime = now(),
+                   ActorUpn = '<see AffectedActors>',
+                   OwnerUpn = '',
+                   ByNonOwner = false,
+                   HasPoisonText = true,
+                   OperationName = strcat('carryover token: ', Token),
+                   Payload = strcat('hits=', Hits, ' convs=', DistinctConvs))
+  | project WriteTime, Source, AgentId, AgentName, ActorUpn, OwnerUpn,
+            ByNonOwner, HasPoisonText, OperationName, Payload
+  | order by WriteTime desc
+tactics:
+  - Persistence
+  - DefenseEvasion
+techniques:
+  - T1546
+  - T1556
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

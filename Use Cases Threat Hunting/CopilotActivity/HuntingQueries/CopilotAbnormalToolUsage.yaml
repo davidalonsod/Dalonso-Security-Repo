@@ -1,0 +1,59 @@
+id: 2b13a43b-a1e4-b2f5-04e6-7393a4b3c3d8
+name: Microsoft 365 Copilot - Abnormal AI agent tool usage mix
+description: |
+  Hunts for Microsoft 365 Copilot agents whose 24-hour tool-invocation profile
+  differs sharply from their 14-day baseline: new sensitive tools
+  appearing, write / admin tools invoked by an agent that has only
+  ever read, or call rate spiking far above the per-tool baseline.
+
+  Useful for finding agent-exploitation, chaining anomalies, and
+  abuse of high-impact tools (send-email, delete-file, write-graph,
+  password-reset) by an agent that previously did not touch them.
+query: |
+  // Confirmed schema: LLMEventData.AISystemPlugin[].{Id, Name}
+  // Joins against the CopilotApprovedPlugins watchlist (any plugin NOT in
+  // the approved list AND newly seen / spiking is surfaced).
+  let baselineWindow = 14d;
+  let recentWindow = 1d;
+  let toolEvents =
+      CopilotActivity
+      | where TimeGenerated > ago(baselineWindow)
+      | where RecordType == "CopilotInteraction"
+      | mv-expand p = LLMEventData.AISystemPlugin
+      | extend
+          PluginId = tostring(p.Id),
+          PluginName = tostring(p.Name),
+          LowerPluginName = tolower(tostring(p.Name))
+      | where isnotempty(PluginName);
+  let approved =
+      _GetWatchlist('CopilotApprovedPlugins')
+      | project ApprovedPlugin = tolower(tostring(column_ifexists('PluginName', '')))
+      | where isnotempty(ApprovedPlugin);
+  let baseline =
+      toolEvents
+      | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+      | summarize BaselineCalls = count() by AgentId, AgentName, PluginName, LowerPluginName;
+  let recent =
+      toolEvents
+      | where TimeGenerated > ago(recentWindow)
+      | summarize RecentCalls = count() by AgentId, AgentName, PluginName, LowerPluginName;
+  recent
+  | join kind=leftouter baseline on AgentId, PluginName
+  | extend BaselineCalls = coalesce(BaselineCalls, 0)
+  | extend
+      IsNewPlugin = BaselineCalls == 0,
+      SpikeRatio = iff(BaselineCalls > 0, todouble(RecentCalls) / todouble(BaselineCalls), todouble(RecentCalls))
+  | join kind=leftanti approved on $left.LowerPluginName == $right.ApprovedPlugin
+  | where IsNewPlugin or SpikeRatio >= 5.0
+  | order by IsNewPlugin desc, SpikeRatio desc, RecentCalls desc
+tactics:
+  - Execution
+  - PrivilegeEscalation
+techniques:
+  - T1059
+  - T1098
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

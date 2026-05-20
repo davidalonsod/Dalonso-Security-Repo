@@ -1,0 +1,55 @@
+id: 4a9c8d5e-7b2f-4e1a-9c3d-1f6a8b9c2d3e
+name: Microsoft 365 Copilot - Grounding source enumeration (RAG recon)
+description: |
+  Hunts for Microsoft 365 Copilot agents or users that touch an unusually
+  diverse set of grounding sources (sites, document libraries, mailboxes)
+  in a short window — the RAG-equivalent of network port-scanning.
+
+  Common pre-cursor to data discovery, sensitive-file harvesting, and
+  staged exfiltration. Pairs well with CopilotExfiltrationPattern.
+query: |
+  let recentWindow = 1h;
+  let baselineWindow = 14d;
+  let recent =
+      CopilotActivity
+      | where TimeGenerated > ago(recentWindow)
+      | where RecordType == "CopilotInteraction"
+      | mv-expand src = LLMEventData.RagSources
+      | extend SourceUri = tolower(tostring(src))
+      | where isnotempty(SourceUri)
+      | summarize
+          RecentDistinctSources = dcount(SourceUri),
+          RecentSampleSources   = make_set(SourceUri, 25),
+          RecentCalls           = count()
+          by AgentId, AgentName, ActorName = tostring(coalesce(ActorName, column_ifexists('ActorUPN', '')));
+  let baseline =
+      CopilotActivity
+      | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+      | where RecordType == "CopilotInteraction"
+      | mv-expand src = LLMEventData.RagSources
+      | extend SourceUri = tolower(tostring(src))
+      | where isnotempty(SourceUri)
+      | summarize BaselineDistinctSources = dcount(SourceUri)
+          by AgentId, ActorName = tostring(coalesce(ActorName, column_ifexists('ActorUPN', '')));
+  recent
+  | join kind=leftouter baseline on AgentId, ActorName
+  | extend BaselineDistinctSources = coalesce(BaselineDistinctSources, 0)
+  | extend SpikeRatio = iff(BaselineDistinctSources > 0,
+                            todouble(RecentDistinctSources) / todouble(BaselineDistinctSources),
+                            todouble(RecentDistinctSources))
+  | where RecentDistinctSources >= 25 and (BaselineDistinctSources == 0 or SpikeRatio >= 5.0)
+  | project TimeGenerated = now(), AgentId, AgentName, ActorName,
+            RecentDistinctSources, BaselineDistinctSources, SpikeRatio,
+            RecentCalls, RecentSampleSources
+  | order by SpikeRatio desc, RecentDistinctSources desc
+tactics:
+  - Discovery
+  - Collection
+techniques:
+  - T1083
+  - T1213
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

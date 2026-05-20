@@ -1,0 +1,56 @@
+id: 4d6a1e53-2e5c-4f7b-8a9d-8b3e7c5f6a34
+name: Microsoft 365 Copilot - Anomalous AI agent delegation chains
+description: |
+  Hunts for Microsoft 365 Copilot conversations where one agent delegates to
+  another agent (and possibly a third) within a short window.
+  Long delegation chains expand blast radius: each hop inherits a
+  new identity and toolset and obscures the original prompt.
+
+  Surfaces:
+    - Chains of three or more agents within one conversation.
+    - Delegations crossing tenants or user contexts.
+    - Delegations where the leaf agent touches sensitive resources.
+query: |
+  let window = 7d;
+  let agentEvents =
+      CopilotActivity
+      | where TimeGenerated > ago(window)
+      | extend
+          ConversationId = tostring(LLMEventData.ConversationId),
+          ParentAgentId = tostring(LLMEventData.ParentAgentId),
+          ParentAgentName = tostring(LLMEventData.ParentAgentName),
+          DelegationType = tostring(LLMEventData.DelegationType),
+          TouchedResource = tostring(LLMEventData.ResourceUri)
+      | where isnotempty(ConversationId);
+  let chains =
+      agentEvents
+      | summarize
+          AgentChain = make_set(AgentName, 16),
+          AgentIds = make_set(AgentId, 16),
+          ParentAgents = make_set(ParentAgentName, 16),
+          Delegations = make_set(DelegationType, 16),
+          Resources = make_set(TouchedResource, 32),
+          Actors = make_set(ActorName, 16),
+          Tenants = make_set(TenantId, 8),
+          FirstSeen = min(TimeGenerated),
+          LastSeen = max(TimeGenerated),
+          EventCount = count()
+          by ConversationId
+      | extend
+          ChainLength = array_length(AgentChain),
+          CrossTenant = array_length(Tenants) > 1,
+          CrossUser = array_length(Actors) > 1;
+  chains
+  | where ChainLength >= 3 or CrossTenant or CrossUser
+  | order by ChainLength desc, LastSeen desc
+tactics:
+  - LateralMovement
+  - Discovery
+techniques:
+  - T1078
+  - T1087
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

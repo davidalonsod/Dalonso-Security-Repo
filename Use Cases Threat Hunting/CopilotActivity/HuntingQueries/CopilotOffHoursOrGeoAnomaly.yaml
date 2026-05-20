@@ -1,0 +1,47 @@
+id: 5b0d9e6f-8c3a-4f2b-0d4e-2a7b9c0d3e4f
+name: Microsoft 365 Copilot - Off-hours or anomalous-geo agent usage
+description: |
+  Hunts for Microsoft 365 Copilot sessions that occur outside the actor's
+  normal business hours or from a country/region the actor has not used
+  in the last 30 days. Common indicator of session theft, OAuth token
+  abuse, or geographically displaced impersonation.
+
+  Correlates Copilot interactions with the actor's SigninLogs to build
+  the location and time baseline from a trusted source.
+query: |
+  let lookback = 30d;
+  let recentWindow = 1d;
+  let usual =
+      SigninLogs
+      | where TimeGenerated between (ago(lookback) .. ago(recentWindow))
+      | where ResultType == 0
+      | extend Hour = hourofday(TimeGenerated), Country = tostring(LocationDetails.countryOrRegion)
+      | summarize UsualHours = make_set(Hour, 24), UsualCountries = make_set(Country, 50)
+          by UserPrincipalName = tolower(UserPrincipalName);
+  CopilotActivity
+  | where TimeGenerated > ago(recentWindow)
+  | where RecordType == "CopilotInteraction"
+  | extend ActorUpn = tolower(tostring(coalesce(column_ifexists('ActorUPN', ''), ActorName)))
+  | extend Hour = hourofday(TimeGenerated)
+  | join kind=leftouter usual on $left.ActorUpn == $right.UserPrincipalName
+  | extend ActorCountry = tostring(coalesce(column_ifexists('Location', ''),
+                                            column_ifexists('Country', '')))
+  | extend
+      OffHours      = isnotnull(UsualHours) and not(set_has_element(UsualHours, Hour)),
+      AnomalousGeo  = isnotempty(ActorCountry) and isnotnull(UsualCountries)
+                      and not(set_has_element(UsualCountries, ActorCountry))
+  | where OffHours or AnomalousGeo
+  | project TimeGenerated, AgentId, AgentName, ActorUpn, Hour, ActorCountry,
+            OffHours, AnomalousGeo, UsualHours, UsualCountries, TenantId
+  | order by TimeGenerated desc
+tactics:
+  - InitialAccess
+  - DefenseEvasion
+techniques:
+  - T1078
+  - T1078.004
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

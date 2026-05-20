@@ -1,0 +1,82 @@
+id: a05c43b4-d18f-4476-5293-7f2041528394
+name: Microsoft 365 Copilot - Cross-tenant data leak via guest-shared chats
+description: |
+  Hunts for Microsoft 365 Copilot conversations that mix internal grounding
+  sources with guest participants from external tenants — the channel
+  through which sensitive RAG content most often leaks across the tenant
+  boundary.
+
+  Triggers when an agent in a chat with at least one guest / external user:
+    - retrieves grounding from internal SharePoint / OneDrive / mailboxes,
+      AND
+    - emits a response containing the same internal URIs, file names, or
+      sensitivity-label terms.
+
+  Pair with CopilotSensitivityLabelDowngrade for label-stripping cases.
+query: |
+  let internalHostHints = dynamic([
+      ".sharepoint.com", "-my.sharepoint.com", "/personal/",
+      "exchange.microsoft", "outlook.office", "graph.microsoft.com"
+  ]);
+  let highLabelHints = dynamic([
+      "confidential", "highly confidential", "restricted",
+      "internal only", "secret"
+  ]);
+  CopilotActivity
+  | where TimeGenerated > ago(7d)
+  | where RecordType == "CopilotInteraction"
+  | extend
+      Participants     = tostring(coalesce(column_ifexists('Participants', ''),
+                                           column_ifexists('Recipients', ''),
+                                           column_ifexists('ChatParticipants', ''))),
+      RagSourcesText   = tolower(tostring(LLMEventData.RagSources)),
+      ResponseText     = tostring(LLMEventData.Response),
+      ResponseLower    = tolower(tostring(LLMEventData.Response)),
+      ChatId           = tostring(coalesce(column_ifexists('ChatId', ''),
+                                           LLMEventData.ConversationId)),
+      HomeTenantId     = tostring(TenantId)
+  // Extract guest UPNs / domains
+  | extend GuestEmails = extract_all(@"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})", Participants)
+  | mv-apply g = GuestEmails to typeof(string) on (
+        extend
+            GuestDomain   = tolower(tostring(split(g, '@')[1])),
+            IsGuestMarker = tolower(g) has_any (dynamic(["#ext#", "(guest)", "<guest>"]))
+      | project GuestEmail = g, GuestDomain, IsGuestMarker
+    )
+  // Pull tenant default-domain hint to decide "external"
+  | extend
+      HomeDomainHint = tolower(tostring(column_ifexists('TenantDefaultDomain', '')))
+  | extend
+      IsExternalGuest = IsGuestMarker
+          or (isnotempty(HomeDomainHint) and GuestDomain != HomeDomainHint)
+  | where IsExternalGuest
+  // Confirm internal grounding present
+  | extend RetrievedInternal = RagSourcesText has_any (internalHostHints)
+  | where RetrievedInternal
+  // And the response actually carries internal content back to the guest
+  | extend
+      ResponseEchoesInternalUri = ResponseLower has_any (internalHostHints),
+      ResponseHasHighLabel      = ResponseLower has_any (highLabelHints)
+  | where ResponseEchoesInternalUri or ResponseHasHighLabel
+  | summarize
+      Events             = count(),
+      GuestEmails        = make_set(GuestEmail, 25),
+      GuestDomains       = make_set(GuestDomain, 25),
+      InternalUriSample  = make_set(RagSourcesText, 5),
+      ResponseSample     = any(ResponseText)
+      by TimeBucket = bin(TimeGenerated, 1h),
+         AgentId, AgentName, ActorName = tostring(coalesce(ActorName, column_ifexists('ActorUPN', ''))),
+         ChatId, HomeTenantId,
+         ResponseEchoesInternalUri, ResponseHasHighLabel
+  | order by TimeBucket desc, Events desc
+tactics:
+  - Exfiltration
+  - Collection
+techniques:
+  - T1567
+  - T1213
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Copilot
+  - AI

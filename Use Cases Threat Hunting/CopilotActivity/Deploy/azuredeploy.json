@@ -1,0 +1,1213 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Microsoft 365 Copilot - Microsoft Sentinel analytic rules and hunting queries.",
+    "author": "Sentinel-As-Code / Microsoft 365 Copilot bundle"
+  },
+  "parameters": {
+    "workspaceName": {
+      "metadata": {
+        "description": "Name of the Log Analytics workspace where Microsoft Sentinel is enabled."
+      },
+      "type": "string"
+    },
+    "enableAnalyticRules": {
+      "defaultValue": true,
+      "type": "bool",
+      "metadata": {
+        "description": "Set to false to deploy the scheduled analytic rules in a disabled state. Hunting queries are always deployed."
+      }
+    }
+  },
+  "variables": {},
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '1f6c2a5e-9c2f-4f4b-b1d3-3a7d5e8b9c01')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Microsoft 365 Copilot - AI agent access drift outside baseline",
+        "description": "Detects when A Microsoft 365 Copilot agent suddenly invokes tools or accesses\ndata sources that fall outside its 14-day behavioural baseline.\n\nAgent permissions tend to expand quietly as agents take on new\ntasks. An agent that has only ever read SharePoint documents\nunexpectedly invoking an Exchange or Graph data-write tool is a\nstrong signal of access drift or scope abuse and should be\nreviewed by an analyst.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "// Confirmed schema: LLMEventData.AccessedResources[].Type / .SiteUrl\n// Drift is computed on the resource-type set per user across a 14d window.\nlet lookback = 14d;\nlet recentWindow = 1h;\nlet events =\n    CopilotActivity\n    | where TimeGenerated > ago(lookback)\n    | where RecordType == \"CopilotInteraction\"\n    | mv-expand r = LLMEventData.AccessedResources\n    | extend\n        ResourceType = tostring(r.Type),\n        SiteUrl = tolower(tostring(r.SiteUrl)),\n        ResourceAction = tostring(r.Action)\n    | where isnotempty(ResourceType);\nlet baseline =\n    events\n    | where TimeGenerated between (ago(lookback) .. ago(recentWindow))\n    | summarize BaselineTypes = make_set(ResourceType, 64) by ActorUserId;\nlet recent =\n    events\n    | where TimeGenerated > ago(recentWindow);\nrecent\n| join kind=leftouter baseline on ActorUserId\n| extend BaselineTypes = coalesce(BaselineTypes, dynamic([]))\n| where array_index_of(BaselineTypes, ResourceType) < 0\n| summarize\n    DriftCount = count(),\n    NewResourceTypes = make_set(ResourceType, 16),\n    SampleSites = make_set(SiteUrl, 16),\n    SampleActions = make_set(ResourceAction, 8),\n    AgentNames = make_set(AgentName, 8),\n    AgentIds = make_set(AgentId, 8),\n    AnyActor = take_any(ActorName),\n    ClientIPs = make_set(SrcIpAddr, 16),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by ActorUserId, TenantId\n| extend\n    AgentName = tostring(AgentNames[0]),\n    AgentId = tostring(AgentIds[0]),\n    ActorName = AnyActor,\n    SrcIpAddr = tostring(ClientIPs[0])\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "PrivilegeEscalation",
+          "Discovery"
+        ],
+        "techniques": [
+          "T1098",
+          "T1087"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "matchingMethod": "Selected",
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "enabled": true,
+            "lookbackDuration": "PT5H",
+            "reopenClosedIncident": false
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "fieldMappings": [
+              {
+                "columnName": "AgentName",
+                "identifier": "Name"
+              },
+              {
+                "columnName": "AgentId",
+                "identifier": "AppId"
+              }
+            ],
+            "entityType": "CloudApplication"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "ActorName",
+                "identifier": "Name"
+              }
+            ],
+            "entityType": "Account"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "SrcIpAddr",
+                "identifier": "Address"
+              }
+            ],
+            "entityType": "IP"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '6f8e1a5c-0d7f-4e9f-c3a4-1b0f9e8d7c63')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Microsoft 365 Copilot - Config change followed by abuse signal",
+        "description": "Correlates a Copilot administrative configuration change (settings,\nplugin, prompt-book) with subsequent abuse-class signals (Prompt\nShield jailbreak verdict, XPIA / indirect prompt injection verdict,\nor DLP policy hit) by the same actor or on the same agent within a\n24-hour window.\n\nThis is the chained kill-chain shape: an admin (or a compromised\naccount) widens the attack surface, then either the same actor or\nany user of the changed agent immediately exercises it. Either side\nalone is already covered by CopilotSystemPromptOverride,\nCopilotJailbreakAttemptDetection, CopilotIndirectPromptInjection\nand CopilotSensitiveDataExposure; this rule surfaces only the chain.\n\nLimitation: the correlation key is AgentId where available on the\nconfig event, otherwise ActorUserId. If a plugin is installed\ntenant-wide and abused by a different actor on a different agent,\nthis rule will not connect them.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let configRecordTypes = dynamic([\n    \"UpdateCopilotSettings\",\n    \"CreateCopilotPlugin\", \"UpdateCopilotPlugin\",\n    \"EnableCopilotPlugin\", \"DisableCopilotPlugin\",\n    \"CreateCopilotPromptBook\", \"UpdateCopilotPromptBook\",\n    \"DeleteCopilotPromptBook\"\n]);\nlet window = 1d;\nlet recentWindow = 1h;\nlet configEvents =\n    CopilotActivity\n    | where TimeGenerated > ago(window)\n    | where RecordType in (configRecordTypes)\n    | project\n        ConfigTime = TimeGenerated,\n        ConfigKind = RecordType,\n        ConfigAgentId = AgentId,\n        ConfigAgentName = AgentName,\n        ConfigActor = ActorName,\n        ConfigActorUserId = ActorUserId,\n        TenantId;\nlet abuseEvents =\n    CopilotActivity\n    | where TimeGenerated > ago(recentWindow)\n    | where RecordType == \"CopilotInteraction\"\n    | extend\n        ThreadId = tostring(LLMEventData.ThreadId),\n        DlpDeferred = tobool(LLMEventData.DLPEvaluationDeferred)\n    | mv-expand r = LLMEventData.AccessedResources, m = LLMEventData.Messages\n    | extend\n        XpiaHit = tobool(r.XPIADetected),\n        DlpHit = (isnotempty(tostring(r.PolicyDetails))\n                  and tostring(r.PolicyDetails) !in (\"[]\", \"{}\", \"null\"))\n                  or DlpDeferred,\n        JbHit = tobool(m.JailbreakDetected)\n    | where XpiaHit or DlpHit or JbHit\n    | summarize\n        AbuseTime = max(TimeGenerated),\n        AbuseKinds = make_set(case(XpiaHit, \"XPIA\", DlpHit, \"DLP\", JbHit, \"Jailbreak\", \"\"), 4),\n        AbuseThreads = make_set(ThreadId, 8),\n        AbuseSites = make_set(tostring(r.SiteUrl), 16)\n        by AgentId, AgentName, ActorName, ActorUserId, TenantId;\nabuseEvents\n| join kind=inner (\n    configEvents\n    | project-rename\n        ConfigAgentIdJ = ConfigAgentId,\n        ConfigActorUserIdJ = ConfigActorUserId\n) on $left.TenantId == $right.TenantId\n| where ConfigTime <= AbuseTime\n    and AbuseTime - ConfigTime <= window\n    and (\n        (isnotempty(AgentId) and AgentId == ConfigAgentIdJ)\n        or (isnotempty(ActorUserId) and ActorUserId == ConfigActorUserIdJ)\n    )\n| extend ChainGapMin = datetime_diff('minute', AbuseTime, ConfigTime)\n| project\n    ConfigTime, ConfigKind, ConfigActor, ConfigAgentName,\n    AbuseTime, AbuseKinds, AbuseThreads, AbuseSites,\n    AgentId, AgentName, ActorName, ActorUserId,\n    ChainGapMin, TenantId\n| order by AbuseTime desc, ChainGapMin asc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Persistence",
+          "DefenseEvasion",
+          "Execution"
+        ],
+        "techniques": [
+          "T1098",
+          "T1556",
+          "T1059"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "matchingMethod": "Selected",
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "groupByEntities": [
+              "CloudApplication",
+              "Account"
+            ],
+            "enabled": true,
+            "lookbackDuration": "PT24H",
+            "reopenClosedIncident": false
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "fieldMappings": [
+              {
+                "columnName": "AgentName",
+                "identifier": "Name"
+              },
+              {
+                "columnName": "AgentId",
+                "identifier": "AppId"
+              }
+            ],
+            "entityType": "CloudApplication"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "ActorName",
+                "identifier": "Name"
+              }
+            ],
+            "entityType": "Account"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '4d6c9e3a-8b5f-4c7d-a1e2-9f8d7c6b5a41')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Microsoft 365 Copilot - Exfiltration pattern (sensitive + cross-repo + large synthesis)",
+        "description": "Detects the classic data-exfiltration shape on a Microsoft 365 Copilot\nthread: a sensitive-resource hit (DLP PolicyDetails or\nDLPEvaluationDeferred), combined with cross-repository aggregation\n(many distinct grounding sites), combined with a large multi-document\nsynthesis (high total message count on the thread).\n\nNone of these signals on their own is necessarily malicious; the\ncombination is. Tune the thresholds to match how your tenant uses\nCopilot - the defaults below assume a workforce that does not\nroutinely synthesise 5+ document repositories in a single thread.\n\nLimitation: this rule only sees the structural fields exposed in\nLLMEventData. It cannot detect explicit export / send / forward\nintents because raw prompt and response text are not surfaced.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "// Per-thread combo: DLP hit + >=5 distinct sites + >=50 total messages.\nCopilotActivity\n| where TimeGenerated > ago(6h)\n| where RecordType == \"CopilotInteraction\"\n| extend\n    ThreadId = tostring(LLMEventData.ThreadId),\n    DlpDeferred = tobool(LLMEventData.DLPEvaluationDeferred),\n    InteractionMessages = array_length(LLMEventData.Messages)\n| where isnotempty(ThreadId)\n| mv-expand r = LLMEventData.AccessedResources\n| extend\n    SiteUrl = tostring(r.SiteUrl),\n    ResourceType = tostring(r.Type),\n    PolicyDetailsStr = tostring(r.PolicyDetails),\n    HasPolicyHit = isnotempty(tostring(r.PolicyDetails))\n        and tostring(r.PolicyDetails) !in (\"[]\", \"{}\", \"null\")\n| summarize\n    DlpHits = countif(HasPolicyHit or DlpDeferred),\n    DistinctSites = dcount(SiteUrl),\n    DistinctTypes = dcount(ResourceType),\n    TotalMessages = sum(InteractionMessages),\n    Interactions = dcount(strcat(tostring(TimeGenerated))),\n    Sites = make_set(SiteUrl, 32),\n    ResourceTypes = make_set(ResourceType, 16),\n    Policies = make_set(PolicyDetailsStr, 16),\n    AgentIds = make_set(AgentId, 4),\n    AgentNames = make_set(AgentName, 4),\n    Actors = make_set(ActorName, 4),\n    ActorUserIds = make_set(ActorUserId, 4),\n    ClientIPs = make_set(SrcIpAddr, 16),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by ThreadId, TenantId\n| where DlpHits >= 1 and DistinctSites >= 5 and TotalMessages >= 50\n| extend\n    AgentId = tostring(AgentIds[0]),\n    AgentName = tostring(AgentNames[0]),\n    ActorName = tostring(Actors[0]),\n    ActorUserId = tostring(ActorUserIds[0]),\n    SrcIpAddr = tostring(ClientIPs[0])\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT6H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Collection",
+          "Exfiltration"
+        ],
+        "techniques": [
+          "T1213",
+          "T1530",
+          "T1567"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "matchingMethod": "Selected",
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "groupByEntities": [
+              "Account"
+            ],
+            "enabled": true,
+            "lookbackDuration": "PT12H",
+            "reopenClosedIncident": false
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "fieldMappings": [
+              {
+                "columnName": "AgentName",
+                "identifier": "Name"
+              },
+              {
+                "columnName": "AgentId",
+                "identifier": "AppId"
+              }
+            ],
+            "entityType": "CloudApplication"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "ActorName",
+                "identifier": "Name"
+              }
+            ],
+            "entityType": "Account"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "SrcIpAddr",
+                "identifier": "Address"
+              }
+            ],
+            "entityType": "IP"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '3c5b8d29-4e7f-4b1a-9c2d-8f7e6a5b4c30')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Microsoft 365 Copilot - Indirect prompt injection (XPIA) detected",
+        "description": "Detects Microsoft 365 Copilot interactions where the cross-prompt injection\nattack (XPIA) classifier flagged a grounding resource. This is Microsoft's\nnative indirect prompt injection signal exposed on the\nLLMEventData.AccessedResources[].XPIADetected boolean.\n\nAn XPIA hit means an attacker planted instructions (typically markdown or\nhidden text) in a document, web page, email, or chat that Copilot grounded\non, attempting to hijack the agent's behaviour on behalf of the legitimate\nuser. This rule surfaces the affected user, agent, and the source URLs the\npoisoned content came from.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "// Confirmed schema: LLMEventData.AccessedResources[].XPIADetected\n// (Microsoft's native XPIA / indirect prompt injection classifier).\nCopilotActivity\n| where TimeGenerated > ago(1h)\n| where RecordType == \"CopilotInteraction\"\n| extend ThreadId = tostring(LLMEventData.ThreadId)\n| mv-expand r = LLMEventData.AccessedResources\n| extend\n    SiteUrl = tostring(r.SiteUrl),\n    ResourceType = tostring(r.Type),\n    ResourceAction = tostring(r.Action),\n    XPIADetected = tobool(r.XPIADetected)\n| where XPIADetected == true\n| summarize\n    XpiaHits = count(),\n    Sites = make_set(SiteUrl, 16),\n    ResourceTypes = make_set(ResourceType, 8),\n    Actions = make_set(ResourceAction, 8),\n    Threads = make_set(ThreadId, 16),\n    ClientIPs = make_set(SrcIpAddr, 16),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by AgentId, AgentName, ActorName, ActorUserId, TenantId\n| extend SrcIpAddr = tostring(ClientIPs[0])\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "Execution"
+        ],
+        "techniques": [
+          "T1566",
+          "T1059"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "matchingMethod": "Selected",
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "groupByEntities": [
+              "CloudApplication",
+              "Account"
+            ],
+            "enabled": true,
+            "lookbackDuration": "PT5H",
+            "reopenClosedIncident": false
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "fieldMappings": [
+              {
+                "columnName": "AgentName",
+                "identifier": "Name"
+              },
+              {
+                "columnName": "AgentId",
+                "identifier": "AppId"
+              }
+            ],
+            "entityType": "CloudApplication"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "ActorName",
+                "identifier": "Name"
+              }
+            ],
+            "entityType": "Account"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "SrcIpAddr",
+                "identifier": "Address"
+              }
+            ],
+            "entityType": "IP"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '5a8c3f64-3a6d-4b8e-9d7f-0c1a2b3c4d51')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Microsoft 365 Copilot - Jailbreak attempt against AI agent",
+        "description": "Detects prompts that contain known jailbreak markers (persona\ntakeovers such as DAN / DUDE / STAN, \"ignore safety\", \"developer\nmode\", policy-bypass framings) or that ask the agent to disclose\nits own system prompt.\n\nJailbreaks are the precursor to most agent-driven exfiltration\nand toxic-output incidents. Surfaces successful or attempted\njailbreaks so SOC can revoke the session and review what tools\nthe agent invoked afterwards.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "// Uses Microsoft's native Prompt Shield verdict surfaced in\n// LLMEventData.Messages[].JailbreakDetected (confirmed by schema probe).\nCopilotActivity\n| where TimeGenerated > ago(1h)\n| where RecordType == \"CopilotInteraction\"\n| extend ThreadId = tostring(LLMEventData.ThreadId)\n| extend AppHost = tostring(LLMEventData.AppHost)\n| mv-expand m = LLMEventData.Messages\n| extend\n    MessageId = tostring(m.Id),\n    IsPrompt = tobool(m.isPrompt),\n    JailbreakDetected = tobool(m.JailbreakDetected)\n| where JailbreakDetected == true\n| summarize\n    JailbreakHits = count(),\n    PromptHits = countif(IsPrompt),\n    Threads = make_set(ThreadId, 16),\n    MessageIds = make_set(MessageId, 32),\n    AppHosts = make_set(AppHost, 8),\n    ClientIPs = make_set(SrcIpAddr, 16),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by AgentId, AgentName, ActorName, ActorUserId, TenantId\n| extend SrcIpAddr = tostring(ClientIPs[0])\n",
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "DefenseEvasion",
+          "InitialAccess",
+          "Execution"
+        ],
+        "techniques": [
+          "T1562",
+          "T1059"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "matchingMethod": "Selected",
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "groupByEntities": [
+              "Account",
+              "CloudApplication"
+            ],
+            "enabled": true,
+            "lookbackDuration": "PT5H",
+            "reopenClosedIncident": false
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "fieldMappings": [
+              {
+                "columnName": "AgentName",
+                "identifier": "Name"
+              },
+              {
+                "columnName": "AgentId",
+                "identifier": "AppId"
+              }
+            ],
+            "entityType": "CloudApplication"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "ActorName",
+                "identifier": "Name"
+              }
+            ],
+            "entityType": "Account"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "SrcIpAddr",
+                "identifier": "Address"
+              }
+            ],
+            "entityType": "IP"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9ec07108-7eb1-8fc2-d1b3-405e6f8190a5')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Microsoft 365 Copilot - Untrusted RAG source used to ground agent response",
+        "description": "Detects A Microsoft 365 Copilot agent grounding its response on a retrieval\nsource that is not on the approved corpus list. Used to surface\nRAG poisoning and \"context smuggling\" attacks where an attacker\nplants content in a shared store the agent indexes.\n\nThe trusted corpus is sourced from the \"CopilotTrustedRagSources\"\nwatchlist (alias: CopilotTrustedRagSources, column: SourceUri).\nPopulate that watchlist with the URIs / hostnames of approved\ndocument repositories before enabling the rule.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let trusted =\n    _GetWatchlist('CopilotTrustedRagSources')\n    | project SourceUri = tolower(tostring(column_ifexists('SourceUri', '')))\n    | where isnotempty(SourceUri);\nCopilotActivity\n| where TimeGenerated > ago(1h)\n| where RecordType == \"CopilotInteraction\"\n| extend AccessedResources = LLMEventData.AccessedResources\n| mv-expand AccessedResources\n| extend\n    SourceUri = tolower(tostring(AccessedResources.SiteUrl)),\n    Action    = tostring(AccessedResources.Action),\n    ResourceType = tostring(AccessedResources.Type)\n| where isnotempty(SourceUri)\n| join kind=leftanti trusted on SourceUri\n| summarize\n    UntrustedHits = count(),\n    UntrustedSources = make_set(SourceUri, 64),\n    Actions = make_set(Action, 16),\n    ClientIPs = make_set(SrcIpAddr, 16),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by AgentId, AgentName, ActorName, TenantId\n| extend SrcIpAddr = tostring(ClientIPs[0])\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1195",
+          "T1199"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "matchingMethod": "Selected",
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "enabled": true,
+            "lookbackDuration": "PT5H",
+            "reopenClosedIncident": false
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "fieldMappings": [
+              {
+                "columnName": "AgentName",
+                "identifier": "Name"
+              },
+              {
+                "columnName": "AgentId",
+                "identifier": "AppId"
+              }
+            ],
+            "entityType": "CloudApplication"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "ActorName",
+                "identifier": "Name"
+              }
+            ],
+            "entityType": "Account"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "SrcIpAddr",
+                "identifier": "Address"
+              }
+            ],
+            "entityType": "IP"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '7a9f2b6d-1e8a-4f0a-d4b5-2c1a0f9e8d74')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Microsoft 365 Copilot - Automated red-team / fuzzing pacing",
+        "description": "Detects the pacing fingerprint left by automated LLM red-team /\nfuzzing frameworks (e.g. Microsoft PyRIT, Confident-AI DeepTeam,\ncustom adversarial scripts) targeting Microsoft 365 Copilot.\nReal attackers wielding these frameworks - and red-teamers exercising\nthem - generate distinctive volumetric patterns that differ from\nnormal interactive use.\n\nThree independent sub-signals are evaluated against a one-hour window;\nany one firing raises the alert. Two or more firing simultaneously is\na strong indicator of automated abuse rather than a busy human user.\n\n  1. ThreadFanOut       - one actor opens >=10 distinct ThreadIds\n                          in a 10-minute bucket (parallel attack runs)\n  2. JailbreakHammer    - one actor accumulates >=5 Prompt Shield\n                          JailbreakDetected verdicts in 1h\n  3. SustainedHighRate  - one actor sustains >=30 messages/min for\n                          >=5 minutes (mass fuzzing)\n\nTune the thresholds to your tenant: heavy power-users of Copilot for\nSales / Service can legitimately produce high rates, but they\ngenerally do not fan out across many parallel threads while doing so.\n\nTagged against OWASP LLM Top 10:\n  - LLM01 Prompt Injection (multi-turn / hammering sub-signal)\n  - LLM10 Unbounded Consumption (fan-out + sustained rate sub-signals)\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let window = 1h;\nlet burstWindow = 10m;\nlet base =\n    CopilotActivity\n    | where TimeGenerated > ago(window)\n    | where RecordType == \"CopilotInteraction\"\n    | extend\n        ThreadId = tostring(LLMEventData.ThreadId),\n        InteractionMessages = array_length(LLMEventData.Messages);\nlet threadFanOut =\n    base\n    | summarize Threads = dcount(ThreadId)\n        by ActorUserId, AgentId, AgentName, ActorName, TenantId,\n           Bucket = bin(TimeGenerated, burstWindow)\n    | where Threads >= 10\n    | extend Signal = \"ThreadFanOut\", Value = todouble(Threads);\nlet jailbreakHammer =\n    base\n    | mv-expand m = LLMEventData.Messages\n    | extend JbHit = tobool(m.JailbreakDetected)\n    | summarize JbCount = countif(JbHit)\n        by ActorUserId, AgentId, AgentName, ActorName, TenantId,\n           Bucket = bin(TimeGenerated, window)\n    | where JbCount >= 5\n    | extend Signal = \"JailbreakHammer\", Value = todouble(JbCount);\nlet sustainedRate =\n    base\n    | summarize MsgPerMin = sum(InteractionMessages)\n        by ActorUserId, AgentId, AgentName, ActorName, TenantId,\n           Minute = bin(TimeGenerated, 1m)\n    | where MsgPerMin >= 30\n    | summarize HighRateMinutes = count(), MaxRate = max(MsgPerMin)\n        by ActorUserId, AgentId, AgentName, ActorName, TenantId\n    | where HighRateMinutes >= 5\n    | extend\n        Signal = \"SustainedHighRate\",\n        Value = todouble(MaxRate),\n        Bucket = bin(now(), 1m);\nunion threadFanOut, jailbreakHammer, sustainedRate\n| summarize\n    Signals = make_set(Signal, 4),\n    SignalDetails = make_bag(pack(Signal, Value)),\n    FirstSeen = min(Bucket),\n    LastSeen = max(Bucket)\n    by ActorUserId, AgentId, AgentName, ActorName, TenantId\n| extend SignalCount = array_length(Signals)\n| extend Confidence = iff(SignalCount >= 2, \"High\", \"Medium\")\n| order by SignalCount desc, LastSeen desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Discovery",
+          "Impact"
+        ],
+        "techniques": [
+          "T1526",
+          "T1499"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "matchingMethod": "Selected",
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "groupByEntities": [
+              "Account"
+            ],
+            "enabled": true,
+            "lookbackDuration": "PT12H",
+            "reopenClosedIncident": false
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "fieldMappings": [
+              {
+                "columnName": "AgentName",
+                "identifier": "Name"
+              },
+              {
+                "columnName": "AgentId",
+                "identifier": "AppId"
+              }
+            ],
+            "entityType": "CloudApplication"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "ActorName",
+                "identifier": "Name"
+              }
+            ],
+            "entityType": "Account"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '5e7d0f4b-9c6e-4d8e-b2f3-0a9e8d7c6b52')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Microsoft 365 Copilot - Resource diversity burst per user",
+        "description": "Detects sudden bursts in the breadth of grounding sources a single\nuser touches in a one-hour window via Microsoft 365 Copilot. Used to\nsurface enumeration / cross-department reconnaissance patterns where\nan actor (or a compromised agent acting on their behalf) is fanning\nout across a large number of SharePoint sites, OneDrive locations,\nand other repositories that they don't normally touch together.\n\nDifferent from CopilotAccessDriftDetection (which surfaces newly-seen\nresource TYPES vs a 14d baseline): this rule surfaces a spike in the\nCOUNT of distinct grounding sites in a single hour vs the user's own\n14d-hourly P95.\n\nLimitation: department / business-unit metadata is not exposed on\nAccessedResources, so we use the SharePoint / OneDrive hostname as a\nproxy. Tune the floor (DistinctSitesFloor) to your tenant.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let lookback = 14d;\nlet recentWindow = 1h;\nlet floorSites = 10;          // minimum sites/hour to even consider\nlet spikeMultiplier = 3.0;     // hour must exceed P95 by this factor\nlet perUserHour =\n    CopilotActivity\n    | where TimeGenerated > ago(lookback)\n    | where RecordType == \"CopilotInteraction\"\n    | mv-expand r = LLMEventData.AccessedResources\n    | extend SiteUrl = tostring(r.SiteUrl)\n    | where isnotempty(SiteUrl)\n    | summarize\n        DistinctSites = dcount(SiteUrl),\n        AnyAgentName = take_any(AgentName),\n        AnyAgentId = take_any(AgentId),\n        AnyActor = take_any(ActorName)\n        by ActorUserId, TenantId, Hour = bin(TimeGenerated, 1h);\nlet baseline =\n    perUserHour\n    | where Hour < bin(now(), 1h) - recentWindow\n    | summarize\n        P95Sites = todouble(percentile(DistinctSites, 95)),\n        MedianSites = todouble(percentile(DistinctSites, 50))\n        by ActorUserId;\nlet recent =\n    perUserHour\n    | where Hour >= bin(now(), 1h) - recentWindow;\nrecent\n| join kind=leftouter baseline on ActorUserId\n| extend\n    P95Sites = coalesce(P95Sites, 0.0),\n    MedianSites = coalesce(MedianSites, 0.0)\n| extend SpikeRatio = iff(P95Sites > 0, todouble(DistinctSites) / P95Sites, todouble(DistinctSites))\n| where DistinctSites >= floorSites and DistinctSites > P95Sites * spikeMultiplier\n| project\n    Hour, ActorUserId, ActorName = AnyActor, AgentId = AnyAgentId,\n    AgentName = AnyAgentName, DistinctSites, P95Sites, MedianSites,\n    SpikeRatio, TenantId\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Discovery",
+          "Collection"
+        ],
+        "techniques": [
+          "T1087",
+          "T1213",
+          "T1083"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "matchingMethod": "Selected",
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "groupByEntities": [
+              "Account"
+            ],
+            "enabled": true,
+            "lookbackDuration": "PT12H",
+            "reopenClosedIncident": false
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "fieldMappings": [
+              {
+                "columnName": "AgentName",
+                "identifier": "Name"
+              },
+              {
+                "columnName": "AgentId",
+                "identifier": "AppId"
+              }
+            ],
+            "entityType": "CloudApplication"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "ActorName",
+                "identifier": "Name"
+              }
+            ],
+            "entityType": "Account"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '2b4e9d31-7a8c-4d2f-8c7e-6e1b9a3f4d12')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Microsoft 365 Copilot - Sensitive data exposure via AI agent",
+        "description": "Detects A Microsoft 365 Copilot agent reading or returning content tagged\nwith a sensitivity label of Confidential or higher, or content\ncarrying DLP-style classifiers (PII, PCI, secrets).\n\nA misconfigured or prompt-injected agent can serve as an\nexfiltration path: a single crafted prompt can pull regulated\ndata through an over-permissioned agent. This rule alerts on\nthe data-access leg of that path so SOC can trace prompt -> tool\n-> data and contain the agent identity quickly.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "// Confirmed schema: AccessedResources[].PolicyDetails (DLP policy hits)\n// and the top-level LLMEventData.DLPEvaluationDeferred boolean.\nCopilotActivity\n| where TimeGenerated > ago(1h)\n| where RecordType == \"CopilotInteraction\"\n| extend\n    ThreadId = tostring(LLMEventData.ThreadId),\n    DlpDeferred = tobool(LLMEventData.DLPEvaluationDeferred)\n| mv-expand r = LLMEventData.AccessedResources\n| extend\n    SiteUrl = tostring(r.SiteUrl),\n    ResourceType = tostring(r.Type),\n    ResourceAction = tostring(r.Action),\n    PolicyDetails = r.PolicyDetails,\n    PolicyDetailsStr = tostring(r.PolicyDetails)\n| where DlpDeferred\n    or (isnotempty(PolicyDetailsStr) and PolicyDetailsStr !in (\"[]\", \"{}\", \"null\"))\n| summarize\n    SensitiveHits = count(),\n    SiteHits = make_set(SiteUrl, 32),\n    ResourceTypes = make_set(ResourceType, 16),\n    Actions = make_set(ResourceAction, 8),\n    Policies = make_set(PolicyDetails, 16),\n    DlpDeferredCount = countif(DlpDeferred),\n    Threads = make_set(ThreadId, 16),\n    ClientIPs = make_set(SrcIpAddr, 16),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by AgentId, AgentName, ActorName, ActorUserId, TenantId\n| extend SrcIpAddr = tostring(ClientIPs[0])\n",
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Collection",
+          "Exfiltration"
+        ],
+        "techniques": [
+          "T1530",
+          "T1213",
+          "T1567"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "matchingMethod": "Selected",
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "groupByEntities": [
+              "Account",
+              "CloudApplication"
+            ],
+            "enabled": true,
+            "lookbackDuration": "PT5H",
+            "reopenClosedIncident": false
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "fieldMappings": [
+              {
+                "columnName": "AgentName",
+                "identifier": "Name"
+              },
+              {
+                "columnName": "AgentId",
+                "identifier": "AppId"
+              }
+            ],
+            "entityType": "CloudApplication"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "ActorName",
+                "identifier": "Name"
+              }
+            ],
+            "entityType": "Account"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "SrcIpAddr",
+                "identifier": "Address"
+              }
+            ],
+            "entityType": "IP"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '8dbf6097-6da0-7eb1-c0a2-3f4d5e6f8084')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Microsoft 365 Copilot - Agent system prompt or model override",
+        "description": "Detects events where A Microsoft 365 Copilot agent's effective system\nprompt, model identifier, model version, or safety policy is\nchanged - whether via an admin update record or via a runtime\noverride embedded in the request.\n\nModel and system-prompt tampering is the highest-impact agent\nattack: it can disable safety filters, redirect tool calls,\nand weaken downstream RAG grounding. This rule alerts on every\ndetected change so the SOC can verify it was intentional.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "// Confirmed RecordType values surfaced by the Copilot connector:\n//   UpdateCopilotSettings, *CopilotPlugin (Create/Update/Enable/Disable),\n//   *CopilotPromptBook (Create/Update/Delete).\n// ModelTransparencyDetails on CopilotInteraction events carries the\n// model identity + safety policy in effect for each interaction.\nlet configRecordTypes = dynamic([\n    \"UpdateCopilotSettings\",\n    \"CreateCopilotPlugin\", \"UpdateCopilotPlugin\",\n    \"EnableCopilotPlugin\", \"DisableCopilotPlugin\",\n    \"CreateCopilotPromptBook\", \"UpdateCopilotPromptBook\",\n    \"DeleteCopilotPromptBook\"\n]);\nCopilotActivity\n| where TimeGenerated > ago(1h)\n| where RecordType in (configRecordTypes)\n| extend ModelDetails = tostring(LLMEventData.ModelTransparencyDetails)\n| extend ChangeKind = case(\n    RecordType == \"UpdateCopilotSettings\", \"Tenant Copilot settings change\",\n    RecordType in (\"CreateCopilotPlugin\", \"EnableCopilotPlugin\"), \"Plugin enabled / created\",\n    RecordType == \"DisableCopilotPlugin\", \"Plugin disabled\",\n    RecordType == \"UpdateCopilotPlugin\", \"Plugin configuration updated\",\n    RecordType startswith \"Create\", \"PromptBook created\",\n    RecordType startswith \"Update\", \"PromptBook updated\",\n    RecordType startswith \"Delete\", \"PromptBook deleted\",\n    \"Other Copilot config change\")\n| project\n    TimeGenerated, AgentId, AgentName, ActorName, ActorUserId,\n    ChangeKind, RecordType, ModelDetails, SrcIpAddr, TenantId\n",
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "DefenseEvasion",
+          "Persistence"
+        ],
+        "techniques": [
+          "T1562",
+          "T1098"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "matchingMethod": "Selected",
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "groupByEntities": [
+              "CloudApplication",
+              "Account"
+            ],
+            "enabled": true,
+            "lookbackDuration": "PT5H",
+            "reopenClosedIncident": false
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "fieldMappings": [
+              {
+                "columnName": "AgentName",
+                "identifier": "Name"
+              },
+              {
+                "columnName": "AgentId",
+                "identifier": "AppId"
+              }
+            ],
+            "entityType": "CloudApplication"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "ActorName",
+                "identifier": "Name"
+              }
+            ],
+            "entityType": "Account"
+          },
+          {
+            "fieldMappings": [
+              {
+                "columnName": "SrcIpAddr",
+                "identifier": "Address"
+              }
+            ],
+            "entityType": "IP"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '7cae5f86-5c8f-6da0-bf91-2e3c4d5e6f73')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Microsoft 365 Copilot - Anomalous token / cost spike per agent",
+        "description": "Detects A Microsoft 365 Copilot agent whose token consumption in the last\nhour exceeds three times its 7-day per-hour median. Useful for\ncatching token abuse, runaway agent loops, and cost-driven\ndenial-of-service / wallet-drain attacks.\n\nPair with the trace-anomaly hunting query to confirm whether\nthe spike is a legitimate workload or a tight tool-call loop.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "// TotalTokens is not exposed in CopilotActivity today, so we use the\n// sum of Messages[] cardinality per hour per agent+user as a usage proxy.\n// Pair with CopilotTraceLevelAnomalies hunting query for context.\nlet lookback = 7d;\nlet recentWindow = 1h;\nlet perHour =\n    CopilotActivity\n    | where TimeGenerated > ago(lookback)\n    | where RecordType == \"CopilotInteraction\"\n    | extend MsgCount = array_length(LLMEventData.Messages)\n    | summarize\n        HourMessages = sum(MsgCount),\n        HourInteractions = count(),\n        AnyActor = take_any(ActorName)\n        by AgentId, AgentName, ActorUserId, Hour = bin(TimeGenerated, 1h);\nlet baseline =\n    perHour\n    | where Hour < bin(now(), 1h) - recentWindow\n    | summarize\n        MedianHourMessages = percentile(HourMessages, 50),\n        P95HourMessages = percentile(HourMessages, 95)\n        by AgentId, AgentName, ActorUserId;\nlet recent =\n    perHour\n    | where Hour >= bin(now(), 1h) - recentWindow;\nrecent\n| join kind=leftouter baseline on AgentId, ActorUserId\n| extend\n    MedianHourMessages = coalesce(todouble(MedianHourMessages), 0.0),\n    P95HourMessages = coalesce(todouble(P95HourMessages), 0.0)\n| extend SpikeRatio = iff(MedianHourMessages > 0, todouble(HourMessages) / MedianHourMessages, todouble(HourMessages))\n| where HourMessages > 100\n    and (SpikeRatio >= 3.0 or HourMessages > P95HourMessages * 2)\n| extend ActorName = AnyActor\n| project\n    Hour, AgentId, AgentName, ActorName, ActorUserId,\n    HourInteractions, HourMessages, MedianHourMessages,\n    P95HourMessages, SpikeRatio\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Impact"
+        ],
+        "techniques": [
+          "T1496",
+          "T1499"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "matchingMethod": "Selected",
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "enabled": true,
+            "lookbackDuration": "PT6H",
+            "reopenClosedIncident": false
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "fieldMappings": [
+              {
+                "columnName": "AgentName",
+                "identifier": "Name"
+              },
+              {
+                "columnName": "AgentId",
+                "identifier": "AppId"
+              }
+            ],
+            "entityType": "CloudApplication"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/2b13a43b-a1e4-b2f5-04e6-7393a4b3c3d8')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Abnormal AI agent tool usage mix",
+        "query": "// Confirmed schema: LLMEventData.AISystemPlugin[].{Id, Name}\n// Joins against the CopilotApprovedPlugins watchlist (any plugin NOT in\n// the approved list AND newly seen / spiking is surfaced).\nlet baselineWindow = 14d;\nlet recentWindow = 1d;\nlet toolEvents =\n    CopilotActivity\n    | where TimeGenerated > ago(baselineWindow)\n    | where RecordType == \"CopilotInteraction\"\n    | mv-expand p = LLMEventData.AISystemPlugin\n    | extend\n        PluginId = tostring(p.Id),\n        PluginName = tostring(p.Name),\n        LowerPluginName = tolower(tostring(p.Name))\n    | where isnotempty(PluginName);\nlet approved =\n    _GetWatchlist('CopilotApprovedPlugins')\n    | project ApprovedPlugin = tolower(tostring(column_ifexists('PluginName', '')))\n    | where isnotempty(ApprovedPlugin);\nlet baseline =\n    toolEvents\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n    | summarize BaselineCalls = count() by AgentId, AgentName, PluginName, LowerPluginName;\nlet recent =\n    toolEvents\n    | where TimeGenerated > ago(recentWindow)\n    | summarize RecentCalls = count() by AgentId, AgentName, PluginName, LowerPluginName;\nrecent\n| join kind=leftouter baseline on AgentId, PluginName\n| extend BaselineCalls = coalesce(BaselineCalls, 0)\n| extend\n    IsNewPlugin = BaselineCalls == 0,\n    SpikeRatio = iff(BaselineCalls > 0, todouble(RecentCalls) / todouble(BaselineCalls), todouble(RecentCalls))\n| join kind=leftanti approved on $left.LowerPluginName == $right.ApprovedPlugin\n| where IsNewPlugin or SpikeRatio >= 5.0\n| order by IsNewPlugin desc, SpikeRatio desc, RecentCalls desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for Microsoft 365 Copilot agents whose 24-hour tool-invocation profile differs sharply from their 14-day baseline: new sensitive tools appearing, write / admin tools invoked by an agent that has only ever read, or call rate spiking far above the ...",
+            "name": "description"
+          },
+          {
+            "value": "Execution,PrivilegeEscalation",
+            "name": "tactics"
+          },
+          {
+            "value": "T1059,T1098",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/7d2f1081-ae5c-4143-2f60-4c9d1e2f5061')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Adversarial paraphrase loop after refusal",
+        "query": "let window = 15m;\nlet refusalMarkers = dynamic([\n    \"i can't help with that\", \"i cannot assist\", \"i won't help\",\n    \"i'm not able to provide\", \"that request can't be processed\",\n    \"as an ai, i can't\", \"sorry, i can't\", \"policy prevents me\"\n]);\nlet conv =\n    CopilotActivity\n    | where TimeGenerated > ago(7d)\n    | where RecordType == \"CopilotInteraction\"\n    | extend\n        ActorUpn = tolower(tostring(coalesce(column_ifexists('ActorUPN', ''), ActorName))),\n        Prompt   = tostring(LLMEventData.Prompt),\n        ResponseLower = tolower(tostring(LLMEventData.Response)),\n        ConversationId = tostring(LLMEventData.ConversationId);\nlet refusals =\n    conv\n    | where ResponseLower has_any (refusalMarkers)\n    | extend RefusedPromptTokens = set_difference(extract_all(@\"([a-z]{4,})\", tolower(Prompt)), dynamic([]))\n    | project RefusalTime = TimeGenerated, ActorUpn, AgentId, AgentName,\n              ConversationId, RefusedPrompt = Prompt, RefusedPromptTokens;\nrefusals\n| join kind=inner (\n      conv\n      | extend FollowupTokens = set_difference(extract_all(@\"([a-z]{4,})\", tolower(Prompt)), dynamic([]))\n      | project FollowupTime = TimeGenerated, ActorUpn, AgentId, ConversationId,\n                FollowupPrompt = Prompt, FollowupTokens\n  ) on ActorUpn, AgentId, ConversationId\n| where FollowupTime > RefusalTime and FollowupTime - RefusalTime <= window\n| extend\n    Intersection = array_length(set_intersect(RefusedPromptTokens, FollowupTokens)),\n    Union        = array_length(set_union(RefusedPromptTokens, FollowupTokens))\n| extend Jaccard = iff(Union > 0, todouble(Intersection) / todouble(Union), 0.0)\n| where Jaccard >= 0.4\n| summarize\n    ParaphraseCount = count(),\n    FirstFollowup   = min(FollowupTime),\n    LastFollowup    = max(FollowupTime),\n    SampleFollowups = make_set(FollowupPrompt, 5),\n    MaxJaccard      = max(Jaccard)\n    by RefusalTime, ActorUpn, AgentId, AgentName, ConversationId, RefusedPrompt\n| where ParaphraseCount >= 3\n| order by ParaphraseCount desc, MaxJaccard desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for users who keep paraphrasing the same forbidden request after Copilot refused — a classic jailbreak-refinement loop. Detected by: (1) a refusal signal in the response, immediately followed by (2) >= 3 prompts from the same actor in the next 15...",
+            "name": "description"
+          },
+          {
+            "value": "DefenseEvasion,InitialAccess",
+            "name": "tactics"
+          },
+          {
+            "value": "T1059,T1204",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/5e46d76e-d417-e528-3719-a6c6d7e6f60b')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - PII or biased content emitted in agent output",
+        "query": "let biasMarkers = dynamic([\n    \"all women are\", \"all men are\", \"people of\",\n    \"those people\", \"you people\", \"inferior race\",\n    \"superior race\", \"lazy ethnic\", \"criminal ethnic\"\n]);\nCopilotActivity\n| where TimeGenerated > ago(7d)\n| extend\n    Response = tostring(LLMEventData.Response),\n    ConversationId = tostring(LLMEventData.ConversationId)\n| extend\n    EmailHits = extract_all(@\"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})\", Response),\n    PhoneHits = extract_all(@\"(\\+?\\d{1,3}[\\s\\-\\.]?\\(?\\d{2,4}\\)?[\\s\\-\\.]?\\d{3,4}[\\s\\-\\.]?\\d{3,4})\", Response),\n    IbanHits = extract_all(@\"([A-Z]{2}\\d{2}[A-Z0-9]{11,30})\", Response),\n    PanHits = extract_all(@\"(\\b(?:\\d[ -]*?){13,19}\\b)\", Response)\n| extend LowerResponse = tolower(Response)\n| extend BiasHit = LowerResponse has_any (biasMarkers)\n| where array_length(EmailHits) > 0\n    or array_length(PhoneHits) > 0\n    or array_length(IbanHits) > 0\n    or array_length(PanHits) > 0\n    or BiasHit\n| project\n    TimeGenerated, AgentId, AgentName, ActorName, ConversationId,\n    EmailHitCount = array_length(EmailHits),\n    PhoneHitCount = array_length(PhoneHits),\n    IbanHitCount = array_length(IbanHits),\n    PanHitCount = array_length(PanHits),\n    BiasHit, Response, TenantId\n| order by TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for Microsoft 365 Copilot agent responses that contain PII patterns (email addresses, e.164 phone numbers, IBAN, credit-card-like PANs, government IDs) or bias / discriminatory phrasing not filtered by the platform safety classifier. Acts as a la...",
+            "name": "description"
+          },
+          {
+            "value": "Collection,Exfiltration",
+            "name": "tactics"
+          },
+          {
+            "value": "T1530,T1213",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/a05c43b4-d18f-4476-5293-7f2041528394')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Cross-tenant data leak via guest-shared chats",
+        "query": "let internalHostHints = dynamic([\n    \".sharepoint.com\", \"-my.sharepoint.com\", \"/personal/\",\n    \"exchange.microsoft\", \"outlook.office\", \"graph.microsoft.com\"\n]);\nlet highLabelHints = dynamic([\n    \"confidential\", \"highly confidential\", \"restricted\",\n    \"internal only\", \"secret\"\n]);\nCopilotActivity\n| where TimeGenerated > ago(7d)\n| where RecordType == \"CopilotInteraction\"\n| extend\n    Participants     = tostring(coalesce(column_ifexists('Participants', ''),\n                                         column_ifexists('Recipients', ''),\n                                         column_ifexists('ChatParticipants', ''))),\n    RagSourcesText   = tolower(tostring(LLMEventData.RagSources)),\n    ResponseText     = tostring(LLMEventData.Response),\n    ResponseLower    = tolower(tostring(LLMEventData.Response)),\n    ChatId           = tostring(coalesce(column_ifexists('ChatId', ''),\n                                         LLMEventData.ConversationId)),\n    HomeTenantId     = tostring(TenantId)\n// Extract guest UPNs / domains\n| extend GuestEmails = extract_all(@\"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})\", Participants)\n| mv-apply g = GuestEmails to typeof(string) on (\n      extend\n          GuestDomain   = tolower(tostring(split(g, '@')[1])),\n          IsGuestMarker = tolower(g) has_any (dynamic([\"#ext#\", \"(guest)\", \"<guest>\"]))\n    | project GuestEmail = g, GuestDomain, IsGuestMarker\n  )\n// Pull tenant default-domain hint to decide \"external\"\n| extend\n    HomeDomainHint = tolower(tostring(column_ifexists('TenantDefaultDomain', '')))\n| extend\n    IsExternalGuest = IsGuestMarker\n        or (isnotempty(HomeDomainHint) and GuestDomain != HomeDomainHint)\n| where IsExternalGuest\n// Confirm internal grounding present\n| extend RetrievedInternal = RagSourcesText has_any (internalHostHints)\n| where RetrievedInternal\n// And the response actually carries internal content back to the guest\n| extend\n    ResponseEchoesInternalUri = ResponseLower has_any (internalHostHints),\n    ResponseHasHighLabel      = ResponseLower has_any (highLabelHints)\n| where ResponseEchoesInternalUri or ResponseHasHighLabel\n| summarize\n    Events             = count(),\n    GuestEmails        = make_set(GuestEmail, 25),\n    GuestDomains       = make_set(GuestDomain, 25),\n    InternalUriSample  = make_set(RagSourcesText, 5),\n    ResponseSample     = any(ResponseText)\n    by TimeBucket = bin(TimeGenerated, 1h),\n       AgentId, AgentName, ActorName = tostring(coalesce(ActorName, column_ifexists('ActorUPN', ''))),\n       ChatId, HomeTenantId,\n       ResponseEchoesInternalUri, ResponseHasHighLabel\n| order by TimeBucket desc, Events desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for Microsoft 365 Copilot conversations that mix internal grounding sources with guest participants from external tenants — the channel through which sensitive RAG content most often leaks across the tenant boundary. Triggers when an agent in a c...",
+            "name": "description"
+          },
+          {
+            "value": "Exfiltration,Collection",
+            "name": "tactics"
+          },
+          {
+            "value": "T1567,T1213",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/4d6a1e53-2e5c-4f7b-8a9d-8b3e7c5f6a34')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Anomalous AI agent delegation chains",
+        "query": "let window = 7d;\nlet agentEvents =\n    CopilotActivity\n    | where TimeGenerated > ago(window)\n    | extend\n        ConversationId = tostring(LLMEventData.ConversationId),\n        ParentAgentId = tostring(LLMEventData.ParentAgentId),\n        ParentAgentName = tostring(LLMEventData.ParentAgentName),\n        DelegationType = tostring(LLMEventData.DelegationType),\n        TouchedResource = tostring(LLMEventData.ResourceUri)\n    | where isnotempty(ConversationId);\nlet chains =\n    agentEvents\n    | summarize\n        AgentChain = make_set(AgentName, 16),\n        AgentIds = make_set(AgentId, 16),\n        ParentAgents = make_set(ParentAgentName, 16),\n        Delegations = make_set(DelegationType, 16),\n        Resources = make_set(TouchedResource, 32),\n        Actors = make_set(ActorName, 16),\n        Tenants = make_set(TenantId, 8),\n        FirstSeen = min(TimeGenerated),\n        LastSeen = max(TimeGenerated),\n        EventCount = count()\n        by ConversationId\n    | extend\n        ChainLength = array_length(AgentChain),\n        CrossTenant = array_length(Tenants) > 1,\n        CrossUser = array_length(Actors) > 1;\nchains\n| where ChainLength >= 3 or CrossTenant or CrossUser\n| order by ChainLength desc, LastSeen desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for Microsoft 365 Copilot conversations where one agent delegates to another agent (and possibly a third) within a short window. Long delegation chains expand blast radius: each hop inherits a new identity and toolset and obscures the original pr...",
+            "name": "description"
+          },
+          {
+            "value": "LateralMovement,Discovery",
+            "name": "tactics"
+          },
+          {
+            "value": "T1078,T1087",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/4a9c8d5e-7b2f-4e1a-9c3d-1f6a8b9c2d3e')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Grounding source enumeration (RAG recon)",
+        "query": "let recentWindow = 1h;\nlet baselineWindow = 14d;\nlet recent =\n    CopilotActivity\n    | where TimeGenerated > ago(recentWindow)\n    | where RecordType == \"CopilotInteraction\"\n    | mv-expand src = LLMEventData.RagSources\n    | extend SourceUri = tolower(tostring(src))\n    | where isnotempty(SourceUri)\n    | summarize\n        RecentDistinctSources = dcount(SourceUri),\n        RecentSampleSources   = make_set(SourceUri, 25),\n        RecentCalls           = count()\n        by AgentId, AgentName, ActorName = tostring(coalesce(ActorName, column_ifexists('ActorUPN', '')));\nlet baseline =\n    CopilotActivity\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n    | where RecordType == \"CopilotInteraction\"\n    | mv-expand src = LLMEventData.RagSources\n    | extend SourceUri = tolower(tostring(src))\n    | where isnotempty(SourceUri)\n    | summarize BaselineDistinctSources = dcount(SourceUri)\n        by AgentId, ActorName = tostring(coalesce(ActorName, column_ifexists('ActorUPN', '')));\nrecent\n| join kind=leftouter baseline on AgentId, ActorName\n| extend BaselineDistinctSources = coalesce(BaselineDistinctSources, 0)\n| extend SpikeRatio = iff(BaselineDistinctSources > 0,\n                          todouble(RecentDistinctSources) / todouble(BaselineDistinctSources),\n                          todouble(RecentDistinctSources))\n| where RecentDistinctSources >= 25 and (BaselineDistinctSources == 0 or SpikeRatio >= 5.0)\n| project TimeGenerated = now(), AgentId, AgentName, ActorName,\n          RecentDistinctSources, BaselineDistinctSources, SpikeRatio,\n          RecentCalls, RecentSampleSources\n| order by SpikeRatio desc, RecentDistinctSources desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for Microsoft 365 Copilot agents or users that touch an unusually diverse set of grounding sources (sites, document libraries, mailboxes) in a short window — the RAG-equivalent of network port-scanning. Common pre-cursor to data discovery, sensit...",
+            "name": "description"
+          },
+          {
+            "value": "Discovery,Collection",
+            "name": "tactics"
+          },
+          {
+            "value": "T1083,T1213",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/3c24b54c-b2f5-c306-15f7-84a4b5c4d4e9')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Hallucination and output quality drift signals",
+        "query": "let hallucinationMarkers = dynamic([\n    \"as an ai\", \"i am not sure but\", \"i made that up\",\n    \"i cannot verify\", \"according to my knowledge\",\n    \"i don't have real-time\", \"i hallucinated\"\n]);\nlet contradictionMarkers = dynamic([\n    \"actually, that was wrong\",\n    \"scratch that\", \"ignore my previous answer\",\n    \"correction:\", \"i misspoke\", \"let me revise\"\n]);\nlet confidenceThreshold = 0.4;\nCopilotActivity\n| where TimeGenerated > ago(7d)\n| extend\n    Response = tostring(LLMEventData.Response),\n    Confidence = toreal(LLMEventData.ResponseConfidence),\n    RagSources = LLMEventData.RagSources,\n    ConversationId = tostring(LLMEventData.ConversationId)\n| extend\n    LowerResponse = tolower(Response),\n    CitedUrls = extract_all(@\"(https?://[^\\s\\)\\\"\"<]+)\", Response)\n| extend\n    RagUriSet = tolower(tostring(RagSources))\n| extend\n    UncitedUrls = set_difference(CitedUrls, dynamic([])),\n    HasHallucinationMarker = LowerResponse has_any (hallucinationMarkers),\n    HasContradictionMarker = LowerResponse has_any (contradictionMarkers),\n    LowConfidence = isnotnull(Confidence) and Confidence < confidenceThreshold\n| where HasHallucinationMarker or HasContradictionMarker or LowConfidence\n| project\n    TimeGenerated, AgentId, AgentName, ActorName, ConversationId,\n    Confidence, HasHallucinationMarker, HasContradictionMarker,\n    LowConfidence, CitedUrls, Response, TenantId\n| order by TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for Microsoft 365 Copilot responses that show quality-degradation signals: low model-reported confidence, self-contradiction markers, refusal-then-comply patterns, or hallucination markers such as citing non-existent URLs / files that did not app...",
+            "name": "description"
+          },
+          {
+            "value": "Impact",
+            "name": "tactics"
+          },
+          {
+            "value": "T1496",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/1a02932a-90d3-a1e4-f3d5-628293a2b2c7')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Multi-turn jailbreak escalation hunting",
+        "query": "// Confirmed schema: per-message JailbreakDetected aggregated by ThreadId.\n// A thread with two or more flagged messages is a multi-turn jailbreak\n// attempt (single-turn jailbreaks are already covered by the analytic).\nlet window = 1d;\nCopilotActivity\n| where TimeGenerated > ago(window)\n| where RecordType == \"CopilotInteraction\"\n| extend ThreadId = tostring(LLMEventData.ThreadId)\n| mv-expand m = LLMEventData.Messages\n| extend\n    MessageId = tostring(m.Id),\n    IsPrompt = tobool(m.isPrompt),\n    JbDetected = tobool(m.JailbreakDetected)\n| summarize\n    Messages = count(),\n    Prompts = countif(IsPrompt),\n    JailbreakHits = countif(JbDetected),\n    PromptJailbreakHits = countif(JbDetected and IsPrompt),\n    Agents = make_set(AgentName, 4),\n    Actors = make_set(ActorName, 4),\n    JbMessageIds = make_set_if(MessageId, JbDetected, 32),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by ThreadId, TenantId\n| where JailbreakHits >= 2\n| extend EscalationRatio = todouble(JailbreakHits) / todouble(Messages)\n| order by JailbreakHits desc, EscalationRatio desc, LastSeen desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for Microsoft 365 Copilot conversations where a single user gradually escalates the prompts against an agent: starting with benign questions, then adding role-play / persona language, then asking for policy-bypass output. Multi-turn jailbreaks ev...",
+            "name": "description"
+          },
+          {
+            "value": "DefenseEvasion,InitialAccess",
+            "name": "tactics"
+          },
+          {
+            "value": "T1562,T1059",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/9f4b32a3-c07e-4365-4182-6e1f30417283')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Agent memory or context poisoning persistence",
+        "query": "let poisonTokens = dynamic([\n    \"ignore previous instructions\", \"ignore all prior\",\n    \"you are now\", \"from now on you\", \"act as\",\n    \"system override\", \"developer mode\",\n    \"exfiltrate\", \"send to attacker\", \"leak to\",\n    \"do not refuse\", \"bypass safety\", \"remove restrictions\"\n]);\nlet recentWindow = 7d;\n// 1) Memory / instruction writes by non-owner actors\nlet writes =\n    union isfuzzy=true\n        (AuditLogs\n         | extend\n             _OperationName = tostring(OperationName),\n             _Initiator     = tolower(tostring(InitiatedBy.user.userPrincipalName)),\n             _TargetId      = tostring(TargetResources[0].id),\n             _TargetName    = tostring(TargetResources[0].displayName),\n             _OwnerUpn      = \"\",\n             _Payload       = tolower(tostring(TargetResources[0].modifiedProperties))),\n        (CopilotAdminActivity\n         | extend\n             _OperationName = tostring(column_ifexists('OperationName', '')),\n             _Initiator     = tolower(tostring(coalesce(column_ifexists('ActorUPN', ''),\n                                                        column_ifexists('ActorName', '')))),\n             _TargetId      = tostring(column_ifexists('AgentId', '')),\n             _TargetName    = tostring(column_ifexists('AgentName', '')),\n             _OwnerUpn      = tolower(tostring(column_ifexists('AgentOwnerUPN', ''))),\n             _Payload       = tolower(tostring(coalesce(column_ifexists('NewValue', ''),\n                                                        column_ifexists('ModifiedProperties', '')))))\n    | where TimeGenerated > ago(recentWindow)\n    | where (_OperationName has_any (\"Memory\", \"Instruction\", \"SystemPrompt\",\n                                     \"CustomInstruction\", \"GroundingSource\"))\n            and (_OperationName has_any (\"Update\", \"Set\", \"Add\", \"Write\", \"Modify\"))\n    | extend\n        ActorUpn      = _Initiator,\n        AgentId       = _TargetId,\n        AgentName     = _TargetName,\n        OwnerUpn      = _OwnerUpn,\n        Payload       = _Payload,\n        ByNonOwner    = isnotempty(_OwnerUpn) and _Initiator != _OwnerUpn,\n        HasPoisonText = _Payload has_any (poisonTokens)\n    | where ByNonOwner or HasPoisonText\n    | project WriteTime = TimeGenerated, ActorUpn, AgentId, AgentName,\n              OwnerUpn, ByNonOwner, HasPoisonText, OperationName = _OperationName, Payload;\n// 2) Repeated suspicious phrase across distinct conversations of one agent\nlet carryOver =\n    CopilotActivity\n    | where TimeGenerated > ago(recentWindow)\n    | where RecordType == \"CopilotInteraction\"\n    | extend\n        ResponseLower = tolower(tostring(LLMEventData.Response)),\n        ConvId        = tostring(LLMEventData.ConversationId)\n    | mv-apply tok = poisonTokens to typeof(string) on (\n          where ResponseLower has tok\n        | project Token = tok\n      )\n    | summarize\n        DistinctConvs = dcount(ConvId),\n        AffectedActors = make_set(tostring(coalesce(column_ifexists('ActorUPN', ''), ActorName)), 50),\n        SampleConvs    = make_set(ConvId, 10),\n        Hits           = count()\n        by AgentId, AgentName, Token\n    | where DistinctConvs >= 3;\nunion\n    (writes | extend Source = 'instruction-write'),\n    (carryOver | extend Source = 'cross-conversation-carryover',\n                 WriteTime = now(),\n                 ActorUpn = '<see AffectedActors>',\n                 OwnerUpn = '',\n                 ByNonOwner = false,\n                 HasPoisonText = true,\n                 OperationName = strcat('carryover token: ', Token),\n                 Payload = strcat('hits=', Hits, ' convs=', DistinctConvs))\n| project WriteTime, Source, AgentId, AgentName, ActorUpn, OwnerUpn,\n          ByNonOwner, HasPoisonText, OperationName, Payload\n| order by WriteTime desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for indicators that an agent's persistent memory, custom instructions, or grounding context has been poisoned and is influencing subsequent unrelated conversations: - Custom-instruction / memory write events from non-owner actors. - The same susp...",
+            "name": "description"
+          },
+          {
+            "value": "Persistence,DefenseEvasion",
+            "name": "tactics"
+          },
+          {
+            "value": "T1546,T1556",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/5b0d9e6f-8c3a-4f2b-0d4e-2a7b9c0d3e4f')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Off-hours or anomalous-geo agent usage",
+        "query": "let lookback = 30d;\nlet recentWindow = 1d;\nlet usual =\n    SigninLogs\n    | where TimeGenerated between (ago(lookback) .. ago(recentWindow))\n    | where ResultType == 0\n    | extend Hour = hourofday(TimeGenerated), Country = tostring(LocationDetails.countryOrRegion)\n    | summarize UsualHours = make_set(Hour, 24), UsualCountries = make_set(Country, 50)\n        by UserPrincipalName = tolower(UserPrincipalName);\nCopilotActivity\n| where TimeGenerated > ago(recentWindow)\n| where RecordType == \"CopilotInteraction\"\n| extend ActorUpn = tolower(tostring(coalesce(column_ifexists('ActorUPN', ''), ActorName)))\n| extend Hour = hourofday(TimeGenerated)\n| join kind=leftouter usual on $left.ActorUpn == $right.UserPrincipalName\n| extend ActorCountry = tostring(coalesce(column_ifexists('Location', ''),\n                                          column_ifexists('Country', '')))\n| extend\n    OffHours      = isnotnull(UsualHours) and not(set_has_element(UsualHours, Hour)),\n    AnomalousGeo  = isnotempty(ActorCountry) and isnotnull(UsualCountries)\n                    and not(set_has_element(UsualCountries, ActorCountry))\n| where OffHours or AnomalousGeo\n| project TimeGenerated, AgentId, AgentName, ActorUpn, Hour, ActorCountry,\n          OffHours, AnomalousGeo, UsualHours, UsualCountries, TenantId\n| order by TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for Microsoft 365 Copilot sessions that occur outside the actor's normal business hours or from a country/region the actor has not used in the last 30 days. Common indicator of session theft, OAuth token abuse, or geographically displaced imperso...",
+            "name": "description"
+          },
+          {
+            "value": "InitialAccess,DefenseEvasion",
+            "name": "tactics"
+          },
+          {
+            "value": "T1078,T1078.004",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/8e3a2192-bf6d-4254-3071-5d0e2f306172')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Plugin or connector install anomaly",
+        "query": "let lookback = 30d;\nlet recentWindow = 1d;\nlet pluginEvents =\n    union isfuzzy=true\n        (AuditLogs\n         | extend\n             _OperationName = tostring(OperationName),\n             _RecordType    = \"AuditLogs\",\n             _Initiator     = tolower(tostring(InitiatedBy.user.userPrincipalName)),\n             _TargetName    = tostring(TargetResources[0].displayName)),\n        (OfficeActivity\n         | extend\n             _OperationName = tostring(Operation),\n             _RecordType    = tostring(RecordType),\n             _Initiator     = tolower(tostring(UserId)),\n             _TargetName    = tostring(coalesce(column_ifexists('ItemName', ''), Operation))),\n        (CopilotAdminActivity\n         | extend\n             _OperationName = tostring(column_ifexists('OperationName', '')),\n             _RecordType    = \"CopilotAdminActivity\",\n             _Initiator     = tolower(tostring(coalesce(column_ifexists('ActorUPN', ''),\n                                                        column_ifexists('ActorName', '')))),\n             _TargetName    = tostring(coalesce(column_ifexists('PluginName', ''),\n                                                column_ifexists('ResourceName', ''))))\n    | where TimeGenerated > ago(lookback)\n    | where (_OperationName has_any (\"Install\", \"Add\", \"Enable\")\n             and _OperationName has_any (\"Plugin\", \"Connector\", \"Agent\", \"App\", \"Extension\"))\n            or _RecordType in (\"MicrosoftCopilotAdminAction\", \"CopilotAdminActivity\")\n    | project TimeGenerated, ActorUpn = _Initiator, PluginName = _TargetName,\n              LowerPlugin = tolower(_TargetName), _OperationName, _RecordType;\nlet approved =\n    _GetWatchlist('CopilotApprovedPlugins')\n    | project ApprovedPlugin = tolower(tostring(column_ifexists('PluginName', '')))\n    | where isnotempty(ApprovedPlugin);\nlet baseline =\n    pluginEvents\n    | where TimeGenerated between (ago(lookback) .. ago(recentWindow))\n    | summarize BaselineInstalls = count() by ActorUpn;\nlet recent =\n    pluginEvents\n    | where TimeGenerated > ago(recentWindow)\n    | summarize\n        RecentInstalls   = count(),\n        DistinctPlugins  = dcount(LowerPlugin),\n        PluginSample     = make_set(PluginName, 25)\n        by ActorUpn;\nrecent\n| join kind=leftouter baseline on ActorUpn\n| extend BaselineInstalls = coalesce(BaselineInstalls, 0)\n| extend SpikeRatio = iff(BaselineInstalls > 0,\n                          todouble(RecentInstalls) / todouble(BaselineInstalls),\n                          todouble(RecentInstalls))\n| where (BaselineInstalls == 0 and RecentInstalls >= 3)\n     or SpikeRatio >= 5.0\n     or DistinctPlugins >= 5\n| join kind=leftouter (\n      pluginEvents\n      | where TimeGenerated > ago(recentWindow)\n      | join kind=leftanti approved on $left.LowerPlugin == $right.ApprovedPlugin\n      | summarize UnapprovedPlugins = make_set(PluginName, 25) by ActorUpn\n  ) on ActorUpn\n| project TimeGenerated = now(), ActorUpn, RecentInstalls, BaselineInstalls,\n          SpikeRatio, DistinctPlugins, PluginSample, UnapprovedPlugins\n| order by SpikeRatio desc, RecentInstalls desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for new Microsoft 365 Copilot plugins / connectors / declarative agents enabled by an actor that has not previously installed any, or installed at a rate sharply higher than baseline. Catches: - Mass plugin enablement before exfiltration. - Insta...",
+            "name": "description"
+          },
+          {
+            "value": "Persistence,PrivilegeEscalation",
+            "name": "tactics"
+          },
+          {
+            "value": "T1098,T1505",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/3c5f0d42-1d4b-4e6a-9f8c-7a2d6b4e5f23')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Prompt injection patterns in AI agent prompts",
+        "query": "let injectionPhrases = dynamic([\n    \"ignore previous instructions\",\n    \"ignore prior instructions\",\n    \"disregard the above\",\n    \"you are now\",\n    \"act as system\",\n    \"system prompt:\",\n    \"developer mode\",\n    \"bypass safety\",\n    \"reveal your prompt\",\n    \"print your instructions\",\n    \"exfiltrate\",\n    \"send to attacker\"\n]);\nlet toolCoercion = dynamic([\n    \"regardless of restrictions\",\n    \"without confirming\",\n    \"skip approval\",\n    \"use admin privileges\",\n    \"elevate to\"\n]);\nCopilotActivity\n| where TimeGenerated > ago(7d)\n| extend\n    Prompt = tostring(LLMEventData.Prompt),\n    ToolInput = tostring(LLMEventData.ToolInput),\n    ToolName = tostring(LLMEventData.ToolName),\n    ConversationId = tostring(LLMEventData.ConversationId)\n| extend LowerPrompt = tolower(strcat(Prompt, \" \", ToolInput))\n| where LowerPrompt has_any (injectionPhrases)\n    or LowerPrompt has_any (toolCoercion)\n    or LowerPrompt matches regex @\"data:[a-z/+.\\-]+;base64,[A-Za-z0-9+/=]{200,}\"\n| extend MatchedInjection = set_intersect(split(LowerPrompt, \" \"), injectionPhrases)\n| project\n    TimeGenerated, AgentId, AgentName, ActorName, ActorUserId,\n    ToolName, ConversationId, Prompt, ToolInput, SrcIpAddr,\n    TenantId\n| order by TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts Microsoft 365 Copilot prompts and tool inputs for known prompt-injection markers: instructions to ignore previous guidance, role-override phrases, tool-coercion phrases, and base64 / data-URI blobs embedded in user content. Use this to find promp...",
+            "name": "description"
+          },
+          {
+            "value": "InitialAccess,Execution",
+            "name": "tactics"
+          },
+          {
+            "value": "T1059,T1204",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/6c1e0f70-9d4b-4032-1e5f-3b8c0d1e4f50')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Sensitivity label downgrade in agent output",
+        "query": "let highLabels = dynamic([\n    \"confidential\", \"highly confidential\", \"restricted\",\n    \"internal only\", \"secret\", \"top secret\"\n]);\nlet lowerTrustSinks = dynamic([\n    \"/personal/\", \"guest\", \"external\", \"anonymous\",\n    \"outlook.com\", \"gmail.com\", \"hotmail.com\",\n    \"proton.me\", \"yahoo.com\"\n]);\nCopilotActivity\n| where TimeGenerated > ago(7d)\n| where RecordType == \"CopilotInteraction\"\n| extend\n    RagSourcesText = tolower(tostring(LLMEventData.RagSources)),\n    ResponseText   = tolower(tostring(LLMEventData.Response)),\n    OutputLabel    = tolower(tostring(column_ifexists('OutputSensitivityLabel', ''))),\n    RecipientsText = tolower(tostring(column_ifexists('Recipients', ''))),\n    DestinationUri = tolower(tostring(column_ifexists('DestinationUri', '')))\n| extend\n    SourceHasHighLabel = RagSourcesText has_any (highLabels),\n    OutputHasHighLabel = OutputLabel has_any (highLabels),\n    ToLowerTrustSink   = RecipientsText has_any (lowerTrustSinks)\n                        or DestinationUri has_any (lowerTrustSinks)\n| where SourceHasHighLabel and (not(OutputHasHighLabel) or ToLowerTrustSink)\n| project TimeGenerated, AgentId, AgentName, ActorName,\n          SourceHasHighLabel, OutputHasHighLabel, ToLowerTrustSink,\n          OutputLabel, RecipientsText, DestinationUri, TenantId\n| order by TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for Microsoft 365 Copilot responses that reference highly classified grounding documents (Confidential, Highly Confidential, Restricted) but produce output sent to a lower-trust surface (external recipient, public site, personal OneDrive, chat wi...",
+            "name": "description"
+          },
+          {
+            "value": "Exfiltration,Collection",
+            "name": "tactics"
+          },
+          {
+            "value": "T1530,T1213",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/4d35c65d-c306-d417-2608-95b5c6d5e5fa')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Microsoft 365 Copilot - Trace-level interaction-path anomalies",
+        "query": "// Confirmed schema has no TraceStepId; we use ThreadId + per-interaction\n// cardinality (Messages, AISystemPlugin, AccessedResources) as proxies\n// for trace shape. Long threads, rapid-fire bursts, and sustained high\n// message rates are surfaced.\nlet window = 1d;\nCopilotActivity\n| where TimeGenerated > ago(window)\n| where RecordType == \"CopilotInteraction\"\n| extend ThreadId = tostring(LLMEventData.ThreadId)\n| where isnotempty(ThreadId)\n| extend\n    InteractionMessages = array_length(LLMEventData.Messages),\n    InteractionPlugins = array_length(LLMEventData.AISystemPlugin),\n    InteractionResources = array_length(LLMEventData.AccessedResources)\n| summarize\n    Interactions = count(),\n    TotalMessages = sum(InteractionMessages),\n    TotalPlugins = sum(InteractionPlugins),\n    TotalResources = sum(InteractionResources),\n    Plugins = make_set(tostring(LLMEventData.AISystemPlugin), 16),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by ThreadId, AgentId, AgentName, ActorUserId\n| extend DurationMin = datetime_diff('minute', LastSeen, FirstSeen)\n| extend MsgPerMin = iff(DurationMin > 0, todouble(TotalMessages) / DurationMin, todouble(TotalMessages))\n| where (TotalMessages > 100)\n    or (Interactions > 50 and DurationMin < 60)\n    or (MsgPerMin > 5 and DurationMin >= 5)\n| order by TotalMessages desc, MsgPerMin desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for Microsoft 365 Copilot conversations whose execution trace is abnormal: excessive trace length, tight tool-call loops (the same tool fired more than ten times in five minutes), or retry storms on a single tool. These are the trace-level signat...",
+            "name": "description"
+          },
+          {
+            "value": "Impact,Execution",
+            "name": "tactics"
+          },
+          {
+            "value": "T1499,T1059",
+            "name": "techniques"
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "analyticRuleCount": {
+      "value": 11,
+      "type": "int"
+    },
+    "huntingQueryCount": {
+      "value": 14,
+      "type": "int"
+    },
+    "analyticRulesEnabled": {
+      "value": "[parameters('enableAnalyticRules')]",
+      "type": "bool"
+    }
+  }
+}
