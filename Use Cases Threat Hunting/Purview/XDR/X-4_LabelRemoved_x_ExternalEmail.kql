@@ -1,0 +1,23 @@
+// X-4 - Sensitivity-label removal ⨯ EmailEvents send to external recipient (within 30 min)
+// Run in: security.microsoft.com -> Hunting -> Advanced hunting (UNIFIED PORTAL)
+// NOTE: Edit "int.zava-corp.com" to your internal domain.
+let labelStripped =
+    MicrosoftPurviewInformationProtection
+    | where TimeGenerated > ago(1d)
+    | where LabelEventType == "LabelRemoved"
+       or (isnotempty(OldSensitivityLabelId) and isempty(SensitivityLabelId))
+    | project StripTime=TimeGenerated, AccountUpn=UserId, ItemName, ObjectId,
+              OldLabel=OldSensitivityLabelId;
+let extEmail =
+    EmailEvents
+    | where Timestamp > ago(1d)
+    | where SenderFromDomain == "int.zava-corp.com"
+    | where RecipientEmailAddress !endswith "@int.zava-corp.com"
+    | project EmailTime=Timestamp, AccountUpn=SenderFromAddress, Subject, RecipientEmailAddress,
+              AttachmentCount, NetworkMessageId;
+labelStripped
+| join kind=inner extEmail on AccountUpn
+| where EmailTime between (StripTime .. (StripTime + 30m))
+| project StripTime, EmailTime, AccountUpn, ItemName, OldLabel,
+          RecipientEmailAddress, Subject, AttachmentCount
+| order by StripTime desc

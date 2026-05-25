@@ -1,0 +1,14 @@
+// XDR-4 - Behavior -> Event drill-through
+// Run in: security.microsoft.com -> Hunting -> Advanced hunting
+// Joins anomalous Insider Risk behaviors with concrete file events on same user, same window
+DataSecurityBehaviors
+| where Timestamp > ago(7d) and IsAnomalous == 1
+| project BehaviorId, AccountUpn, ActionTypeBehavior=ActionType, Categories, StartTime, EndTime
+| join kind=inner (
+    DataSecurityEvents
+    | where Timestamp > ago(7d)
+    | project Timestamp, AccountUpn, ActionType, ObjectId, ApplicationNames, Workload, ActivityId
+) on AccountUpn
+| where Timestamp between (StartTime .. EndTime)
+| project ActionTypeBehavior, Categories, AccountUpn, Timestamp, ActionType, ObjectId, ApplicationNames, Workload
+| order by AccountUpn, Timestamp asc

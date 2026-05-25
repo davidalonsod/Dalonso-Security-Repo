@@ -1,0 +1,21 @@
+// X-1 - Purview label downgrade ⨯ CloudAppEvents external upload (10 min window)
+// Run in: security.microsoft.com -> Hunting -> Advanced hunting (UNIFIED PORTAL ONLY)
+// Requires: Sentinel onboarded to Defender XDR so MicrosoftPurviewInformationProtection is queryable beside CloudAppEvents
+let downgrades =
+    MicrosoftPurviewInformationProtection
+    | where TimeGenerated > ago(7d)
+    | where isnotempty(OldSensitivityLabelId) and OldSensitivityLabelId != SensitivityLabelId
+    | project DowngradeTime=TimeGenerated, AccountUpn=UserId, ItemName, ObjectId,
+              OldLabel=OldSensitivityLabelId, NewLabel=SensitivityLabelId;
+let cloudUploads =
+    CloudAppEvents
+    | where Timestamp > ago(7d)
+    | where ActionType in ("FileUploaded","FileSharedExternally","FileDownloaded")
+    | project UploadTime=Timestamp, AccountUpn=AccountObjectId, AccountUserName=AccountDisplayName,
+              ApplicationName=Application, ActionType, ObjectName, IPAddress;
+downgrades
+| join kind=inner cloudUploads on AccountUpn
+| where UploadTime between (DowngradeTime .. (DowngradeTime + 10m))
+| project DowngradeTime, UploadTime, AccountUpn, ItemName, ObjectName,
+          OldLabel, NewLabel, ApplicationName, ActionType, IPAddress
+| order by DowngradeTime desc

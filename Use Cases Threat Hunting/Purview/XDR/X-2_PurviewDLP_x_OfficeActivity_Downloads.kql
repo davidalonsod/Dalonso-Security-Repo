@@ -1,0 +1,23 @@
+// X-2 - Purview DLP match ⨯ OfficeActivity SharePoint download by same user (±30 min)
+// Run in: security.microsoft.com -> Hunting -> Advanced hunting (UNIFIED PORTAL)
+let dlpMatches =
+    MicrosoftPurviewInformationProtection
+    | where TimeGenerated > ago(1d)
+    | where isnotempty(ExecutionRuleName)
+    | project DlpTime=TimeGenerated, UserId, ItemName, PolicyName, ExecutionRuleName;
+let spDownloads =
+    OfficeActivity
+    | where TimeGenerated > ago(1d)
+    | where Operation in ("FileDownloaded","FileSyncDownloadedFull","FileAccessed")
+    | project SpTime=TimeGenerated, UserId, OfficeObjectId, ClientIP, UserAgent;
+dlpMatches
+| join kind=inner spDownloads on UserId
+| where SpTime between (DlpTime - 30m .. DlpTime + 30m)
+| summarize Hits=count(),
+            DlpRules=make_set(ExecutionRuleName, 10),
+            Files=make_set(ItemName, 20),
+            SpObjects=make_set(OfficeObjectId, 20),
+            FirstSeen=min(DlpTime), LastSeen=max(DlpTime)
+        by UserId, ClientIP
+| where Hits >= 5
+| order by Hits desc

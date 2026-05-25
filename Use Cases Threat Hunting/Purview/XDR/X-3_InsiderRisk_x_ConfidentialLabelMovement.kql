@@ -1,0 +1,17 @@
+// X-3 - Insider Risk behavior ⨯ Purview confidential label movement (±1h)
+// Run in: security.microsoft.com -> Hunting -> Advanced hunting (UNIFIED PORTAL)
+let irBehaviors =
+    DataSecurityBehaviors
+    | where Timestamp > ago(7d)
+    | where IsAnomalous == 1
+    | project IrTime=Timestamp, AccountUpn, ActionType, Categories, ActivityCount;
+let confMoves =
+    MicrosoftPurviewInformationProtection
+    | where TimeGenerated > ago(7d)
+    | where LabelName has_any ("Confidential","Highly Confidential","Restricted")
+    | project MoveTime=TimeGenerated, AccountUpn=UserId, ItemName, ObjectId, Operation, LabelName, Receivers;
+irBehaviors
+| join kind=inner confMoves on AccountUpn
+| where MoveTime between (IrTime - 1h .. IrTime + 1h)
+| project IrTime, MoveTime, AccountUpn, ActionType, Categories, Operation, LabelName, ItemName, Receivers
+| order by IrTime desc
