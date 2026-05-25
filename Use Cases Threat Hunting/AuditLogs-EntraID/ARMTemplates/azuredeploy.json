@@ -1,0 +1,1000 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace where Microsoft Sentinel is deployed"
+      }
+    },
+    "enableAnalyticRules": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "If false, all alert rules deploy disabled."
+      }
+    },
+    "watchlistAlias": {
+      "type": "string",
+      "defaultValue": "NetworkAllowlist",
+      "metadata": {
+        "description": "Trusted IP allowlist watchlist alias."
+      }
+    },
+    "functionAlias": {
+      "type": "string",
+      "defaultValue": "ExcludeAllowlistedIPs_AuditLogs",
+      "metadata": {
+        "description": "savedSearches function used by rules."
+      }
+    },
+    "watchlistRawContent": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional CSV override for watchlist seed."
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/', parameters('watchlistAlias'))]",
+      "properties": {
+        "displayName": "[parameters('watchlistAlias')]",
+        "description": "Trusted/sanctioned IPs and CIDR ranges to exclude from AuditLogs/SigninLogs detections.",
+        "provider": "Customer",
+        "source": "Local file",
+        "itemsSearchKey": "IPOrRange",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "[variables('watchlistEffectiveContent')]"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', parameters('functionAlias'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "ExcludeAllowlistedIPs_AuditLogs",
+        "category": "Functions",
+        "query": "let _ips = _GetWatchlist('NetworkAllowlist') | summarize Ranges = make_list(IPOrRange);\nlet _allowed = toscalar(_ips);\niif(isempty(ip) or array_length(_allowed) == 0, false, ipv4_is_in_any_range(ip, _allowed))",
+        "functionAlias": "[parameters('functionAlias')]",
+        "functionParameters": "ip:string",
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-001-AzureHound-DirectoryEnumeration')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "AzureHound DirectoryEnumeration",
+        "query": "// =========================================================================\n// HQ-001: AzureHound / BloodHound \u00e2\u20ac\u201c Directory Enumeration via Group Policy Reads\n// =========================================================================\n// Description : Detects burst reads of GroupLifecyclePolicies, a low-noise\n//               signal produced by AzureHound and ROADtools when they map \n//               the tenant's group model. Five or more calls in one hour from\n//               the same actor is abnormal for normal user/admin activity.\n// MITRE ATT&CK: TA0007 Discovery\n//               T1069.003 \u00e2\u20ac\u201c Permission Groups Discovery: Cloud Groups\n//               T1087.004 \u00e2\u20ac\u201c Account Discovery: Cloud Account\n// Tools       : AzureHound, BloodHoundAD, ROADtools\n// Severity    : Medium\n// Data Source : AuditLogs (Azure Active Directory)\n// =========================================================================\n\nAuditLogs\n| where TimeGenerated > ago(1d)\n| where ActivityDisplayName == \"GroupLifecyclePolicies_Get\"\n| extend InitiatedByUPN  = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByUser = tostring(InitiatedBy.user.displayName)\n| extend InitiatedByApp  = tostring(InitiatedBy.app.displayName)\n| extend InitiatedBySPId = tostring(InitiatedBy.app.servicePrincipalId)\n| extend Actor = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| summarize\n    ActionCount    = count(),\n    FirstSeen      = min(TimeGenerated),\n    LastSeen       = max(TimeGenerated),\n    Services       = make_set(LoggedByService),\n    CorrelationIds = make_set(CorrelationId, 5)\n    by Actor, InitiatedBySPId, AADTenantId, bin(TimeGenerated, 1h)\n| where ActionCount >= 5\n| extend DurationMinutes = datetime_diff('minute', LastSeen, FirstSeen)\n| extend RatePerMinute   = round(toreal(ActionCount) / iff(DurationMinutes == 0, 1.0, toreal(DurationMinutes)), 2)\n| project-reorder TimeGenerated, Actor, ActionCount, RatePerMinute, DurationMinutes, FirstSeen, LastSeen\n| order by ActionCount desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - AzureHound DirectoryEnumeration"
+          },
+          {
+            "name": "tactics",
+            "value": "Discovery"
+          },
+          {
+            "name": "techniques",
+            "value": "T1069.003,T1087.004"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-002-NewApp-ImmediateCredentialAdd')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "NewApp ImmediateCredentialAdd",
+        "query": "// =========================================================================\n// HQ-002: New Application Registration with Immediate Credential Addition\n// =========================================================================\n// Description : Joins app creation events with credential-add events within\n//               a 5-minute window. Legitimate DevOps pipelines register apps\n//               and add secrets, but so do ROADtools and MicroBurst when\n//               setting up OAuth infrastructure for token abuse or persistence.\n//               Review the actor and app display name for anomalies.\n// MITRE ATT&CK: TA0003 Persistence\n//               T1098.001 \u00e2\u20ac\u201c Additional Cloud Credentials\n// Tools       : ROADtools, MicroBurst, AADInternals, CloudKatana\n// Severity    : Medium-High\n// Data Source : AuditLogs (Azure Active Directory)\n// =========================================================================\n\nlet Lookback       = 1d;\nlet CredWindow     = 5m;\n\nlet AppCreations = AuditLogs\n| where TimeGenerated > ago(Lookback)\n| where ActivityDisplayName in (\n    \"Add application\",\n    \"Create application \\u2013 Certificates and secrets management \")\n| extend AppObjectId   = tostring(TargetResources[0].id)\n| extend AppName       = tostring(TargetResources[0].displayName)\n| extend CreatorUPN    = tostring(InitiatedBy.user.userPrincipalName)\n| extend CreatorApp    = tostring(InitiatedBy.app.displayName)\n| extend CreatorActor  = iff(isnotempty(CreatorUPN), CreatorUPN, CreatorApp)\n| project CreatedAt = TimeGenerated, AppObjectId, AppName, CreatorActor, CreatorUPN, CreatorApp, CorrelationId;\n\nlet CredAdds = AuditLogs\n| where TimeGenerated > ago(Lookback)\n| where ActivityDisplayName in (\n    \"Update application \\u2013 Certificates and secrets management \",\n    \"Create application \\u2013 Certificates and secrets management \",\n    \"Add service principal credentials\",\n    \"Update service principal\")\n| mv-expand Prop = TargetResources[0].modifiedProperties\n| where tostring(Prop.displayName) has_any (\"KeyCredentials\",\"PasswordCredentials\",\"Credential\",\"Secret\",\"Certificate\")\n| extend AppObjectId    = tostring(TargetResources[0].id)\n| extend AppName        = tostring(TargetResources[0].displayName)\n| extend CredActorUPN   = tostring(InitiatedBy.user.userPrincipalName)\n| extend CredActorApp   = tostring(InitiatedBy.app.displayName)\n| extend CredActor      = iff(isnotempty(CredActorUPN), CredActorUPN, CredActorApp)\n| extend CredType       = tostring(Prop.displayName)\n| project CredAddedAt = TimeGenerated, AppObjectId, AppName, CredActor, CredActorUPN, CredType;\n\nAppCreations\n| join kind=inner CredAdds on AppObjectId\n| where CredAddedAt > CreatedAt\n| where CredAddedAt <= CreatedAt + CredWindow\n| extend MinutesBetween = datetime_diff('minute', CredAddedAt, CreatedAt)\n| project\n    AppName,\n    AppObjectId,\n    CreatedAt,\n    CredAddedAt,\n    MinutesBetween,\n    CreatorActor,\n    CredActor,\n    CredType\n| order by CreatedAt desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - NewApp ImmediateCredentialAdd"
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence,CredentialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1098.001"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-003-OAuth-ConsentGrants-MultiApp')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "OAuth ConsentGrants MultiApp",
+        "query": "// =========================================================================\n// HQ-003: OAuth Consent Grants \u00e2\u20ac\u201c Actors with Multiple App Consents\n// =========================================================================\n// Description : Surfaces users or service principals that consented to,\n//               or granted delegated permissions for, multiple applications\n//               within the last 7 days. Token-abuse tools (TokenTactics,\n//               ROADtools) often consent to custom apps to obtain broad\n//               delegated tokens. Also covers admin-consent phishing.\n// MITRE ATT&CK: TA0006 Credential Access\n//               T1528 \u00e2\u20ac\u201c Steal Application Access Token\n// Tools       : TokenTactics, ROADtools, AADInternals\n// Severity    : Medium\n// Data Source : AuditLogs (Azure Active Directory)\n// =========================================================================\n\nAuditLogs\n| where TimeGenerated > ago(7d)\n| where ActivityDisplayName in (\n    \"Consent to application\",\n    \"Add delegated permission grant\",\n    \"Add app role assignment to service principal\")\n| extend InitiatedByUPN  = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByUser = tostring(InitiatedBy.user.displayName)\n| extend InitiatedByApp  = tostring(InitiatedBy.app.displayName)\n| extend Actor           = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetApp       = tostring(TargetResources[0].displayName)\n| extend TargetAppId     = tostring(TargetResources[0].id)\n| extend PermDetail      = tostring(AdditionalDetails)\n| summarize\n    ConsentCount      = count(),\n    AppsConsented     = make_set(TargetApp, 20),\n    AppIds            = make_set(TargetAppId, 20),\n    Operations        = make_set(ActivityDisplayName),\n    FirstConsent      = min(TimeGenerated),\n    LastConsent       = max(TimeGenerated),\n    CorrelationIds    = make_set(CorrelationId, 5)\n    by Actor\n| where ConsentCount >= 2 or array_length(AppsConsented) >= 2\n| extend DaysBetween = datetime_diff('day', LastConsent, FirstConsent)\n| order by ConsentCount desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - OAuth ConsentGrants MultiApp"
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1528"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-004-BulkServicePrincipalCreation')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "BulkServicePrincipalCreation",
+        "query": "// =========================================================================\n// HQ-004: Burst Service Principal Creations in 1-Hour Window\n// =========================================================================\n// Description : Detects three or more service principals created by the\n//               same actor within a one-hour bucket. MicroBurst, ROADtools\n//               and CloudKatana register SPs in bulk when setting up attack\n//               infrastructure. Legitimate admins rarely create more than\n//               one or two SPs in rapid succession.\n// MITRE ATT&CK: TA0003 Persistence\n//               T1136.003 \u00e2\u20ac\u201c Create Cloud Account\n// Tools       : ROADtools, MicroBurst, CloudKatana, AADInternals\n// Severity    : Medium\n// Data Source : AuditLogs (Azure Active Directory)\n// =========================================================================\n\nAuditLogs\n| where TimeGenerated > ago(1d)\n| where ActivityDisplayName == \"Add service principal\"\n| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)\n| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend NewSPName      = tostring(TargetResources[0].displayName)\n| extend NewSPId        = tostring(TargetResources[0].id)\n| summarize\n    SPCreatedCount = count(),\n    SPNames        = make_set(NewSPName, 20),\n    SPIds          = make_set(NewSPId, 20),\n    FirstCreation  = min(TimeGenerated),\n    LastCreation   = max(TimeGenerated)\n    by Actor, bin(TimeGenerated, 1h)\n| where SPCreatedCount >= 3\n| extend DurationMinutes = datetime_diff('minute', LastCreation, FirstCreation)\n| extend RatePerMinute   = round(toreal(SPCreatedCount) / iff(DurationMinutes == 0, 1.0, toreal(DurationMinutes)), 2)\n| order by SPCreatedCount desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - BulkServicePrincipalCreation"
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1136.003"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-005-PrivilegedRoleAssignment-NonPIM')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "PrivilegedRoleAssignment NonPIM",
+        "query": "// =========================================================================\n// HQ-005: Privileged Role Assignment NOT Logged by PIM\n// =========================================================================\n// Description : All legitimate role assignments in a PIM-enabled tenant\n//               should be logged with LoggedByService = \"PIM\". Direct \n//               role assignments via the Azure portal, PowerShell, or\n//               attacker tools (AADInternals, MicroBurst) will appear with\n//               LoggedByService = \"Core Directory\". This query surfaces\n//               those non-PIM assignments.\n// MITRE ATT&CK: TA0004 Privilege Escalation\n//               T1098.003 \u00e2\u20ac\u201c Additional Cloud Roles\n// Tools       : AADInternals, MicroBurst, manual attacker\n// Severity    : High\n// Note        : If PIM is not licensed/enabled in your tenant, adjust the\n//               filter or suppress the LoggedByService condition.\n// Data Source : AuditLogs (Azure Active Directory)\n// =========================================================================\n\nAuditLogs\n| where TimeGenerated > ago(7d)\n| where ActivityDisplayName in (\n    \"Add member to role\",\n    \"Add eligible member to role\",\n    \"Add scoped member to role\",\n    \"Add permanent member to role\")\n| where LoggedByService !in (\"PIM\", \"Privileged Identity Management\")\n| extend InitiatedByUPN  = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp  = tostring(InitiatedBy.app.displayName)\n| extend Actor           = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetUser      = tostring(TargetResources[0].displayName)\n| extend TargetUserUPN   = tostring(TargetResources[0].userPrincipalName)\n| extend RoleName        = tostring(TargetResources[1].displayName)\n| where Result == \"success\"\n| project\n    TimeGenerated,\n    Actor,\n    TargetUser,\n    TargetUserUPN,\n    RoleName,\n    ActivityDisplayName,\n    LoggedByService,\n    CorrelationId\n| order by TimeGenerated desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - PrivilegedRoleAssignment NonPIM"
+          },
+          {
+            "name": "tactics",
+            "value": "PrivilegeEscalation,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1098.003"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-006-GuestUser-PrivilegeEscalation')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "GuestUser PrivilegeEscalation",
+        "query": "// =========================================================================\n// HQ-006: External / Guest User Receiving Group or Role Membership\n// =========================================================================\n// Description : Entra ID guests (UPN contains #EXT#) should rarely receive\n//               sensitive group or role memberships. Post-compromise actors\n//               and insider threats escalate privileges by adding external\n//               accounts to high-privilege groups. This query hunts for\n//               such assignments to facilitate triage.\n// MITRE ATT&CK: TA0004 Privilege Escalation\n//               T1078.004 \u00e2\u20ac\u201c Valid Accounts: Cloud Accounts\n// Tools       : Manual attacker action, AADInternals, MicroBurst\n// Severity    : High\n// Data Source : AuditLogs (Azure Active Directory)\n// =========================================================================\n\nAuditLogs\n| where TimeGenerated > ago(7d)\n| where ActivityDisplayName in (\n    \"Add member to group\",\n    \"Add member to role\",\n    \"Add eligible member to role\",\n    \"Add app role assignment grant to user\")\n| extend TargetUserDisplayName = tostring(TargetResources[0].displayName)\n| extend TargetUserUPN         = tostring(TargetResources[0].userPrincipalName)\n| extend TargetUserId          = tostring(TargetResources[0].id)\n| extend GroupOrRole           = tostring(TargetResources[1].displayName)\n| extend InitiatedByUPN        = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp        = tostring(InitiatedBy.app.displayName)\n| extend Actor                 = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n// Guest accounts use the #EXT# convention in their UPN\n| where TargetUserUPN has \"#EXT#\"\n    or TargetUserDisplayName has \"(Guest)\"\n| where Result == \"success\"\n| project\n    TimeGenerated,\n    Actor,\n    TargetUserDisplayName,\n    TargetUserUPN,\n    GroupOrRole,\n    ActivityDisplayName,\n    LoggedByService,\n    CorrelationId\n| order by TimeGenerated desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - GuestUser PrivilegeEscalation"
+          },
+          {
+            "name": "tactics",
+            "value": "PrivilegeEscalation"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078.004"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-007-BulkRefreshToken-Revocation')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "BulkRefreshToken Revocation",
+        "query": "// =========================================================================\n// HQ-007: Bulk Refresh Token Revocations (Post-Compromise or Evasion)\n// =========================================================================\n// Description : \"Update StsRefreshTokenValidFrom Timestamp\" is produced\n//               when a user's refresh tokens are revoked (e.g., via\n//               Revoke-AzureADUserAllRefreshToken, MCAS response, or an\n//               attacker using AADInternals to invalidate sessions after\n//               extracting tokens). Three or more revocations in a day by\n//               the same actor warrants investigation \u00e2\u20ac\u201d it may be IR\n//               activity or an attacker covering tracks.\n// MITRE ATT&CK: TA0005 Defense Evasion\n//               T1070 \u00e2\u20ac\u201c Indicator Removal\n//               T1531 \u00e2\u20ac\u201c Account Access Removal\n// Tools       : AADInternals, MCAS/MDCA automated response, IR scripts\n// Severity    : Medium\n// Data Source : AuditLogs (Azure Active Directory)\n// =========================================================================\n\nAuditLogs\n| where TimeGenerated > ago(1d)\n| where ActivityDisplayName == \"Update StsRefreshTokenValidFrom Timestamp\"\n| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)\n| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetUser     = tostring(TargetResources[0].displayName)\n| extend TargetUPN      = tostring(TargetResources[0].userPrincipalName)\n| summarize\n    RevocationCount = count(),\n    TargetUsers     = make_set(TargetUser, 20),\n    TargetUPNs      = make_set(TargetUPN, 20),\n    FirstEvent      = min(TimeGenerated),\n    LastEvent       = max(TimeGenerated),\n    CorrelationIds  = make_set(CorrelationId, 5)\n    by Actor\n| where RevocationCount >= 3\n| extend DurationMinutes = datetime_diff('minute', LastEvent, FirstEvent)\n| order by RevocationCount desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - BulkRefreshToken Revocation"
+          },
+          {
+            "name": "tactics",
+            "value": "Impact,DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1531,T1070"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-008-OAuth-SensitiveScope-PermissionGrant')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "OAuth SensitiveScope PermissionGrant",
+        "query": "// =========================================================================\n// HQ-008: Delegated Permission Grant Including Sensitive API Scopes\n// =========================================================================\n// Description : Consent events that include high-privilege delegated scopes\n//               (Mail.Read, Directory.ReadWrite.All, offline_access, etc.)\n//               are a primary indicator of OAuth phishing attacks (Device\n//               Code flow abuse via TokenTactics, consent-phishing via\n//               AADInternals). The offline_access scope is especially\n//               dangerous as it allows long-lived refresh tokens.\n// MITRE ATT&CK: TA0006 Credential Access\n//               T1528 \u00e2\u20ac\u201c Steal Application Access Token\n// Tools       : TokenTactics, ROADtools, AADInternals (Device Code flow)\n// Severity    : High\n// Data Source : AuditLogs (Azure Active Directory)\n// =========================================================================\n\nlet SensitiveScopes = dynamic([\n    \"Mail.Read\", \"Mail.ReadWrite\", \"Mail.Send\",\n    \"Files.ReadWrite.All\", \"Directory.ReadWrite.All\",\n    \"User.ReadWrite.All\", \"RoleManagement.ReadWrite.Directory\",\n    \"Application.ReadWrite.All\", \"Sites.FullControl.All\",\n    \"EWS.AccessAsUser.All\", \"IMAP.AccessAsUser.All\",\n    \"POP.AccessAsUser.All\", \"SMTP.Send\",\n    \"ChannelMessage.Read.All\", \"TeamSettings.ReadWrite.All\",\n    \"offline_access\"\n]);\n\nAuditLogs\n| where TimeGenerated > ago(7d)\n| where ActivityDisplayName in (\n    \"Add delegated permission grant\",\n    \"Consent to application\")\n| extend InitiatedByUPN  = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp  = tostring(InitiatedBy.app.displayName)\n| extend Actor           = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetApp       = tostring(TargetResources[0].displayName)\n| extend TargetAppId     = tostring(TargetResources[0].id)\n| extend PermDetailRaw   = tostring(AdditionalDetails)\n// Match any sensitive scope in the AdditionalDetails blob\n| where PermDetailRaw has_any (SensitiveScopes)\n| extend MatchedScopes = extract_all(\n    @\"(Mail\\.[^\\s,\"\"]+|Directory\\.[^\\s,\"\"]+|offline_access|Application\\.[^\\s,\"\"]+|Files\\.[^\\s,\"\"]+|User\\.ReadWrite\\.All|RoleManagement\\.[^\\s,\"\"]+|Sites\\.[^\\s,\"\"]+|EWS\\.[^\\s,\"\"]+|IMAP\\.[^\\s,\"\"]+|SMTP\\.[^\\s,\"\"]+|Channel[^\\s,\"\"]+|Team[^\\s,\"\"]+)\",\n    PermDetailRaw)\n| project\n    TimeGenerated,\n    Actor,\n    TargetApp,\n    TargetAppId,\n    MatchedScopes,\n    ActivityDisplayName,\n    LoggedByService,\n    Result,\n    CorrelationId\n| order by TimeGenerated desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - OAuth SensitiveScope PermissionGrant"
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1528,T1098.001"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-009-AppCredential-PersistenceAdd')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "AppCredential PersistenceAdd",
+        "query": "// =========================================================================\n// HQ-009: Credential Added to Existing Application Registration\n// =========================================================================\n// Description : Adding a new secret or certificate to an already-registered\n//               application is a classic post-compromise persistence\n//               technique. Attackers (MicroBurst, AADInternals, manual)\n//               add credentials to high-value apps to maintain access even\n//               after password resets. Filter out changes made by known \n//               CI/CD service accounts.\n// MITRE ATT&CK: TA0003 Persistence\n//               T1098.001 \u00e2\u20ac\u201c Additional Cloud Credentials\n// Tools       : MicroBurst, AADInternals, manual attacker, BurpSuite + Graph\n// Severity    : High\n// Data Source : AuditLogs (Azure Active Directory)\n// =========================================================================\n\nAuditLogs\n| where TimeGenerated > ago(7d)\n| where ActivityDisplayName in (\n    \"Update application \\u2013 Certificates and secrets management \",\n    \"Create application \\u2013 Certificates and secrets management \",\n    \"Add service principal credentials\",\n    \"Update service principal\")\n| mv-expand Prop = TargetResources[0].modifiedProperties\n| where tostring(Prop.displayName) has_any (\n    \"KeyCredentials\",\n    \"PasswordCredentials\",\n    \"Credential\",\n    \"Secret\",\n    \"Certificate\")\n| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)\n| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetApp      = tostring(TargetResources[0].displayName)\n| extend TargetAppId    = tostring(TargetResources[0].id)\n| extend CredType       = tostring(Prop.displayName)\n| extend NewValue       = tostring(Prop.newValue)\n| extend OldValue       = tostring(Prop.oldValue)\n| where Result == \"success\"\n// Optionally exclude known CI/CD automation accounts:\n// | where Actor !in (\"devops-pipeline@contoso.com\", \"terraform-sp\")\n| project\n    TimeGenerated,\n    Actor,\n    TargetApp,\n    TargetAppId,\n    CredType,\n    NewValue,\n    OldValue,\n    ActivityDisplayName,\n    LoggedByService,\n    CorrelationId\n| order by TimeGenerated desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - AppCredential PersistenceAdd"
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1098.001"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-010-FederationConfig-Changes')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "FederationConfig Changes",
+        "query": "// =========================================================================\n// HQ-010: Domain Federation / Authentication Configuration Changes\n// =========================================================================\n// Description : Modifying a domain's authentication type (Managed \u00e2\u2020\u2019 \n//               Federated) is the cornerstone of the \"Golden SAML\" and\n//               AADInternals federation abuse attacks. Attackers with \n//               Global Admin privilege can federate a domain with a rogue\n//               IDP and forge SAML tokens for any user without knowing\n//               their passwords. Any change here is extremely high-fidelity.\n// MITRE ATT&CK: TA0003 Persistence\n//               T1484.002 \u00e2\u20ac\u201c Domain Trust Modification\n//               TA0005 Defense Evasion\n//               T1606.002 \u00e2\u20ac\u201c Forge Web Credentials: SAML Token\n// Tools       : AADInternals (ConvertTo-AADIntBackdoor), manual attacker\n// Severity    : Critical\n// Data Source : AuditLogs (Azure Active Directory)\n// =========================================================================\n\nAuditLogs\n| where TimeGenerated > ago(90d)\n| where ActivityDisplayName in (\n    \"Set domain authentication\",\n    \"Set federation settings on domain\",\n    \"Set DirSyncEnabled flag\",\n    \"Set Company Information\",\n    \"Set federation settings\",\n    \"Update domain\",\n    \"Verify domain\")\n| extend InitiatedByUPN  = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp  = tostring(InitiatedBy.app.displayName)\n| extend Actor           = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetDomain    = tostring(TargetResources[0].displayName)\n| extend TargetId        = tostring(TargetResources[0].id)\n| mv-expand Prop = TargetResources[0].modifiedProperties\n| extend PropName        = tostring(Prop.displayName)\n| extend OldValue        = tostring(Prop.oldValue)\n| extend NewValue        = tostring(Prop.newValue)\n| where Result == \"success\"\n| project\n    TimeGenerated,\n    Actor,\n    ActivityDisplayName,\n    TargetDomain,\n    TargetId,\n    PropName,\n    OldValue,\n    NewValue,\n    LoggedByService,\n    CorrelationId\n| order by TimeGenerated desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - FederationConfig Changes"
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence,DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1484.002,T1606.002"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-011-PrivilegedRole-Changes-Monitoring')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "PrivilegedRole Changes Monitoring",
+        "query": "// HQ-011 \u00e2\u20ac\u201d Privileged Role Changes Monitoring\n// Purpose  : Monitor all Add / Remove operations targeting high-privilege Entra ID roles.\n//            Covers both PIM-managed and direct (outside-PIM) assignments.\n//            Highlights direct assignments as elevated risk.\n// Tables   : AuditLogs\n// MITRE    : TA0004 Privilege Escalation \u00e2\u20ac\u201d T1078.004 Valid Accounts: Cloud Accounts\n//            TA0003 Persistence \u00e2\u20ac\u201d T1098.003 Account Manipulation: Additional Cloud Roles\n// Author   : Custom\n// ---------------------------------------------------------------------------\n\nlet LookbackDays = 14d;\nlet PrivilegedRoles = dynamic([\n    \"Global Administrator\",\n    \"Security Administrator\",\n    \"Privileged Role Administrator\",\n    \"User Administrator\",\n    \"Authentication Administrator\",\n    \"Privileged Authentication Administrator\",\n    \"Exchange Administrator\",\n    \"SharePoint Administrator\",\n    \"Compliance Administrator\",\n    \"Conditional Access Administrator\",\n    \"Application Administrator\",\n    \"Cloud Application Administrator\",\n    \"Helpdesk Administrator\",\n    \"Password Administrator\",\n    \"Security Operator\",\n    \"Security Reader\"\n]);\nlet RoleChangeActivities = dynamic([\n    \"Add member to role\",\n    \"Remove member from role\",\n    \"Add eligible member to role\",\n    \"Remove eligible member from role\",\n    \"Add scoped member to role\",\n    \"Remove scoped member from role\",\n    \"Add permanent member to role\",\n    \"Remove permanent member from role\",\n    \"Add member to role outside of PIM\",\n    \"Add eligible member to role (permanent)\"\n]);\n// Extract events then expand TargetResources to get both Role and User entries\nAuditLogs\n| where TimeGenerated > ago(LookbackDays)\n| where Category == \"RoleManagement\"\n| where ActivityDisplayName in~ (RoleChangeActivities)\n| extend InitiatorUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatorApp = tostring(InitiatedBy.app.displayName)\n| extend InitiatorSPId = tostring(InitiatedBy.app.servicePrincipalId)\n| extend InitiatorType = iff(isnotempty(tostring(InitiatedBy.user.userPrincipalName)), \"User\", \"Application\")\n// Expand each TargetResource to find role name and target user\n| mv-expand TargetResource = TargetResources\n| extend ResType    = tostring(TargetResource.type)\n| extend ResName    = tostring(TargetResource.displayName)\n| extend ResUserUPN = tostring(TargetResource.userPrincipalName)\n// Reconstruct one row per audit event \u00e2\u20ac\u201d pick role name and target user across all typed entries\n| summarize\n    RoleName      = max(iff(ResType == \"Role\", ResName, \"\")),\n    TargetUserUPN = tolower(max(iff(isnotempty(ResUserUPN), ResUserUPN, \"\")))\n    by  TimeGenerated, ActivityDisplayName, LoggedByService, Result,\n        InitiatorUPN, InitiatorApp, InitiatorSPId, InitiatorType, Id, CorrelationId\n// Keep only rows where role is in privileged list\n| where RoleName in (PrivilegedRoles)\n// Annotate\n| extend OperationType  = case(\n    ActivityDisplayName has \"Add\",    \"Role Assigned\",\n    ActivityDisplayName has \"Remove\", \"Role Removed\",\n    \"Other\"\n)\n| extend AssignmentSource = case(\n    LoggedByService in (\"PIM\", \"Privileged Identity Management\"), \"PIM-Managed\",\n    ActivityDisplayName has \"outside of PIM\",                     \"DirectAssignment-HighRisk\",\n    \"DirectAssignment-HighRisk\"\n)\n// Flag direct assignments (not via PIM) as high-risk entries\n| extend RiskSignal = iff(AssignmentSource == \"DirectAssignment-HighRisk\",\n    strcat(\"ALERT: Privileged role assigned outside PIM by \", coalesce(InitiatorUPN, InitiatorApp)),\n    \"INFO: PIM-managed role change\"\n)\n| project\n    TimeGenerated,\n    RoleName,\n    TargetUserUPN,\n    OperationType,\n    AssignmentSource,\n    InitiatorType,\n    InitiatorUPN,\n    InitiatorApp,\n    LoggedByService,\n    Result,\n    RiskSignal,\n    ActivityDisplayName,\n    CorrelationId\n| sort by TimeGenerated desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - PrivilegedRole Changes Monitoring"
+          },
+          {
+            "name": "tactics",
+            "value": "PrivilegeEscalation,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078.004,T1098.003"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-012-RiskySignIn-MFARegistration')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "RiskySignIn MFARegistration",
+        "query": "// HQ-012 \u00e2\u20ac\u201d Risky Sign-In Followed by MFA Registration\n// Purpose  : Detect when a user experiences a risky sign-in and then registers or modifies\n//            an MFA/security-info method within a short window (default 4 hours).\n//            Attackers who obtain credentials may immediately add their own MFA device\n//            to maintain persistent access after a risk-flagged sign-in.\n// Tables   : SigninLogs, AuditLogs\n// MITRE    : TA0003 Persistence \u00e2\u20ac\u201d T1098.005 Account Manipulation: Device Registration\n//            TA0005 Defense Evasion \u00e2\u20ac\u201d T1556.006 Modify Authentication Process: MFA\n// Author   : Custom\n// ---------------------------------------------------------------------------\n\nlet LookbackDays       = 14d;\nlet MFAChangeWindow    = 4h;        // Max time AFTER risky sign-in for MFA change to count\nlet MFAActivities = dynamic([\n    \"User registered security info\",\n    \"User updated security info\",\n    \"User deleted security info\",\n    \"User changed default security info\",\n    \"Register security info\",\n    \"Delete security info\",\n    \"User registered for multi-factor authentication\",\n    \"User started security info registration\",\n    \"User completed security info registration\",\n    \"Admin updated user authentication method\",\n    \"Update user\"    // Covers StrongAuthenticationPhoneAppDetail modifications\n]);\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 1: Risky sign-ins \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nlet RiskySignIns = SigninLogs\n| where TimeGenerated > ago(LookbackDays)\n| where RiskLevelDuringSignIn in (\"high\", \"medium\")\n    or RiskState    == \"atRisk\"\n    or IsRisky      == true\n| project\n    SigninTime           = TimeGenerated,\n    UserPrincipalName    = tolower(UserPrincipalName),\n    RiskLevel            = RiskLevelDuringSignIn,\n    RiskState,\n    RiskDetail,\n    RiskEventTypes       = tostring(RiskEventTypes_V2),\n    IPAddress,\n    AppDisplayName,\n    ConditionalAccessStatus,\n    SigninCorrelationId  = CorrelationId;\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 2: MFA registration / modification events \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nlet MFARegistrations = AuditLogs\n| where TimeGenerated > ago(LookbackDays)\n| where ActivityDisplayName in~ (MFAActivities)\n    // Narrow \"Update user\" to only those touching authentication methods\n    or (ActivityDisplayName == \"Update user\"\n        and tostring(AdditionalDetails) has_any (\"StrongAuthentication\", \"PhoneAppDetail\", \"AuthenticationPhone\"))\n| extend ActorUPN = tolower(tostring(InitiatedBy.user.userPrincipalName))\n| where isnotempty(ActorUPN)\n| project\n    MFATime       = TimeGenerated,\n    ActorUPN,\n    MFAActivity   = ActivityDisplayName,\n    MFAResult     = Result,\n    LoggedByService;\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 3: Correlate \u00e2\u20ac\u201d MFA change occurring within window AFTER risky signin\nRiskySignIns\n| join kind=inner (MFARegistrations)\n    on $left.UserPrincipalName == $right.ActorUPN\n| where MFATime  >  SigninTime\n    and MFATime  <= (SigninTime + MFAChangeWindow)\n| extend TimeToMFAChange = MFATime - SigninTime\n| project\n    SigninTime,\n    UserPrincipalName,\n    RiskLevel,\n    RiskState,\n    RiskDetail,\n    RiskEventTypes,\n    IPAddress,\n    AppDisplayName,\n    ConditionalAccessStatus,\n    MFATime,\n    MFAActivity,\n    MFAResult,\n    TimeToMFAChange,\n    SigninCorrelationId\n| sort by SigninTime desc\n| extend _IpRaw = tostring(IPAddress)\n| where isempty(_IpRaw) or not(ExcludeAllowlistedIPs_AuditLogs(_IpRaw))",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - RiskySignIn MFARegistration"
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence,DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1098.005,T1556.006"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-013-AdminActions-from-RiskyUsers')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "AdminActions from RiskyUsers",
+        "query": "// HQ-013 \u00e2\u20ac\u201d Audit Admin Actions from Risky Users\n// Purpose  : Surface administrative operations in AuditLogs that were initiated by users\n//            currently flagged as medium or high risk in AADRiskyUsers.\n//            An attacker using a compromised account may perform privilege escalation or\n//            persistence actions while the account is still risk-flagged.\n// Tables   : AuditLogs, AADRiskyUsers\n// MITRE    : TA0004 Privilege Escalation \u00e2\u20ac\u201d T1078.004 Valid Accounts: Cloud Accounts\n//            TA0003 Persistence \u00e2\u20ac\u201d T1098 Account Manipulation\n// Author   : Custom\n// ---------------------------------------------------------------------------\n\nlet LookbackDays = 14d;\nlet SensitiveCategories = dynamic([\n    \"RoleManagement\",\n    \"ApplicationManagement\",\n    \"DirectoryManagement\",\n    \"UserManagement\",\n    \"PolicyManagement\"\n]);\nlet SensitiveActivities = dynamic([\n    \"Add member to role\",\n    \"Remove member from role\",\n    \"Add eligible member to role\",\n    \"Add app role assignment to service principal\",\n    \"Add app role assignment grant to user\",\n    \"Add application\",\n    \"Add service principal\",\n    \"Add owner to application\",\n    \"Add owner to service principal\",\n    \"Add credentials to service principal\",\n    \"Set domain authentication\",\n    \"Update domain\",\n    \"Update federation settings on domain\",\n    \"Add policy\",\n    \"Update policy\",\n    \"Delete policy\",\n    \"Reset password\",\n    \"Admin reset user password\",\n    \"Update user\",\n    \"Add group member\"\n]);\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 1: Get users currently flagged as at-risk \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nlet RiskyUsers = AADRiskyUsers\n| where TimeGenerated > ago(LookbackDays)\n| where RiskLevel in (\"high\", \"medium\") or RiskState == \"atRisk\"\n| summarize\n    RiskLevel            = take_any(RiskLevel),\n    RiskState            = take_any(RiskState),\n    RiskDetail           = take_any(RiskDetail),\n    RiskLastUpdated      = max(RiskLastUpdatedDateTime)\n    by RiskyUPN = tolower(UserPrincipalName);\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 2: Get sensitive admin audit operations initiated by human users \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nlet AdminAuditOps = AuditLogs\n| where TimeGenerated > ago(LookbackDays)\n| where Category in (SensitiveCategories)\n    or  ActivityDisplayName in~ (SensitiveActivities)\n| extend ActorUPN = tolower(tostring(InitiatedBy.user.userPrincipalName))\n| where isnotempty(ActorUPN)\n| extend TargetResource = tostring(TargetResources[0].displayName)\n| extend TargetUserUPN  = tostring(TargetResources[0].userPrincipalName)\n| project\n    AuditTime        = TimeGenerated,\n    ActorUPN,\n    ActivityDisplayName,\n    Category,\n    TargetResource,\n    TargetUserUPN,\n    Result,\n    LoggedByService,\n    CorrelationId;\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 3: Inner join \u00e2\u20ac\u201d admin operations by currently-risky users \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nAdminAuditOps\n| join kind=inner (RiskyUsers) on $left.ActorUPN == $right.RiskyUPN\n| project\n    AuditTime,\n    ActorUPN,\n    RiskLevel,\n    RiskState,\n    RiskDetail,\n    RiskLastUpdated,\n    ActivityDisplayName,\n    Category,\n    TargetResource,\n    TargetUserUPN,\n    Result,\n    LoggedByService,\n    CorrelationId\n| sort by AuditTime desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - AdminActions from RiskyUsers"
+          },
+          {
+            "name": "tactics",
+            "value": "PrivilegeEscalation,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078.004,T1098"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-014-PasswordReset-HighPrivilegedUser')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "PasswordReset HighPrivilegedUser",
+        "query": "// HQ-014 \u00e2\u20ac\u201d Password Reset on High-Privileged User\n// Purpose  : Detect password resets or forced password profile updates where the TARGET\n//            account holds (or previously held) a high-privilege Entra ID role.\n//            Resetting a privileged account's password is a classic account-takeover step\n//            and may indicate lateral movement toward a more privileged identity.\n// Tables   : AuditLogs (two correlated datasets)\n// MITRE    : TA0006 Credential Access \u00e2\u20ac\u201d T1110 Brute Force / Password Manipulation\n//            TA0003 Persistence \u00e2\u20ac\u201d T1098 Account Manipulation\n// Author   : Custom\n// ---------------------------------------------------------------------------\n\nlet LookbackDays    = 14d;\nlet RoleLookback    = 90d;    // Look further back for role membership history\nlet PrivilegedRoles = dynamic([\n    \"Global Administrator\",\n    \"Security Administrator\",\n    \"Privileged Role Administrator\",\n    \"User Administrator\",\n    \"Authentication Administrator\",\n    \"Privileged Authentication Administrator\",\n    \"Exchange Administrator\",\n    \"SharePoint Administrator\",\n    \"Compliance Administrator\",\n    \"Conditional Access Administrator\",\n    \"Application Administrator\",\n    \"Cloud Application Administrator\",\n    \"Helpdesk Administrator\",\n    \"Password Administrator\"\n]);\nlet PasswordActivities = dynamic([\n    \"Reset password\",\n    \"Reset password (self-service)\",\n    \"Admin reset user password\",\n    \"Change password\",\n    \"Update user\"    // Catches forced PasswordProfile modifications\n]);\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 1: Build list of privileged role holders from role assignment history \u00e2\u201d\u20ac\n// Expand TargetResources; reconstruct one row per event with RoleName + TargetUserUPN\nlet PrivilegedRoleMembers = AuditLogs\n| where TimeGenerated > ago(RoleLookback)\n| where Category == \"RoleManagement\"\n| where ActivityDisplayName has \"Add member\"\n| mv-expand TargetResource = TargetResources\n| extend ResType    = tostring(TargetResource.type)\n| extend ResName    = tostring(TargetResource.displayName)\n| extend ResUserUPN = tostring(TargetResource.userPrincipalName)\n| summarize\n    RoleName      = max(iff(ResType == \"Role\", ResName, \"\")),\n    TargetUserUPN = tolower(max(iff(isnotempty(ResUserUPN), ResUserUPN, \"\")))\n    by Id\n| where RoleName in (PrivilegedRoles) and isnotempty(TargetUserUPN)\n| summarize PrivilegedRolesList = make_set(RoleName) by TargetUserUPN;\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 2: Collect password reset / profile update events \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nlet PasswordResets = AuditLogs\n| where TimeGenerated > ago(LookbackDays)\n| where ActivityDisplayName in~ (PasswordActivities)\n    // For \"Update user\", narrow to actual password profile changes\n    or (ActivityDisplayName == \"Update user\"\n        and tostring(AdditionalDetails) has_any (\"PasswordProfile\", \"ForceChangePasswordNextSignIn\"))\n| extend TargetResetUPN = tolower(tostring(TargetResources[0].userPrincipalName))\n| extend InitiatorUPN   = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatorApp   = tostring(InitiatedBy.app.displayName)\n| extend InitiatorType  = iff(isnotempty(tostring(InitiatedBy.user.userPrincipalName)), \"User\", \"Application\")\n| where isnotempty(TargetResetUPN)\n| project\n    ResetTime       = TimeGenerated,\n    TargetResetUPN,\n    InitiatorUPN,\n    InitiatorApp,\n    InitiatorType,\n    ActivityDisplayName,\n    Result,\n    LoggedByService,\n    CorrelationId;\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 3: Join \u00e2\u20ac\u201d password reset on a user who holds/held a privileged role \u00e2\u201d\u20ac\nPasswordResets\n| join kind=inner (PrivilegedRoleMembers)\n    on $left.TargetResetUPN == $right.TargetUserUPN\n| extend SelfReset = tolower(InitiatorUPN) == TargetResetUPN\n| extend RiskAnnotation = case(\n    SelfReset and InitiatorType == \"User\",  \"Self-service reset of privileged account\",\n    InitiatorType == \"Application\",        \"Automated reset \u00e2\u20ac\u201d verify service principal authorization\",\n    isnotempty(InitiatorUPN),              \"Admin-initiated reset on privileged account\",\n    \"Password reset \u00e2\u20ac\u201d initiator unknown\"\n)\n| project\n    ResetTime,\n    TargetResetUPN,\n    PrivilegedRoles  = PrivilegedRolesList,\n    InitiatorUPN,\n    InitiatorApp,\n    InitiatorType,\n    SelfReset,\n    ActivityDisplayName,\n    Result,\n    RiskAnnotation,\n    LoggedByService,\n    CorrelationId\n| sort by ResetTime desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - PasswordReset HighPrivilegedUser"
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1110,T1098"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-015-SSPR-Followed-by-RiskySignIn')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "SSPR Followed by RiskySignIn",
+        "query": "// HQ-015 \u00e2\u20ac\u201d Identity SSPR Followed by Risky Sign-In\n// Purpose  : Detect cases where a user resets their own password via SSPR and then\n//            performs a risky sign-in within 24 hours.\n//            This sequence may indicate an attacker who obtained enough identity\n//            signals (email / phone) to pass SSPR verification but whose sign-in\n//            still triggers Entra ID risk detection (unfamiliar IP, impossible travel, etc.).\n// Tables   : AuditLogs, SigninLogs\n// MITRE    : TA0006 Credential Access \u00e2\u20ac\u201d T1110.004 Password Spraying (post-reset attempt)\n//            TA0001 Initial Access \u00e2\u20ac\u201d T1078 Valid Accounts\n// Author   : Custom\n// ---------------------------------------------------------------------------\n\nlet LookbackDays        = 14d;\nlet RiskySigninWindow   = 24h;    // Max time after SSPR for risky sign-in to count\nlet SSPRActivities = dynamic([\n    \"Reset password (self-service)\",\n    \"Self-service password reset flow activity progress\",\n    \"User registered for self-service password reset\",\n    \"Reset password\",\n    \"User completed security info registration\",\n    \"User started security info registration\"\n]);\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 1: SSPR events \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nlet SSPREvents = AuditLogs\n| where TimeGenerated > ago(LookbackDays)\n| where ActivityDisplayName in~ (SSPRActivities)\n// Accept any logging service \u00e2\u20ac\u201d SSPR can appear under Core Directory or Self-service\n| extend SSPRUserUPN = tolower(coalesce(\n    tostring(TargetResources[0].userPrincipalName),\n    tostring(InitiatedBy.user.userPrincipalName)\n))\n| where isnotempty(SSPRUserUPN)\n| project\n    SSPRTime         = TimeGenerated,\n    SSPRUserUPN,\n    SSPRActivity     = ActivityDisplayName,\n    SSPRResult       = Result,\n    LoggedByService;\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 2: Risky sign-ins \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nlet RiskySignIns = SigninLogs\n| where TimeGenerated > ago(LookbackDays)\n| where RiskLevelDuringSignIn in (\"high\", \"medium\")\n    or RiskState    == \"atRisk\"\n    or IsRisky      == true\n| project\n    SigninTime       = TimeGenerated,\n    SigninUPN        = tolower(UserPrincipalName),\n    RiskLevel        = RiskLevelDuringSignIn,\n    RiskState,\n    RiskDetail,\n    RiskEventTypes   = tostring(RiskEventTypes_V2),\n    IPAddress,\n    AppDisplayName,\n    LocationDetails,\n    ConditionalAccessStatus,\n    SigninCorrelationId = CorrelationId;\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 3: Correlate \u00e2\u20ac\u201d risky sign-in within window AFTER SSPR \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nSSPREvents\n| join kind=inner (RiskySignIns)\n    on $left.SSPRUserUPN == $right.SigninUPN\n| where SigninTime  >  SSPRTime\n    and SigninTime  <= (SSPRTime + RiskySigninWindow)\n| extend TimeFromSSPRToRiskySignin = SigninTime - SSPRTime\n| project\n    SSPRTime,\n    SSPRUserUPN,\n    SSPRActivity,\n    SSPRResult,\n    SigninTime,\n    RiskLevel,\n    RiskState,\n    RiskDetail,\n    RiskEventTypes,\n    IPAddress,\n    AppDisplayName,\n    LocationDetails,\n    ConditionalAccessStatus,\n    TimeFromSSPRToRiskySignin,\n    SigninCorrelationId\n| sort by SSPRTime desc\n| extend _IpRaw = tostring(IPAddress)\n| where isempty(_IpRaw) or not(ExcludeAllowlistedIPs_AuditLogs(_IpRaw))",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - SSPR Followed by RiskySignIn"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,CredentialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078,T1110.004"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-016-PrivilegedRoleChange-RiskEventCorrelation')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "PrivilegedRoleChange RiskEventCorrelation",
+        "query": "// HQ-016 \u00e2\u20ac\u201d Privileged Role Change Correlated with User Risk Events\n// Purpose  : Cross-correlate privileged role assignment / removal events with\n//            AADUserRiskEvents for the same user within a \u00c2\u00b12-hour window.\n//            Two attacker scenarios are covered:\n//              A) Risk event detected THEN attacker elevates the compromised account\n//                 (RiskEvent \u00e2\u2020\u2019 RoleChange) \u00e2\u20ac\u201d confirming post-compromise privilege escalation.\n//              B) Role assignment made THEN Entra ID detects risky behaviour shortly after\n//                 (RoleChange \u00e2\u2020\u2019 RiskEvent) \u00e2\u20ac\u201d may indicate the newly-elevated account\n//                 performing suspicious actions.\n// Tables   : AuditLogs, AADUserRiskEvents\n// MITRE    : TA0004 Privilege Escalation \u00e2\u20ac\u201d T1078.004 Valid Accounts: Cloud Accounts\n//            TA0003 Persistence \u00e2\u20ac\u201d T1098.003 Additional Cloud Roles\n// Author   : Custom\n// ---------------------------------------------------------------------------\n\nlet LookbackDays       = 14d;\nlet CorrelationWindow  = 2h;\nlet PrivilegedRoles = dynamic([\n    \"Global Administrator\",\n    \"Security Administrator\",\n    \"Privileged Role Administrator\",\n    \"User Administrator\",\n    \"Authentication Administrator\",\n    \"Privileged Authentication Administrator\",\n    \"Exchange Administrator\",\n    \"SharePoint Administrator\",\n    \"Compliance Administrator\",\n    \"Conditional Access Administrator\",\n    \"Application Administrator\",\n    \"Cloud Application Administrator\",\n    \"Helpdesk Administrator\",\n    \"Password Administrator\"\n]);\nlet RoleChangeActivities = dynamic([\n    \"Add member to role\",\n    \"Remove member from role\",\n    \"Add eligible member to role\",\n    \"Remove eligible member from role\",\n    \"Add scoped member to role\",\n    \"Remove scoped member from role\",\n    \"Add permanent member to role\",\n    \"Remove permanent member from role\",\n    \"Add member to role outside of PIM\"\n]);\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 1: Privileged role assignment / removal events \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nlet PrivRoleChanges = AuditLogs\n| where TimeGenerated > ago(LookbackDays)\n| where Category == \"RoleManagement\"\n| where ActivityDisplayName in~ (RoleChangeActivities)\n| extend InitiatorUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatorApp = tostring(InitiatedBy.app.displayName)\n// Expand TargetResources to extract RoleName and TargetUserUPN\n| mv-expand TargetResource = TargetResources\n| extend ResType    = tostring(TargetResource.type)\n| extend ResName    = tostring(TargetResource.displayName)\n| extend ResUserUPN = tostring(TargetResource.userPrincipalName)\n| summarize\n    RoleName      = max(iff(ResType == \"Role\", ResName, \"\")),\n    TargetUserUPN = tolower(max(iff(isnotempty(ResUserUPN), ResUserUPN, \"\")))\n    by  TimeGenerated, ActivityDisplayName, LoggedByService, Result,\n        InitiatorUPN, InitiatorApp, Id\n| where RoleName in (PrivilegedRoles) and isnotempty(TargetUserUPN);\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 2: User risk detection events \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nlet UserRiskEvents = AADUserRiskEvents\n| where TimeGenerated > ago(LookbackDays)\n| where RiskLevel in (\"high\", \"medium\")\n| project\n    RiskTime       = TimeGenerated,\n    RiskyUPN       = tolower(UserPrincipalName),\n    RiskEventType,\n    RiskLevel,\n    RiskState,\n    RiskIpAddress  = IpAddress;\n// \u00e2\u201d\u20ac\u00e2\u201d\u20ac Step 3: Inner join \u00e2\u20ac\u201d same user, events within CorrelationWindow \u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\u00e2\u201d\u20ac\nPrivRoleChanges\n| join kind=inner (UserRiskEvents)\n    on $left.TargetUserUPN == $right.RiskyUPN\n// Filter to events within the bidirectional correlation window\n| where TimeGenerated between ((RiskTime - CorrelationWindow) .. (RiskTime + CorrelationWindow))\n| extend TimeDiffMinutes = abs(datetime_diff('minute', TimeGenerated, RiskTime))\n// Label the sequence ordering\n| extend EventSequence = case(\n    TimeGenerated < RiskTime,  \"RoleChange THEN RiskDetected\",\n    TimeGenerated > RiskTime,  \"RiskDetected THEN RoleChange\",\n    \"Simultaneous\"\n)\n| extend OperationType = iff(ActivityDisplayName has \"Add\", \"Role Assigned\", \"Role Removed\")\n| project\n    RoleChangeTime   = TimeGenerated,\n    RoleName,\n    TargetUserUPN,\n    OperationType,\n    LoggedByService,\n    InitiatorUPN,\n    InitiatorApp,\n    Result,\n    RiskTime,\n    RiskEventType,\n    RiskLevel,\n    RiskState,\n    RiskIpAddress,\n    EventSequence,\n    TimeDiffMinutes,\n    RoleChangeId     = Id\n| sort by RoleChangeTime desc\n",
+        "tags": [
+          {
+            "name": "description",
+            "value": "Entra ID AuditLogs hunting query - PrivilegedRoleChange RiskEventCorrelation"
+          },
+          {
+            "name": "tactics",
+            "value": "PrivilegeEscalation,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078.004,T1098.003"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ],
+        "version": 2
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-017-AdminConsent-AnomalousScope')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Hunt: Admin Consent for Anomalous OAuth Scopes (30d baseline)",
+        "category": "Hunting Queries",
+        "query": "let LookbackWindow = 30d;\nlet RecentWindow = 1d;\nlet ExtractScopes = (T:(AdditionalDetails:dynamic)) {\n    T\n    | mv-expand AD = AdditionalDetails\n    | where tostring(AD.key) in (\"ConsentAction.Permissions\", \"Scope\", \"Scopes\")\n    | extend ScopesRaw = tostring(AD.value)\n    | mv-expand Scope = split(ScopesRaw, \" \") to typeof(string)\n    | where isnotempty(Scope)\n};\nlet Baseline =\n    AuditLogs\n    | where TimeGenerated between (ago(LookbackWindow) .. ago(RecentWindow))\n    | where ActivityDisplayName in (\"Consent to application\", \"Add app role assignment to service principal\", \"Add delegated permission grant\")\n    | invoke ExtractScopes()\n    | summarize by Scope;\nAuditLogs\n| where TimeGenerated > ago(RecentWindow)\n| where ActivityDisplayName in (\"Consent to application\", \"Add app role assignment to service principal\", \"Add delegated permission grant\")\n| extend Actor = tostring(InitiatedBy.user.userPrincipalName)\n| extend ActorApp = tostring(InitiatedBy.app.displayName)\n| extend TargetApp = tostring(TargetResources[0].displayName)\n| extend TargetAppId = tostring(TargetResources[0].id)\n| invoke ExtractScopes()\n| join kind=leftanti Baseline on Scope\n| summarize NewScopes = make_set(Scope), CorrelationIds = make_set(CorrelationId, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by Actor, ActorApp, TargetApp, TargetAppId\n| order by LastSeen desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Admin consent events involving scope strings not seen in the prior 30 days. Surfaces newly-introduced OAuth permission patterns that may indicate phishing app onboarding."
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1528,T1098"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-018-ServicePrincipal-NewIP-Burst')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Hunt: Service Principal Sign-In from First-Seen IP with Burst",
+        "category": "Hunting Queries",
+        "query": "let Lookback = 30d;\nlet Recent = 1d;\nlet Baseline = AADServicePrincipalSignInLogs\n    | where TimeGenerated between (ago(Lookback) .. ago(Recent))\n    | where ResultType == 0\n    | summarize HistoricIPs = make_set(IPAddress) by ServicePrincipalName;\nAADServicePrincipalSignInLogs\n| where TimeGenerated > ago(Recent)\n| where ResultType == 0\n| join kind=leftouter Baseline on ServicePrincipalName\n| where isempty(HistoricIPs) or not(HistoricIPs has IPAddress)\n| summarize Count=count(), Apps=make_set(ResourceDisplayName), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated) by ServicePrincipalName, IPAddress\n| where Count > 20\n| order by Count desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Service principals using IPs not in their 30-day baseline AND making more than 20 requests within 24h. High-signal indicator of credential replay from attacker infrastructure."
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess,DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078.004,T1098.001"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-019-Application-CertificateAdd-NoExpiry')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Hunt: Application Certificate Added Without Expiry or with >2y Lifetime",
+        "category": "Hunting Queries",
+        "query": "AuditLogs\n| where TimeGenerated > ago(7d)\n| where ActivityDisplayName in ('Update application - Certificates and secrets management', 'Add service principal credentials', 'Update application')\n| where Result == 'success'\n| extend Actor = tostring(InitiatedBy.user.userPrincipalName)\n| extend ActorApp = tostring(InitiatedBy.app.displayName)\n| extend TargetApp = tostring(TargetResources[0].displayName)\n| extend KeyDetails = tostring(TargetResources[0].modifiedProperties)\n| where KeyDetails has 'KeyDescription' or KeyDetails has 'EndDateTime'\n| extend EndDate = extract(@'EndDateTime[^0-9]+(\\d{4}-\\d{2}-\\d{2})', 1, KeyDetails)\n| extend LifetimeDays = datetime_diff('day', todatetime(EndDate), now())\n| where isempty(EndDate) or LifetimeDays > 730\n| project TimeGenerated, Actor, ActorApp, TargetApp, EndDate, LifetimeDays, CorrelationId",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Application credentials added with abnormally long validity (>2 years) or missing expiry. Classic long-term persistence technique."
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1098.001"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-020-FederationCert-Rotation-OutsideMaintenance')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Hunt: Federation Certificate Rotation Outside Maintenance Window",
+        "category": "Hunting Queries",
+        "query": "AuditLogs\n| where TimeGenerated > ago(14d)\n| where ActivityDisplayName in ('Set federation settings on domain', 'Set domain authentication')\n| extend Hour = datetime_part('hour', TimeGenerated)\n| extend Dow = dayofweek(TimeGenerated)\n| where Hour < 6 or Hour > 20 or Dow == 0d or Dow == 6d\n| extend Actor = tostring(InitiatedBy.user.userPrincipalName)\n| extend ActorApp = tostring(InitiatedBy.app.displayName)\n| extend Domain = tostring(TargetResources[0].displayName)\n| project TimeGenerated, Hour, Actor, ActorApp, Domain, AdditionalDetails, CorrelationId",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Federation/domain authentication settings changed outside business hours or on weekends. Golden SAML setup indicator (AADInternals/Solorigate pattern)."
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence,PrivilegeEscalation"
+          },
+          {
+            "name": "techniques",
+            "value": "T1484.002,T1606.002"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-021-DormantAdmin-Reactivation')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Hunt: Dormant Admin Suddenly Performs Sensitive Audit Action",
+        "category": "Hunting Queries",
+        "query": "let Sensitive = dynamic(['Add member to role','Add eligible member to role','Set federation settings on domain','Update application','Add service principal credentials']);\nlet RecentlyActive = AuditLogs\n    | where TimeGenerated > ago(60d) and TimeGenerated < ago(7d)\n    | extend UPN = tostring(InitiatedBy.user.userPrincipalName)\n    | summarize by UPN;\nAuditLogs\n| where TimeGenerated > ago(7d)\n| where ActivityDisplayName in (Sensitive)\n| extend UPN = tostring(InitiatedBy.user.userPrincipalName)\n| where isnotempty(UPN)\n| join kind=leftanti RecentlyActive on UPN\n| project TimeGenerated, UPN, ActivityDisplayName, Target = tostring(TargetResources[0].displayName), CorrelationId",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Admin accounts with no activity in the prior 53-day window suddenly performing high-impact directory actions. Surfaces compromised dormant accounts."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078.004,T1098"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/HQ-022-OAuth-Consent-FollowedBy-MailRead')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "Hunt: OAuth Consent Followed by Mail.Read Token Use Within 1h",
+        "category": "Hunting Queries",
+        "query": "let Window = 1h;\nlet Consents = AuditLogs\n    | where TimeGenerated > ago(24h)\n    | where ActivityDisplayName == 'Consent to application'\n    | extend Actor = tostring(InitiatedBy.user.userPrincipalName)\n    | extend TargetApp = tostring(TargetResources[0].displayName)\n    | extend ConsentTime = TimeGenerated\n    | project Actor, TargetApp, ConsentTime, CorrelationId;\nAADNonInteractiveUserSignInLogs\n| where TimeGenerated > ago(24h)\n| where ResultType == 0\n| where AppDisplayName has_any (toscalar(Consents | summarize make_set(TargetApp)))\n| extend AccessTime = TimeGenerated\n| join kind=inner Consents on $left.AppDisplayName == $right.TargetApp\n| where AccessTime between (ConsentTime .. ConsentTime + Window)\n| project ConsentTime, AccessTime, Actor, TargetApp = AppDisplayName, IPAddress, UserPrincipalName, CorrelationId",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "OAuth consent grant immediately followed (within 1h) by non-interactive token issuance for that app. TokenTactics / illicit-consent attack chain."
+          },
+          {
+            "name": "tactics",
+            "value": "CredentialAccess,Collection"
+          },
+          {
+            "name": "techniques",
+            "value": "T1528,T1114.002"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2022-09-01",
+      "name": "deploy-AuditLogs-AnalyticRules",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspace'), 'Microsoft.SecurityInsights', parameters('watchlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspace'), parameters('functionAlias'))]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "parameters": {
+          "workspace": {
+            "value": "[parameters('workspace')]"
+          },
+          "enableAnalyticRules": {
+            "value": "[parameters('enableAnalyticRules')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "workspace": {
+              "type": "string"
+            },
+            "enableAnalyticRules": {
+              "type": "bool"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2023-02-01-preview",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/a1b2c3d4-0001-4e5f-8901-aabbccddeeff')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "New OAuth App Registration with Immediate High-Privilege Consent",
+                "description": "Detects a new application registered in Entra ID followed within 10 minutes by an admin or user consent to that same application. This two-step pattern is characteristic of OAuth phishing infrastructure set up by tools such as TokenTactics, ROADtools, and AADInternals to obtain access tokens with broad delegated permissions. Reference: TokenTactics https://github.com/rvrsh3ll/TokenTactics ROADtools    https://github.com/dirkjanm/ROADtools",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "let ConsentWindow = 10m;\nlet AppCreations = AuditLogs\n| where TimeGenerated > ago(2h)\n| extend _IpRaw = tostring(InitiatedBy.user.ipAddress)\n| where isempty(_IpRaw) or not(ExcludeAllowlistedIPs_AuditLogs(_IpRaw))\n| where ActivityDisplayName in (\n    \"Add application\",\n    \"Create application \\u2013 Certificates and secrets management \")\n| extend AppObjectId  = tostring(TargetResources[0].id)\n| extend AppName      = tostring(TargetResources[0].displayName)\n| extend CreatorUPN   = tostring(InitiatedBy.user.userPrincipalName)\n| extend CreatorApp   = tostring(InitiatedBy.app.displayName)\n| extend CreatorActor = iff(isnotempty(CreatorUPN), CreatorUPN, CreatorApp)\n| project CreatedAt = TimeGenerated, AppObjectId, AppName, CreatorActor, CreatorUPN;\nlet ConsentEvents = AuditLogs\n| where TimeGenerated > ago(2h)\n| extend _IpRaw = tostring(InitiatedBy.user.ipAddress)\n| where isempty(_IpRaw) or not(ExcludeAllowlistedIPs_AuditLogs(_IpRaw))\n| where ActivityDisplayName in (\n    \"Consent to application\",\n    \"Add delegated permission grant\",\n    \"Add app role assignment to service principal\")\n| extend AppObjectId    = tostring(TargetResources[0].id)\n| extend ConsentorUPN   = tostring(InitiatedBy.user.userPrincipalName)\n| extend ConsentorApp   = tostring(InitiatedBy.app.displayName)\n| extend ConsentorActor = iff(isnotempty(ConsentorUPN), ConsentorUPN, ConsentorApp)\n| extend PermDetails    = tostring(AdditionalDetails)\n| project ConsentedAt = TimeGenerated, AppObjectId, ConsentorActor, ConsentorUPN, PermDetails;\nAppCreations\n| join kind=inner ConsentEvents on AppObjectId\n| where ConsentedAt > CreatedAt\n| where ConsentedAt <= CreatedAt + ConsentWindow\n| extend MinutesBetween = datetime_diff('minute', ConsentedAt, CreatedAt)\n| project\n    TimeGenerated    = ConsentedAt,\n    AppName,\n    AppObjectId,\n    CreatedAt,\n    ConsentedAt,\n    MinutesBetween,\n    CreatorActor,\n    CreatorUPN,\n    ConsentorActor,\n    ConsentorUPN,\n    PermDetails",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT2H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT2H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Persistence",
+                  "CredentialAccess"
+                ],
+                "techniques": [
+                  "T1098",
+                  "T1528"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "CreatorUPN"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "ConsentorUPN"
+                      }
+                    ]
+                  }
+                ],
+                "alertRuleTemplateName": null
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2023-02-01-preview",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/b2c3d4e5-0002-4f60-9012-bbccddeeff01')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "Privileged Role Assigned by Service Principal Outside PIM",
+                "description": "Detects when a Service Principal (application identity \u00e2\u20ac\u201d not a human user) directly assigns a privileged Entra ID directory role via \"Core Directory\" without PIM involvement. This is a key post-exploitation step in attacks where an SP has been granted RoleManagement.ReadWrite.Directory and uses it to silently escalate privileges \u00e2\u20ac\u201d a technique automated by AADInternals, CloudKatana, and  MicroBurst. HOW THIS DIFFERS FROM BUILT-IN \"Privileged Role Assigned Outside PIM\": The two built-in rules (\"Privileged Role Assigned Outside PIM\" and its NRT variant) alert on ALL non-PIM role assignments, including legitimate human admins using the portal/PowerShell before PIM was enforced. This rule narrows the scope to Service Principal actors only, producing higher-fidelity alerts specifically for the automated attack path \u00e2\u20ac\u201d an SP assigning a role to itself, to another SP, or to a user account without any human involvement. Reference: AADInternals   https://github.com/Gerenios/AADInternals CloudKatana     https://github.com/Azure/CloudKatana MicroBurst      https://github.com/NetSPI/MicroBurst MITRE           T1098.003 \u00e2\u20ac\u201c Additional Cloud Roles",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "AuditLogs\n| where TimeGenerated > ago(1d)\n| extend _IpRaw = tostring(InitiatedBy.user.ipAddress)\n| where isempty(_IpRaw) or not(ExcludeAllowlistedIPs_AuditLogs(_IpRaw))\n| where ActivityDisplayName in (\n    \"Add member to role\",\n    \"Add eligible member to role\",\n    \"Add scoped member to role\",\n    \"Add permanent member to role\",\n    \"Add app role assignment to service principal\")\n| where LoggedByService !in (\"PIM\", \"Privileged Identity Management\")\n| where Result == \"success\"\n// Restrict to Service Principal actors \u00e2\u20ac\u201d the uniquely dangerous attack path\n| where isnotempty(tostring(InitiatedBy.app.servicePrincipalId))\n| where isempty(tostring(InitiatedBy.user.userPrincipalName))\n| extend ActingAppDisplayName     = tostring(InitiatedBy.app.displayName)\n| extend ActingAppServicePrincipalId = tostring(InitiatedBy.app.servicePrincipalId)\n| extend ActingAppId              = tostring(InitiatedBy.app.appId)\n| extend TargetUser               = tostring(TargetResources[0].displayName)\n| extend TargetUserUPN            = tostring(TargetResources[0].userPrincipalName)\n| extend TargetUserId             = tostring(TargetResources[0].id)\n| extend TargetType               = tostring(TargetResources[0].type)\n| extend RoleName                 = tostring(TargetResources[1].displayName)\n| project\n    TimeGenerated,\n    ActingAppDisplayName,\n    ActingAppServicePrincipalId,\n    ActingAppId,\n    TargetUser,\n    TargetUserUPN,\n    TargetUserId,\n    TargetType,\n    RoleName,\n    ActivityDisplayName,\n    LoggedByService,\n    AADOperationType,\n    CorrelationId",
+                "queryFrequency": "PT15M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "PrivilegeEscalation",
+                  "Persistence"
+                ],
+                "techniques": [
+                  "T1098",
+                  "T1078"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "Name",
+                        "columnName": "ActingAppDisplayName"
+                      },
+                      {
+                        "identifier": "AadUserId",
+                        "columnName": "ActingAppServicePrincipalId"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "TargetUserUPN"
+                      }
+                    ]
+                  }
+                ],
+                "alertRuleTemplateName": null
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2023-02-01-preview",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/c3d4e5f6-0003-4061-a123-ccddeeff0011')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "Credential Added to Application Registration Outside Business Hours",
+                "description": "Detects a new secret or certificate being added to an existing Entra ID application registration between 20:00\u00e2\u20ac\u201c08:00 local UTC or on weekends. Attackers who have compromised a Global Admin or Application Admin account add credentials to high-value apps to establish persistence that survives password resets. Legitimate DevOps pipelines are expected during working hours; out-of-hours changes are anomalous and require investigation. Adjust the BusinessHoursStart / BusinessHoursEnd variables to match your organization's working hours. Reference: MicroBurst   https://github.com/NetSPI/MicroBurst AADInternals  https://github.com/Gerenios/AADInternals",
+                "severity": "Medium",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "// --- Configurable thresholds ---\nlet BusinessHoursStart = 8;   // 08:00 UTC\nlet BusinessHoursEnd   = 20;  // 20:00 UTC\n// --------------------------------\nAuditLogs\n| where TimeGenerated > ago(1d)\n| extend _IpRaw = tostring(InitiatedBy.user.ipAddress)\n| where isempty(_IpRaw) or not(ExcludeAllowlistedIPs_AuditLogs(_IpRaw))\n| where ActivityDisplayName in (\n    \"Update application \\u2013 Certificates and secrets management \",\n    \"Create application \\u2013 Certificates and secrets management \",\n    \"Add service principal credentials\",\n    \"Update service principal\")\n| mv-expand Prop = TargetResources[0].modifiedProperties\n| where tostring(Prop.displayName) has_any (\n    \"KeyCredentials\",\n    \"PasswordCredentials\",\n    \"Credential\",\n    \"Secret\",\n    \"Certificate\")\n| where Result == \"success\"\n| extend HourOfDay  = toint(format_datetime(TimeGenerated, \"HH\"))\n| extend DayOfWeek  = dayofweek(TimeGenerated) / 1d  // 0=Sun, 6=Sat\n| where HourOfDay < BusinessHoursStart\n     or HourOfDay >= BusinessHoursEnd\n     or DayOfWeek == 0\n     or DayOfWeek == 6\n| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)\n| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetApp      = tostring(TargetResources[0].displayName)\n| extend TargetAppId    = tostring(TargetResources[0].id)\n| extend CredType       = tostring(Prop.displayName)\n| project\n    TimeGenerated,\n    Actor,\n    InitiatedByUPN,\n    TargetApp,\n    TargetAppId,\n    CredType,\n    HourOfDay,\n    DayOfWeek,\n    ActivityDisplayName,\n    LoggedByService,\n    CorrelationId",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT2H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Persistence"
+                ],
+                "techniques": [
+                  "T1098"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "InitiatedByUPN"
+                      }
+                    ]
+                  }
+                ],
+                "alertRuleTemplateName": null
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2023-02-01-preview",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/d4e5f607-0004-4162-b234-ddeeff001122')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "Burst of OAuth Consent Grants by a Single Actor",
+                "description": "Alerts when a single user or application performs five or more OAuth consent or permission-grant operations within a one-hour window. This is characteristic of automated consent-phishing campaigns where a compromised account is used to grant attacker-controlled apps access to mailboxes, files, or directory objects across the organization. It is also a signal from tools such as ROADtools and TokenTactics when they enumerate or abuse delegation chains in bulk. Reference: TokenTactics https://github.com/rvrsh3ll/TokenTactics ROADtools     https://github.com/dirkjanm/ROADtools",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "// --- Configurable ---\nlet ConsentThreshold = 10;\n// --------------------\nAuditLogs\n| where TimeGenerated > ago(2h)\n| extend _IpRaw = tostring(InitiatedBy.user.ipAddress)\n| where isempty(_IpRaw) or not(ExcludeAllowlistedIPs_AuditLogs(_IpRaw))\n| where ActivityDisplayName in (\n    \"Consent to application\",\n    \"Add delegated permission grant\",\n    \"Add app role assignment to service principal\",\n    \"Remove delegated permission grant\")\n| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)\n| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetApp      = tostring(TargetResources[0].displayName)\n| summarize\n    ConsentCount   = count(),\n    AppsActedOn    = make_set(TargetApp, 20),\n    Operations     = make_set(ActivityDisplayName),\n    FirstEvent     = min(TimeGenerated),\n    LastEvent      = max(TimeGenerated),\n    CorrelationIds = make_set(CorrelationId, 5)\n    by Actor, InitiatedByUPN, bin(TimeGenerated, 1h)\n| where ConsentCount >= ConsentThreshold\n| extend DurationMinutes = datetime_diff('minute', LastEvent, FirstEvent)\n| extend RatePerMinute   = round(toreal(ConsentCount) / iff(DurationMinutes == 0, 1.0, toreal(DurationMinutes)), 2)",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT2H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT2H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "CredentialAccess",
+                  "Persistence"
+                ],
+                "techniques": [
+                  "T1528",
+                  "T1098"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "InitiatedByUPN"
+                      }
+                    ]
+                  }
+                ],
+                "alertRuleTemplateName": null
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2023-02-01-preview",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/e5f60718-0005-4263-c345-eeff00112233')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "Entra ID Domain Federation Settings Modified",
+                "description": "Detects any modification to a domain's authentication configuration, including converting a domain from Managed to Federated authentication. This is the primary technique in the \"Golden SAML\" attack and the AADInternals `ConvertTo-AADIntBackdoor` command: by pointing a domain at a rogue Identity Provider, an attacker can forge authentication tokens for any user without knowing their password, fully bypassing MFA. Any occurrence of this event should be treated as Critical until verified with the identity team. There should be extremely few legitimate changes to domain federation settings. Reference: AADInternals https://github.com/Gerenios/AADInternals MITRE T1484.002 \u00e2\u20ac\u201c Domain Trust Modification",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "AuditLogs\n| where TimeGenerated > ago(1d)\n| extend _IpRaw = tostring(InitiatedBy.user.ipAddress)\n| where isempty(_IpRaw) or not(ExcludeAllowlistedIPs_AuditLogs(_IpRaw))\n| where ActivityDisplayName in (\n    \"Set domain authentication\",\n    \"Set federation settings on domain\",\n    \"Set federation settings\",\n    \"Set DirSyncEnabled flag\",\n    \"Update domain\")\n| where Result == \"success\"\n| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)\n| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetDomain   = tostring(TargetResources[0].displayName)\n| extend TargetId       = tostring(TargetResources[0].id)\n| mv-expand Prop = TargetResources[0].modifiedProperties\n| extend PropName = tostring(Prop.displayName)\n| extend OldValue = tostring(Prop.oldValue)\n| extend NewValue = tostring(Prop.newValue)\n| project\n    TimeGenerated,\n    Actor,\n    InitiatedByUPN,\n    ActivityDisplayName,\n    TargetDomain,\n    TargetId,\n    PropName,\n    OldValue,\n    NewValue,\n    LoggedByService,\n    CorrelationId",
+                "queryFrequency": "PT15M",
+                "queryPeriod": "P1D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT1H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Persistence",
+                  "DefenseEvasion",
+                  "CredentialAccess"
+                ],
+                "techniques": [
+                  "T1484",
+                  "T1606"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "InitiatedByUPN"
+                      }
+                    ]
+                  },
+                  {
+                    "entityType": "DNS",
+                    "fieldMappings": [
+                      {
+                        "identifier": "DomainName",
+                        "columnName": "TargetDomain"
+                      }
+                    ]
+                  }
+                ],
+                "alertRuleTemplateName": null
+              }
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+              "apiVersion": "2023-02-01-preview",
+              "name": "[concat(parameters('workspace'), '/Microsoft.SecurityInsights/f6071829-0006-4364-d456-ff0011223344')]",
+              "kind": "Scheduled",
+              "properties": {
+                "displayName": "Bulk Password Profile Updates Across Multiple Users",
+                "description": "Detects five or more successful \"Update PasswordProfile\" or  \"Update StsRefreshTokenValidFrom Timestamp\" events against different users within a one-hour window from the same actor. This bulk behavior is seen during Azure AD Connect sync exploitation (AADInternals), automated password resets by an attacker pivoting through multiple accounts, or an adversary revoking tokens to prevent defensive response teams from maintaining access. A single user performing multiple password profile updates in rapid succession is anomalous unless they are a privileged service account with a known management profile. Reference: AADInternals https://github.com/Gerenios/AADInternals MITRE T1098 \u00e2\u20ac\u201c Account Manipulation",
+                "severity": "High",
+                "enabled": "[parameters('enableAnalyticRules')]",
+                "query": "// --- Configurable ---\nlet UpdateThreshold = 10;\n// --------------------\nAuditLogs\n| where TimeGenerated > ago(2h)\n| extend _IpRaw = tostring(InitiatedBy.user.ipAddress)\n| where isempty(_IpRaw) or not(ExcludeAllowlistedIPs_AuditLogs(_IpRaw))\n| where ActivityDisplayName in (\n    \"Update PasswordProfile\",\n    \"Update StsRefreshTokenValidFrom Timestamp\",\n    \"Reset user password\",\n    \"Change user password\")\n| where Result == \"success\"\n| extend InitiatedByUPN = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatedByApp = tostring(InitiatedBy.app.displayName)\n| extend Actor          = iff(isnotempty(InitiatedByUPN), InitiatedByUPN, InitiatedByApp)\n| extend TargetUser     = tostring(TargetResources[0].displayName)\n| extend TargetUserUPN  = tostring(TargetResources[0].userPrincipalName)\n| summarize\n    UpdateCount       = count(),\n    DistinctTargets   = dcount(TargetUserUPN),\n    TargetUsers       = make_set(TargetUserUPN, 20),\n    Operations        = make_set(ActivityDisplayName),\n    FirstEvent        = min(TimeGenerated),\n    LastEvent         = max(TimeGenerated),\n    CorrelationIds    = make_set(CorrelationId, 5)\n    by Actor, InitiatedByUPN, bin(TimeGenerated, 1h)\n| where UpdateCount >= UpdateThreshold and DistinctTargets >= 5\n| extend DurationMinutes = datetime_diff('minute', LastEvent, FirstEvent)",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "PT2H",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT2H",
+                "suppressionEnabled": false,
+                "tactics": [
+                  "Persistence",
+                  "Impact",
+                  "DefenseEvasion"
+                ],
+                "techniques": [
+                  "T1098",
+                  "T1531",
+                  "T1070"
+                ],
+                "entityMappings": [
+                  {
+                    "entityType": "Account",
+                    "fieldMappings": [
+                      {
+                        "identifier": "FullName",
+                        "columnName": "InitiatedByUPN"
+                      }
+                    ]
+                  }
+                ],
+                "alertRuleTemplateName": null
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "variables": {
+    "crlf": "[concat(' ', '\\r\\n')]",
+    "watchlistHeader": "IPOrRange,Description,Owner,AddedDate",
+    "watchlistDefaultRows": "10.0.0.0/8,RFC1918 Class A,Network,2026-01-01\\r\\n172.16.0.0/12,RFC1918 Class B,Network,2026-01-01\\r\\n192.168.0.0/16,RFC1918 Class C,Network,2026-01-01",
+    "watchlistEffectiveContent": "[if(empty(parameters('watchlistRawContent')), concat(variables('watchlistHeader'), '\\r\\n', variables('watchlistDefaultRows')), concat(variables('watchlistHeader'), '\\r\\n', parameters('watchlistRawContent')))]"
+  }
+}
