@@ -1,0 +1,1089 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "2.2.0.0",
+  "metadata": {
+    "title": "Microsoft Purview / IRM gap-filler analytic rules for Microsoft Sentinel",
+    "description": "Sentinel scheduled analytic rules targeting detection gaps NOT covered by native Purview DLP, IRM Adaptive Protection, MDA, Activity Explorer, or Sentinel UEBA/Fusion. v2.2 adds per-rule enable parameters and ingestion-cost guidance.",
+    "author": "Agentic-SOC",
+    "version": "2.2.0"
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": { "description": "Sentinel-enabled Log Analytics workspace name (in the target resource group)." }
+    },
+    "bulkDlpUniqueFilesThreshold": {
+      "type": "int",
+      "defaultValue": 10,
+      "metadata": { "description": "Min distinct files per user/IP per hour for the bulk-DLP rule." }
+    },
+    "bulkDlpHitsThreshold": {
+      "type": "int",
+      "defaultValue": 25,
+      "metadata": { "description": "Min total DLP rule hits per user/IP per hour for the bulk-DLP rule." }
+    },
+    "ingestionStallHours": {
+      "type": "int",
+      "defaultValue": 6,
+      "metadata": { "description": "Alert when MicrosoftPurviewInformationProtection has no rows for this many hours despite baseline activity in the prior 7 days." }
+    },
+    "labelMassModUniqueItems": {
+      "type": "int",
+      "defaultValue": 25,
+      "metadata": { "description": "Min distinct items per user per hour to trigger AR-PURVIEW-LABEL-MASS-MODIFICATION." }
+    },
+    "rmsDenialThreshold": {
+      "type": "int",
+      "defaultValue": 10,
+      "metadata": { "description": "Min RMS access denials per user per hour to trigger AR-RMS-DECRYPTION-FAILURES." }
+    },
+    "eDiscoveryExportSizeMB": {
+      "type": "int",
+      "defaultValue": 500,
+      "metadata": { "description": "Min reported export size (MB) to trigger AR-EDISCOVERY-EXPORT-ABUSE on a single export job." }
+    },
+    "anonLinkBurstThreshold": {
+      "type": "int",
+      "defaultValue": 20,
+      "metadata": { "description": "Min anonymous / company-share link creations per user per hour to trigger AR-SPO-ANONLINK-BURST." }
+    },
+    "dspmSpikeUniqueAssets": {
+      "type": "int",
+      "defaultValue": 50,
+      "metadata": { "description": "Min distinct newly-classified assets per data source per hour to trigger AR-DSPM-CLASSIFICATION-SPIKE." }
+    },
+    "dspmSpillThreshold": {
+      "type": "int",
+      "defaultValue": 100,
+      "metadata": { "description": "Min total high-fidelity classification hits per data source per hour to trigger AR-DSPM-DATA-SPILL." }
+    },
+    "dspmNonProdNamePattern": {
+      "type": "string",
+      "defaultValue": "(?i)(dev|test|sandbox|staging|qa|uat|sbx|nonprod|preview|scratch|poc)",
+      "metadata": { "description": "Regex applied to DataSourceName / AssetName / AssetPath for AR-DSPM-NONPROD-SENSITIVE. Match indicates non-production zone." }
+    },
+    "dspmDisapprovedDataSourceTypes": {
+      "type": "string",
+      "defaultValue": "(?i)(amazon|aws|s3|google|gcp|bigquery|redshift|external|onprem|unmanaged|databricks)",
+      "metadata": { "description": "Regex applied to DataSourceType / DataSourceName / AssetPath for AR-DSPM-CROSS-CLOUD-SOVEREIGNTY. Match indicates non-Azure / non-approved cloud." }
+    },
+    "dspmSovereignClassificationPattern": {
+      "type": "string",
+      "defaultValue": "(?i)(EU |GDPR|France|Germany|Italy|Spain|United Kingdom|Netherlands|Belgium|Austria|Portugal|Poland|Ireland|Sweden|Finland|Denmark|Norway|Switzerland|Czech|Hungary|Greece|Romania|Bulgaria|Croatia|Slovenia|Slovakia|Estonia|Latvia|Lithuania)",
+      "metadata": { "description": "Regex matching ClassificationName values that carry sovereign / regional residency obligations." }
+    },
+    "dspmUnauthorizedPathPattern": {
+      "type": "string",
+      "defaultValue": "(?i)(anonymous|/public/|/temp/|/tmp/|/shared/|external|quarantine|unmanaged|/backup/|/dump/|/export/|/scratch/)",
+      "metadata": { "description": "Regex applied to AssetPath / AssetName / DataSourceName for AR-DSPM-UNAUTHORIZED-PATH." }
+    },
+    "enableLabelDowngrade":     { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-PURVIEW-LABEL-DOWNGRADE." } },
+    "enableDlpBulkMatches":     { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-PURVIEW-DLP-BULK-MATCHES." } },
+    "enableOverrideUsed":       { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-PURVIEW-OVERRIDE-USED." } },
+    "enableLabelRemoved":       { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-PURVIEW-LABEL-REMOVED." } },
+    "enableAuditTampering":     { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-AUDIT-EDISCOVERY-TAMPERING." } },
+    "enableAdminConfigDrift":   { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-PURVIEW-ADMIN-CONFIG-DRIFT." } },
+    "enableIngestionStall":     { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-PURVIEW-INGESTION-STALL." } },
+    "enableLabelMassMod":       { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-PURVIEW-LABEL-MASS-MODIFICATION." } },
+    "enableRmsFailures":        { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-RMS-DECRYPTION-FAILURES." } },
+    "enableEdiscoveryExport":   { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-EDISCOVERY-EXPORT-ABUSE." } },
+    "enableEdiscoveryRoleEsc":  { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-EDISCOVERY-ROLE-ESCALATION." } },
+    "enableDlpUnfamiliarLoc":   { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-PURVIEW-DLP-UNFAMILIAR-LOCATION (joins SigninLogs 30d - more expensive)." } },
+    "enableDiagDisabled":       { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-DIAGNOSTICS-DISABLED." } },
+    "enableSpoAnonLink":        { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-SPO-ANONLINK-BURST." } },
+    "enableDspmUnlabeled":      { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-DSPM-UNLABELED-SENSITIVE (PurviewDataSensitivityLogs)." } },
+    "enableDspmSpike":          { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-DSPM-CLASSIFICATION-SPIKE (PurviewDataSensitivityLogs)." } },
+    "enableDspmNonProd":        { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-DSPM-NONPROD-SENSITIVE (PurviewDataSensitivityLogs)." } },
+    "enableDspmSovereignty":    { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-DSPM-CROSS-CLOUD-SOVEREIGNTY (PurviewDataSensitivityLogs)." } },
+    "enableDspmUnauthorizedPath": { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-DSPM-UNAUTHORIZED-PATH (PurviewDataSensitivityLogs)." } },
+    "enableDspmSpill":          { "type": "bool", "defaultValue": true, "metadata": { "description": "Enable AR-DSPM-DATA-SPILL (PurviewDataSensitivityLogs)." } },
+    "deployHuntingQueries":     { "type": "bool", "defaultValue": true, "metadata": { "description": "Deploy the companion hunting queries (savedSearches, Category=Hunting Queries) alongside the analytic rules." } }
+  },
+  "variables": {
+    "rule1Id":  "[guid(parameters('workspaceName'), 'AR-PURVIEW-LABEL-DOWNGRADE')]",
+    "rule3Id":  "[guid(parameters('workspaceName'), 'AR-PURVIEW-DLP-BULK-MATCHES')]",
+    "rule4Id":  "[guid(parameters('workspaceName'), 'AR-PURVIEW-OVERRIDE-USED')]",
+    "rule5Id":  "[guid(parameters('workspaceName'), 'AR-PURVIEW-LABEL-REMOVED')]",
+    "rule6Id":  "[guid(parameters('workspaceName'), 'AR-AUDIT-EDISCOVERY-TAMPERING')]",
+    "rule7Id":  "[guid(parameters('workspaceName'), 'AR-PURVIEW-ADMIN-CONFIG-DRIFT')]",
+    "rule8Id":  "[guid(parameters('workspaceName'), 'AR-PURVIEW-INGESTION-STALL')]",
+    "rule9Id":  "[guid(parameters('workspaceName'), 'AR-PURVIEW-LABEL-MASS-MODIFICATION')]",
+    "rule10Id": "[guid(parameters('workspaceName'), 'AR-RMS-DECRYPTION-FAILURES')]",
+    "rule11Id": "[guid(parameters('workspaceName'), 'AR-EDISCOVERY-EXPORT-ABUSE')]",
+    "rule12Id": "[guid(parameters('workspaceName'), 'AR-EDISCOVERY-ROLE-ESCALATION')]",
+    "rule13Id": "[guid(parameters('workspaceName'), 'AR-PURVIEW-DLP-UNFAMILIAR-LOCATION')]",
+    "rule14Id": "[guid(parameters('workspaceName'), 'AR-DIAGNOSTICS-DISABLED')]",
+    "rule15Id": "[guid(parameters('workspaceName'), 'AR-SPO-ANONLINK-BURST')]",
+    "rule16Id": "[guid(parameters('workspaceName'), 'AR-DSPM-UNLABELED-SENSITIVE')]",
+    "rule17Id": "[guid(parameters('workspaceName'), 'AR-DSPM-CLASSIFICATION-SPIKE')]",
+    "rule18Id": "[guid(parameters('workspaceName'), 'AR-DSPM-NONPROD-SENSITIVE')]",
+    "rule19Id": "[guid(parameters('workspaceName'), 'AR-DSPM-CROSS-CLOUD-SOVEREIGNTY')]",
+    "rule20Id": "[guid(parameters('workspaceName'), 'AR-DSPM-UNAUTHORIZED-PATH')]",
+    "rule21Id": "[guid(parameters('workspaceName'), 'AR-DSPM-DATA-SPILL')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule1Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview - Sensitivity label downgraded (tenant-wide gap-filler)",
+        "description": "Tenant-wide visibility into label downgrade events. Purview IRM 'Sensitivity label downgrade' indicator only fires for users in an IRM policy; this rule covers everyone else.",
+        "severity": "Medium",
+        "enabled": "[parameters('enableLabelDowngrade')]",
+        "query": "let lowConfidentialLabels = dynamic([\"Public\",\"General\",\"Internal\"]);\nMicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(1h)\n| where LabelEventType in (\"LabelDowngraded\",\"SensitivityLabelChanged\")\n   or (isnotempty(OldSensitivityLabelId) and OldSensitivityLabelId != SensitivityLabelId)\n| where LabelName in (lowConfidentialLabels) or isempty(LabelName)\n| project TimeGenerated, UserId, ClientIP, DeviceName, ItemName,\n          OldLabel=OldSensitivityLabelId, NewLabel=SensitivityLabelId,\n          LabelName, JustificationText, Workload, Application\n| extend AccountUpn = UserId, IPAddress = ClientIP, FileName = ItemName",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "Exfiltration", "DefenseEvasion" ],
+        "techniques": [ "T1070" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] },
+          { "entityType": "Host",    "fieldMappings": [ { "identifier": "HostName", "columnName": "DeviceName" } ] },
+          { "entityType": "File",    "fieldMappings": [ { "identifier": "Name",     "columnName": "FileName"   } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule3Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview - Bulk DLP rule matches by single user (rule-burst gap-filler)",
+        "description": "Detects bursts of DLP rule matches by a single user/IP. Complements MDA 'Mass download' (file-count) and IRM 'Cumulative exfiltration' (risk-score) by counting DLP-rule firings - a denominator neither native control covers.",
+        "severity": "High",
+        "enabled": "[parameters('enableDlpBulkMatches')]",
+        "query": "[concat('MicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(1h)\n| where isnotempty(PolicyName) and isnotempty(ExecutionRuleName)\n| extend RuleSeverity = tostring(Severity)\n| summarize Hits = count(),\n            UniqueFiles = dcount(ItemName),\n            Files = make_set(ItemName, 25),\n            Policies = make_set(PolicyName, 10),\n            Rules = make_set(ExecutionRuleName, 10),\n            FirstSeen = min(TimeGenerated),\n            LastSeen = max(TimeGenerated)\n        by UserId, ClientIP\n| where UniqueFiles >= ', string(parameters('bulkDlpUniqueFilesThreshold')), ' or Hits >= ', string(parameters('bulkDlpHitsThreshold')), '\n| extend AccountUpn = UserId, IPAddress = ClientIP')]",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "Collection" ],
+        "techniques": [ "T1530" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule4Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview - DLP override or business justification used (no native default alert)",
+        "description": "Override / justification events are logged in Purview Audit but do NOT raise a default alert. This rule turns them into Sentinel incidents.",
+        "severity": "Medium",
+        "enabled": "[parameters('enableOverrideUsed')]",
+        "query": "MicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(1h)\n| where isnotempty(OverRideType) or isnotempty(OverRideReason)\n   or array_length(OverriddenActions) > 0\n| project TimeGenerated, UserId, ClientIP, ItemName,\n          PolicyName, ExecutionRuleName, OverRideType, OverRideReason, JustificationText\n| extend AccountUpn = UserId, IPAddress = ClientIP, FileName = ItemName",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "DefenseEvasion" ],
+        "techniques": [ "T1070" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] },
+          { "entityType": "File",    "fieldMappings": [ { "identifier": "Name",     "columnName": "FileName"   } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule5Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview - Sensitivity label removed (tenant-wide gap-filler)",
+        "description": "Detects label-removal events tenant-wide. IRM's equivalent indicator only covers users enrolled in an Insider Risk policy.",
+        "severity": "Medium",
+        "enabled": "[parameters('enableLabelRemoved')]",
+        "query": "MicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(1h)\n| where LabelEventType == \"LabelRemoved\"\n   or (isnotempty(OldSensitivityLabelId) and isempty(SensitivityLabelId))\n| project TimeGenerated, UserId, ClientIP, DeviceName, ItemName,\n          OldLabel=OldSensitivityLabelId, JustificationText, Workload\n| extend AccountUpn = UserId, IPAddress = ClientIP, FileName = ItemName",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "DefenseEvasion" ],
+        "techniques": [ "T1070" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] },
+          { "entityType": "Host",    "fieldMappings": [ { "identifier": "HostName", "columnName": "DeviceName" } ] },
+          { "entityType": "File",    "fieldMappings": [ { "identifier": "Name",     "columnName": "FileName"   } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule6Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Audit / eDiscovery tampering - audit disabled, mailbox bypass, purge actions",
+        "description": "Detects high-risk Exchange / Compliance Center operations that disable auditing or use eDiscovery purge actions. None of these raise a default Microsoft alert today.",
+        "severity": "High",
+        "enabled": "[parameters('enableAuditTampering')]",
+        "query": "let tamperOps = dynamic([\n  \"Set-AdminAuditLogConfig\",\n  \"Set-Mailbox\",\n  \"New-MailboxAuditBypassAssociation\",\n  \"Remove-MailboxAuditBypassAssociation\",\n  \"Remove-ComplianceSearch\",\n  \"Remove-ComplianceSearchAction\",\n  \"New-ComplianceSearchAction\",\n  \"Set-ComplianceSearchAction\",\n  \"Remove-CaseHoldPolicy\",\n  \"Remove-CaseHoldRule\"\n]);\nOfficeActivity\n| where TimeGenerated > ago(1h)\n| where Operation in (tamperOps)\n| extend ParamsStr = tostring(Parameters)\n| where (Operation == \"Set-Mailbox\" and ParamsStr has_any (\"AuditEnabled\\\":\\\"False\",\"AuditEnabled=False\"))\n     or (Operation == \"Set-AdminAuditLogConfig\" and ParamsStr has_any (\"UnifiedAuditLogIngestionEnabled\\\":\\\"False\",\"AdminAuditLogEnabled\\\":\\\"False\"))\n     or (Operation == \"New-ComplianceSearchAction\" and ParamsStr has \"Purge\")\n     or Operation in (\"New-MailboxAuditBypassAssociation\",\"Remove-MailboxAuditBypassAssociation\",\"Remove-ComplianceSearch\",\"Remove-ComplianceSearchAction\",\"Set-ComplianceSearchAction\",\"Remove-CaseHoldPolicy\",\"Remove-CaseHoldRule\")\n| project TimeGenerated, UserId, ClientIP, UserAgent, Operation, ResultStatus, OfficeWorkload, OfficeObjectId, ParamsStr\n| extend AccountUpn = UserId, IPAddress = ClientIP",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "DefenseEvasion", "Impact" ],
+        "techniques": [ "T1562", "T1485" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule7Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview admin abuse / config drift - DLP or label policies disabled, non-eDiscovery role group changes",
+        "description": "Detects Purview Compliance admin operations that disable / delete DLP or label policies, or grant non-eDiscovery role-group membership. eDiscovery / Compliance Admin / Reviewer role grants are handled by the dedicated AR-EDISCOVERY-ROLE-ESCALATION rule.",
+        "severity": "High",
+        "enabled": "[parameters('enableAdminConfigDrift')]",
+        "query": "let driftOps = dynamic([\n  \"Disable-DlpCompliancePolicy\",\n  \"Remove-DlpCompliancePolicy\",\n  \"New-DlpCompliancePolicy\",\n  \"Set-DlpCompliancePolicy\",\n  \"Remove-DlpComplianceRule\",\n  \"Set-DlpComplianceRule\",\n  \"Remove-LabelPolicy\",\n  \"Set-LabelPolicy\",\n  \"Disable-LabelPolicy\",\n  \"Remove-Label\",\n  \"Set-Label\",\n  \"Add-RoleGroupMember\",\n  \"Remove-RoleGroupMember\",\n  \"New-RoleGroup\",\n  \"Update-RoleGroupMember\"\n]);\nlet eDiscoveryRoleGroups = dynamic([\"eDiscovery Manager\",\"eDiscovery Administrator\",\"Compliance Administrator\",\"Compliance Data Administrator\",\"Reviewer\"]);\nOfficeActivity\n| where TimeGenerated > ago(1h)\n| where Operation in (driftOps)\n| extend ParamsStr = tostring(Parameters)\n| where not(Operation in (\"Add-RoleGroupMember\",\"Remove-RoleGroupMember\",\"New-RoleGroup\",\"Update-RoleGroupMember\") and ParamsStr has_any (eDiscoveryRoleGroups))\n| project TimeGenerated, UserId, ClientIP, UserAgent, Operation, OfficeWorkload, OfficeObjectId, ResultStatus, ParamsStr\n| extend AccountUpn = UserId, IPAddress = ClientIP",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "DefenseEvasion", "PrivilegeEscalation" ],
+        "techniques": [ "T1562", "T1098" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule8Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview - Ingestion stall on MicrosoftPurviewInformationProtection",
+        "description": "Fires when MicrosoftPurviewInformationProtection has zero rows for the configured stall window despite a baseline of activity in the prior 7 days. Catches connector / audit-pipeline outages that would silently kill detections.",
+        "severity": "Medium",
+        "enabled": "[parameters('enableIngestionStall')]",
+        "query": "[concat('let stallHours = ', string(parameters('ingestionStallHours')), ';\nlet baseline =\n    MicrosoftPurviewInformationProtection\n    | where TimeGenerated between (ago(7d) .. ago(1d))\n    | summarize HourlyAvg = count() / 144.0;\nlet recent =\n    MicrosoftPurviewInformationProtection\n    | where TimeGenerated > ago(stallHours * 1h)\n    | summarize Recent = count();\nbaseline\n| extend dummy = 1\n| join kind=inner (recent | extend dummy = 1) on dummy\n| where HourlyAvg >= 1.0 and Recent == 0\n| extend AlertReason = strcat(\"No rows in MicrosoftPurviewInformationProtection for last \", stallHours, \"h. 7d hourly baseline: \", round(HourlyAvg,2))\n| project AlertReason, HourlyAvg, Recent')]",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT6H",
+        "suppressionEnabled": true,
+        "tactics": [ "ImpairProcessControl", "DefenseEvasion" ],
+        "techniques": [ "T1562" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "P1D", "matchingMethod": "AllEntities"
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule9Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview - Mass sensitivity-label modification by single user",
+        "description": "Detects scripted / automated stripping or rewriting of sensitivity labels: one user changing labels on many distinct items in a 1h window. Distinct from DLP rule-burst (counts label CHANGES, not DLP firings). IRM 'Cumulative exfiltration' uses risk score, not label-change count, so this is a real gap.",
+        "severity": "High",
+        "enabled": "[parameters('enableLabelMassMod')]",
+        "query": "[concat('let unique = ', string(parameters('labelMassModUniqueItems')), ';\nMicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(1h)\n| where LabelEventType in (\"LabelChanged\",\"LabelDowngraded\",\"LabelRemoved\",\"LabelUpgraded\",\"SensitivityLabelChanged\",\"SensitivityLabelRemoved\")\n   or (isnotempty(OldSensitivityLabelId) and OldSensitivityLabelId != SensitivityLabelId)\n| summarize ItemCount = dcount(ItemName),\n            Items = make_set(ItemName, 25),\n            Workloads = make_set(Workload, 5),\n            EventTypes = make_set(LabelEventType, 10),\n            FirstSeen = min(TimeGenerated),\n            LastSeen = max(TimeGenerated)\n        by UserId, ClientIP\n| where ItemCount >= unique\n| extend AccountUpn = UserId, IPAddress = ClientIP')]",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "DefenseEvasion" ],
+        "techniques": [ "T1070" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule10Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview - Persistent RMS / AIP decryption failures by single identity",
+        "description": "Repeated Rights Management Service decryption / access denials by one identity, indicating systematic probing of protected files. Not a default Microsoft alert; IRM only reacts when a user is in scope of an IRM policy.",
+        "severity": "High",
+        "enabled": "[parameters('enableRmsFailures')]",
+        "query": "[concat('let denials = ', string(parameters('rmsDenialThreshold')), ';\nMicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(1h)\n| where Operation has_any (\"AccessDenied\",\"DecryptionFailed\",\"RightsManagementServiceFailure\",\"RmsAccessDenied\",\"AipAccessDenied\",\"Decryption\")\n| summarize Denials = count(),\n            Items = make_set(ItemName, 25),\n            Devices = make_set(DeviceName, 10),\n            FirstSeen = min(TimeGenerated),\n            LastSeen = max(TimeGenerated)\n        by UserId, ClientIP\n| where Denials >= denials\n| extend AccountUpn = UserId, IPAddress = ClientIP')]",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "CredentialAccess", "Discovery" ],
+        "techniques": [ "T1212", "T1083" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule11Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "eDiscovery - Search export abuse (large export or non-admin actor)",
+        "description": "Detects eDiscovery / Compliance search exports that are unusually large, OR initiated by a user who is not in eDiscovery role groups. Catches data exfiltration via the Compliance portal export path. Microsoft does not raise a default alert on export size.",
+        "severity": "High",
+        "enabled": "[parameters('enableEdiscoveryExport')]",
+        "query": "let exportOps = dynamic([\"SearchExportDownloaded\",\"SearchExportCompleted\",\"PurviewSearchExportJobCreated\",\"GetActionsForAllExports\",\"New-ComplianceSearchAction\"]);\nOfficeActivity\n| where TimeGenerated > ago(1h)\n| where RecordType in (\"24\",\"DiscoveryEvents\",\"AeD\",\"Discovery\") or Operation in (exportOps)\n| extend ParamsStr = tostring(Parameters)\n| project TimeGenerated, UserId, ClientIP, UserAgent, Operation, RecordType, OfficeObjectId, ParamsStr\n| extend AccountUpn = UserId, IPAddress = ClientIP",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "Exfiltration", "Collection" ],
+        "techniques": [ "T1567", "T1213" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule12Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "eDiscovery - Privilege escalation via role group membership",
+        "description": "Detects additions to eDiscovery Manager / eDiscovery Administrator / Compliance Administrator / Reviewer role groups in Microsoft 365. Default Microsoft alerts only cover global Entra role assignments, not the Purview-side compliance role groups.",
+        "severity": "High",
+        "enabled": "[parameters('enableEdiscoveryRoleEsc')]",
+        "query": "let eDiscoveryRoleGroups = dynamic([\"eDiscovery Manager\",\"eDiscovery Administrator\",\"Compliance Administrator\",\"Compliance Data Administrator\",\"Reviewer\"]);\nlet officeRoleEvents =\n    OfficeActivity\n    | where TimeGenerated > ago(1h)\n    | where Operation in (\"Add-RoleGroupMember\",\"New-RoleGroup\",\"Update-RoleGroupMember\",\"Set-RoleGroup\")\n    | extend ParamsStr = tostring(Parameters)\n    | where ParamsStr has_any (eDiscoveryRoleGroups)\n    | extend Source = \"OfficeActivity\", AccountUpn = UserId, IPAddress = ClientIP, Detail = ParamsStr;\nlet entraRoleEvents =\n    AuditLogs\n    | where TimeGenerated > ago(1h)\n    | where OperationName in (\"Add member to role\",\"Add eligible member to role\",\"Add member to group\")\n    | extend Targets = tostring(TargetResources)\n    | where Targets has_any (eDiscoveryRoleGroups)\n    | extend Source = \"AuditLogs\",\n             AccountUpn = tostring(InitiatedBy.user.userPrincipalName),\n             IPAddress = tostring(InitiatedBy.user.ipAddress),\n             Detail = Targets;\nofficeRoleEvents\n| project TimeGenerated, Source, AccountUpn, IPAddress, Operation = coalesce(Operation, \"\"), Detail\n| union (entraRoleEvents | project TimeGenerated, Source, AccountUpn, IPAddress, Operation = OperationName, Detail)",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "PrivilegeEscalation", "Persistence" ],
+        "techniques": [ "T1098", "T1078" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule13Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview DLP match from unfamiliar location or unmanaged device",
+        "description": "Joins Purview DLP / label events with SigninLogs to flag the same UserId hitting DLP from a country never seen for that user in 30d, OR from a device that fails Conditional Access compliance / is unmanaged. Native MDA impossible-travel does not key on label / DLP context.",
+        "severity": "High",
+        "enabled": "[parameters('enableDlpUnfamiliarLoc')]",
+        "query": "let lookback = 14d;\nlet userCountries =\n    SigninLogs\n    | where TimeGenerated between (ago(lookback) .. ago(1h))\n    | where ResultType == 0\n    | summarize KnownCountries = make_set(tostring(LocationDetails.countryOrRegion), 25) by UserPrincipalName;\nlet recentSignins =\n    SigninLogs\n    | where TimeGenerated > ago(2h)\n    | where ResultType == 0\n    | extend Country = tostring(LocationDetails.countryOrRegion),\n             DeviceCompliant = tobool(DeviceDetail.isCompliant),\n             DeviceManaged = tobool(DeviceDetail.isManaged),\n             ConditionalAccessFailed = (ConditionalAccessStatus == \"failure\")\n    | project SigninTime = TimeGenerated, UserPrincipalName, Country, IPAddress, DeviceCompliant, DeviceManaged, ConditionalAccessFailed;\nMicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(1h)\n| where isnotempty(PolicyName) or isnotempty(SensitivityLabelId)\n| join kind=inner (recentSignins) on $left.UserId == $right.UserPrincipalName\n| where abs(datetime_diff('minute', TimeGenerated, SigninTime)) <= 60\n| join kind=leftouter (userCountries) on $left.UserId == $right.UserPrincipalName\n| extend NewCountry = iff(isempty(KnownCountries) or not(set_has_element(KnownCountries, Country)), true, false)\n| extend RiskFlag = case(\n    NewCountry, \"NewCountry\",\n    DeviceManaged == false, \"UnmanagedDevice\",\n    DeviceCompliant == false, \"NonCompliantDevice\",\n    ConditionalAccessFailed, \"CAFailure\",\n    \"\")\n| where RiskFlag != \"\"\n| project TimeGenerated, UserId, ClientIP, IPAddress, Country, RiskFlag, ItemName, PolicyName, ExecutionRuleName\n| extend AccountUpn = UserId",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "Exfiltration", "InitialAccess" ],
+        "techniques": [ "T1078", "T1567" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule14Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Azure diagnostic settings deleted or disabled (Sentinel / Purview / Defender scope)",
+        "description": "Detects deletion / write of Microsoft.Insights/diagnosticSettings on resources that feed Sentinel - Log Analytics workspaces, Key Vaults, Storage accounts, Front Door, App Gateway, Defender. Catches the 'silence the SIEM' move that Set-AdminAuditLogConfig does NOT cover.",
+        "severity": "High",
+        "enabled": "[parameters('enableDiagDisabled')]",
+        "query": "AzureActivity\n| where TimeGenerated > ago(1h)\n| where OperationNameValue has \"Microsoft.Insights/diagnosticSettings\"\n   or OperationNameValue has \"microsoft.aadiam/diagnosticSettings\"\n| where ActivityStatusValue in~ (\"Success\",\"Succeeded\",\"Started\")\n| where OperationNameValue endswith \"/delete\" or OperationNameValue endswith \"/write\"\n| project TimeGenerated, Caller, CallerIpAddress, ResourceGroup, _ResourceId, OperationNameValue, ActivityStatusValue, Properties\n| extend AccountUpn = Caller, IPAddress = CallerIpAddress, ResourceId = _ResourceId",
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT15M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "DefenseEvasion", "ImpairProcessControl" ],
+        "techniques": [ "T1562" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account",       "fieldMappings": [ { "identifier": "FullName",   "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",            "fieldMappings": [ { "identifier": "Address",    "columnName": "IPAddress"  } ] },
+          { "entityType": "AzureResource", "fieldMappings": [ { "identifier": "ResourceId", "columnName": "ResourceId" } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule15Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "SharePoint / OneDrive - Anonymous-link burst by single user (SPO365-Scanner pattern)",
+        "description": "Detects bursts of anonymous / company-share / external-share link creations across many sites by one identity, the action signature of automated SP/OneDrive scanners (SPO365-Scanner, ROADtools-style enumeration). Purview 'Overshared content' reports the static state, not bursty creation.",
+        "severity": "High",
+        "enabled": "[parameters('enableSpoAnonLink')]",
+        "query": "[concat('let burst = ', string(parameters('anonLinkBurstThreshold')), ';\nlet shareOps = dynamic([\"AnonymousLinkCreated\",\"AnonymousLinkUpdated\",\"CompanyLinkCreated\",\"AddedToSecureLink\",\"SecureLinkCreated\",\"SharingPolicyChanged\",\"SharingSet\",\"SharingInvitationCreated\",\"AddedToGroup\"]);\nOfficeActivity\n| where TimeGenerated > ago(1h)\n| where OfficeWorkload in (\"SharePoint\",\"OneDrive\",\"OneDriveForBusiness\")\n| where Operation in (shareOps)\n| extend Site = coalesce(Site_Url, OfficeObjectId)\n| summarize Shares = count(),\n            UniqueSites = dcount(Site),\n            Sites = make_set(Site, 25),\n            UniqueTargets = dcount(TargetUserOrGroupName),\n            Targets = make_set(TargetUserOrGroupName, 25),\n            FirstSeen = min(TimeGenerated),\n            LastSeen = max(TimeGenerated)\n        by UserId, ClientIP\n| where Shares >= burst or UniqueSites >= max_of(5, burst/3)\n| extend AccountUpn = UserId, IPAddress = ClientIP')]",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "Exfiltration", "Collection" ],
+        "techniques": [ "T1567", "T1213" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Account", "fieldMappings": [ { "identifier": "FullName", "columnName": "AccountUpn" } ] },
+          { "entityType": "IP",      "fieldMappings": [ { "identifier": "Address",  "columnName": "IPAddress"  } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule16Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview DSPM - Unlabelled sensitive data discovered (PurviewDataSensitivityLogs)",
+        "description": "Purview DSPM scan found classified sensitive content (SITs, trainable classifiers) in assets that have NO sensitivity label applied. Native DSPM dashboards show this as posture; this rule turns it into actionable alerts when at least 5 unlabelled assets surface in a 4h window per data source.",
+        "severity": "Medium",
+        "enabled": "[parameters('enableDspmUnlabeled')]",
+        "query": "PurviewDataSensitivityLogs\n| where TimeGenerated > ago(4h)\n| where array_length(Classification) > 0\n| where array_length(SensitivityLabel) == 0\n| summarize Hits = count(),\n            UniqueAssets = dcount(AssetName),\n            Assets = make_set(AssetName, 25),\n            Classifications = make_set(Classification, 25),\n            FirstSeen = min(TimeGenerated),\n            LastSeen = max(TimeGenerated)\n        by PurviewAccountName, SourceName, SourceType\n| where UniqueAssets >= 5\n| extend HostName = SourceName",
+        "queryFrequency": "PT4H",
+        "queryPeriod": "PT4H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "Collection" ],
+        "techniques": [ "T1530" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Host", "fieldMappings": [ { "identifier": "HostName", "columnName": "HostName" } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule17Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview DSPM - Classification spike on a single data source (PurviewDataSensitivityLogs)",
+        "description": "Sudden surge of newly-classified assets on a single data source can indicate mass-import of sensitive data, ransomware staging, or shadow-IT promotion. Native DSPM dashboards trend volume but do not alert. Threshold tunable via dspmSpikeUniqueAssets.",
+        "severity": "Medium",
+        "enabled": "[parameters('enableDspmSpike')]",
+        "query": "[concat('let spike = ', string(parameters('dspmSpikeUniqueAssets')), ';\nPurviewDataSensitivityLogs\n| where TimeGenerated > ago(1h)\n| where array_length(Classification) > 0\n| summarize NewClassifications = count(),\n            UniqueAssets = dcount(AssetName),\n            Assets = make_set(AssetName, 25),\n            Classifications = make_set(Classification, 25),\n            Labels = make_set(SensitivityLabel, 10),\n            FirstSeen = min(TimeGenerated),\n            LastSeen = max(TimeGenerated)\n        by PurviewAccountName, SourceName, SourceType\n| where UniqueAssets >= spike\n| extend HostName = SourceName')]",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "Collection" ],
+        "techniques": [ "T1530" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Host", "fieldMappings": [ { "identifier": "HostName", "columnName": "HostName" } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule18Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview DSPM - High-fidelity sensitive data in non-production / test zone (PurviewDataSensitivityLogs)",
+        "description": "Production data copied to dev / test / sandbox / QA / staging assets is a recurring PCI-DSS, HIPAA and GDPR finding. Triggers when SSN, credit card, bank account, passport, driver license, tax-ID or similar high-fidelity classifications appear in an asset whose name / path matches the non-prod regex.",
+        "severity": "High",
+        "enabled": "[parameters('enableDspmNonProd')]",
+        "query": "[concat('let highFidelity = dynamic([\"Social Security\",\"Credit Card\",\"Bank Account\",\"Passport\",\"Driver\",\"Tax Identif\",\"Tax File\",\"National ID\",\"National Identif\",\"Insurance Number\",\"IBAN\",\"Medical\",\"CPF\",\"DNI\",\"CNI\",\"Fiscal Code\"]);\nlet nonProdPattern = \"', parameters('dspmNonProdNamePattern'), '\";\nPurviewDataSensitivityLogs\n| where TimeGenerated > ago(4h)\n| where array_length(Classification) > 0\n| where Classification has_any (highFidelity)\n| where (SourceName matches regex nonProdPattern) or (AssetName matches regex nonProdPattern) or (AssetPath matches regex nonProdPattern)\n| summarize Hits = count(), UniqueAssets = dcount(AssetName), Assets = make_set(AssetName, 25), Classifications = make_set(Classification, 25), Labels = make_set(SensitivityLabel, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by PurviewAccountName, SourceName, SourceType\n| extend HostName = SourceName')]",
+        "queryFrequency": "PT4H",
+        "queryPeriod": "PT4H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "Collection" ],
+        "techniques": [ "T1530" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Host", "fieldMappings": [ { "identifier": "HostName", "columnName": "HostName" } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule19Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview DSPM - Cross-cloud / sovereign-region data residency violation (PurviewDataSensitivityLogs)",
+        "description": "Sovereign-classified data (EU NID, GDPR PII, country-specific tax / passport / driver IDs) discovered in a data source whose type or location matches a non-approved cloud (AWS / S3, GCP / BigQuery, on-prem, external) or region. Catches AWS S3 buckets holding EU citizen data and similar residency breaches.",
+        "severity": "High",
+        "enabled": "[parameters('enableDspmSovereignty')]",
+        "query": "[concat('let sovereign = \"', parameters('dspmSovereignClassificationPattern'), '\";\nlet disapproved = \"', parameters('dspmDisapprovedDataSourceTypes'), '\";\nPurviewDataSensitivityLogs\n| where TimeGenerated > ago(4h)\n| where array_length(Classification) > 0\n| where tostring(Classification) matches regex sovereign\n| where (SourceType matches regex disapproved) or (SourceName matches regex disapproved) or (AssetPath matches regex disapproved)\n| summarize Hits = count(), UniqueAssets = dcount(AssetName), Assets = make_set(AssetName, 25), Classifications = make_set(Classification, 25), Labels = make_set(SensitivityLabel, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by PurviewAccountName, SourceName, SourceType\n| extend HostName = SourceName')]",
+        "queryFrequency": "PT4H",
+        "queryPeriod": "PT4H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "Collection" ],
+        "techniques": [ "T1530" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Host", "fieldMappings": [ { "identifier": "HostName", "columnName": "HostName" } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule20Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview DSPM - High-fidelity sensitive data in unauthorized storage path (PurviewDataSensitivityLogs)",
+        "description": "High-fidelity classifications (SSN, credit card, bank account, passport, driver, tax IDs, IBAN, medical) discovered in paths matching common unsanctioned patterns (anonymous / public / temp / shared / external / quarantine / backup / dump / export / scratch). Complements the non-prod rule with path-based, not name-based, matching.",
+        "severity": "Medium",
+        "enabled": "[parameters('enableDspmUnauthorizedPath')]",
+        "query": "[concat('let highFidelity = dynamic([\"Social Security\",\"Credit Card\",\"Bank Account\",\"Passport\",\"Driver\",\"Tax Identif\",\"Tax File\",\"National ID\",\"National Identif\",\"Insurance Number\",\"IBAN\",\"Medical\",\"CPF\",\"DNI\",\"CNI\",\"Fiscal Code\"]);\nlet badPath = \"', parameters('dspmUnauthorizedPathPattern'), '\";\nPurviewDataSensitivityLogs\n| where TimeGenerated > ago(4h)\n| where array_length(Classification) > 0\n| where Classification has_any (highFidelity)\n| where (AssetPath matches regex badPath) or (AssetName matches regex badPath) or (SourceName matches regex badPath)\n| summarize Hits = count(), UniqueAssets = dcount(AssetName), Assets = make_set(AssetName, 25), Classifications = make_set(Classification, 25), Labels = make_set(SensitivityLabel, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by PurviewAccountName, SourceName, SourceType\n| extend HostName = SourceName')]",
+        "queryFrequency": "PT4H",
+        "queryPeriod": "PT4H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "Collection" ],
+        "techniques": [ "T1530" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Host", "fieldMappings": [ { "identifier": "HostName", "columnName": "HostName" } ] }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', variables('rule21Id'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Purview DSPM - Sensitive data spill volume threshold (PurviewDataSensitivityLogs)",
+        "description": "Burst of high-fidelity classifications on a single data source within an hour. A single sensitive file is operational cleanup; hundreds appearing at once points to a rogue data dump or a broken automated process exporting production databases to unprotected shares. Threshold tunable via dspmSpillThreshold.",
+        "severity": "High",
+        "enabled": "[parameters('enableDspmSpill')]",
+        "query": "[concat('let spill = ', string(parameters('dspmSpillThreshold')), ';\nlet highFidelity = dynamic([\"Social Security\",\"Credit Card\",\"Bank Account\",\"Passport\",\"Driver\",\"Tax Identif\",\"Tax File\",\"National ID\",\"National Identif\",\"Insurance Number\",\"IBAN\",\"Medical\",\"CPF\",\"DNI\",\"CNI\",\"Fiscal Code\"]);\nPurviewDataSensitivityLogs\n| where TimeGenerated > ago(1h)\n| where array_length(Classification) > 0\n| where Classification has_any (highFidelity)\n| summarize TotalHits = count(), UniqueAssets = dcount(AssetName), Assets = make_set(AssetName, 25), Classifications = make_set(Classification, 25), Labels = make_set(SensitivityLabel, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by PurviewAccountName, SourceName, SourceType\n| where TotalHits >= spill\n| extend HostName = SourceName')]",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [ "Collection" ],
+        "techniques": [ "T1530" ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true, "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H", "matchingMethod": "AllEntities"
+          }
+        },
+        "entityMappings": [
+          { "entityType": "Host", "fieldMappings": [ { "identifier": "HostName", "columnName": "HostName" } ] }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-PURVIEW-LABEL-DOWNGRADE')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - Purview label downgrades (24h)",
+        "query": "let lowConfidentialLabels = dynamic([\"Public\",\"General\",\"Internal\"]);\nMicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(24h)\n| where LabelEventType in (\"LabelDowngraded\",\"SensitivityLabelChanged\")\n   or (isnotempty(OldSensitivityLabelId) and OldSensitivityLabelId != SensitivityLabelId)\n| where LabelName in (lowConfidentialLabels) or isempty(LabelName)\n| project TimeGenerated, UserId, ClientIP, DeviceName, ItemName, OldLabel=OldSensitivityLabelId, NewLabel=SensitivityLabelId, LabelName, JustificationText, Workload, Application",
+        "tags": [
+          { "name": "description", "value": "Tenant-wide label-downgrade hunt; complements IRM Adaptive Protection." },
+          { "name": "tactics", "value": "Exfiltration,DefenseEvasion" },
+          { "name": "techniques", "value": "T1070" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-PURVIEW-DLP-BULK-MATCHES')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - Bulk DLP rule matches by user (24h)",
+        "query": "MicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(24h)\n| where isnotempty(PolicyName) or isnotempty(ExecutionRuleName)\n| summarize Hits = count(), UniqueFiles = dcount(ItemName), Files = make_set(ItemName, 25), Policies = make_set(PolicyName, 10), Rules = make_set(ExecutionRuleName, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by UserId, ClientIP\n| order by Hits desc",
+        "tags": [
+          { "name": "description", "value": "Top users by DLP rule-match volume; tune threshold during hunt." },
+          { "name": "tactics", "value": "Collection" },
+          { "name": "techniques", "value": "T1530" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-PURVIEW-OVERRIDE-USED')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - DLP override / business justification used (24h)",
+        "query": "MicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(24h)\n| where isnotempty(OverRideType) or isnotempty(OverRideReason)\n   or array_length(OverriddenActions) > 0\n| project TimeGenerated, UserId, ClientIP, ItemName, PolicyName, ExecutionRuleName, OverRideType, OverRideReason, JustificationText\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "Every DLP override / justification, including activities outside an IRM policy." },
+          { "name": "tactics", "value": "DefenseEvasion" },
+          { "name": "techniques", "value": "T1070" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-PURVIEW-LABEL-REMOVED')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - Sensitivity labels removed (24h)",
+        "query": "MicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(24h)\n| where LabelEventType == \"LabelRemoved\"\n   or (isnotempty(OldSensitivityLabelId) and isempty(SensitivityLabelId))\n| project TimeGenerated, UserId, ClientIP, DeviceName, ItemName, OldLabel=OldSensitivityLabelId, JustificationText, Workload\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "Labels stripped tenant-wide (gap left by IRM-only telemetry)." },
+          { "name": "tactics", "value": "DefenseEvasion" },
+          { "name": "techniques", "value": "T1070" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-AUDIT-EDISCOVERY-TAMPERING')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - Audit / eDiscovery tampering (24h)",
+        "query": "let tamperOps = dynamic([\"Set-AdminAuditLogConfig\",\"Set-Mailbox\",\"New-MailboxAuditBypassAssociation\",\"Remove-MailboxAuditBypassAssociation\",\"Remove-ComplianceSearch\",\"Remove-ComplianceSearchAction\",\"New-ComplianceSearchAction\",\"Set-ComplianceSearchAction\",\"Remove-CaseHoldPolicy\",\"Remove-CaseHoldRule\"]);\nOfficeActivity\n| where TimeGenerated > ago(24h)\n| where Operation in (tamperOps)\n| extend ParamsStr = tostring(Parameters)\n| project TimeGenerated, UserId, ClientIP, UserAgent, Operation, ResultStatus, OfficeWorkload, OfficeObjectId, ParamsStr\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "Audit-disable / mailbox bypass / compliance purge operations." },
+          { "name": "tactics", "value": "DefenseEvasion,Impact" },
+          { "name": "techniques", "value": "T1562,T1485" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-PURVIEW-ADMIN-CONFIG-DRIFT')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - Purview admin abuse / config drift (24h)",
+        "query": "let driftOps = dynamic([\"Disable-DlpCompliancePolicy\",\"Remove-DlpCompliancePolicy\",\"New-DlpCompliancePolicy\",\"Set-DlpCompliancePolicy\",\"Remove-DlpComplianceRule\",\"Set-DlpComplianceRule\",\"Remove-LabelPolicy\",\"Set-LabelPolicy\",\"Disable-LabelPolicy\",\"Remove-Label\",\"Set-Label\",\"Add-RoleGroupMember\",\"Remove-RoleGroupMember\",\"New-RoleGroup\",\"Update-RoleGroupMember\"]);\nOfficeActivity\n| where TimeGenerated > ago(24h)\n| where Operation in (driftOps)\n| extend ParamsStr = tostring(Parameters)\n| project TimeGenerated, UserId, ClientIP, UserAgent, Operation, OfficeWorkload, OfficeObjectId, ResultStatus, ParamsStr\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "DLP / label policy mutations and Compliance role group changes." },
+          { "name": "tactics", "value": "DefenseEvasion,PrivilegeEscalation" },
+          { "name": "techniques", "value": "T1562,T1098" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-PURVIEW-INGESTION-STALL')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - Purview ingestion stall (last 24h vs prior 7d)",
+        "query": "let baseline = MicrosoftPurviewInformationProtection | where TimeGenerated between (ago(7d) .. ago(24h)) | summarize BaselineRows = count();\nlet recent = MicrosoftPurviewInformationProtection | where TimeGenerated > ago(24h) | summarize RecentRows = count(), LastSeen = max(TimeGenerated);\nbaseline | extend dummy = 1 | join kind=inner (recent | extend dummy = 1) on dummy\n| project BaselineRows, RecentRows, LastSeen, HoursSinceLastEvent = datetime_diff('hour', now(), LastSeen)",
+        "tags": [
+          { "name": "description", "value": "Detects MicrosoftPurviewInformationProtection silence; covers a known native blind spot." },
+          { "name": "tactics", "value": "DefenseEvasion" },
+          { "name": "techniques", "value": "T1562" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-PURVIEW-LABEL-MASS-MODIFICATION')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - Mass label modification by single user (24h)",
+        "query": "MicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(24h)\n| where LabelEventType in (\"LabelChanged\",\"LabelDowngraded\",\"LabelRemoved\",\"LabelUpgraded\",\"SensitivityLabelChanged\",\"SensitivityLabelRemoved\")\n   or (isnotempty(OldSensitivityLabelId) and OldSensitivityLabelId != SensitivityLabelId)\n| summarize ItemCount = dcount(ItemName), Items = make_set(ItemName, 25), Workloads = make_set(Workload, 5), EventTypes = make_set(LabelEventType, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by UserId, ClientIP\n| order by ItemCount desc",
+        "tags": [
+          { "name": "description", "value": "Top users by distinct labelled items modified - tune threshold per environment." },
+          { "name": "tactics", "value": "DefenseEvasion" },
+          { "name": "techniques", "value": "T1070" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-RMS-DECRYPTION-FAILURES')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - Persistent RMS / AIP decryption failures (24h)",
+        "query": "MicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(24h)\n| where Operation has_any (\"AccessDenied\",\"DecryptionFailed\",\"RightsManagementServiceFailure\",\"RmsAccessDenied\",\"AipAccessDenied\",\"Decryption\")\n| summarize Denials = count(), Items = make_set(ItemName, 25), Devices = make_set(DeviceName, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by UserId, ClientIP\n| order by Denials desc",
+        "tags": [
+          { "name": "description", "value": "Brute-force / stolen-token signal - high count of RMS denials per identity." },
+          { "name": "tactics", "value": "CredentialAccess,Discovery" },
+          { "name": "techniques", "value": "T1212,T1083" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-EDISCOVERY-EXPORT-ABUSE')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - eDiscovery search-export activity (24h)",
+        "query": "let exportOps = dynamic([\"SearchExportDownloaded\",\"SearchExportCompleted\",\"PurviewSearchExportJobCreated\",\"GetActionsForAllExports\",\"New-ComplianceSearchAction\"]);\nOfficeActivity\n| where TimeGenerated > ago(24h)\n| where RecordType in (\"24\",\"DiscoveryEvents\",\"AeD\",\"Discovery\") or Operation in (exportOps)\n| extend ParamsStr = tostring(Parameters)\n| project TimeGenerated, UserId, ClientIP, UserAgent, Operation, RecordType, OfficeObjectId, ParamsStr\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "All eDiscovery search-export and DiscoveryEvents - watch for non-admin actors." },
+          { "name": "tactics", "value": "Exfiltration,Collection" },
+          { "name": "techniques", "value": "T1567,T1213" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-EDISCOVERY-ROLE-ESCALATION')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - eDiscovery role-group membership changes (7d)",
+        "query": "let eDiscoveryRoleGroups = dynamic([\"eDiscovery Manager\",\"eDiscovery Administrator\",\"Compliance Administrator\",\"Compliance Data Administrator\",\"Reviewer\"]);\nOfficeActivity\n| where TimeGenerated > ago(7d)\n| where Operation in (\"Add-RoleGroupMember\",\"Update-RoleGroupMember\",\"New-RoleGroup\")\n| extend ParamsStr = tostring(Parameters)\n| where ParamsStr has_any (eDiscoveryRoleGroups)\n| project TimeGenerated, UserId, ClientIP, UserAgent, Operation, OfficeWorkload, ResultStatus, ParamsStr\n| order by TimeGenerated desc",
+        "tags": [
+          { "name": "description", "value": "Insider grants self / peer eDiscovery rights to enable export abuse." },
+          { "name": "tactics", "value": "PrivilegeEscalation,Persistence" },
+          { "name": "techniques", "value": "T1098,T1078" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-PURVIEW-DLP-UNFAMILIAR-LOCATION')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - DLP match from unfamiliar location / unmanaged device (24h)",
+        "query": "let lookback = 14d;\nlet userCountries = SigninLogs | where TimeGenerated between (ago(lookback) .. ago(24h)) | where ResultType == 0 | summarize KnownCountries = make_set(tostring(LocationDetails.countryOrRegion), 25) by UserPrincipalName;\nlet recentSignins = SigninLogs | where TimeGenerated > ago(25h) | where ResultType == 0 | extend Country = tostring(LocationDetails.countryOrRegion), DeviceCompliant = tobool(DeviceDetail.isCompliant), DeviceManaged = tobool(DeviceDetail.isManaged), ConditionalAccessFailed = (ConditionalAccessStatus == \"failure\") | project SigninTime = TimeGenerated, UserPrincipalName, Country, IPAddress, DeviceCompliant, DeviceManaged, ConditionalAccessFailed;\nMicrosoftPurviewInformationProtection\n| where TimeGenerated > ago(24h)\n| where isnotempty(PolicyName) or isnotempty(SensitivityLabelId)\n| join kind=inner (recentSignins) on $left.UserId == $right.UserPrincipalName\n| where abs(datetime_diff('minute', TimeGenerated, SigninTime)) <= 60\n| join kind=leftouter (userCountries) on $left.UserId == $right.UserPrincipalName\n| extend NewCountry = iff(isempty(KnownCountries) or not(set_has_element(KnownCountries, Country)), true, false)\n| extend RiskFlag = case(NewCountry, \"NewCountry\", DeviceManaged == false, \"UnmanagedDevice\", DeviceCompliant == false, \"NonCompliantDevice\", ConditionalAccessFailed, \"CAFailure\", \"\")\n| where RiskFlag != \"\"\n| project TimeGenerated, UserId, ClientIP, IPAddress, Country, RiskFlag, ItemName, PolicyName, ExecutionRuleName",
+        "tags": [
+          { "name": "description", "value": "DLP hits correlated with unfamiliar country, unmanaged device, or CA failure." },
+          { "name": "tactics", "value": "Exfiltration,InitialAccess" },
+          { "name": "techniques", "value": "T1078,T1567" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-DIAGNOSTICS-DISABLED')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - Diagnostic settings deleted or disabled (24h)",
+        "query": "AzureActivity\n| where TimeGenerated > ago(24h)\n| where OperationNameValue endswith \"DIAGNOSTICSETTINGS/DELETE\" or OperationNameValue endswith \"DIAGNOSTICSETTINGS/WRITE\"\n| extend Target = tolower(tostring(parse_json(Properties).resource))\n| where Target has_any (\"oms\",\"insights\",\"sentinel\",\"loganalytics\",\"purview\",\"defender\",\"securityinsights\")\n| project TimeGenerated, Caller, CallerIpAddress, OperationNameValue, ActivityStatusValue, ResourceProviderValue, ResourceId, Target",
+        "tags": [
+          { "name": "description", "value": "Watch for attackers killing diagnostic forwarding to Sentinel / Defender / Purview workspaces." },
+          { "name": "tactics", "value": "DefenseEvasion,ImpairProcessControl" },
+          { "name": "techniques", "value": "T1562" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-SPO-ANONLINK-BURST')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - SPO / OneDrive anonymous-link burst (24h)",
+        "query": "let shareOps = dynamic([\"AnonymousLinkCreated\",\"AnonymousLinkUpdated\",\"CompanyLinkCreated\",\"AddedToSecureLink\",\"SecureLinkCreated\",\"SharingPolicyChanged\",\"SharingSet\",\"SharingInvitationCreated\",\"AddedToGroup\"]);\nOfficeActivity\n| where TimeGenerated > ago(24h)\n| where OfficeWorkload in (\"SharePoint\",\"OneDrive\",\"OneDriveForBusiness\")\n| where Operation in (shareOps)\n| extend Site = coalesce(Site_Url, OfficeObjectId)\n| summarize Shares = count(), UniqueSites = dcount(Site), Sites = make_set(Site, 25), UniqueTargets = dcount(TargetUserOrGroupName), Targets = make_set(TargetUserOrGroupName, 25), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by UserId, ClientIP\n| order by Shares desc",
+        "tags": [
+          { "name": "description", "value": "SPO365-Scanner-style anonymous / company-link burst per user." },
+          { "name": "tactics", "value": "Exfiltration,Collection" },
+          { "name": "techniques", "value": "T1567,T1213" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-DSPM-UNLABELED-SENSITIVE')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - DSPM unlabelled sensitive data (24h)",
+        "query": "PurviewDataSensitivityLogs\n| where TimeGenerated > ago(24h)\n| where array_length(Classification) > 0\n| where array_length(SensitivityLabel) == 0\n| summarize Hits = count(), UniqueAssets = dcount(AssetName), Assets = make_set(AssetName, 25), Classifications = make_set(Classification, 25), LastSeen = max(TimeGenerated) by PurviewAccountName, SourceName, SourceType\n| order by UniqueAssets desc",
+        "tags": [
+          { "name": "description", "value": "Where is sensitive data sitting without a label? DSPM posture turned into an interactive hunt." },
+          { "name": "tactics", "value": "Collection" },
+          { "name": "techniques", "value": "T1530" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-DSPM-CLASSIFICATION-COVERAGE')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - DSPM top data sources by classification volume (24h)",
+        "query": "PurviewDataSensitivityLogs\n| where TimeGenerated > ago(24h)\n| where array_length(Classification) > 0\n| summarize TotalHits = count(), UniqueAssets = dcount(AssetName), Classifications = make_set(Classification, 25), LabelCoverage = countif(array_length(SensitivityLabel) > 0) * 100.0 / count(), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by PurviewAccountName, SourceName, SourceType\n| order by TotalHits desc",
+        "tags": [
+          { "name": "description", "value": "Top data sources by classification volume; LabelCoverage column highlights gaps." },
+          { "name": "tactics", "value": "Collection" },
+          { "name": "techniques", "value": "T1530" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-DSPM-NONPROD-SENSITIVE')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - DSPM high-fidelity sensitive data in non-prod / test (24h)",
+        "query": "let highFidelity = dynamic([\"Social Security\",\"Credit Card\",\"Bank Account\",\"Passport\",\"Driver\",\"Tax Identif\",\"National ID\",\"National Identif\",\"Insurance Number\",\"IBAN\",\"Medical\",\"CPF\",\"DNI\",\"CNI\",\"Fiscal Code\"]);\nlet nonProdPattern = \"(?i)(dev|test|sandbox|staging|qa|uat|sbx|nonprod|preview|scratch|poc)\";\nPurviewDataSensitivityLogs\n| where TimeGenerated > ago(24h)\n| where array_length(Classification) > 0\n| where Classification has_any (highFidelity)\n| where (SourceName matches regex nonProdPattern) or (AssetName matches regex nonProdPattern) or (AssetPath matches regex nonProdPattern)\n| summarize Hits = count(), UniqueAssets = dcount(AssetName), Assets = make_set(AssetName, 25), Classifications = make_set(Classification, 25), Labels = make_set(SensitivityLabel, 10), LastSeen = max(TimeGenerated) by PurviewAccountName, SourceName, SourceType\n| order by UniqueAssets desc",
+        "tags": [
+          { "name": "description", "value": "Production-like sensitive data sitting in dev / test / sandbox - PCI / HIPAA / GDPR violation hunt." },
+          { "name": "tactics", "value": "Collection" },
+          { "name": "techniques", "value": "T1530" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-DSPM-CROSS-CLOUD-SOVEREIGNTY')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - DSPM cross-cloud / sovereign residency violation (24h)",
+        "query": "let sovereign = \"(?i)(EU |GDPR|France|Germany|Italy|Spain|United Kingdom|Netherlands|Belgium|Austria|Portugal|Poland|Ireland|Sweden|Finland|Denmark|Norway|Switzerland)\";\nlet disapproved = \"(?i)(amazon|aws|s3|google|gcp|bigquery|redshift|external|onprem|unmanaged|databricks)\";\nPurviewDataSensitivityLogs\n| where TimeGenerated > ago(24h)\n| where array_length(Classification) > 0\n| where tostring(Classification) matches regex sovereign\n| where (SourceType matches regex disapproved) or (SourceName matches regex disapproved) or (AssetPath matches regex disapproved)\n| summarize Hits = count(), UniqueAssets = dcount(AssetName), Assets = make_set(AssetName, 25), Classifications = make_set(Classification, 25), Labels = make_set(SensitivityLabel, 10), LastSeen = max(TimeGenerated) by PurviewAccountName, SourceName, SourceType\n| order by Hits desc",
+        "tags": [
+          { "name": "description", "value": "EU / sovereign-classified data found in non-Azure or non-approved cloud locations." },
+          { "name": "tactics", "value": "Collection" },
+          { "name": "techniques", "value": "T1530" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-DSPM-UNAUTHORIZED-PATH')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - DSPM high-fidelity sensitive data in unauthorized path (24h)",
+        "query": "let highFidelity = dynamic([\"Social Security\",\"Credit Card\",\"Bank Account\",\"Passport\",\"Driver\",\"Tax Identif\",\"National ID\",\"National Identif\",\"Insurance Number\",\"IBAN\",\"Medical\",\"CPF\",\"DNI\",\"CNI\",\"Fiscal Code\"]);\nlet badPath = \"(?i)(anonymous|/public/|/temp/|/tmp/|/shared/|external|quarantine|unmanaged|/backup/|/dump/|/export/|/scratch/)\";\nPurviewDataSensitivityLogs\n| where TimeGenerated > ago(24h)\n| where array_length(Classification) > 0\n| where Classification has_any (highFidelity)\n| where (AssetPath matches regex badPath) or (AssetName matches regex badPath) or (SourceName matches regex badPath)\n| summarize Hits = count(), UniqueAssets = dcount(AssetName), Assets = make_set(AssetName, 25), Classifications = make_set(Classification, 25), Labels = make_set(SensitivityLabel, 10), LastSeen = max(TimeGenerated) by PurviewAccountName, SourceName, SourceType\n| order by UniqueAssets desc",
+        "tags": [
+          { "name": "description", "value": "High-fidelity SITs in anonymous / public / temp / shared / backup / dump paths." },
+          { "name": "tactics", "value": "Collection" },
+          { "name": "techniques", "value": "T1530" }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployHuntingQueries')]",
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/HQ-DSPM-DATA-SPILL')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "HQ - DSPM sensitive data spill burst (24h)",
+        "query": "let highFidelity = dynamic([\"Social Security\",\"Credit Card\",\"Bank Account\",\"Passport\",\"Driver\",\"Tax Identif\",\"National ID\",\"National Identif\",\"Insurance Number\",\"IBAN\",\"Medical\",\"CPF\",\"DNI\",\"CNI\",\"Fiscal Code\"]);\nPurviewDataSensitivityLogs\n| where TimeGenerated > ago(24h)\n| where array_length(Classification) > 0\n| where Classification has_any (highFidelity)\n| summarize TotalHits = count(), UniqueAssets = dcount(AssetName), Assets = make_set(AssetName, 25), Classifications = make_set(Classification, 25), Labels = make_set(SensitivityLabel, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by PurviewAccountName, SourceName, SourceType, bin(TimeGenerated, 1h)\n| order by TotalHits desc",
+        "tags": [
+          { "name": "description", "value": "Hourly burst of high-fidelity classifications - spot rogue data dumps or broken export pipelines." },
+          { "name": "tactics", "value": "Collection" },
+          { "name": "techniques", "value": "T1530" }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "deployedRuleCount":         { "type": "int",    "value": 20 },
+    "enabledRuleCount":          { "type": "int",    "value": "[add(add(add(add(add(add(add(add(add(add(add(add(add(add(add(add(add(add(add(if(parameters('enableLabelDowngrade'),1,0),if(parameters('enableDlpBulkMatches'),1,0)),if(parameters('enableOverrideUsed'),1,0)),if(parameters('enableLabelRemoved'),1,0)),if(parameters('enableAuditTampering'),1,0)),if(parameters('enableAdminConfigDrift'),1,0)),if(parameters('enableIngestionStall'),1,0)),if(parameters('enableLabelMassMod'),1,0)),if(parameters('enableRmsFailures'),1,0)),if(parameters('enableEdiscoveryExport'),1,0)),if(parameters('enableEdiscoveryRoleEsc'),1,0)),if(parameters('enableDlpUnfamiliarLoc'),1,0)),if(parameters('enableDiagDisabled'),1,0)),if(parameters('enableSpoAnonLink'),1,0)),if(parameters('enableDspmUnlabeled'),1,0)),if(parameters('enableDspmSpike'),1,0)),if(parameters('enableDspmNonProd'),1,0)),if(parameters('enableDspmSovereignty'),1,0)),if(parameters('enableDspmUnauthorizedPath'),1,0)),if(parameters('enableDspmSpill'),1,0))]" },
+    "deployedHuntingQueryCount": { "type": "int",    "value": "[if(parameters('deployHuntingQueries'), 20, 0)]" },
+    "workspace":                 { "type": "string", "value": "[parameters('workspaceName')]" },
+    "version":                   { "type": "string", "value": "2.2.0" }
+  }
+}

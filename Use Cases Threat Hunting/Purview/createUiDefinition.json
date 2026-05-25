@@ -1,0 +1,107 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/0.1.2-preview/CreateUIDefinition.MultiVm.json#",
+  "handler": "Microsoft.Azure.CreateUIDef",
+  "version": "0.1.2-preview",
+  "parameters": {
+    "basics": [
+      {
+        "name": "workspaceName",
+        "type": "Microsoft.Common.TextBox",
+        "label": "Sentinel workspace name",
+        "toolTip": "Name of the Sentinel-enabled Log Analytics workspace in this resource group.",
+        "constraints": { "required": true, "regex": "^[A-Za-z0-9][A-Za-z0-9-]{2,62}$", "validationMessage": "3-63 chars, alphanumeric + hyphen." }
+      }
+    ],
+    "steps": [
+      {
+        "name": "rules",
+        "label": "Enable / disable rules",
+        "subLabel": {
+          "preValidation": "Choose which of the 14 rules to enable",
+          "postValidation": "Done"
+        },
+        "bladeTitle": "Per-rule enable",
+        "elements": [
+          {
+            "name": "rulesInfo",
+            "type": "Microsoft.Common.InfoBox",
+            "visible": true,
+            "options": {
+              "icon": "Info",
+              "text": "All rules default to enabled. Uncheck any rule you do NOT want to run. Disabled rules are still deployed (idempotent) but produce zero query cost."
+            }
+          },
+
+          { "name": "secLabels",   "type": "Microsoft.Common.Section", "label": "Purview / DLP / Label rules", "elements": [
+            { "name": "enableLabelDowngrade",      "type": "Microsoft.Common.CheckBox", "label": "AR-PURVIEW-LABEL-DOWNGRADE - tenant-wide label downgrade", "defaultValue": true },
+            { "name": "enableLabelRemoved",        "type": "Microsoft.Common.CheckBox", "label": "AR-PURVIEW-LABEL-REMOVED - tenant-wide label removal", "defaultValue": true },
+            { "name": "enableLabelMassMod",        "type": "Microsoft.Common.CheckBox", "label": "AR-PURVIEW-LABEL-MASS-MODIFICATION - mass label change by single user", "defaultValue": true },
+            { "name": "enableDlpBulkMatches",      "type": "Microsoft.Common.CheckBox", "label": "AR-PURVIEW-DLP-BULK-MATCHES - DLP rule-burst by single user", "defaultValue": true },
+            { "name": "enableOverrideUsed",        "type": "Microsoft.Common.CheckBox", "label": "AR-PURVIEW-OVERRIDE-USED - DLP override / justification", "defaultValue": true },
+            { "name": "enableDlpUnfamiliarLoc",    "type": "Microsoft.Common.CheckBox", "label": "AR-PURVIEW-DLP-UNFAMILIAR-LOCATION - new country / unmanaged device (uses 30d SigninLogs - higher cost)", "defaultValue": true },
+            { "name": "enableRmsFailures",         "type": "Microsoft.Common.CheckBox", "label": "AR-RMS-DECRYPTION-FAILURES - persistent RMS access denials", "defaultValue": true }
+          ]},
+
+          { "name": "secEdiscovery", "type": "Microsoft.Common.Section", "label": "eDiscovery / Audit / Admin rules", "elements": [
+            { "name": "enableAuditTampering",      "type": "Microsoft.Common.CheckBox", "label": "AR-AUDIT-EDISCOVERY-TAMPERING - audit disable / mailbox bypass / purge", "defaultValue": true },
+            { "name": "enableAdminConfigDrift",    "type": "Microsoft.Common.CheckBox", "label": "AR-PURVIEW-ADMIN-CONFIG-DRIFT - DLP / label policy disabled, role group changes", "defaultValue": true },
+            { "name": "enableEdiscoveryExport",    "type": "Microsoft.Common.CheckBox", "label": "AR-EDISCOVERY-EXPORT-ABUSE - large export or non-admin actor", "defaultValue": true },
+            { "name": "enableEdiscoveryRoleEsc",   "type": "Microsoft.Common.CheckBox", "label": "AR-EDISCOVERY-ROLE-ESCALATION - eDiscovery / Compliance role membership change", "defaultValue": true }
+          ]},
+
+          { "name": "secPlatform", "type": "Microsoft.Common.Section", "label": "Platform integrity / scanner pattern", "elements": [
+            { "name": "enableDiagDisabled",        "type": "Microsoft.Common.CheckBox", "label": "AR-DIAGNOSTICS-DISABLED - Azure diagnostic-settings deleted/modified", "defaultValue": true },
+            { "name": "enableIngestionStall",      "type": "Microsoft.Common.CheckBox", "label": "AR-PURVIEW-INGESTION-STALL - Purview connector / pipeline outage", "defaultValue": true },
+            { "name": "enableSpoAnonLink",         "type": "Microsoft.Common.CheckBox", "label": "AR-SPO-ANONLINK-BURST - SharePoint / OneDrive anonymous-link burst", "defaultValue": true }
+          ]}
+        ]
+      },
+      {
+        "name": "thresholds",
+        "label": "Thresholds",
+        "subLabel": {
+          "preValidation": "Tune detection thresholds",
+          "postValidation": "Done"
+        },
+        "bladeTitle": "Thresholds",
+        "elements": [
+          { "name": "bulkDlpUniqueFilesThreshold", "type": "Microsoft.Common.TextBox", "label": "Bulk DLP - min distinct files / hr",     "defaultValue": "10",  "constraints": { "required": true, "regex": "^[1-9][0-9]{0,3}$" } },
+          { "name": "bulkDlpHitsThreshold",        "type": "Microsoft.Common.TextBox", "label": "Bulk DLP - min DLP hits / hr",            "defaultValue": "25",  "constraints": { "required": true, "regex": "^[1-9][0-9]{0,3}$" } },
+          { "name": "labelMassModUniqueItems",     "type": "Microsoft.Common.TextBox", "label": "Mass label mod - min distinct items / hr","defaultValue": "25",  "constraints": { "required": true, "regex": "^[1-9][0-9]{0,3}$" } },
+          { "name": "rmsDenialThreshold",          "type": "Microsoft.Common.TextBox", "label": "RMS denials - min / hr",                  "defaultValue": "10",  "constraints": { "required": true, "regex": "^[1-9][0-9]{0,3}$" } },
+          { "name": "eDiscoveryExportSizeMB",      "type": "Microsoft.Common.TextBox", "label": "eDiscovery export - min size (MB)",       "defaultValue": "500", "constraints": { "required": true, "regex": "^[1-9][0-9]{0,4}$" } },
+          { "name": "anonLinkBurstThreshold",      "type": "Microsoft.Common.TextBox", "label": "Anon-link burst - min shares / hr",       "defaultValue": "20",  "constraints": { "required": true, "regex": "^[1-9][0-9]{0,3}$" } },
+          { "name": "ingestionStallHours",         "type": "Microsoft.Common.TextBox", "label": "Ingestion stall window (hours)",          "defaultValue": "6",   "constraints": { "required": true, "regex": "^[1-9][0-9]?$" } }
+        ]
+      }
+    ],
+    "outputs": {
+      "workspaceName":               "[basics('workspaceName')]",
+
+      "enableLabelDowngrade":        "[steps('rules').secLabels.enableLabelDowngrade]",
+      "enableLabelRemoved":          "[steps('rules').secLabels.enableLabelRemoved]",
+      "enableLabelMassMod":          "[steps('rules').secLabels.enableLabelMassMod]",
+      "enableDlpBulkMatches":        "[steps('rules').secLabels.enableDlpBulkMatches]",
+      "enableOverrideUsed":          "[steps('rules').secLabels.enableOverrideUsed]",
+      "enableDlpUnfamiliarLoc":      "[steps('rules').secLabels.enableDlpUnfamiliarLoc]",
+      "enableRmsFailures":           "[steps('rules').secLabels.enableRmsFailures]",
+
+      "enableAuditTampering":        "[steps('rules').secEdiscovery.enableAuditTampering]",
+      "enableAdminConfigDrift":      "[steps('rules').secEdiscovery.enableAdminConfigDrift]",
+      "enableEdiscoveryExport":      "[steps('rules').secEdiscovery.enableEdiscoveryExport]",
+      "enableEdiscoveryRoleEsc":     "[steps('rules').secEdiscovery.enableEdiscoveryRoleEsc]",
+
+      "enableDiagDisabled":          "[steps('rules').secPlatform.enableDiagDisabled]",
+      "enableIngestionStall":        "[steps('rules').secPlatform.enableIngestionStall]",
+      "enableSpoAnonLink":           "[steps('rules').secPlatform.enableSpoAnonLink]",
+
+      "bulkDlpUniqueFilesThreshold": "[int(steps('thresholds').bulkDlpUniqueFilesThreshold)]",
+      "bulkDlpHitsThreshold":        "[int(steps('thresholds').bulkDlpHitsThreshold)]",
+      "labelMassModUniqueItems":     "[int(steps('thresholds').labelMassModUniqueItems)]",
+      "rmsDenialThreshold":          "[int(steps('thresholds').rmsDenialThreshold)]",
+      "eDiscoveryExportSizeMB":      "[int(steps('thresholds').eDiscoveryExportSizeMB)]",
+      "anonLinkBurstThreshold":      "[int(steps('thresholds').anonLinkBurstThreshold)]",
+      "ingestionStallHours":         "[int(steps('thresholds').ingestionStallHours)]"
+    }
+  }
+}
