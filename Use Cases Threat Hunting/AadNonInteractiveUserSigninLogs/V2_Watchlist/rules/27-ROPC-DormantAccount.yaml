@@ -1,0 +1,98 @@
+id: d4e5f6a7-b8c9-0d1e-2f3a-4b5c6d7e8f9a
+name: ROPC Authentication Against Dormant Account
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects a successful ROPC sign-in for an account that has had no interactive or
+  non-interactive successful sign-in in the prior 30 days. Dormant accounts are a
+  preferred target for credential-stuffing and breach-replay attacks: leaked passwords
+  for inactive employees / contractors often still work because no one notices the
+  sign-ins.
+
+  Trigger: successful ROPC sign-in (ResultType == 0) where UPN does not appear in
+  SigninLogs OR AADNonInteractiveUserSignInLogs successes in the prior 30 days.
+
+  Tuning:
+    - LegitRopcApps suppresses known-good ROPC clients.
+    - Service / sync accounts that intentionally sit dormant should be allowlisted via
+      LegitRopcUsers.
+  MITRE ATT&CK: T1078 (Valid Accounts), T1110 (Brute Force)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADNonInteractiveUserSignInLogs
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 30d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078
+  - T1110
+query: |
+  let LegitRopcApps = dynamic([
+      "Microsoft Authentication Broker",
+      "Microsoft Intune Company Portal",
+      "Azure AD Connect",
+      "Microsoft Office",
+      "Microsoft Office Authentication Broker"
+  ]);
+  let LegitRopcUsers = dynamic([]);
+  let Active =
+      union isfuzzy=true
+          (SigninLogs
+              | where TimeGenerated between (ago(30d) .. ago(1h))),
+          (AADNonInteractiveUserSignInLogs
+              | where TimeGenerated between (ago(30d) .. ago(1h)))
+      | where ResultType == 0
+      | distinct Upn = tolower(UserPrincipalName);
+  AADNonInteractiveUserSignInLogs
+  | invoke ExcludeAllowlistedIPs_AADNI()
+  | where TimeGenerated > ago(1h)
+  | where AuthenticationProtocol =~ "ropc"
+  | where ResultType == 0
+  | where AppDisplayName !in~ (LegitRopcApps)
+  | extend Upn = tolower(UserPrincipalName)
+  | where Upn !in (LegitRopcUsers)
+  | where Upn !in (Active)
+  | summarize
+      Count     = count(),
+      IPs       = make_set(IPAddress),
+      Countries = make_set(Location),
+      Apps      = make_set(AppDisplayName),
+      FirstSeen = min(TimeGenerated),
+      LastSeen  = max(TimeGenerated)
+    by UserPrincipalName
+  | extend IPAddress = tostring(IPs[0])
+  | order by Count desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  SignInCount: Count
+  Countries: Countries
+  Apps: Apps
+alertDetailsOverride:
+  alertDisplayNameFormat: "ROPC sign-in on dormant account {{UserPrincipalName}}"
+  alertDescriptionFormat: "Dormant account {{UserPrincipalName}} (no successful sign-in in 30 days) suddenly authenticated via ROPC from {{Countries}}. Strong indicator of breach-replay or credential-stuffing success."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
