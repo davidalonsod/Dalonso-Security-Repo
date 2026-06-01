@@ -1,0 +1,49 @@
+id: aa1f000c-200c-420c-920c-aadprov-hunt12
+name: HUNT-12 Provisioning Operation Followed by Consent Grant (24h)
+description: |
+  Correlates provisioning activity from a ServicePrincipal with subsequent
+  delegated/admin consent grants on the same SP within 24 hours. The chain
+  "rogue SP provisions accounts" -> "rogue SP receives broader consent" is a
+  documented escalation: attacker first writes objects through limited scope,
+  then escalates scope via consent to keep the persistent footprint.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+      - AuditLogs
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+relevantTechniques:
+  - T1098
+  - T1078.004
+query: |
+  let ProvisioningSPs =
+      AADProvisioningLogs
+      | where TimeGenerated > ago(7d)
+      | extend SPId = tostring(parse_json(ServicePrincipal).Id),
+               SPName = tostring(parse_json(ServicePrincipal).Name)
+      | summarize ProvisioningEvents = count(),
+                  FirstProvisioningSeen = min(TimeGenerated)
+        by SPId, SPName;
+  let ConsentEvents =
+      AuditLogs
+      | where TimeGenerated > ago(7d)
+      | where OperationName has_any (
+            "Consent to application",
+            "Add delegated permission grant",
+            "Add app role assignment grant to user",
+            "Add app role assignment to service principal"
+        )
+      | mv-expand TargetResources
+      | extend TargetSPId   = tostring(TargetResources.id),
+               TargetSPName = tostring(TargetResources.displayName),
+               Actor        = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+                                        tostring(InitiatedBy.app.displayName))
+      | project ConsentTime = TimeGenerated, TargetSPId, TargetSPName, Actor, OperationName;
+  ProvisioningSPs
+  | join kind=inner (ConsentEvents) on $left.SPId == $right.TargetSPId
+  | where ConsentTime between (FirstProvisioningSeen .. FirstProvisioningSeen + 1d)
+  | project SPName, SPId, FirstProvisioningSeen, ConsentTime, Actor, OperationName, ProvisioningEvents
+  | order by ConsentTime desc

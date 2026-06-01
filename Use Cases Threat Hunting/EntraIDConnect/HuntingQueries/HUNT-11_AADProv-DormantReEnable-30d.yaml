@@ -1,0 +1,51 @@
+id: aa1f000b-200b-420b-920b-aadprov-hunt11
+name: HUNT-11 Dormant Account Re-Enablement via Provisioning (30d)
+description: |
+  User accounts disabled for >= 90 days that were re-enabled via the
+  provisioning channel in the last 30 days. Dormant-account re-enablement
+  via provisioning is a documented persistence path: attacker forces a
+  long-disabled service or shared identity back to life as a backdoor.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+      - AuditLogs
+tactics:
+  - Persistence
+relevantTechniques:
+  - T1098
+  - T1078
+query: |
+  // Recent re-enables via provisioning
+  let RecentReEnables =
+      AADProvisioningLogs
+      | where TimeGenerated > ago(30d)
+      | where ResultType =~ "Success"
+      | mv-expand Mod = todynamic(ModifiedProperties)
+      | extend PropName = tostring(Mod.displayName),
+               OldValue = tostring(Mod.oldValue),
+               NewValue = tostring(Mod.newValue)
+      | where PropName has_any ("accountEnabled","AccountEnabled")
+      | where OldValue has "false" and NewValue has "true"
+      | extend TargetUpn = tostring(parse_json(TargetIdentity).userPrincipalName),
+               SPName    = tostring(parse_json(ServicePrincipal).Name)
+      | project TimeGenerated, TargetUpn, SPName, OldValue, NewValue;
+  // Find last disable for each
+  let LastDisable =
+      AuditLogs
+      | where TimeGenerated > ago(180d)
+      | where OperationName has_any ("Disable account","Update user")
+      | mv-expand TargetResources
+      | mv-expand Mod = todynamic(TargetResources.modifiedProperties)
+      | where tostring(Mod.displayName) has_any ("AccountEnabled","accountEnabled")
+      | where tostring(Mod.newValue) has "false"
+      | extend TargetUpn = tostring(TargetResources.userPrincipalName)
+      | summarize LastDisableTime = max(TimeGenerated) by TargetUpn;
+  RecentReEnables
+  | join kind=inner (LastDisable) on TargetUpn
+  | extend DormantDays = datetime_diff('day', TimeGenerated, LastDisableTime)
+  | where DormantDays >= 90
+  | project ReEnableTime = TimeGenerated, TargetUpn, SPName,
+            LastDisableTime, DormantDays
+  | order by DormantDays desc

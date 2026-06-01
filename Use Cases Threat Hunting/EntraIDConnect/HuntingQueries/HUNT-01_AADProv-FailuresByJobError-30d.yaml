@@ -1,0 +1,33 @@
+id: aa1f0001-2001-4201-9201-aadprov-hunt01
+name: HUNT-01 Provisioning Failures by Job and Error (30d)
+description: |
+  30-day rollup of provisioning failures grouped by JobId, ServicePrincipal,
+  and error signature. Use to retro-hunt persistent connector issues, identify
+  campaigns of bad-actor SCIM calls that fell under analytic-rule thresholds,
+  and detect schema-drift failures.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+tactics:
+  - DefenseEvasion
+relevantTechniques:
+  - T1556
+query: |
+  AADProvisioningLogs
+  | where TimeGenerated > ago(30d)
+  | where ResultType =~ "Failure"
+  | extend SPName = tostring(parse_json(ServicePrincipal).Name)
+  | summarize
+      Failures        = count(),
+      AffectedTargets = dcount(TargetIdentity),
+      ErrorMessages   = make_set(ResultDescription, 5),
+      Operations      = make_set(OperationName, 10),
+      DistinctDays    = dcount(startofday(TimeGenerated)),
+      FirstSeen       = min(TimeGenerated),
+      LastSeen        = max(TimeGenerated)
+    by JobId, SPName, ResultSignature
+  | where Failures >= 10
+  | extend Sustained = DistinctDays >= 3
+  | order by Failures desc

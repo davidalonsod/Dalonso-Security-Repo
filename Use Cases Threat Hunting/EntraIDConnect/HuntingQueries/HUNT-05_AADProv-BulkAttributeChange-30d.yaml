@@ -1,0 +1,37 @@
+id: aa1f0005-2005-4205-9205-aadprov-hunt05
+name: HUNT-05 Bulk Attribute Changes by Single CycleId (30d)
+description: |
+  30-day hunt for provisioning cycles that performed unusually high attribute
+  churn (touched many distinct properties across many targets in a single
+  CycleId). High-churn cycles outside of expected initial-sync windows are
+  worth investigating as bulk attribute manipulation.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+tactics:
+  - Persistence
+  - DefenseEvasion
+relevantTechniques:
+  - T1098
+  - T1556
+query: |
+  AADProvisioningLogs
+  | where TimeGenerated > ago(30d)
+  | where ResultType =~ "Success"
+  | extend SPName = tostring(parse_json(ServicePrincipal).Name)
+  | mv-expand Mod = todynamic(ModifiedProperties)
+  | extend PropName = tostring(Mod.displayName)
+  | where isnotempty(PropName)
+  | summarize
+      DistinctProps   = dcount(PropName),
+      DistinctTargets = dcount(TargetIdentity),
+      Props           = make_set(PropName, 30),
+      EventCount      = count(),
+      FirstSeen       = min(TimeGenerated),
+      LastSeen        = max(TimeGenerated)
+    by CycleId, JobId, SPName
+  | where DistinctProps >= 5 and DistinctTargets >= 20
+  | extend AttributeChurnIntensity = DistinctProps * DistinctTargets
+  | order by AttributeChurnIntensity desc

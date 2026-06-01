@@ -1,0 +1,33 @@
+id: aa1f0008-2008-4208-9208-aadprov-hunt08
+name: HUNT-08 Provisioning of Role-Assignable Groups (30d)
+description: |
+  Provisioning operations that touched role-assignable groups (`IsAssignableToRole = true`).
+  Membership changes to role-assignable groups effectively grant directory roles,
+  so flowing them through the provisioning channel is highly anomalous and
+  worth a manual review.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+relevantTechniques:
+  - T1098
+query: |
+  AADProvisioningLogs
+  | where TimeGenerated > ago(30d)
+  | where ResultType =~ "Success"
+  | where tostring(TargetIdentity) has "IsAssignableToRole"
+       or tostring(ModifiedProperties) has "isAssignableToRole"
+       or tostring(ModifiedProperties) has "directoryRoles"
+  | extend Target       = tostring(parse_json(TargetIdentity).displayName),
+           SPName       = tostring(parse_json(ServicePrincipal).Name),
+           InitiatorUpn = tostring(parse_json(InitiatedBy).userPrincipalName),
+           InitiatorApp = tostring(parse_json(InitiatedBy).displayName)
+  | project TimeGenerated, JobId, CycleId, ChangeId, SPName,
+            Initiator = coalesce(InitiatorUpn, InitiatorApp),
+            TargetGroup = Target,
+            OperationName, ProvisioningAction, ModifiedProperties
+  | order by TimeGenerated desc

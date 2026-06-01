@@ -1,0 +1,48 @@
+id: aa1f0004-2004-4204-9204-aadprov-hunt04
+name: HUNT-04 Entra Connector Activities Enriched with IdentityInfo (30d)
+description: |
+  30-day audit-log activities performed by the Entra Connector account,
+  enriched with role assignment data from IdentityInfo. Surfaces takeover
+  attempts (`Update user`, `Reset password`, group-membership writes) targeted
+  at sensitive role members, which is the classic sync-account abuse pattern.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+tactics:
+  - Persistence
+  - PrivilegeEscalation
+relevantTechniques:
+  - T1098
+query: |
+  let SyncAccounts =
+      IdentityInfo
+      | where TimeGenerated > ago(14d)
+      | summarize arg_max(TimeGenerated, *) by AccountUPN
+      | where AssignedRoles has_any (
+            "Directory Synchronization Accounts",
+            "On Premises Directory Sync Account"
+        )
+        or AccountUPN startswith "Sync_"
+      | project SyncUpn = AccountUPN, SyncObjectId = AccountObjectId;
+  let PrivilegedUsers =
+      IdentityInfo
+      | where TimeGenerated > ago(14d)
+      | summarize arg_max(TimeGenerated, *) by AccountUPN
+      | where isnotempty(AssignedRoles) and AssignedRoles != "[]"
+      | project AccountUPN, AssignedRoles;
+  AuditLogs
+  | where TimeGenerated > ago(30d)
+  | extend Initiator = tostring(InitiatedBy.user.userPrincipalName)
+  | where Initiator in~ (SyncAccounts | project SyncUpn)
+  | mv-expand TargetResources
+  | extend TargetUpn = tostring(TargetResources.userPrincipalName)
+  | join kind=leftouter (PrivilegedUsers) on $left.TargetUpn == $right.AccountUPN
+  | extend TargetIsPrivileged = isnotempty(AssignedRoles)
+  | project TimeGenerated, Initiator, OperationName, Category, TargetUpn,
+            TargetIsPrivileged, AssignedRoles, Result,
+            ModifiedProperties = tostring(TargetResources.modifiedProperties)
+  | where TargetIsPrivileged
+       or OperationName has_any ("Reset password","Update user","Add member","Set Password")
+  | order by TargetIsPrivileged desc, TimeGenerated desc

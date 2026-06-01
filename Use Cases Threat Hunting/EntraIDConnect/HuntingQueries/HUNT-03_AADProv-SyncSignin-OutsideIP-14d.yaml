@@ -1,0 +1,39 @@
+id: aa1f0003-2003-4203-9203-aadprov-hunt03
+name: HUNT-03 Sync Account Sign-ins Outside Entra Connect IP (14d)
+description: |
+  14-day history of Entra Connector sign-ins not originating from the
+  allowlisted public IPs in HighValueAssets:EntraIDConnect. Includes both
+  interactive (SigninLogs) and non-interactive (AADNonInteractiveUserSignInLogs)
+  - most legitimate sync traffic lives in the latter.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+      - AADNonInteractiveUserSignInLogs
+tactics:
+  - InitialAccess
+relevantTechniques:
+  - T1078.004
+query: |
+  let AllowedIPs =
+      _GetWatchlist('EntraConnect_HighValueAssets')
+      | where tostring(Tags) has "EntraIDConnect"
+      | project IPAddress = tostring(IPAddress);
+  union isfuzzy=true
+    (SigninLogs                      | where TimeGenerated > ago(14d)),
+    (AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(14d))
+  | where ResultType == 0
+  | where UserPrincipalName startswith "Sync_"
+       or UserPrincipalName contains "DirSync"
+       or UserDisplayName has "On-Premises Directory Synchronization Service Account"
+  | where IPAddress !in (AllowedIPs)
+  | summarize
+      SigninCount = count(),
+      Apps        = make_set(AppDisplayName, 10),
+      Locations   = make_set(Location, 5),
+      Days        = dcount(startofday(TimeGenerated)),
+      FirstSeen   = min(TimeGenerated),
+      LastSeen    = max(TimeGenerated)
+    by UserPrincipalName, IPAddress
+  | order by SigninCount desc

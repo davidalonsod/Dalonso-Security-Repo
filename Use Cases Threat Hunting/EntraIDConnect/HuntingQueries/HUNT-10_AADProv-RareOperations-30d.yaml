@@ -1,0 +1,30 @@
+id: aa1f000a-200a-420a-920a-aadprov-hunt10
+name: HUNT-10 Rare ProvisioningAction / TargetSystem / ResultSignature (30d)
+description: |
+  Surfaces rare values across `ProvisioningAction`, `TargetSystem`,
+  `ResultSignature`, and `OperationName` over 30 days - useful for ad-hoc
+  discovery of unusual telemetry patterns that no static rule would catch.
+  Stack-counting style: anything with a tiny share is shown for triage.
+severity: Low
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+tactics:
+  - DefenseEvasion
+relevantTechniques:
+  - T1078
+query: |
+  let TotalEvents = toscalar(
+      AADProvisioningLogs
+      | where TimeGenerated > ago(30d)
+      | count
+  );
+  AADProvisioningLogs
+  | where TimeGenerated > ago(30d)
+  | extend TgtSystem = tostring(parse_json(TargetSystem).DisplayName),
+           SPName    = tostring(parse_json(ServicePrincipal).Name)
+  | summarize Events = count() by ProvisioningAction, TgtSystem, ResultSignature, OperationName, SPName
+  | extend Share = round(100.0 * Events / TotalEvents, 4)
+  | where Share <= 0.05  // <= 0.05% of telemetry
+  | order by Events asc

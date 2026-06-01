@@ -1,0 +1,36 @@
+id: aa1f0006-2006-4206-9206-aadprov-hunt06
+name: HUNT-06 New ServicePrincipals Performing Provisioning (30d vs 90d)
+description: |
+  Provisioning SPs active in the last 30 days but absent from the prior 60.
+  Complements RULE-11 with a longer history window for retrospective hunts
+  after a watchlist refresh or new SCIM application investigation.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+tactics:
+  - Persistence
+relevantTechniques:
+  - T1136
+query: |
+  let Recent =
+      AADProvisioningLogs
+      | where TimeGenerated > ago(30d)
+      | extend SPName = tostring(parse_json(ServicePrincipal).Name),
+               SPId   = tostring(parse_json(ServicePrincipal).Id)
+      | summarize
+          Events     = count(),
+          FirstSeen  = min(TimeGenerated),
+          LastSeen   = max(TimeGenerated),
+          Operations = make_set(OperationName, 10),
+          Targets    = dcount(TargetIdentity)
+        by SPId, SPName;
+  let Historical =
+      AADProvisioningLogs
+      | where TimeGenerated between (ago(120d) .. ago(30d))
+      | extend SPId = tostring(parse_json(ServicePrincipal).Id)
+      | distinct SPId;
+  Recent
+  | join kind=leftanti (Historical) on SPId
+  | order by Events desc

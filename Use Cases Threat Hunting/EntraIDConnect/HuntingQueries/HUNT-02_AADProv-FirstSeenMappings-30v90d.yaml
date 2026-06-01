@@ -1,0 +1,35 @@
+id: aa1f0002-2002-4202-9202-aadprov-hunt02
+name: HUNT-02 First-seen Source-to-Target Mappings (30d vs 90d)
+description: |
+  Surfaces SourceIdentity -> TargetIdentity provisioning pairs that appeared
+  in the last 30 days but had no prior history in the preceding 60 days.
+  Useful to detect new HR feeds, new SCIM integrations, or attacker-introduced
+  mappings that re-route identity data.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+tactics:
+  - Persistence
+relevantTechniques:
+  - T1136
+query: |
+  let Recent =
+      AADProvisioningLogs
+      | where TimeGenerated > ago(30d)
+      | where ResultType =~ "Success"
+      | extend SourceUpn = tostring(parse_json(SourceIdentity).userPrincipalName),
+               TargetUpn = tostring(parse_json(TargetIdentity).userPrincipalName),
+               SPName    = tostring(parse_json(ServicePrincipal).Name)
+      | summarize Events = count(), FirstSeen = min(TimeGenerated) by SourceUpn, TargetUpn, SPName
+      | where Events >= 3;
+  let Historical =
+      AADProvisioningLogs
+      | where TimeGenerated between (ago(90d) .. ago(30d))
+      | extend SourceUpn = tostring(parse_json(SourceIdentity).userPrincipalName),
+               TargetUpn = tostring(parse_json(TargetIdentity).userPrincipalName)
+      | distinct SourceUpn, TargetUpn;
+  Recent
+  | join kind=leftanti (Historical) on SourceUpn, TargetUpn
+  | order by Events desc

@@ -1,0 +1,38 @@
+id: aa1f0009-2009-4209-9209-aadprov-hunt09
+name: HUNT-09 Cycle Duration Outliers vs 7d Baseline
+description: |
+  Provisioning cycles whose DurationMs is > 3x the per-job 7-day median.
+  Long cycles can indicate connector throttling under abuse, an attacker
+  performing extra work mid-cycle (membership lookups, attribute brute force),
+  or schema-drift slowdowns. Short cycles can indicate aborted runs.
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+tactics:
+  - DefenseEvasion
+relevantTechniques:
+  - T1562
+query: |
+  let Baseline =
+      AADProvisioningLogs
+      | where TimeGenerated between (ago(7d) .. ago(1d))
+      | where isnotempty(CycleId) and isnotnull(DurationMs)
+      | summarize MedianDuration = percentile(DurationMs, 50) by JobId
+      | where MedianDuration > 0;
+  AADProvisioningLogs
+  | where TimeGenerated > ago(1d)
+  | where isnotempty(CycleId) and isnotnull(DurationMs)
+  | extend SPName = tostring(parse_json(ServicePrincipal).Name)
+  | summarize
+      RecentDuration = avg(DurationMs),
+      EventCount     = count(),
+      LastSeen       = max(TimeGenerated)
+    by CycleId, JobId, SPName
+  | join kind=inner (Baseline) on JobId
+  | extend Ratio = RecentDuration / MedianDuration
+  | where Ratio >= 3.0 or Ratio <= 0.25
+  | project CycleId, JobId, SPName, RecentDuration, MedianDuration, Ratio,
+            EventCount, LastSeen
+  | order by Ratio desc

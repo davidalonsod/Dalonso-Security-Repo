@@ -1,0 +1,52 @@
+id: aa1f0007-2007-4207-9207-aadprov-hunt07
+name: HUNT-07 DirSync Feature Change History (180d)
+description: |
+  Long-window history (180 days) of DirSync feature configuration changes:
+  BlockSoftMatch, BlockCloudObjectTakeoverThroughHardMatch, Password Hash Sync,
+  Seamless SSO. Useful for retrospective audit of who changed what, when,
+  from which IP - directly modelled on the Cloud-Architekt
+  AADConnect-ChangedDirSyncSettings.kql query.
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+tactics:
+  - DefenseEvasion
+  - PrivilegeEscalation
+relevantTechniques:
+  - T1556
+  - T1098
+query: |
+  AuditLogs
+  | where TimeGenerated > ago(180d)
+  | where Category =~ "DirectoryManagement"
+       or OperationName has_any (
+            "Set DirSyncEnabled flag",
+            "Update directory feature",
+            "Set Company Information",
+            "Set Password Hash Sync",
+            "Update OnPremisesDirectorySynchronization",
+            "OnPremDirectorySynchronization"
+          )
+       or tostring(TargetResources) has_any (
+            "BlockSoftMatch",
+            "BlockCloudObjectTakeoverThroughHardMatch",
+            "PasswordHashSync",
+            "passwordHashSync",
+            "SeamlessSSO",
+            "synchronizationInterval"
+          )
+  | extend Actor    = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+                                tostring(InitiatedBy.app.displayName))
+  | extend SourceIP = tostring(InitiatedBy.user.ipAddress)
+  | extend Feature  = case(
+        tostring(TargetResources) has "BlockCloudObjectTakeoverThroughHardMatch", "HardMatchBlock",
+        tostring(TargetResources) has "BlockSoftMatch", "SoftMatchBlock",
+        tostring(TargetResources) has_any ("PasswordHashSync","passwordHashSync"), "PasswordHashSync",
+        tostring(TargetResources) has "SeamlessSSO", "SeamlessSSO",
+        "Other"
+    )
+  | project TimeGenerated, OperationName, Feature, Actor, SourceIP, Result,
+            TargetResources
+  | order by TimeGenerated desc

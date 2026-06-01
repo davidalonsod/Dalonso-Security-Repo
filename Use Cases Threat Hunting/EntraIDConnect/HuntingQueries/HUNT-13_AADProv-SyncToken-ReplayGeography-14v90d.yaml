@@ -1,0 +1,50 @@
+id: aa1f000d-200d-420d-920d-aadprov-hunt13
+name: HUNT-13 Sync Account Token-Replay Geography (14d vs 90d)
+description: |
+  Surfaces new sign-in geographies / IP addresses for the Entra Connector
+  sync account on the non-interactive table (AADNonInteractiveUserSignInLogs),
+  where most sync token-refresh traffic lives. Token theft from the Entra
+  Connect host typically surfaces here as a refresh-token replay from a new
+  IP/Location that never appears in the 90-day baseline. Complements HUNT-03
+  (which is allowlist-based and interactive-inclusive): this hunt is a
+  first-seen baseline-diff scoped to the non-interactive channel only.
+  MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts),
+  T1550.001 (Use Alternate Authentication Material: Application Access Token).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADNonInteractiveUserSignInLogs
+tactics:
+  - InitialAccess
+  - DefenseEvasion
+relevantTechniques:
+  - T1078.004
+  - T1550.001
+query: |
+  let Lookback = 14d;
+  let Baseline = 90d;
+  let SyncSignins =
+      AADNonInteractiveUserSignInLogs
+      | where ResultType == 0
+      | where UserPrincipalName startswith "Sync_"
+           or UserPrincipalName contains "DirSync"
+           or UserDisplayName has "On-Premises Directory Synchronization Service Account";
+  // IPs / locations seen in the 90d->14d historical window (the known-good baseline).
+  let KnownGeo =
+      SyncSignins
+      | where TimeGenerated between (ago(Baseline) .. ago(Lookback))
+      | summarize by UserPrincipalName, IPAddress, Location;
+  SyncSignins
+  | where TimeGenerated > ago(Lookback)
+  | join kind=leftanti KnownGeo on UserPrincipalName, IPAddress, Location
+  | summarize
+      SigninCount = count(),
+      Apps        = make_set(AppDisplayName, 10),
+      Locations   = make_set(Location, 10),
+      ASNs        = make_set(AutonomousSystemNumber, 10),
+      Days        = dcount(startofday(TimeGenerated)),
+      FirstSeen   = min(TimeGenerated),
+      LastSeen    = max(TimeGenerated)
+    by UserPrincipalName, IPAddress
+  | order by FirstSeen desc
