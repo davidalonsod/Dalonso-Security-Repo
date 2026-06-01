@@ -1,0 +1,77 @@
+id: 9b1a000b-100b-410b-910b-aadprov0000b
+name: New Service Principal Performing Provisioning
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects the first appearance of a `ServicePrincipal` performing provisioning
+  operations - i.e. an SP that has never been seen as a provisioning agent in
+  the previous 30 days but has emitted >= 50 events in the last 24 hours.
+  An unexpected new provisioning SP is a strong supply-chain / persistence
+  indicator: an attacker may have registered a SCIM app, granted
+  `User.ReadWrite.All` / `Directory.ReadWrite.All`, and started writing
+  arbitrary objects into Entra ID.
+  MITRE ATT&CK: T1136 (Create Account), T1098 (Account Manipulation),
+  T1078.004 (Valid Accounts: Cloud Accounts).
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+queryFrequency: 6h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Persistence
+  - PrivilegeEscalation
+relevantTechniques:
+  - T1136
+  - T1098
+query: |
+  let Recent =
+      AADProvisioningLogs
+      | where TimeGenerated > ago(1d)
+      | extend SPName = tostring(parse_json(ServicePrincipal).Name),
+               SPId   = tostring(parse_json(ServicePrincipal).Id)
+      | summarize
+          RecentEvents = count(),
+          FirstSeen    = min(TimeGenerated),
+          LastSeen     = max(TimeGenerated),
+          Operations   = make_set(OperationName, 10),
+          Targets      = make_set(tostring(parse_json(TargetIdentity).userPrincipalName), 30)
+        by SPId, SPName
+      // Conservative: ignore one-off probes
+      | where RecentEvents >= 50;
+  let Historical =
+      AADProvisioningLogs
+      | where TimeGenerated between (ago(14d) .. ago(1d))
+      | extend SPId = tostring(parse_json(ServicePrincipal).Id)
+      | distinct SPId;
+  Recent
+  | where SPId !in (Historical)
+  | order by RecentEvents desc
+entityMappings:
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: Name
+        columnName: SPName
+customDetails:
+  RecentEvents: RecentEvents
+  Operations: Operations
+  Targets: Targets
+alertDetailsOverride:
+  alertDisplayNameFormat: "New provisioning ServicePrincipal observed: {{SPName}} ({{RecentEvents}} ops)"
+  alertDescriptionFormat: "SP {{SPName}} ({{SPId}}) has never performed provisioning in the prior 30 days but emitted {{RecentEvents}} operations in 24h. Validate against approved app inventory."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT24H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []

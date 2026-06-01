@@ -1,0 +1,73 @@
+id: 9b1a0003-1003-4103-9103-aadprov00003
+name: Mass User Deletion via Provisioning
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects 5 or more `Delete` (or `StagedDelete`) provisioning actions completing
+  successfully against Entra ID user objects within 1 hour. Deletion via the
+  provisioning channel is rare under normal operations - lifecycle workflows
+  typically `Disable` first and only purge after retention windows. A burst of
+  deletions over the provisioning path is a strong signal of either a runaway
+  HR feed (data-integrity issue) or deliberate destruction.
+  MITRE ATT&CK: T1531 (Account Access Removal), T1485 (Data Destruction),
+  T1078.004 (Valid Accounts: Cloud Accounts).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Impact
+relevantTechniques:
+  - T1531
+  - T1485
+query: |
+  AADProvisioningLogs
+  | where TimeGenerated > ago(1h)
+  | where ResultType =~ "Success"
+  | where ProvisioningAction in~ ("Delete", "StagedDelete")
+       or OperationName has_any ("Delete", "Remove")
+  | extend SPName = tostring(parse_json(ServicePrincipal).Name)
+  | extend InitiatorUpn = tostring(parse_json(InitiatedBy).userPrincipalName)
+  | extend InitiatorApp = tostring(parse_json(InitiatedBy).displayName)
+  | extend TargetUpn    = tostring(parse_json(TargetIdentity).userPrincipalName)
+  | summarize
+      DeletedCount = count(),
+      Targets      = make_set(TargetUpn, 30),
+      Jobs         = make_set(JobId, 10),
+      Initiators   = make_set(coalesce(InitiatorUpn, InitiatorApp), 5),
+      FirstSeen    = min(TimeGenerated),
+      LastSeen     = max(TimeGenerated)
+    by SPName
+  // Conservative: 5/hour is well above legitimate scheduled-purge spikes
+  | where DeletedCount >= 5
+  | order by DeletedCount desc
+entityMappings:
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: Name
+        columnName: SPName
+customDetails:
+  DeletedCount: DeletedCount
+  Initiators: Initiators
+  Targets: Targets
+alertDetailsOverride:
+  alertDisplayNameFormat: "Mass user deletion via provisioning - {{DeletedCount}} accounts ({{SPName}})"
+  alertDescriptionFormat: "Provisioning service {{SPName}} deleted {{DeletedCount}} users in 1h. Confirm against lifecycle/HR purge schedule."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT8H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []

@@ -1,0 +1,100 @@
+id: 9b1a0008-1008-4108-9108-aadprov00008
+name: TAP Added to Entra Connector Account (Backdoor)
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects Temporary Access Pass (TAP) issuance against a user account that is
+  either (a) a member of the `Directory Synchronization Accounts` role (per
+  `IdentityInfo`), or (b) matches the Entra Connector account naming pattern
+  (`Sync_*` / `On-Premises Directory Synchronization Service Account`). TAP
+  issuance against a sync account is **never legitimate** under normal
+  operations - it is the documented stealth backdoor for sync-account
+  takeover (Cloud-Architekt playbook).
+  MITRE ATT&CK: T1098.001 (Account Manipulation: Additional Cloud Credentials),
+  T1078.004 (Valid Accounts: Cloud Accounts), T1556 (Modify Authentication
+  Process).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Persistence
+  - PrivilegeEscalation
+relevantTechniques:
+  - T1098
+  - T1556
+query: |
+  // Sync accounts known via IdentityInfo (UEBA) - degrade to naming pattern if not available
+  let SyncAccounts =
+      IdentityInfo
+      | where TimeGenerated > ago(14d)
+      | summarize arg_max(TimeGenerated, *) by AccountUPN
+      | where AssignedRoles has_any (
+            "Directory Synchronization Accounts",
+            "On Premises Directory Sync Account"
+        )
+          or AccountUPN startswith "Sync_"
+          or AccountDisplayName has "On-Premises Directory Synchronization Service Account"
+      | project AccountUPN, AccountObjectId, AccountDisplayName;
+  AuditLogs
+  | where TimeGenerated > ago(1d)
+  | where OperationName has_any (
+        "Admin registered security info",
+        "Register security info",
+        "Create temporary access pass",
+        "Issue temporary access pass",
+        "Admin Issued Temporary Access Pass",
+        "User registered security info"
+    )
+  | mv-expand TargetResources
+  | extend TargetUpn = tostring(TargetResources.userPrincipalName)
+  | extend TargetId  = tostring(TargetResources.id)
+  | extend Initiator = tostring(InitiatedBy.user.userPrincipalName)
+  | extend Actor     = coalesce(Initiator, tostring(InitiatedBy.app.displayName))
+  | extend SourceIP  = tostring(InitiatedBy.user.ipAddress)
+  // Match by UPN or ObjectId OR by naming heuristic (works even without IdentityInfo)
+  | where TargetUpn in~ (SyncAccounts | project AccountUPN)
+       or TargetId  in  (SyncAccounts | project AccountObjectId)
+       or TargetUpn startswith "Sync_"
+       or TargetUpn contains "DirSync"
+       or TargetUpn has "On-Premises Directory Synchronization"
+  | project TimeGenerated, OperationName, Actor, SourceIP, TargetUpn, TargetResources, Result
+  | order by TimeGenerated desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: TargetUpn
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Actor
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SourceIP
+customDetails:
+  Operation: OperationName
+  Actor: Actor
+  Target: TargetUpn
+alertDetailsOverride:
+  alertDisplayNameFormat: "TAP / security-info change on sync account {{TargetUpn}}"
+  alertDescriptionFormat: "{{OperationName}} performed by {{Actor}} against Entra Connector account {{TargetUpn}}. TAP on sync accounts is the documented stealth backdoor."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT24H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

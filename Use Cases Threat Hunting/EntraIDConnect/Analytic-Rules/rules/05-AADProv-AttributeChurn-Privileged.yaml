@@ -1,0 +1,90 @@
+id: 9b1a0005-1005-4105-9105-aadprov00005
+name: Bulk Attribute Churn on Privileged Target
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects provisioning of >= 5 attribute modifications against a single user
+  identity within 1 hour where the target user holds an Entra ID directory
+  role (joined via `IdentityInfo`). Mass attribute churn against a privileged
+  user is a strong signal of takeover preparation: attackers manipulate
+  `ProxyAddresses`, `UserPrincipalName`, `OnPremisesImmutableId`, MFA phone,
+  MFA email, or `OtherMails` to enable account-takeover, soft-match abuse, or
+  to re-route password-reset notifications.
+  MITRE ATT&CK: T1098 (Account Manipulation), T1556 (Modify Authentication
+  Process), T1078.004 (Valid Accounts: Cloud Accounts).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Persistence
+  - PrivilegeEscalation
+  - DefenseEvasion
+relevantTechniques:
+  - T1098
+  - T1556
+query: |
+  let PrivilegedUsers =
+      IdentityInfo
+      | where TimeGenerated > ago(14d)
+      | summarize arg_max(TimeGenerated, *) by AccountUPN
+      | where isnotempty(AssignedRoles) and AssignedRoles != "[]"
+      | project AccountUPN, AssignedRoles;
+  AADProvisioningLogs
+  | where TimeGenerated > ago(1h)
+  | where ResultType =~ "Success"
+  | where ProvisioningAction in~ ("Update","Other")
+  | extend TargetUpn = tostring(parse_json(TargetIdentity).userPrincipalName)
+  | extend SPName    = tostring(parse_json(ServicePrincipal).Name)
+  | where isnotempty(TargetUpn)
+  | join kind=inner (PrivilegedUsers) on $left.TargetUpn == $right.AccountUPN
+  | mv-expand Mod = todynamic(ModifiedProperties)
+  | extend PropName = tostring(Mod.displayName),
+           OldValue = tostring(Mod.oldValue),
+           NewValue = tostring(Mod.newValue)
+  | where isnotempty(PropName)
+  | summarize
+      AttributesChanged = dcount(PropName),
+      Props             = make_set(PropName, 20),
+      ChangeId_count    = dcount(ChangeId),
+      AssignedRoles     = any(AssignedRoles),
+      FirstSeen         = min(TimeGenerated),
+      LastSeen          = max(TimeGenerated)
+    by TargetUpn, SPName
+  // 5 attribute changes in 1h against a privileged user is highly unusual
+  | where AttributesChanged >= 5
+  | order by AttributesChanged desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: TargetUpn
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: Name
+        columnName: SPName
+customDetails:
+  AttributesChanged: AttributesChanged
+  Props: Props
+  AssignedRoles: AssignedRoles
+alertDetailsOverride:
+  alertDisplayNameFormat: "Bulk attribute churn on privileged user {{TargetUpn}} via {{SPName}}"
+  alertDescriptionFormat: "{{AttributesChanged}} attributes modified on privileged user {{TargetUpn}} in 1h via provisioning ({{SPName}}). Possible takeover preparation."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

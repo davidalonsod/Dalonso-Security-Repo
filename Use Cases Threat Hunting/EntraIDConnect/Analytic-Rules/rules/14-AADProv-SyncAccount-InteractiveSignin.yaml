@@ -1,0 +1,87 @@
+id: 9b1a000e-100e-410e-910e-aadprov0000e
+name: Interactive / Browser Sign-in by Sync Service Account
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects an Entra Connector account (`Sync_*` / `On-Premises Directory
+  Synchronization Service Account`) authenticating through `SigninLogs`
+  (interactive) OR with `ClientAppUsed = "Browser"`. The sync account should
+  only emit non-interactive token-acquisition traffic against the
+  synchronization endpoints. An interactive or browser sign-in is the exact
+  smoking-gun pattern for an attacker who exfiltrated sync credentials from
+  the Entra Connect server (per the Swisskyrepo guide) and is now using them
+  by hand against the Azure Portal or Graph Explorer.
+  Complementary to RULE-10 (which catches sign-ins from non-allowlisted IPs);
+  this rule fires even from the allowlisted IP if the client class is wrong.
+  MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts), T1552
+  (Unsecured Credentials).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - CredentialAccess
+relevantTechniques:
+  - T1078
+  - T1552
+query: |
+  SigninLogs
+  | extend IPAddress = tostring(IPAddress)
+  | invoke ExcludeAllowlistedIPs()
+  | where TimeGenerated > ago(1h)
+  | where ResultType == 0
+  | where UserPrincipalName startswith "Sync_"
+       or UserPrincipalName contains "DirSync"
+       or UserDisplayName has "On-Premises Directory Synchronization Service Account"
+  // High-fidelity signals only: real interactive browser sign-in, or a
+  // first-party admin surface app. "Mobile Apps and Desktop clients" is
+  // intentionally excluded - the sync service itself authenticates via that
+  // class for non-interactive token refresh and would generate FPs.
+  | where ClientAppUsed == "Browser"
+       or AppDisplayName in~ (
+            "Microsoft Azure portal",
+            "Microsoft Graph PowerShell",
+            "Microsoft Graph Explorer",
+            "Azure Active Directory PowerShell",
+            "Azure CLI",
+            "Microsoft Azure CLI"
+        )
+  | project TimeGenerated, UserPrincipalName, IPAddress, Location,
+            AppDisplayName, ClientAppUsed, UserAgent, ConditionalAccessStatus,
+            CorrelationId, ResultType
+  | order by TimeGenerated desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  AppDisplayName: AppDisplayName
+  ClientAppUsed: ClientAppUsed
+  UserAgent: UserAgent
+alertDetailsOverride:
+  alertDisplayNameFormat: "Interactive sign-in by sync account {{UserPrincipalName}}"
+  alertDescriptionFormat: "Sync account {{UserPrincipalName}} signed in interactively to {{AppDisplayName}} from {{IPAddress}}. Sync accounts must never authenticate via browser/portal - likely credential exfiltration from Entra Connect host."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT24H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

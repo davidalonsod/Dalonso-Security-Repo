@@ -1,0 +1,99 @@
+id: 9b1a0007-1007-4107-9107-aadprov00007
+name: DirSync Feature Toggle - SoftMatch / HardMatch / PHS
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects modification of Entra Connect DirSync feature settings, including
+  `BlockSoftMatch`, `BlockCloudObjectTakeoverThroughHardMatch`, and Password
+  Hash Sync enable/disable, via `Update-MgDirectoryOnPremiseSynchronization`
+  or equivalent Graph cmdlets. These toggles are documented attack vectors:
+  disabling SoftMatch blocking allows an attacker holding `Hybrid Identity
+  Administrator` to take over cloud-only accounts by syncing matching
+  on-premises objects. Direct mapping to the Cloud-Architekt
+  `AADCSyncServiceAccount` playbook.
+  MITRE ATT&CK: T1556 (Modify Authentication Process), T1098.003 (Account
+  Manipulation: Additional Cloud Roles), T1078.004 (Valid Accounts: Cloud
+  Accounts).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 1d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - DefenseEvasion
+  - Persistence
+  - PrivilegeEscalation
+relevantTechniques:
+  - T1556
+  - T1098
+query: |
+  AuditLogs
+  | where TimeGenerated > ago(1d)
+  | where Category =~ "DirectoryManagement"
+       or OperationName has_any (
+            "Set DirSyncEnabled flag",
+            "Update directory feature",
+            "Set Company DirSyncEnabled",
+            "Set Company Information",
+            "Set Password Hash Sync",
+            "Update OnPremisesDirectorySynchronization",
+            "OnPremDirectorySynchronization"
+          )
+  | extend Initiator      = tostring(InitiatedBy.user.userPrincipalName)
+  | extend InitiatorApp   = tostring(InitiatedBy.app.displayName)
+  | extend Actor          = coalesce(Initiator, InitiatorApp)
+  | extend TargetProps    = tostring(TargetResources)
+  | where TargetProps has_any (
+        "BlockSoftMatch",
+        "BlockCloudObjectTakeoverThroughHardMatch",
+        "PasswordHashSync",
+        "passwordHashSync",
+        "SeamlessSSO",
+        "DirSyncEnabled",
+        "synchronizationInterval"
+    )
+  | extend FeatureMentioned = case(
+        TargetProps has "BlockCloudObjectTakeoverThroughHardMatch", "HardMatchBlock",
+        TargetProps has "BlockSoftMatch", "SoftMatchBlock",
+        TargetProps has "PasswordHashSync" or TargetProps has "passwordHashSync", "PasswordHashSync",
+        TargetProps has "SeamlessSSO", "SeamlessSSO",
+        TargetProps has "DirSyncEnabled", "DirSyncEnabled",
+        "OtherFeature"
+    )
+  | project TimeGenerated, OperationName, Category, Actor,
+            SourceIP = tostring(InitiatedBy.user.ipAddress),
+            FeatureMentioned, Result, ResultReason, TargetResources
+  | order by TimeGenerated desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Actor
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SourceIP
+customDetails:
+  Feature: FeatureMentioned
+  Actor: Actor
+  Operation: OperationName
+alertDetailsOverride:
+  alertDisplayNameFormat: "DirSync feature change ({{FeatureMentioned}}) by {{Actor}}"
+  alertDescriptionFormat: "Entra Connect feature {{FeatureMentioned}} was modified by {{Actor}}. Operation: {{OperationName}}. Validate against approved change ticket."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT24H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

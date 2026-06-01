@@ -1,0 +1,73 @@
+id: 9b1a000c-100c-410c-910c-aadprov0000c
+name: Sync Account Outside ServiceAccounts Watchlist
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects user objects assigned the `Directory Synchronization Accounts` role
+  (per `IdentityInfo`) or matching the `Sync_*` / `On-Premises Directory
+  Synchronization Service Account` naming pattern that are NOT present in the
+  `ServiceAccounts` watchlist tagged `EntraIDConnect`. Per the Cloud-Architekt
+  playbook, this is the indicator-of-backdoor pattern: an attacker creating
+  a new sync account to maintain persistence while staying invisible to SOC
+  watchlists.
+  MITRE ATT&CK: T1136.003 (Create Account: Cloud Account), T1098.001
+  (Account Manipulation: Additional Cloud Credentials).
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 12h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Persistence
+relevantTechniques:
+  - T1136
+  - T1098
+query: |
+  let ApprovedSyncAccounts =
+      _GetWatchlist('EntraConnect_ServiceAccounts')
+      | where tostring(Tags) has "EntraIDConnect"
+      | project AccountObjectId = tostring(AccountObjectId);
+  IdentityInfo
+  | where TimeGenerated > ago(14d)
+  | summarize arg_max(TimeGenerated, *) by AccountUPN
+  | where AssignedRoles has_any (
+        "Directory Synchronization Accounts",
+        "On Premises Directory Sync Account"
+    )
+      or AccountUPN startswith "Sync_"
+      or AccountDisplayName has "On-Premises Directory Synchronization Service Account"
+  | where AccountObjectId !in (ApprovedSyncAccounts)
+  | project AccountUPN, AccountObjectId, AccountDisplayName, AssignedRoles,
+            AccountCreationTime, IsAccountEnabled
+  | order by AccountCreationTime desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountUPN
+      - identifier: AadUserId
+        columnName: AccountObjectId
+customDetails:
+  AssignedRoles: AssignedRoles
+  AccountCreationTime: AccountCreationTime
+  IsAccountEnabled: IsAccountEnabled
+alertDetailsOverride:
+  alertDisplayNameFormat: "Unapproved sync account detected: {{AccountUPN}}"
+  alertDescriptionFormat: "Account {{AccountUPN}} carries DirSync role / naming but is missing from ServiceAccounts:EntraIDConnect watchlist. Investigate for backdoor or update watchlist."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: P1D
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

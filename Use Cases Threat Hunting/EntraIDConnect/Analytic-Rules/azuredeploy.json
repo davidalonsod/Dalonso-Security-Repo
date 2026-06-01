@@ -1,0 +1,1946 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "AADProvisioningLogs Threat Hunting pack - 17 analytic rules + 14 hunting queries + watchlists + ExcludeAllowlistedIPs function.",
+    "author": "AADProvisioningLogs Threat Hunting Rule Pack"
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace that Sentinel is deployed on."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region."
+      }
+    },
+    "enableAnalyticRules": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy rules enabled (true) or disabled (false) for staged rollout."
+      }
+    },
+    "networkAllowlistAlias": {
+      "type": "string",
+      "defaultValue": "NetworkAllowlist",
+      "metadata": {
+        "description": "Alias of the shared trusted-IP allowlist watchlist."
+      }
+    },
+    "functionAlias": {
+      "type": "string",
+      "defaultValue": "ExcludeAllowlistedIPs",
+      "metadata": {
+        "description": "Alias of the saved KQL function for IP allowlist filtering."
+      }
+    },
+    "deployNetworkAllowlist": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Set to false if a NetworkAllowlist watchlist already exists in this workspace (avoids ARM searchKey collision). Rules still resolve it by alias at query time."
+      }
+    },
+    "deployHighValueAssets": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Set to false if a HighValueAssets watchlist already exists with a different schema (e.g. DeviceName search key). RULE-10 will still work as long as the existing watchlist has an IPAddress column populated with Entra Connect server IPs tagged EntraIDConnect."
+      }
+    },
+    "deployServiceAccounts": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Set to false if a ServiceAccounts watchlist already exists. RULE-12 needs an AccountObjectId column with sync identities tagged EntraIDConnect."
+      }
+    },
+    "deployHuntingQueries": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy the 14 companion hunting queries as savedSearches in the Hunting Queries category."
+      }
+    },
+    "networkAllowlistContent": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Initial CSV content for NetworkAllowlist. Header IPOrRange,Description,Owner,AddedDate."
+      }
+    },
+    "highValueAssetsContent": {
+      "type": "string",
+      "defaultValue": "IPAddress,Tags,Description,Owner,AddedDate\r\n203.0.113.10,EntraIDConnect,Replace with your Entra Connect server public IP,SOC,2026-05-26\r\n",
+      "metadata": {
+        "description": "CSV content for HighValueAssets watchlist. Replace stub with real Entra Connect public IPs."
+      }
+    },
+    "serviceAccountsContent": {
+      "type": "string",
+      "defaultValue": "AccountObjectId,AccountUPN,Tags,Description,Owner,AddedDate\r\n00000000-0000-0000-0000-000000000000,Sync_REPLACE_ME@tenant.onmicrosoft.com,EntraIDConnect,Replace with your Entra Connector account,SOC,2026-05-26\r\n",
+      "metadata": {
+        "description": "CSV content for ServiceAccounts watchlist. Replace stub with real sync identities."
+      }
+    }
+  },
+  "variables": {
+    "defaultNetworkAllowlistEntries": [
+      "10.0.0.0/8,RFC1918 private space,SOC,2026-05-26",
+      "172.16.0.0/12,RFC1918 private space,SOC,2026-05-26",
+      "192.168.0.0/16,RFC1918 private space,SOC,2026-05-26"
+    ],
+    "csvHeader": "IPOrRange,Description,Owner,AddedDate",
+    "crlf": "[json('\"\\r\\n\"')]",
+    "builtCsv": "[concat(variables('csvHeader'), variables('crlf'), join(variables('defaultNetworkAllowlistEntries'), variables('crlf')), variables('crlf'))]",
+    "effectiveNetworkAllowlistContent": "[if(empty(parameters('networkAllowlistContent')), variables('builtCsv'), parameters('networkAllowlistContent'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "apiVersion": "2023-02-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', parameters('networkAllowlistAlias'))]",
+      "condition": "[parameters('deployNetworkAllowlist')]",
+      "properties": {
+        "displayName": "Network Allowlist (Trusted IP / CIDR / Ranges)",
+        "source": "NetworkAllowlist.csv",
+        "sourceType": "Local file",
+        "provider": "SOC",
+        "description": "Trusted IPs/CIDR/ranges excluded from AADProvisioningLogs rules and hunts to suppress false positives. Shared model with the ADFSSignInLogs pack.",
+        "itemsSearchKey": "IPOrRange",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "[variables('effectiveNetworkAllowlistContent')]"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "apiVersion": "2023-02-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'EntraConnect_HighValueAssets')]",
+      "condition": "[parameters('deployHighValueAssets')]",
+      "properties": {
+        "displayName": "Entra Connect High Value Assets (server public IPs)",
+        "source": "EntraConnect_HighValueAssets.csv",
+        "sourceType": "Local file",
+        "provider": "SOC",
+        "description": "Entra Connect server public IP addresses. Tagged EntraIDConnect. Consumed by RULE-10 and HUNT-03. Namespaced alias to avoid collision with any pre-existing HighValueAssets watchlist in the workspace.",
+        "itemsSearchKey": "IPAddress",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "[parameters('highValueAssetsContent')]"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "apiVersion": "2023-02-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'EntraConnect_ServiceAccounts')]",
+      "condition": "[parameters('deployServiceAccounts')]",
+      "properties": {
+        "displayName": "Entra Connect Service Accounts (sync identities)",
+        "source": "EntraConnect_ServiceAccounts.csv",
+        "sourceType": "Local file",
+        "provider": "SOC",
+        "description": "Entra Connector sync UPNs / ObjectIds. Tagged EntraIDConnect. Consumed by RULE-12. Namespaced alias to avoid collision with any pre-existing ServiceAccounts watchlist.",
+        "itemsSearchKey": "AccountObjectId",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "[parameters('serviceAccountsContent')]"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', parameters('functionAlias'))]",
+      "properties": {
+        "etag": "*",
+        "displayName": "[parameters('functionAlias')]",
+        "category": "Security - Functions",
+        "functionAlias": "[parameters('functionAlias')]",
+        "functionParameters": "T:(IPAddress:string)",
+        "query": "let _allow = materialize(\r\n    union isfuzzy=true (print R='' | take 0),\r\n    (_GetWatchlist('NetworkAllowlist') | project R = tostring(IPOrRange))\r\n    | where isnotempty(R)\r\n);\r\nlet _allowCIDR = toscalar(\r\n    _allow\r\n    | where not(R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$')\r\n    | extend R = iff(R has '/', R, strcat(R, '/32'))\r\n    | summarize make_list(R)\r\n);\r\nlet _allowRange = toscalar(\r\n    _allow\r\n    | where R matches regex @'^\\d+\\.\\d+\\.\\d+\\.\\d+-\\d+\\.\\d+\\.\\d+\\.\\d+$'\r\n    | summarize make_list(R)\r\n);\r\nT\r\n| extend IPAddress = tostring(IPAddress)\r\n| where array_length(_allowCIDR) == 0 or isnull(ipv4_is_in_any_range(IPAddress, _allowCIDR)) or not(ipv4_is_in_any_range(IPAddress, _allowCIDR))\r\n| mv-apply _r = _allowRange to typeof(string) on (\r\n    extend _lo = tostring(split(_r,'-')[0]), _hi = tostring(split(_r,'-')[1])\r\n    | extend _inRange = ipv4_compare(IPAddress, _lo) >= 0 and ipv4_compare(IPAddress, _hi) <= 0\r\n    | summarize _anyInRange = max(toint(_inRange))\r\n)\r\n| where isnull(_anyInRange) or _anyInRange == 0\r\n| project-away _anyInRange",
+        "version": 2,
+        "tags": [
+          {
+            "name": "Description",
+            "value": "Filters any table with an IPAddress column, excluding rows whose IPv4 matches the NetworkAllowlist watchlist."
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a0001-1001-4101-9101-aadprov00001')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Provisioning Failure Burst - Single Job",
+        "description": "Detects a burst of provisioning failures within a single `JobId` (or `CycleId`), indicating a possible attack on the provisioning channel: credential rotation on the SCIM endpoint, broken connector secret, malicious schema change, or a bad-actor cycling through targets that fail validation. Threshold of 30 in 1h is set well above normal transient retries while still catching active abuse campaigns and outright connector outages. MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts), T1556 (Modify Authentication Process), T1098 (Account Manipulation).",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "AADProvisioningLogs\n| where TimeGenerated > ago(1h)\n| where ResultType =~ \"Failure\"\n| extend SPName = tostring(parse_json(ServicePrincipal).Name)\n| extend Source = tostring(parse_json(SourceIdentity).IdentityType)\n| extend Target = tostring(parse_json(TargetIdentity).IdentityType)\n| summarize\n    Failures        = count(),\n    AffectedTargets = dcount(TargetIdentity),\n    ErrorCodes      = make_set(ResultSignature, 10),\n    ErrorMessages   = make_set(ResultDescription, 10),\n    Operations      = make_set(OperationName, 10),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by JobId, SPName, Source, Target\n// Conservative threshold - normal retry storms rarely exceed 30/hour per job\n| where Failures >= 30\n| order by Failures desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Persistence",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1078",
+          "T1098",
+          "T1556"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "SPName"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "Failures": "Failures",
+          "AffectedTargets": "AffectedTargets",
+          "ErrorCodes": "ErrorCodes"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Provisioning Failure Burst on {{SPName}} - {{Failures}} failures",
+          "alertDescriptionFormat": "Provisioning job {{JobId}} on app {{SPName}} produced {{Failures}} failures in 1h. Investigate connector credentials, schema changes, or target tampering."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a0002-1002-4102-9102-aadprov00002')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Mass User Disable via Provisioning",
+        "description": "Detects 10 or more `Disable` provisioning actions completing successfully within a single hour against Entra ID user objects. Mass disable is a recognised attacker tactic to lock out legitimate users (denial of service) or to disable an account immediately before takeover via TAP/credential injection. Provisioning is the stealthier channel - bulk disables made via HR systems or SCIM rarely raise console alerts. MITRE ATT&CK: T1531 (Account Access Removal), T1098 (Account Manipulation), T1078.004 (Valid Accounts: Cloud Accounts).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "AADProvisioningLogs\n| where TimeGenerated > ago(1h)\n| where ResultType =~ \"Success\"\n| where ProvisioningAction =~ \"Disable\"\n     or (OperationName has_any (\"Disable\", \"disable\") and ProvisioningAction !~ \"Other\")\n| extend SPName = tostring(parse_json(ServicePrincipal).Name)\n| extend InitiatorUpn = tostring(parse_json(InitiatedBy).userPrincipalName)\n| extend InitiatorApp = tostring(parse_json(InitiatedBy).displayName)\n| extend TargetUpn    = tostring(parse_json(TargetIdentity).userPrincipalName)\n| extend TargetId     = tostring(parse_json(TargetIdentity).id)\n| summarize\n    DisabledCount   = count(),\n    Targets         = make_set(TargetUpn, 50),\n    Jobs            = make_set(JobId, 10),\n    Cycles          = make_set(CycleId, 10),\n    Initiators      = make_set(coalesce(InitiatorUpn, InitiatorApp), 5),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by SPName\n// Threshold: 10/hour catches deliberate mass-disable while ignoring routine HR-driven offboarding spikes\n| where DisabledCount >= 10\n| order by DisabledCount desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Impact",
+          "Persistence"
+        ],
+        "techniques": [
+          "T1531",
+          "T1098"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "SPName"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT8H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "DisabledCount": "DisabledCount",
+          "Targets": "Targets",
+          "Initiators": "Initiators"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Mass user disable via provisioning - {{DisabledCount}} accounts ({{SPName}})",
+          "alertDescriptionFormat": "Provisioning service {{SPName}} disabled {{DisabledCount}} users in 1h. Verify against expected HR / lifecycle workflow. Possible account-access-removal attack."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a0003-1003-4103-9103-aadprov00003')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Mass User Deletion via Provisioning",
+        "description": "Detects 5 or more `Delete` (or `StagedDelete`) provisioning actions completing successfully against Entra ID user objects within 1 hour. Deletion via the provisioning channel is rare under normal operations - lifecycle workflows typically `Disable` first and only purge after retention windows. A burst of deletions over the provisioning path is a strong signal of either a runaway HR feed (data-integrity issue) or deliberate destruction. MITRE ATT&CK: T1531 (Account Access Removal), T1485 (Data Destruction), T1078.004 (Valid Accounts: Cloud Accounts).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "AADProvisioningLogs\n| where TimeGenerated > ago(1h)\n| where ResultType =~ \"Success\"\n| where ProvisioningAction in~ (\"Delete\", \"StagedDelete\")\n     or OperationName has_any (\"Delete\", \"Remove\")\n| extend SPName = tostring(parse_json(ServicePrincipal).Name)\n| extend InitiatorUpn = tostring(parse_json(InitiatedBy).userPrincipalName)\n| extend InitiatorApp = tostring(parse_json(InitiatedBy).displayName)\n| extend TargetUpn    = tostring(parse_json(TargetIdentity).userPrincipalName)\n| summarize\n    DeletedCount = count(),\n    Targets      = make_set(TargetUpn, 30),\n    Jobs         = make_set(JobId, 10),\n    Initiators   = make_set(coalesce(InitiatorUpn, InitiatorApp), 5),\n    FirstSeen    = min(TimeGenerated),\n    LastSeen     = max(TimeGenerated)\n  by SPName\n// Conservative: 5/hour is well above legitimate scheduled-purge spikes\n| where DeletedCount >= 5\n| order by DeletedCount desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Impact"
+        ],
+        "techniques": [
+          "T1531",
+          "T1485"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "SPName"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT8H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "DeletedCount": "DeletedCount",
+          "Targets": "Targets",
+          "Initiators": "Initiators"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Mass user deletion via provisioning - {{DeletedCount}} accounts ({{SPName}})",
+          "alertDescriptionFormat": "Provisioning service {{SPName}} deleted {{DeletedCount}} users in 1h. Confirm against lifecycle/HR purge schedule."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a0004-1004-4104-9104-aadprov00004')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Privileged Group Membership Change via Provisioning",
+        "description": "Detects provisioning operations that modify membership of well-known privileged group names (`Domain Admins`, `Global Administrators`, `Privileged Role Administrators`, anything matching `*Admin*`, `*Tier0*`, `*Sensitive*`, or containing `pim-` / `role-` patterns). Provisioning is not a typical channel for privileged-group membership management - any hit here warrants immediate investigation. Modifies the AD-side surface of hybrid identity, which is a documented Entra Connect attack pattern (T1098.003 - Additional Cloud Roles). MITRE ATT&CK: T1098.003 (Account Manipulation: Additional Cloud Roles), T1078.004 (Valid Accounts: Cloud Accounts).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "AADProvisioningLogs\n| where TimeGenerated > ago(2h)\n| where ResultType =~ \"Success\"\n| extend Target     = tostring(parse_json(TargetIdentity).displayName)\n| extend TargetType = tostring(parse_json(TargetIdentity).IdentityType)\n| extend Modified   = tostring(ModifiedProperties)\n| where TargetType =~ \"Group\" or Target has_any (\"Admin\",\"Tier0\",\"Sensitive\",\"Privileged\",\"PIM\")\n| where Modified has_any (\"members\",\"memberOf\",\"Members\",\"appRoleAssignments\",\"directoryRoles\")\n| extend SPName       = tostring(parse_json(ServicePrincipal).Name)\n| extend InitiatorUpn = tostring(parse_json(InitiatedBy).userPrincipalName)\n| extend InitiatorApp = tostring(parse_json(InitiatedBy).displayName)\n| project TimeGenerated, JobId, CycleId, ChangeId, SPName,\n          Initiator = coalesce(InitiatorUpn, InitiatorApp),\n          TargetGroup = Target,\n          OperationName, ProvisioningAction, ModifiedProperties\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "PrivilegeEscalation",
+          "Persistence"
+        ],
+        "techniques": [
+          "T1098"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "SPName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "Initiator"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "TargetGroup": "TargetGroup",
+          "OperationName": "OperationName",
+          "ProvisioningAction": "ProvisioningAction"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Provisioning modified privileged group '{{TargetGroup}}' via {{SPName}}",
+          "alertDescriptionFormat": "Provisioning service {{SPName}} modified privileged group '{{TargetGroup}}' (action={{ProvisioningAction}}). Privileged-group changes should not flow through the provisioning channel."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a0005-1005-4105-9105-aadprov00005')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Bulk Attribute Churn on Privileged Target",
+        "description": "Detects provisioning of >= 5 attribute modifications against a single user identity within 1 hour where the target user holds an Entra ID directory role (joined via `IdentityInfo`). Mass attribute churn against a privileged user is a strong signal of takeover preparation: attackers manipulate `ProxyAddresses`, `UserPrincipalName`, `OnPremisesImmutableId`, MFA phone, MFA email, or `OtherMails` to enable account-takeover, soft-match abuse, or to re-route password-reset notifications. MITRE ATT&CK: T1098 (Account Manipulation), T1556 (Modify Authentication Process), T1078.004 (Valid Accounts: Cloud Accounts).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let PrivilegedUsers =\n    IdentityInfo\n    | where TimeGenerated > ago(14d)\n    | summarize arg_max(TimeGenerated, *) by AccountUPN\n    | where isnotempty(AssignedRoles) and AssignedRoles != \"[]\"\n    | project AccountUPN, AssignedRoles;\nAADProvisioningLogs\n| where TimeGenerated > ago(1h)\n| where ResultType =~ \"Success\"\n| where ProvisioningAction in~ (\"Update\",\"Other\")\n| extend TargetUpn = tostring(parse_json(TargetIdentity).userPrincipalName)\n| extend SPName    = tostring(parse_json(ServicePrincipal).Name)\n| where isnotempty(TargetUpn)\n| join kind=inner (PrivilegedUsers) on $left.TargetUpn == $right.AccountUPN\n| mv-expand Mod = todynamic(ModifiedProperties)\n| extend PropName = tostring(Mod.displayName),\n         OldValue = tostring(Mod.oldValue),\n         NewValue = tostring(Mod.newValue)\n| where isnotempty(PropName)\n| summarize\n    AttributesChanged = dcount(PropName),\n    Props             = make_set(PropName, 20),\n    ChangeId_count    = dcount(ChangeId),\n    AssignedRoles     = any(AssignedRoles),\n    FirstSeen         = min(TimeGenerated),\n    LastSeen          = max(TimeGenerated)\n  by TargetUpn, SPName\n// 5 attribute changes in 1h against a privileged user is highly unusual\n| where AttributesChanged >= 5\n| order by AttributesChanged desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Persistence",
+          "PrivilegeEscalation",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1098",
+          "T1556"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "TargetUpn"
+              }
+            ]
+          },
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "SPName"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "Props": "Props",
+          "AttributesChanged": "AttributesChanged",
+          "AssignedRoles": "AssignedRoles"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Bulk attribute churn on privileged user {{TargetUpn}} via {{SPName}}",
+          "alertDescriptionFormat": "{{AttributesChanged}} attributes modified on privileged user {{TargetUpn}} in 1h via provisioning ({{SPName}}). Possible takeover preparation."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a0006-1006-4106-9106-aadprov00006')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Provisioning Service Silence - Busy Job Stopped",
+        "description": "Detects when a previously busy provisioning job (>= 100 events/hour baseline over the past 7 days) has produced 0 events in the most recent 2-hour window. Sudden silence on a critical provisioning channel can indicate connector credential theft (attacker stopped the legitimate agent), deliberate sabotage of the sync pipeline to defeat lifecycle controls, or simply a broken connector that needs ops attention. Either way it warrants an alert. MITRE ATT&CK: T1562.001 (Impair Defenses: Disable or Modify Tools), T1531 (Account Access Removal).",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let Baseline =\n    AADProvisioningLogs\n    | where TimeGenerated between (ago(7d) .. ago(2h))\n    | extend SPName = tostring(parse_json(ServicePrincipal).Name)\n    | summarize BaselinePerHour = count() / 168.0 by JobId, SPName\n    | where BaselinePerHour >= 100;\nlet Recent =\n    AADProvisioningLogs\n    | where TimeGenerated > ago(2h)\n    | extend SPName = tostring(parse_json(ServicePrincipal).Name)\n    | summarize RecentEvents = count() by JobId, SPName;\nBaseline\n| join kind=leftouter (Recent) on JobId, SPName\n| extend RecentEvents = coalesce(RecentEvents, 0)\n| where RecentEvents == 0\n| project JobId, SPName, BaselinePerHour, RecentEvents,\n          DropRatio = 1.0,\n          AlertReason = strcat(\"Job baseline \", round(BaselinePerHour,0), \"/hr but 0 events in last 2h\")\n| order by BaselinePerHour desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "DefenseEvasion",
+          "Impact"
+        ],
+        "techniques": [
+          "T1562",
+          "T1531"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "SPName"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "BaselinePerHour": "BaselinePerHour",
+          "AlertReason": "AlertReason",
+          "RecentEvents": "RecentEvents"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Provisioning silence on {{SPName}} (was {{BaselinePerHour}}/hr)",
+          "alertDescriptionFormat": "{{AlertReason}}. Confirm connector health, credentials, and recent admin actions on the SP."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a0007-1007-4107-9107-aadprov00007')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "DirSync Feature Toggle - SoftMatch / HardMatch / PHS",
+        "description": "Detects modification of Entra Connect DirSync feature settings, including `BlockSoftMatch`, `BlockCloudObjectTakeoverThroughHardMatch`, and Password Hash Sync enable/disable, via `Update-MgDirectoryOnPremiseSynchronization` or equivalent Graph cmdlets. These toggles are documented attack vectors: disabling SoftMatch blocking allows an attacker holding `Hybrid Identity Administrator` to take over cloud-only accounts by syncing matching on-premises objects. Direct mapping to the Cloud-Architekt `AADCSyncServiceAccount` playbook. MITRE ATT&CK: T1556 (Modify Authentication Process), T1098.003 (Account Manipulation: Additional Cloud Roles), T1078.004 (Valid Accounts: Cloud Accounts).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "AuditLogs\n| where TimeGenerated > ago(1d)\n| where Category =~ \"DirectoryManagement\"\n     or OperationName has_any (\n          \"Set DirSyncEnabled flag\",\n          \"Update directory feature\",\n          \"Set Company DirSyncEnabled\",\n          \"Set Company Information\",\n          \"Set Password Hash Sync\",\n          \"Update OnPremisesDirectorySynchronization\",\n          \"OnPremDirectorySynchronization\"\n        )\n| extend Initiator      = tostring(InitiatedBy.user.userPrincipalName)\n| extend InitiatorApp   = tostring(InitiatedBy.app.displayName)\n| extend Actor          = coalesce(Initiator, InitiatorApp)\n| extend TargetProps    = tostring(TargetResources)\n| where TargetProps has_any (\n      \"BlockSoftMatch\",\n      \"BlockCloudObjectTakeoverThroughHardMatch\",\n      \"PasswordHashSync\",\n      \"passwordHashSync\",\n      \"SeamlessSSO\",\n      \"DirSyncEnabled\",\n      \"synchronizationInterval\"\n  )\n| extend FeatureMentioned = case(\n      TargetProps has \"BlockCloudObjectTakeoverThroughHardMatch\", \"HardMatchBlock\",\n      TargetProps has \"BlockSoftMatch\", \"SoftMatchBlock\",\n      TargetProps has \"PasswordHashSync\" or TargetProps has \"passwordHashSync\", \"PasswordHashSync\",\n      TargetProps has \"SeamlessSSO\", \"SeamlessSSO\",\n      TargetProps has \"DirSyncEnabled\", \"DirSyncEnabled\",\n      \"OtherFeature\"\n  )\n| project TimeGenerated, OperationName, Category, Actor,\n          SourceIP = tostring(InitiatedBy.user.ipAddress),\n          FeatureMentioned, Result, ResultReason, TargetResources\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "DefenseEvasion",
+          "Persistence",
+          "PrivilegeEscalation"
+        ],
+        "techniques": [
+          "T1556",
+          "T1098"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "Actor"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "Operation": "OperationName",
+          "Actor": "Actor",
+          "Feature": "FeatureMentioned"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "DirSync feature change ({{FeatureMentioned}}) by {{Actor}}",
+          "alertDescriptionFormat": "Entra Connect feature {{FeatureMentioned}} was modified by {{Actor}}. Operation: {{OperationName}}. Validate against approved change ticket."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a0008-1008-4108-9108-aadprov00008')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "TAP Added to Entra Connector Account (Backdoor)",
+        "description": "Detects Temporary Access Pass (TAP) issuance against a user account that is either (a) a member of the `Directory Synchronization Accounts` role (per `IdentityInfo`), or (b) matches the Entra Connector account naming pattern (`Sync_*` / `On-Premises Directory Synchronization Service Account`). TAP issuance against a sync account is **never legitimate** under normal operations - it is the documented stealth backdoor for sync-account takeover (Cloud-Architekt playbook). MITRE ATT&CK: T1098.001 (Account Manipulation: Additional Cloud Credentials), T1078.004 (Valid Accounts: Cloud Accounts), T1556 (Modify Authentication Process).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "// Sync accounts known via IdentityInfo (UEBA) - degrade to naming pattern if not available\nlet SyncAccounts =\n    IdentityInfo\n    | where TimeGenerated > ago(14d)\n    | summarize arg_max(TimeGenerated, *) by AccountUPN\n    | where AssignedRoles has_any (\n          \"Directory Synchronization Accounts\",\n          \"On Premises Directory Sync Account\"\n      )\n        or AccountUPN startswith \"Sync_\"\n        or AccountDisplayName has \"On-Premises Directory Synchronization Service Account\"\n    | project AccountUPN, AccountObjectId, AccountDisplayName;\nAuditLogs\n| where TimeGenerated > ago(1d)\n| where OperationName has_any (\n      \"Admin registered security info\",\n      \"Register security info\",\n      \"Create temporary access pass\",\n      \"Issue temporary access pass\",\n      \"Admin Issued Temporary Access Pass\",\n      \"User registered security info\"\n  )\n| mv-expand TargetResources\n| extend TargetUpn = tostring(TargetResources.userPrincipalName)\n| extend TargetId  = tostring(TargetResources.id)\n| extend Initiator = tostring(InitiatedBy.user.userPrincipalName)\n| extend Actor     = coalesce(Initiator, tostring(InitiatedBy.app.displayName))\n| extend SourceIP  = tostring(InitiatedBy.user.ipAddress)\n// Match by UPN or ObjectId OR by naming heuristic (works even without IdentityInfo)\n| where TargetUpn in~ (SyncAccounts | project AccountUPN)\n     or TargetId  in  (SyncAccounts | project AccountObjectId)\n     or TargetUpn startswith \"Sync_\"\n     or TargetUpn contains \"DirSync\"\n     or TargetUpn has \"On-Premises Directory Synchronization\"\n| project TimeGenerated, OperationName, Actor, SourceIP, TargetUpn, TargetResources, Result\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Persistence",
+          "PrivilegeEscalation"
+        ],
+        "techniques": [
+          "T1098",
+          "T1556"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "TargetUpn"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "Actor"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "Operation": "OperationName",
+          "Actor": "Actor",
+          "Target": "TargetUpn"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "TAP / security-info change on sync account {{TargetUpn}}",
+          "alertDescriptionFormat": "{{OperationName}} performed by {{Actor}} against Entra Connector account {{TargetUpn}}. TAP on sync accounts is the documented stealth backdoor."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a0009-1009-4109-9109-aadprov00009')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Password Reset on Entra Connector Account",
+        "description": "Detects password reset events against the Entra Connector service account (member of `Directory Synchronization Accounts` role or matching `Sync_*` naming pattern). Per the Cloud-Architekt playbook, a password reset on the sync account is either a legitimate ops-driven rotation (rare and scheduled) or an attacker rotating to a known value to take control. Either way the SOC must verify. MITRE ATT&CK: T1098.001 (Account Manipulation: Additional Cloud Credentials), T1078.004 (Valid Accounts: Cloud Accounts).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "AuditLogs\n| where TimeGenerated > ago(1d)\n| where OperationName has_any (\n      \"Reset user password\",\n      \"Reset password (by admin)\",\n      \"Reset password\",\n      \"Change user password\",\n      \"Update user\",\n      \"Update StsRefreshTokenValidFrom Timestamp\"\n  )\n| mv-expand TargetResources\n| extend TargetUpn = tostring(TargetResources.userPrincipalName)\n| extend Initiator = tostring(InitiatedBy.user.userPrincipalName)\n| extend Actor     = coalesce(Initiator, tostring(InitiatedBy.app.displayName))\n| extend SourceIP  = tostring(InitiatedBy.user.ipAddress)\n| where TargetUpn startswith \"Sync_\"\n     or TargetUpn contains \"DirSync\"\n     or TargetUpn has \"On-Premises Directory Synchronization\"\n     or tostring(TargetResources.displayName) has \"On-Premises Directory Synchronization Service Account\"\n| project TimeGenerated, OperationName, Actor, SourceIP, TargetUpn,\n          ModifiedProperties = tostring(TargetResources.modifiedProperties), Result\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Persistence",
+          "PrivilegeEscalation"
+        ],
+        "techniques": [
+          "T1098"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "TargetUpn"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "Actor"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "Operation": "OperationName",
+          "Actor": "Actor",
+          "Target": "TargetUpn"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Password reset on Entra Connector account {{TargetUpn}}",
+          "alertDescriptionFormat": "{{OperationName}} performed by {{Actor}} against sync account {{TargetUpn}}. Confirm change ticket."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a000a-100a-410a-910a-aadprov0000a')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Entra Connector Sign-in Outside Allowlisted Public IP",
+        "description": "Detects successful sign-ins from `Sync_*` / `On-Premises Directory Synchronization Service Account` UPNs originating from an IP address that is NOT in the `HighValueAssets` watchlist tagged `EntraIDConnect`. The sync account should only authenticate from the Entra Connect server's public IP range - any other source is either a misconfiguration or active abuse. Threshold is a single successful sign-in (any non-allowlisted IP is notable), with non-interactive sign-ins included via `AADNonInteractiveUserSignInLogs` since sync traffic largely lives there. MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "// Allowlisted Entra Connect server IPs - falls back to empty set if watchlist missing\nlet AllowedIPs =\n    _GetWatchlist('EntraConnect_HighValueAssets')\n    | where tostring(Tags) has \"EntraIDConnect\"\n    | project IPAddress = tostring(IPAddress);\nlet SyncSignIns =\n    union isfuzzy=true\n      (SigninLogs                          | where TimeGenerated > ago(1h)),\n      (AADNonInteractiveUserSignInLogs     | where TimeGenerated > ago(1h))\n    | where ResultType == 0\n    | where UserPrincipalName startswith \"Sync_\"\n         or UserPrincipalName contains \"DirSync\"\n         or UserDisplayName has \"On-Premises Directory Synchronization Service Account\";\nSyncSignIns\n| where IPAddress !in (AllowedIPs) or isempty(IPAddress)\n| summarize\n    SigninCount  = count(),\n    Apps         = make_set(AppDisplayName, 10),\n    ClientApps   = make_set(ClientAppUsed, 5),\n    UserAgents   = make_set(UserAgent, 5),\n    Locations    = make_set(Location, 5),\n    FirstSeen    = min(TimeGenerated),\n    LastSeen     = max(TimeGenerated)\n  by UserPrincipalName, IPAddress\n| order by SigninCount desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "InitialAccess",
+          "Persistence"
+        ],
+        "techniques": [
+          "T1078"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account",
+              "IP"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "SigninCount": "SigninCount",
+          "Apps": "Apps",
+          "Locations": "Locations"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Entra Connector {{UserPrincipalName}} signed in from non-allowlisted IP {{IPAddress}}",
+          "alertDescriptionFormat": "Sync account {{UserPrincipalName}} signed in from {{IPAddress}} ({{SigninCount}} sign-ins) which is not in HighValueAssets:EntraIDConnect. Confirm against Entra Connect server NAT egress."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a000b-100b-410b-910b-aadprov0000b')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "New Service Principal Performing Provisioning",
+        "description": "Detects the first appearance of a `ServicePrincipal` performing provisioning operations - i.e. an SP that has never been seen as a provisioning agent in the previous 30 days but has emitted >= 50 events in the last 24 hours. An unexpected new provisioning SP is a strong supply-chain / persistence indicator: an attacker may have registered a SCIM app, granted `User.ReadWrite.All` / `Directory.ReadWrite.All`, and started writing arbitrary objects into Entra ID. MITRE ATT&CK: T1136 (Create Account), T1098 (Account Manipulation), T1078.004 (Valid Accounts: Cloud Accounts).",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let Recent =\n    AADProvisioningLogs\n    | where TimeGenerated > ago(1d)\n    | extend SPName = tostring(parse_json(ServicePrincipal).Name),\n             SPId   = tostring(parse_json(ServicePrincipal).Id)\n    | summarize\n        RecentEvents = count(),\n        FirstSeen    = min(TimeGenerated),\n        LastSeen     = max(TimeGenerated),\n        Operations   = make_set(OperationName, 10),\n        Targets      = make_set(tostring(parse_json(TargetIdentity).userPrincipalName), 30)\n      by SPId, SPName\n    // Conservative: ignore one-off probes\n    | where RecentEvents >= 50;\nlet Historical =\n    AADProvisioningLogs\n    | where TimeGenerated between (ago(14d) .. ago(1d))\n    | extend SPId = tostring(parse_json(ServicePrincipal).Id)\n    | distinct SPId;\nRecent\n| where SPId !in (Historical)\n| order by RecentEvents desc\n",
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Persistence",
+          "PrivilegeEscalation"
+        ],
+        "techniques": [
+          "T1136",
+          "T1098"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "SPName"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "Operations": "Operations",
+          "RecentEvents": "RecentEvents",
+          "Targets": "Targets"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "New provisioning ServicePrincipal observed: {{SPName}} ({{RecentEvents}} ops)",
+          "alertDescriptionFormat": "SP {{SPName}} ({{SPId}}) has never performed provisioning in the prior 30 days but emitted {{RecentEvents}} operations in 24h. Validate against approved app inventory."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a000c-100c-410c-910c-aadprov0000c')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Sync Account Outside ServiceAccounts Watchlist",
+        "description": "Detects user objects assigned the `Directory Synchronization Accounts` role (per `IdentityInfo`) or matching the `Sync_*` / `On-Premises Directory Synchronization Service Account` naming pattern that are NOT present in the `ServiceAccounts` watchlist tagged `EntraIDConnect`. Per the Cloud-Architekt playbook, this is the indicator-of-backdoor pattern: an attacker creating a new sync account to maintain persistence while staying invisible to SOC watchlists. MITRE ATT&CK: T1136.003 (Create Account: Cloud Account), T1098.001 (Account Manipulation: Additional Cloud Credentials).",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let ApprovedSyncAccounts =\n    _GetWatchlist('EntraConnect_ServiceAccounts')\n    | where tostring(Tags) has \"EntraIDConnect\"\n    | project AccountObjectId = tostring(AccountObjectId);\nIdentityInfo\n| where TimeGenerated > ago(14d)\n| summarize arg_max(TimeGenerated, *) by AccountUPN\n| where AssignedRoles has_any (\n      \"Directory Synchronization Accounts\",\n      \"On Premises Directory Sync Account\"\n  )\n    or AccountUPN startswith \"Sync_\"\n    or AccountDisplayName has \"On-Premises Directory Synchronization Service Account\"\n| where AccountObjectId !in (ApprovedSyncAccounts)\n| project AccountUPN, AccountObjectId, AccountDisplayName, AssignedRoles,\n          AccountCreationTime, IsAccountEnabled\n| order by AccountCreationTime desc\n",
+        "queryFrequency": "PT12H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Persistence"
+        ],
+        "techniques": [
+          "T1136",
+          "T1098"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "AccountUPN"
+              },
+              {
+                "identifier": "AadUserId",
+                "columnName": "AccountObjectId"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "P1D",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "AccountCreationTime": "AccountCreationTime",
+          "IsAccountEnabled": "IsAccountEnabled",
+          "AssignedRoles": "AssignedRoles"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Unapproved sync account detected: {{AccountUPN}}",
+          "alertDescriptionFormat": "Account {{AccountUPN}} carries DirSync role / naming but is missing from ServiceAccounts:EntraIDConnect watchlist. Investigate for backdoor or update watchlist."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a000d-100d-410d-910d-aadprov0000d')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Match-Anchor Modification on Privileged Cloud User",
+        "description": "Detects modification of identity matching anchors (`userPrincipalName`, `mail`, `proxyAddresses`, `onPremisesImmutableId`, `mailNickname`) on an Entra ID user that holds a directory role. Modifying these attributes on a cloud admin enables the documented soft/hard-match takeover - the attacker forces a matching on-premises object to bind to the privileged cloud account on the next sync cycle. Covers both `AADProvisioningLogs` (provisioning channel) and `AuditLogs` (direct Graph writes). Complements RULE-07 (DirSync feature toggle): even with BlockSoftMatch enabled, the cloud-side anchor change is the same TTP signature. MITRE ATT&CK: T1098 (Account Manipulation), T1556.006 (Modify Authentication Process: Multi-Factor Authentication), T1078.004 (Valid Accounts: Cloud Accounts).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "// High-fidelity anchors only. proxyAddresses / otherMails removed:\n// they churn constantly through Exchange mail-flow and shared-mailbox\n// lifecycle and generate FPs on any cloud admin who also has a mailbox.\nlet AnchorAttrs = dynamic([\n    \"userPrincipalName\",\"UserPrincipalName\",\n    \"onPremisesImmutableId\",\"ImmutableId\",\"sourceAnchor\",\n    \"mailNickname\",\"MailNickname\"\n]);\nlet PrivilegedUsers =\n    IdentityInfo\n    | where TimeGenerated > ago(14d)\n    | summarize arg_max(TimeGenerated, *) by AccountUPN\n    | where isnotempty(AssignedRoles) and AssignedRoles != \"[]\"\n    | project AccountUPN, AccountObjectId, AssignedRoles;\nlet FromProvisioning =\n    AADProvisioningLogs\n    | where TimeGenerated > ago(1h)\n    | where ResultType =~ \"Success\"\n    | extend TargetUpn = tostring(parse_json(TargetIdentity).userPrincipalName),\n             SPName    = tostring(parse_json(ServicePrincipal).Name)\n    | mv-expand Mod = todynamic(ModifiedProperties)\n    | extend PropName = tostring(Mod.displayName),\n             OldValue = tostring(Mod.oldValue),\n             NewValue = tostring(Mod.newValue)\n    | where PropName in~ (AnchorAttrs)\n    | project TimeGenerated, Channel = \"Provisioning\", Actor = SPName,\n              TargetUpn, PropName, OldValue, NewValue, SourceIP = \"\";\nlet FromAudit =\n    AuditLogs\n    | where TimeGenerated > ago(1h)\n    | where OperationName has_any (\"Update user\",\"Change user UPN\",\"Set user properties\",\"Update User\")\n    | mv-expand TargetResources\n    | extend TargetUpn  = tostring(TargetResources.userPrincipalName)\n    | extend Actor      = coalesce(tostring(InitiatedBy.user.userPrincipalName),\n                                    tostring(InitiatedBy.app.displayName))\n    | extend SourceIP   = tostring(InitiatedBy.user.ipAddress)\n    | mv-expand Mod = todynamic(TargetResources.modifiedProperties)\n    | extend PropName = tostring(Mod.displayName),\n             OldValue = tostring(Mod.oldValue),\n             NewValue = tostring(Mod.newValue)\n    | where PropName in~ (AnchorAttrs)\n    | project TimeGenerated, Channel = \"AuditLogs\", Actor,\n              TargetUpn, PropName, OldValue, NewValue, SourceIP;\nunion FromProvisioning, FromAudit\n| join kind=inner (PrivilegedUsers) on $left.TargetUpn == $right.AccountUPN\n| project TimeGenerated, Channel, Actor, SourceIP, TargetUpn, AssignedRoles,\n          PropName, OldValue, NewValue\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "PrivilegeEscalation",
+          "Persistence",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1098",
+          "T1556"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "TargetUpn"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "Actor"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "PropName": "PropName",
+          "AssignedRoles": "AssignedRoles",
+          "Channel": "Channel"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Match-anchor {{PropName}} modified on privileged user {{TargetUpn}}",
+          "alertDescriptionFormat": "{{Actor}} modified matching anchor {{PropName}} on privileged user {{TargetUpn}}. Soft/Hard-match takeover indicator - see Channel custom detail."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a000e-100e-410e-910e-aadprov0000e')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Interactive / Browser Sign-in by Sync Service Account",
+        "description": "Detects an Entra Connector account (`Sync_*` / `On-Premises Directory Synchronization Service Account`) authenticating through `SigninLogs` (interactive) OR with `ClientAppUsed = \"Browser\"`. The sync account should only emit non-interactive token-acquisition traffic against the synchronization endpoints. An interactive or browser sign-in is the exact smoking-gun pattern for an attacker who exfiltrated sync credentials from the Entra Connect server (per the Swisskyrepo guide) and is now using them by hand against the Azure Portal or Graph Explorer. Complementary to RULE-10 (which catches sign-ins from non-allowlisted IPs); this rule fires even from the allowlisted IP if the client class is wrong. MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts), T1552 (Unsecured Credentials).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "SigninLogs\n| extend IPAddress = tostring(IPAddress)\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(1h)\n| where ResultType == 0\n| where UserPrincipalName startswith \"Sync_\"\n     or UserPrincipalName contains \"DirSync\"\n     or UserDisplayName has \"On-Premises Directory Synchronization Service Account\"\n// High-fidelity signals only: real interactive browser sign-in, or a\n// first-party admin surface app. \"Mobile Apps and Desktop clients\" is\n// intentionally excluded - the sync service itself authenticates via that\n// class for non-interactive token refresh and would generate FPs.\n| where ClientAppUsed == \"Browser\"\n     or AppDisplayName in~ (\n          \"Microsoft Azure portal\",\n          \"Microsoft Graph PowerShell\",\n          \"Microsoft Graph Explorer\",\n          \"Azure Active Directory PowerShell\",\n          \"Azure CLI\",\n          \"Microsoft Azure CLI\"\n      )\n| project TimeGenerated, UserPrincipalName, IPAddress, Location,\n          AppDisplayName, ClientAppUsed, UserAgent, ConditionalAccessStatus,\n          CorrelationId, ResultType\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "InitialAccess",
+          "CredentialAccess"
+        ],
+        "techniques": [
+          "T1078",
+          "T1552"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "UserPrincipalName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "AppDisplayName": "AppDisplayName",
+          "UserAgent": "UserAgent",
+          "ClientAppUsed": "ClientAppUsed"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Interactive sign-in by sync account {{UserPrincipalName}}",
+          "alertDescriptionFormat": "Sync account {{UserPrincipalName}} signed in interactively to {{AppDisplayName}} from {{IPAddress}}. Sync accounts must never authenticate via browser/portal - likely credential exfiltration from Entra Connect host."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a000f-100f-410f-910f-aadprov0000f')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "New High-Risk TargetSystem in Provisioning",
+        "description": "Detects the first appearance (no history in prior 60 days) of a high-risk TargetSystem in `AADProvisioningLogs`: SCIM endpoints, Workday, SuccessFactors, Salesforce, AWS IAM Identity Center, ServiceNow, custom SCIM URIs. A new high-risk target system means an admin (or attacker with sufficient role) has wired Entra ID to a new external identity store. In the rogue-SCIM abuse case the attacker is now pushing accounts outbound to a malicious endpoint. MITRE ATT&CK: T1136 (Create Account), T1098 (Account Manipulation), T1567 (Exfiltration Over Web Service).",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let HighRiskKeywords = dynamic([\n    \"scim\",\"SCIM\",\n    \"workday\",\"Workday\",\n    \"successfactors\",\"SuccessFactors\",\n    \"salesforce\",\"Salesforce\",\n    \"aws\",\"AWS\",\"IAM Identity Center\",\n    \"servicenow\",\"ServiceNow\",\n    \"okta\",\"Okta\",\n    \"saviynt\",\"Saviynt\"\n]);\nlet Historical =\n    AADProvisioningLogs\n    | where TimeGenerated between (ago(14d) .. ago(1d))\n    | extend TgtSystem = tostring(parse_json(TargetSystem).DisplayName)\n    | where isnotempty(TgtSystem)\n    | distinct TgtSystem;\nAADProvisioningLogs\n| where TimeGenerated > ago(1d)\n| extend TgtSystem = tostring(parse_json(TargetSystem).DisplayName),\n         TgtDetail = tostring(TargetSystem),\n         SPName    = tostring(parse_json(ServicePrincipal).Name)\n| where isnotempty(TgtSystem)\n| where TgtSystem has_any (HighRiskKeywords) or TgtDetail has_any (HighRiskKeywords)\n| where TgtSystem !in (Historical)\n| summarize\n    Events     = count(),\n    FirstSeen  = min(TimeGenerated),\n    LastSeen   = max(TimeGenerated),\n    Operations = make_set(OperationName, 10),\n    SampleTargets = make_set(tostring(parse_json(TargetIdentity).userPrincipalName), 30)\n  by TgtSystem, SPName, TgtDetail\n// Filter out single-event 'Test connection' probes admins fire when\n// wiring a new connector. A real new-integration go-live generates\n// many events on day one.\n| where Events >= 5\n| order by Events desc\n",
+        "queryFrequency": "PT6H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Persistence",
+          "Exfiltration"
+        ],
+        "techniques": [
+          "T1136",
+          "T1098",
+          "T1567"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "SPName"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "P1D",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "Events": "Events",
+          "SampleTargets": "SampleTargets",
+          "TgtSystem": "TgtSystem"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "New high-risk provisioning target: {{TgtSystem}} via {{SPName}}",
+          "alertDescriptionFormat": "First-seen TargetSystem {{TgtSystem}} via SP {{SPName}} - {{Events}} events. Validate against approved integration inventory."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a0010-1010-4110-9110-aadprov00010')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Provisioning ServicePrincipal Credential Added or Rotated",
+        "description": "Detects new client certificates or client secrets added to a service principal that has been observed performing provisioning operations in the last 30 days. Per Cloud-Architekt T1098.001 mapping, adding credentials (\"Additional Cloud Credentials\") to a provisioning SP is a high-value persistence primitive: the attacker keeps using legitimate provisioning flows but with credentials only they hold. Triggers on `Add service principal credentials` / `Update application - Certificates and secrets management` audit events whose target SP intersects with the active provisioning-SP inventory. MITRE ATT&CK: T1098.001 (Account Manipulation: Additional Cloud Credentials), T1550.001 (Use Alternate Authentication Material: Application Access Token).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let ProvisioningSPs =\n    AADProvisioningLogs\n    | where TimeGenerated > ago(14d)\n    | extend SPId   = tostring(parse_json(ServicePrincipal).Id),\n             SPName = tostring(parse_json(ServicePrincipal).Name)\n    | summarize Events = count() by SPId, SPName\n    | where Events >= 10\n    | project SPId, SPName;\nAuditLogs\n| extend IPAddress = tostring(InitiatedBy.user.ipAddress)\n| invoke ExcludeAllowlistedIPs()\n| where TimeGenerated > ago(1h)\n| where OperationName has_any (\n      \"Add service principal credentials\",\n      \"Update application - Certificates and secrets management\",\n      \"Update application\",\n      \"Add owner to service principal\",\n      \"Update service principal\"\n  )\n| mv-expand TargetResources\n| extend TargetSPId   = tostring(TargetResources.id),\n         TargetSPName = tostring(TargetResources.displayName)\n| extend Actor    = coalesce(tostring(InitiatedBy.user.userPrincipalName),\n                              tostring(InitiatedBy.app.displayName))\n| extend SourceIP = tostring(InitiatedBy.user.ipAddress)\n| extend ModProps = tostring(TargetResources.modifiedProperties)\n| where ModProps has_any (\n      \"KeyDescription\",\"PasswordCredentials\",\"KeyCredentials\",\n      \"keyDescription\",\"passwordCredentials\",\"keyCredentials\"\n  )\n| join kind=inner (ProvisioningSPs) on $left.TargetSPId == $right.SPId\n| project TimeGenerated, OperationName, Actor, SourceIP,\n          TargetSPName, TargetSPId, ModProps, Result\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Persistence",
+          "PrivilegeEscalation",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1098",
+          "T1550"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "TargetSPName"
+              }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "Actor"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "SourceIP"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT24H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "Actor": "Actor",
+          "OperationName": "OperationName",
+          "TargetSPName": "TargetSPName"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Credentials added to provisioning SP {{TargetSPName}} by {{Actor}}",
+          "alertDescriptionFormat": "{{Actor}} added/rotated credentials on provisioning ServicePrincipal {{TargetSPName}}. Validate against approved certificate-rotation change ticket."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '9b1a0011-1011-4111-9111-aadprov00011')]",
+      "kind": "Scheduled",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/savedSearches', parameters('workspaceName'), parameters('functionAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', parameters('networkAllowlistAlias'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ],
+      "properties": {
+        "displayName": "Rogue Outbound Provisioning - Mass Create to New Domain",
+        "description": "Detects bursts of outbound `Create` provisioning operations going to a TargetSystem domain or URI that was not present in the prior 30 days, with >= 20 target identities in 1 hour. This is the rogue-SCIM exfiltration pattern: attacker stands up a malicious SCIM endpoint, wires Entra ID to it, and the provisioning service obligingly streams account data outward. Distinct from RULE-15 (new TargetSystem detection on any volume) - this rule fires on volume + previously-unknown domain. MITRE ATT&CK: T1136 (Create Account), T1567 (Exfiltration Over Web Service), T1078.004 (Valid Accounts: Cloud Accounts).",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let HistoricalSystems =\n    AADProvisioningLogs\n    | where TimeGenerated between (ago(14d) .. ago(1h))\n    | extend TgtSystem = tostring(parse_json(TargetSystem).DisplayName)\n    | where isnotempty(TgtSystem)\n    | distinct TgtSystem;\nAADProvisioningLogs\n| where TimeGenerated > ago(1h)\n| where ResultType =~ \"Success\"\n| where ProvisioningAction =~ \"Create\"\n| extend TgtSystem = tostring(parse_json(TargetSystem).DisplayName),\n         TgtDetail = tostring(TargetSystem),\n         SPName    = tostring(parse_json(ServicePrincipal).Name)\n| where isnotempty(TgtSystem) and TgtSystem !in (HistoricalSystems)\n| summarize\n    CreatedCount  = count(),\n    DistinctTargets = dcount(TargetIdentity),\n    SampleTargets = make_set(tostring(parse_json(TargetIdentity).userPrincipalName), 30),\n    FirstSeen     = min(TimeGenerated),\n    LastSeen      = max(TimeGenerated)\n  by TgtSystem, SPName, TgtDetail\n| where DistinctTargets >= 20\n| order by CreatedCount desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT5H",
+        "tactics": [
+          "Persistence",
+          "Exfiltration"
+        ],
+        "techniques": [
+          "T1136",
+          "T1567"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "SPName"
+              }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT12H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "CloudApplication"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        },
+        "customDetails": {
+          "SampleTargets": "SampleTargets",
+          "CreatedCount": "CreatedCount",
+          "TgtSystem": "TgtSystem"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Rogue outbound provisioning to {{TgtSystem}} ({{CreatedCount}} accounts)",
+          "alertDescriptionFormat": "ServicePrincipal {{SPName}} created {{CreatedCount}} accounts against new TargetSystem {{TgtSystem}} in 1h. Possible SCIM-exfiltration / rogue connector."
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f0001-2001-4201-9201-aadprov-hunt01')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-01 Provisioning Failures by Job and Error (30d)",
+        "category": "Hunting Queries",
+        "query": "AADProvisioningLogs\n| where TimeGenerated > ago(30d)\n| where ResultType =~ \"Failure\"\n| extend SPName = tostring(parse_json(ServicePrincipal).Name)\n| summarize\n    Failures        = count(),\n    AffectedTargets = dcount(TargetIdentity),\n    ErrorMessages   = make_set(ResultDescription, 5),\n    Operations      = make_set(OperationName, 10),\n    DistinctDays    = dcount(startofday(TimeGenerated)),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by JobId, SPName, ResultSignature\n| where Failures >= 10\n| extend Sustained = DistinctDays >= 3\n| order by Failures desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "30-day rollup of provisioning failures grouped by JobId, ServicePrincipal, and error signature. Use to retro-hunt persistent connector issues, identify campaigns of bad-actor SCIM calls that fell under analytic-rule thresholds, and detect schema-drift ..."
+          },
+          {
+            "name": "tactics",
+            "value": "DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1556"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f0002-2002-4202-9202-aadprov-hunt02')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-02 First-seen Source-to-Target Mappings (30d vs 90d)",
+        "category": "Hunting Queries",
+        "query": "let Recent =\n    AADProvisioningLogs\n    | where TimeGenerated > ago(30d)\n    | where ResultType =~ \"Success\"\n    | extend SourceUpn = tostring(parse_json(SourceIdentity).userPrincipalName),\n             TargetUpn = tostring(parse_json(TargetIdentity).userPrincipalName),\n             SPName    = tostring(parse_json(ServicePrincipal).Name)\n    | summarize Events = count(), FirstSeen = min(TimeGenerated) by SourceUpn, TargetUpn, SPName\n    | where Events >= 3;\nlet Historical =\n    AADProvisioningLogs\n    | where TimeGenerated between (ago(90d) .. ago(30d))\n    | extend SourceUpn = tostring(parse_json(SourceIdentity).userPrincipalName),\n             TargetUpn = tostring(parse_json(TargetIdentity).userPrincipalName)\n    | distinct SourceUpn, TargetUpn;\nRecent\n| join kind=leftanti (Historical) on SourceUpn, TargetUpn\n| order by Events desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surfaces SourceIdentity -> TargetIdentity provisioning pairs that appeared in the last 30 days but had no prior history in the preceding 60 days. Useful to detect new HR feeds, new SCIM integrations, or attacker-introduced mappings that re-route identi..."
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1136"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f0003-2003-4203-9203-aadprov-hunt03')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-03 Sync Account Sign-ins Outside Entra Connect IP (14d)",
+        "category": "Hunting Queries",
+        "query": "let AllowedIPs =\n    _GetWatchlist('EntraConnect_HighValueAssets')\n    | where tostring(Tags) has \"EntraIDConnect\"\n    | project IPAddress = tostring(IPAddress);\nunion isfuzzy=true\n  (SigninLogs                      | where TimeGenerated > ago(14d)),\n  (AADNonInteractiveUserSignInLogs | where TimeGenerated > ago(14d))\n| where ResultType == 0\n| where UserPrincipalName startswith \"Sync_\"\n     or UserPrincipalName contains \"DirSync\"\n     or UserDisplayName has \"On-Premises Directory Synchronization Service Account\"\n| where IPAddress !in (AllowedIPs)\n| summarize\n    SigninCount = count(),\n    Apps        = make_set(AppDisplayName, 10),\n    Locations   = make_set(Location, 5),\n    Days        = dcount(startofday(TimeGenerated)),\n    FirstSeen   = min(TimeGenerated),\n    LastSeen    = max(TimeGenerated)\n  by UserPrincipalName, IPAddress\n| order by SigninCount desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "14-day history of Entra Connector sign-ins not originating from the allowlisted public IPs in HighValueAssets:EntraIDConnect. Includes both interactive (SigninLogs) and non-interactive (AADNonInteractiveUserSignInLogs) - most legitimate sync traffic li..."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078.004"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f0004-2004-4204-9204-aadprov-hunt04')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-04 Entra Connector Activities Enriched with IdentityInfo (30d)",
+        "category": "Hunting Queries",
+        "query": "let SyncAccounts =\n    IdentityInfo\n    | where TimeGenerated > ago(14d)\n    | summarize arg_max(TimeGenerated, *) by AccountUPN\n    | where AssignedRoles has_any (\n          \"Directory Synchronization Accounts\",\n          \"On Premises Directory Sync Account\"\n      )\n      or AccountUPN startswith \"Sync_\"\n    | project SyncUpn = AccountUPN, SyncObjectId = AccountObjectId;\nlet PrivilegedUsers =\n    IdentityInfo\n    | where TimeGenerated > ago(14d)\n    | summarize arg_max(TimeGenerated, *) by AccountUPN\n    | where isnotempty(AssignedRoles) and AssignedRoles != \"[]\"\n    | project AccountUPN, AssignedRoles;\nAuditLogs\n| where TimeGenerated > ago(30d)\n| extend Initiator = tostring(InitiatedBy.user.userPrincipalName)\n| where Initiator in~ (SyncAccounts | project SyncUpn)\n| mv-expand TargetResources\n| extend TargetUpn = tostring(TargetResources.userPrincipalName)\n| join kind=leftouter (PrivilegedUsers) on $left.TargetUpn == $right.AccountUPN\n| extend TargetIsPrivileged = isnotempty(AssignedRoles)\n| project TimeGenerated, Initiator, OperationName, Category, TargetUpn,\n          TargetIsPrivileged, AssignedRoles, Result,\n          ModifiedProperties = tostring(TargetResources.modifiedProperties)\n| where TargetIsPrivileged\n     or OperationName has_any (\"Reset password\",\"Update user\",\"Add member\",\"Set Password\")\n| order by TargetIsPrivileged desc, TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "30-day audit-log activities performed by the Entra Connector account, enriched with role assignment data from IdentityInfo. Surfaces takeover attempts (`Update user`, `Reset password`, group-membership writes) targeted at sensitive role members, which ..."
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence,PrivilegeEscalation"
+          },
+          {
+            "name": "techniques",
+            "value": "T1098"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f0005-2005-4205-9205-aadprov-hunt05')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-05 Bulk Attribute Changes by Single CycleId (30d)",
+        "category": "Hunting Queries",
+        "query": "AADProvisioningLogs\n| where TimeGenerated > ago(30d)\n| where ResultType =~ \"Success\"\n| extend SPName = tostring(parse_json(ServicePrincipal).Name)\n| mv-expand Mod = todynamic(ModifiedProperties)\n| extend PropName = tostring(Mod.displayName)\n| where isnotempty(PropName)\n| summarize\n    DistinctProps   = dcount(PropName),\n    DistinctTargets = dcount(TargetIdentity),\n    Props           = make_set(PropName, 30),\n    EventCount      = count(),\n    FirstSeen       = min(TimeGenerated),\n    LastSeen        = max(TimeGenerated)\n  by CycleId, JobId, SPName\n| where DistinctProps >= 5 and DistinctTargets >= 20\n| extend AttributeChurnIntensity = DistinctProps * DistinctTargets\n| order by AttributeChurnIntensity desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "30-day hunt for provisioning cycles that performed unusually high attribute churn (touched many distinct properties across many targets in a single CycleId). High-churn cycles outside of expected initial-sync windows are worth investigating as bulk att..."
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence,DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1098,T1556"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f0006-2006-4206-9206-aadprov-hunt06')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-06 New ServicePrincipals Performing Provisioning (30d vs 90d)",
+        "category": "Hunting Queries",
+        "query": "let Recent =\n    AADProvisioningLogs\n    | where TimeGenerated > ago(30d)\n    | extend SPName = tostring(parse_json(ServicePrincipal).Name),\n             SPId   = tostring(parse_json(ServicePrincipal).Id)\n    | summarize\n        Events     = count(),\n        FirstSeen  = min(TimeGenerated),\n        LastSeen   = max(TimeGenerated),\n        Operations = make_set(OperationName, 10),\n        Targets    = dcount(TargetIdentity)\n      by SPId, SPName;\nlet Historical =\n    AADProvisioningLogs\n    | where TimeGenerated between (ago(120d) .. ago(30d))\n    | extend SPId = tostring(parse_json(ServicePrincipal).Id)\n    | distinct SPId;\nRecent\n| join kind=leftanti (Historical) on SPId\n| order by Events desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Provisioning SPs active in the last 30 days but absent from the prior 60. Complements RULE-11 with a longer history window for retrospective hunts after a watchlist refresh or new SCIM application investigation."
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1136"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f0007-2007-4207-9207-aadprov-hunt07')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-07 DirSync Feature Change History (180d)",
+        "category": "Hunting Queries",
+        "query": "AuditLogs\n| where TimeGenerated > ago(180d)\n| where Category =~ \"DirectoryManagement\"\n     or OperationName has_any (\n          \"Set DirSyncEnabled flag\",\n          \"Update directory feature\",\n          \"Set Company Information\",\n          \"Set Password Hash Sync\",\n          \"Update OnPremisesDirectorySynchronization\",\n          \"OnPremDirectorySynchronization\"\n        )\n     or tostring(TargetResources) has_any (\n          \"BlockSoftMatch\",\n          \"BlockCloudObjectTakeoverThroughHardMatch\",\n          \"PasswordHashSync\",\n          \"passwordHashSync\",\n          \"SeamlessSSO\",\n          \"synchronizationInterval\"\n        )\n| extend Actor    = coalesce(tostring(InitiatedBy.user.userPrincipalName),\n                              tostring(InitiatedBy.app.displayName))\n| extend SourceIP = tostring(InitiatedBy.user.ipAddress)\n| extend Feature  = case(\n      tostring(TargetResources) has \"BlockCloudObjectTakeoverThroughHardMatch\", \"HardMatchBlock\",\n      tostring(TargetResources) has \"BlockSoftMatch\", \"SoftMatchBlock\",\n      tostring(TargetResources) has_any (\"PasswordHashSync\",\"passwordHashSync\"), \"PasswordHashSync\",\n      tostring(TargetResources) has \"SeamlessSSO\", \"SeamlessSSO\",\n      \"Other\"\n  )\n| project TimeGenerated, OperationName, Feature, Actor, SourceIP, Result,\n          TargetResources\n| order by TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Long-window history (180 days) of DirSync feature configuration changes: BlockSoftMatch, BlockCloudObjectTakeoverThroughHardMatch, Password Hash Sync, Seamless SSO. Useful for retrospective audit of who changed what, when, from which IP - directly mode..."
+          },
+          {
+            "name": "tactics",
+            "value": "DefenseEvasion,PrivilegeEscalation"
+          },
+          {
+            "name": "techniques",
+            "value": "T1556,T1098"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f0008-2008-4208-9208-aadprov-hunt08')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-08 Provisioning of Role-Assignable Groups (30d)",
+        "category": "Hunting Queries",
+        "query": "AADProvisioningLogs\n| where TimeGenerated > ago(30d)\n| where ResultType =~ \"Success\"\n| where tostring(TargetIdentity) has \"IsAssignableToRole\"\n     or tostring(ModifiedProperties) has \"isAssignableToRole\"\n     or tostring(ModifiedProperties) has \"directoryRoles\"\n| extend Target       = tostring(parse_json(TargetIdentity).displayName),\n         SPName       = tostring(parse_json(ServicePrincipal).Name),\n         InitiatorUpn = tostring(parse_json(InitiatedBy).userPrincipalName),\n         InitiatorApp = tostring(parse_json(InitiatedBy).displayName)\n| project TimeGenerated, JobId, CycleId, ChangeId, SPName,\n          Initiator = coalesce(InitiatorUpn, InitiatorApp),\n          TargetGroup = Target,\n          OperationName, ProvisioningAction, ModifiedProperties\n| order by TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Provisioning operations that touched role-assignable groups (`IsAssignableToRole = true`). Membership changes to role-assignable groups effectively grant directory roles, so flowing them through the provisioning channel is highly anomalous and worth a ..."
+          },
+          {
+            "name": "tactics",
+            "value": "PrivilegeEscalation,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1098"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f0009-2009-4209-9209-aadprov-hunt09')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-09 Cycle Duration Outliers vs 7d Baseline",
+        "category": "Hunting Queries",
+        "query": "let Baseline =\n    AADProvisioningLogs\n    | where TimeGenerated between (ago(7d) .. ago(1d))\n    | where isnotempty(CycleId) and isnotnull(DurationMs)\n    | summarize MedianDuration = percentile(DurationMs, 50) by JobId\n    | where MedianDuration > 0;\nAADProvisioningLogs\n| where TimeGenerated > ago(1d)\n| where isnotempty(CycleId) and isnotnull(DurationMs)\n| extend SPName = tostring(parse_json(ServicePrincipal).Name)\n| summarize\n    RecentDuration = avg(DurationMs),\n    EventCount     = count(),\n    LastSeen       = max(TimeGenerated)\n  by CycleId, JobId, SPName\n| join kind=inner (Baseline) on JobId\n| extend Ratio = RecentDuration / MedianDuration\n| where Ratio >= 3.0 or Ratio <= 0.25\n| project CycleId, JobId, SPName, RecentDuration, MedianDuration, Ratio,\n          EventCount, LastSeen\n| order by Ratio desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Provisioning cycles whose DurationMs is > 3x the per-job 7-day median. Long cycles can indicate connector throttling under abuse, an attacker performing extra work mid-cycle (membership lookups, attribute brute force), or schema-drift slowdowns. Short ..."
+          },
+          {
+            "name": "tactics",
+            "value": "DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1562"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f000a-200a-420a-920a-aadprov-hunt10')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-10 Rare ProvisioningAction / TargetSystem / ResultSignature (30d)",
+        "category": "Hunting Queries",
+        "query": "let TotalEvents = toscalar(\n    AADProvisioningLogs\n    | where TimeGenerated > ago(30d)\n    | count\n);\nAADProvisioningLogs\n| where TimeGenerated > ago(30d)\n| extend TgtSystem = tostring(parse_json(TargetSystem).DisplayName),\n         SPName    = tostring(parse_json(ServicePrincipal).Name)\n| summarize Events = count() by ProvisioningAction, TgtSystem, ResultSignature, OperationName, SPName\n| extend Share = round(100.0 * Events / TotalEvents, 4)\n| where Share <= 0.05  // <= 0.05% of telemetry\n| order by Events asc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surfaces rare values across `ProvisioningAction`, `TargetSystem`, `ResultSignature`, and `OperationName` over 30 days - useful for ad-hoc discovery of unusual telemetry patterns that no static rule would catch. Stack-counting style: anything with a tin..."
+          },
+          {
+            "name": "tactics",
+            "value": "DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078"
+          },
+          {
+            "name": "severity",
+            "value": "Low"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f000b-200b-420b-920b-aadprov-hunt11')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-11 Dormant Account Re-Enablement via Provisioning (30d)",
+        "category": "Hunting Queries",
+        "query": "// Recent re-enables via provisioning\nlet RecentReEnables =\n    AADProvisioningLogs\n    | where TimeGenerated > ago(30d)\n    | where ResultType =~ \"Success\"\n    | mv-expand Mod = todynamic(ModifiedProperties)\n    | extend PropName = tostring(Mod.displayName),\n             OldValue = tostring(Mod.oldValue),\n             NewValue = tostring(Mod.newValue)\n    | where PropName has_any (\"accountEnabled\",\"AccountEnabled\")\n    | where OldValue has \"false\" and NewValue has \"true\"\n    | extend TargetUpn = tostring(parse_json(TargetIdentity).userPrincipalName),\n             SPName    = tostring(parse_json(ServicePrincipal).Name)\n    | project TimeGenerated, TargetUpn, SPName, OldValue, NewValue;\n// Find last disable for each\nlet LastDisable =\n    AuditLogs\n    | where TimeGenerated > ago(180d)\n    | where OperationName has_any (\"Disable account\",\"Update user\")\n    | mv-expand TargetResources\n    | mv-expand Mod = todynamic(TargetResources.modifiedProperties)\n    | where tostring(Mod.displayName) has_any (\"AccountEnabled\",\"accountEnabled\")\n    | where tostring(Mod.newValue) has \"false\"\n    | extend TargetUpn = tostring(TargetResources.userPrincipalName)\n    | summarize LastDisableTime = max(TimeGenerated) by TargetUpn;\nRecentReEnables\n| join kind=inner (LastDisable) on TargetUpn\n| extend DormantDays = datetime_diff('day', TimeGenerated, LastDisableTime)\n| where DormantDays >= 90\n| project ReEnableTime = TimeGenerated, TargetUpn, SPName,\n          LastDisableTime, DormantDays\n| order by DormantDays desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "User accounts disabled for >= 90 days that were re-enabled via the provisioning channel in the last 30 days. Dormant-account re-enablement via provisioning is a documented persistence path: attacker forces a long-disabled service or shared identity bac..."
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1098,T1078"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f000c-200c-420c-920c-aadprov-hunt12')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-12 Provisioning Operation Followed by Consent Grant (24h)",
+        "category": "Hunting Queries",
+        "query": "let ProvisioningSPs =\n    AADProvisioningLogs\n    | where TimeGenerated > ago(7d)\n    | extend SPId = tostring(parse_json(ServicePrincipal).Id),\n             SPName = tostring(parse_json(ServicePrincipal).Name)\n    | summarize ProvisioningEvents = count(),\n                FirstProvisioningSeen = min(TimeGenerated)\n      by SPId, SPName;\nlet ConsentEvents =\n    AuditLogs\n    | where TimeGenerated > ago(7d)\n    | where OperationName has_any (\n          \"Consent to application\",\n          \"Add delegated permission grant\",\n          \"Add app role assignment grant to user\",\n          \"Add app role assignment to service principal\"\n      )\n    | mv-expand TargetResources\n    | extend TargetSPId   = tostring(TargetResources.id),\n             TargetSPName = tostring(TargetResources.displayName),\n             Actor        = coalesce(tostring(InitiatedBy.user.userPrincipalName),\n                                      tostring(InitiatedBy.app.displayName))\n    | project ConsentTime = TimeGenerated, TargetSPId, TargetSPName, Actor, OperationName;\nProvisioningSPs\n| join kind=inner (ConsentEvents) on $left.SPId == $right.TargetSPId\n| where ConsentTime between (FirstProvisioningSeen .. FirstProvisioningSeen + 1d)\n| project SPName, SPId, FirstProvisioningSeen, ConsentTime, Actor, OperationName, ProvisioningEvents\n| order by ConsentTime desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Correlates provisioning activity from a ServicePrincipal with subsequent delegated/admin consent grants on the same SP within 24 hours. The chain \"rogue SP provisions accounts\" -> \"rogue SP receives broader consent\" is a documented escalation: attacker..."
+          },
+          {
+            "name": "tactics",
+            "value": "PrivilegeEscalation,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1098,T1078.004"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f000d-200d-420d-920d-aadprov-hunt13')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-13 Sync Account Token-Replay Geography (14d vs 90d)",
+        "category": "Hunting Queries",
+        "query": "let Lookback = 14d;\nlet Baseline = 90d;\nlet SyncSignins =\n    AADNonInteractiveUserSignInLogs\n    | where ResultType == 0\n    | where UserPrincipalName startswith \"Sync_\"\n         or UserPrincipalName contains \"DirSync\"\n         or UserDisplayName has \"On-Premises Directory Synchronization Service Account\";\n// IPs / locations seen in the 90d->14d historical window (the known-good baseline).\nlet KnownGeo =\n    SyncSignins\n    | where TimeGenerated between (ago(Baseline) .. ago(Lookback))\n    | summarize by UserPrincipalName, IPAddress, Location;\nSyncSignins\n| where TimeGenerated > ago(Lookback)\n| join kind=leftanti KnownGeo on UserPrincipalName, IPAddress, Location\n| summarize\n    SigninCount = count(),\n    Apps        = make_set(AppDisplayName, 10),\n    Locations   = make_set(Location, 10),\n    ASNs        = make_set(AutonomousSystemNumber, 10),\n    Days        = dcount(startofday(TimeGenerated)),\n    FirstSeen   = min(TimeGenerated),\n    LastSeen    = max(TimeGenerated)\n  by UserPrincipalName, IPAddress\n| order by FirstSeen desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surfaces new sign-in geographies / IP addresses for the Entra Connector sync account on the non-interactive table (AADNonInteractiveUserSignInLogs), where most sync token-refresh traffic lives. Token theft from the Entra Connect host typically surfaces..."
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1078.004,T1550.001"
+          },
+          {
+            "name": "severity",
+            "value": "High"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspaceName'), '/', 'aa1f000e-200e-420e-920e-aadprov-hunt14')]",
+      "condition": "[parameters('deployHuntingQueries')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "HUNT-14 Provisioning Self-Service Loop - Actor Modifies Own Object (30d)",
+        "category": "Hunting Queries",
+        "query": "let PrivilegedUsers =\n    IdentityInfo\n    | where TimeGenerated > ago(14d)\n    | summarize arg_max(TimeGenerated, *) by AccountUPN\n    | where isnotempty(AssignedRoles) and AssignedRoles != \"[]\"\n    | project AccountUPN, AssignedRoles;\nAADProvisioningLogs\n| where TimeGenerated > ago(30d)\n| where ResultType =~ \"Success\"\n| extend InitiatorUpn = tolower(tostring(parse_json(InitiatedBy).userPrincipalName)),\n         TargetUpn    = tolower(tostring(parse_json(TargetIdentity).userPrincipalName)),\n         SPName       = tostring(parse_json(ServicePrincipal).Name)\n| where isnotempty(InitiatorUpn) and InitiatorUpn == TargetUpn\n| mv-expand Mod = todynamic(ModifiedProperties)\n| extend PropName = tostring(Mod.displayName),\n         OldValue = tostring(Mod.oldValue),\n         NewValue = tostring(Mod.newValue)\n| summarize\n    EventCount    = count(),\n    Actions       = make_set(ProvisioningAction, 10),\n    ChangedProps  = make_set(PropName, 25),\n    Jobs          = make_set(JobId, 10),\n    FirstSeen     = min(TimeGenerated),\n    LastSeen      = max(TimeGenerated)\n  by InitiatorUpn, SPName\n| join kind=leftouter (PrivilegedUsers) on $left.InitiatorUpn == $right.AccountUPN\n| extend IsPrivileged = isnotempty(AssignedRoles)\n| project InitiatorUpn, IsPrivileged, AssignedRoles, SPName, EventCount,\n          Actions, ChangedProps, Jobs, FirstSeen, LastSeen\n| order by IsPrivileged desc, EventCount desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surfaces provisioning events where the initiating identity and the target identity are the same principal - an actor provisioning, enabling, re-enabling, or rewriting attributes on their own object through the provisioning channel. Self-modification th..."
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence,PrivilegeEscalation"
+          },
+          {
+            "name": "techniques",
+            "value": "T1098,T1078.004"
+          },
+          {
+            "name": "severity",
+            "value": "Medium"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_HighValueAssets')]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces/providers/watchlists', parameters('workspaceName'), 'Microsoft.SecurityInsights', 'EntraConnect_ServiceAccounts')]"
+      ]
+    }
+  ]
+}

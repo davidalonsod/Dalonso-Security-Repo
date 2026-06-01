@@ -1,0 +1,74 @@
+id: 9b1a0004-1004-4104-9104-aadprov00004
+name: Privileged Group Membership Change via Provisioning
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects provisioning operations that modify membership of well-known privileged
+  group names (`Domain Admins`, `Global Administrators`, `Privileged Role
+  Administrators`, anything matching `*Admin*`, `*Tier0*`, `*Sensitive*`, or
+  containing `pim-` / `role-` patterns). Provisioning is not a typical channel
+  for privileged-group membership management - any hit here warrants immediate
+  investigation. Modifies the AD-side surface of hybrid identity, which is a
+  documented Entra Connect attack pattern (T1098.003 - Additional Cloud Roles).
+  MITRE ATT&CK: T1098.003 (Account Manipulation: Additional Cloud Roles),
+  T1078.004 (Valid Accounts: Cloud Accounts).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+queryFrequency: 1h
+queryPeriod: 2h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+relevantTechniques:
+  - T1098
+query: |
+  AADProvisioningLogs
+  | where TimeGenerated > ago(2h)
+  | where ResultType =~ "Success"
+  | extend Target     = tostring(parse_json(TargetIdentity).displayName)
+  | extend TargetType = tostring(parse_json(TargetIdentity).IdentityType)
+  | extend Modified   = tostring(ModifiedProperties)
+  | where TargetType =~ "Group" or Target has_any ("Admin","Tier0","Sensitive","Privileged","PIM")
+  | where Modified has_any ("members","memberOf","Members","appRoleAssignments","directoryRoles")
+  | extend SPName       = tostring(parse_json(ServicePrincipal).Name)
+  | extend InitiatorUpn = tostring(parse_json(InitiatedBy).userPrincipalName)
+  | extend InitiatorApp = tostring(parse_json(InitiatedBy).displayName)
+  | project TimeGenerated, JobId, CycleId, ChangeId, SPName,
+            Initiator = coalesce(InitiatorUpn, InitiatorApp),
+            TargetGroup = Target,
+            OperationName, ProvisioningAction, ModifiedProperties
+  | order by TimeGenerated desc
+entityMappings:
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: Name
+        columnName: SPName
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Initiator
+customDetails:
+  TargetGroup: TargetGroup
+  OperationName: OperationName
+  ProvisioningAction: ProvisioningAction
+alertDetailsOverride:
+  alertDisplayNameFormat: "Provisioning modified privileged group '{{TargetGroup}}' via {{SPName}}"
+  alertDescriptionFormat: "Provisioning service {{SPName}} modified privileged group '{{TargetGroup}}' (action={{ProvisioningAction}}). Privileged-group changes should not flow through the provisioning channel."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT24H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []

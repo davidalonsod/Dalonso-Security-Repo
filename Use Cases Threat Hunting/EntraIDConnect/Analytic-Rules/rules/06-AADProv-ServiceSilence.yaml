@@ -1,0 +1,73 @@
+id: 9b1a0006-1006-4106-9106-aadprov00006
+name: Provisioning Service Silence - Busy Job Stopped
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects when a previously busy provisioning job (>= 100 events/hour baseline
+  over the past 7 days) has produced 0 events in the most recent 2-hour window.
+  Sudden silence on a critical provisioning channel can indicate connector
+  credential theft (attacker stopped the legitimate agent), deliberate
+  sabotage of the sync pipeline to defeat lifecycle controls, or simply a
+  broken connector that needs ops attention. Either way it warrants an alert.
+  MITRE ATT&CK: T1562.001 (Impair Defenses: Disable or Modify Tools),
+  T1531 (Account Access Removal).
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+queryFrequency: 1h
+queryPeriod: 7d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - DefenseEvasion
+  - Impact
+relevantTechniques:
+  - T1562
+  - T1531
+query: |
+  let Baseline =
+      AADProvisioningLogs
+      | where TimeGenerated between (ago(7d) .. ago(2h))
+      | extend SPName = tostring(parse_json(ServicePrincipal).Name)
+      | summarize BaselinePerHour = count() / 168.0 by JobId, SPName
+      | where BaselinePerHour >= 100;
+  let Recent =
+      AADProvisioningLogs
+      | where TimeGenerated > ago(2h)
+      | extend SPName = tostring(parse_json(ServicePrincipal).Name)
+      | summarize RecentEvents = count() by JobId, SPName;
+  Baseline
+  | join kind=leftouter (Recent) on JobId, SPName
+  | extend RecentEvents = coalesce(RecentEvents, 0)
+  | where RecentEvents == 0
+  | project JobId, SPName, BaselinePerHour, RecentEvents,
+            DropRatio = 1.0,
+            AlertReason = strcat("Job baseline ", round(BaselinePerHour,0), "/hr but 0 events in last 2h")
+  | order by BaselinePerHour desc
+entityMappings:
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: Name
+        columnName: SPName
+customDetails:
+  BaselinePerHour: BaselinePerHour
+  RecentEvents: RecentEvents
+  AlertReason: AlertReason
+alertDetailsOverride:
+  alertDisplayNameFormat: "Provisioning silence on {{SPName}} (was {{BaselinePerHour}}/hr)"
+  alertDescriptionFormat: "{{AlertReason}}. Confirm connector health, credentials, and recent admin actions on the SP."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT24H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []

@@ -1,0 +1,78 @@
+id: 9b1a0011-1011-4111-9111-aadprov00011
+name: Rogue Outbound Provisioning - Mass Create to New Domain
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects bursts of outbound `Create` provisioning operations going to a
+  TargetSystem domain or URI that was not present in the prior 30 days, with
+  >= 20 target identities in 1 hour. This is the rogue-SCIM exfiltration
+  pattern: attacker stands up a malicious SCIM endpoint, wires Entra ID to it,
+  and the provisioning service obligingly streams account data outward.
+  Distinct from RULE-15 (new TargetSystem detection on any volume) - this rule
+  fires on volume + previously-unknown domain.
+  MITRE ATT&CK: T1136 (Create Account), T1567 (Exfiltration Over Web Service),
+  T1078.004 (Valid Accounts: Cloud Accounts).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+queryFrequency: 1h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Persistence
+  - Exfiltration
+relevantTechniques:
+  - T1136
+  - T1567
+query: |
+  let HistoricalSystems =
+      AADProvisioningLogs
+      | where TimeGenerated between (ago(14d) .. ago(1h))
+      | extend TgtSystem = tostring(parse_json(TargetSystem).DisplayName)
+      | where isnotempty(TgtSystem)
+      | distinct TgtSystem;
+  AADProvisioningLogs
+  | where TimeGenerated > ago(1h)
+  | where ResultType =~ "Success"
+  | where ProvisioningAction =~ "Create"
+  | extend TgtSystem = tostring(parse_json(TargetSystem).DisplayName),
+           TgtDetail = tostring(TargetSystem),
+           SPName    = tostring(parse_json(ServicePrincipal).Name)
+  | where isnotempty(TgtSystem) and TgtSystem !in (HistoricalSystems)
+  | summarize
+      CreatedCount  = count(),
+      DistinctTargets = dcount(TargetIdentity),
+      SampleTargets = make_set(tostring(parse_json(TargetIdentity).userPrincipalName), 30),
+      FirstSeen     = min(TimeGenerated),
+      LastSeen      = max(TimeGenerated)
+    by TgtSystem, SPName, TgtDetail
+  | where DistinctTargets >= 20
+  | order by CreatedCount desc
+entityMappings:
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: Name
+        columnName: SPName
+customDetails:
+  TgtSystem: TgtSystem
+  CreatedCount: CreatedCount
+  SampleTargets: SampleTargets
+alertDetailsOverride:
+  alertDisplayNameFormat: "Rogue outbound provisioning to {{TgtSystem}} ({{CreatedCount}} accounts)"
+  alertDescriptionFormat: "ServicePrincipal {{SPName}} created {{CreatedCount}} accounts against new TargetSystem {{TgtSystem}} in 1h. Possible SCIM-exfiltration / rogue connector."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []

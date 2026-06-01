@@ -1,0 +1,116 @@
+id: 9b1a000d-100d-410d-910d-aadprov0000d
+name: Match-Anchor Modification on Privileged Cloud User
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects modification of identity matching anchors (`userPrincipalName`,
+  `mail`, `proxyAddresses`, `onPremisesImmutableId`, `mailNickname`) on an
+  Entra ID user that holds a directory role. Modifying these attributes on a
+  cloud admin enables the documented soft/hard-match takeover - the attacker
+  forces a matching on-premises object to bind to the privileged cloud
+  account on the next sync cycle. Covers both `AADProvisioningLogs`
+  (provisioning channel) and `AuditLogs` (direct Graph writes).
+  Complements RULE-07 (DirSync feature toggle): even with BlockSoftMatch
+  enabled, the cloud-side anchor change is the same TTP signature.
+  MITRE ATT&CK: T1098 (Account Manipulation), T1556.006 (Modify
+  Authentication Process: Multi-Factor Authentication), T1078.004
+  (Valid Accounts: Cloud Accounts).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+  - DefenseEvasion
+relevantTechniques:
+  - T1098
+  - T1556
+query: |
+  // High-fidelity anchors only. proxyAddresses / otherMails removed:
+  // they churn constantly through Exchange mail-flow and shared-mailbox
+  // lifecycle and generate FPs on any cloud admin who also has a mailbox.
+  let AnchorAttrs = dynamic([
+      "userPrincipalName","UserPrincipalName",
+      "onPremisesImmutableId","ImmutableId","sourceAnchor",
+      "mailNickname","MailNickname"
+  ]);
+  let PrivilegedUsers =
+      IdentityInfo
+      | where TimeGenerated > ago(14d)
+      | summarize arg_max(TimeGenerated, *) by AccountUPN
+      | where isnotempty(AssignedRoles) and AssignedRoles != "[]"
+      | project AccountUPN, AccountObjectId, AssignedRoles;
+  let FromProvisioning =
+      AADProvisioningLogs
+      | where TimeGenerated > ago(1h)
+      | where ResultType =~ "Success"
+      | extend TargetUpn = tostring(parse_json(TargetIdentity).userPrincipalName),
+               SPName    = tostring(parse_json(ServicePrincipal).Name)
+      | mv-expand Mod = todynamic(ModifiedProperties)
+      | extend PropName = tostring(Mod.displayName),
+               OldValue = tostring(Mod.oldValue),
+               NewValue = tostring(Mod.newValue)
+      | where PropName in~ (AnchorAttrs)
+      | project TimeGenerated, Channel = "Provisioning", Actor = SPName,
+                TargetUpn, PropName, OldValue, NewValue, SourceIP = "";
+  let FromAudit =
+      AuditLogs
+      | where TimeGenerated > ago(1h)
+      | where OperationName has_any ("Update user","Change user UPN","Set user properties","Update User")
+      | mv-expand TargetResources
+      | extend TargetUpn  = tostring(TargetResources.userPrincipalName)
+      | extend Actor      = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+                                      tostring(InitiatedBy.app.displayName))
+      | extend SourceIP   = tostring(InitiatedBy.user.ipAddress)
+      | mv-expand Mod = todynamic(TargetResources.modifiedProperties)
+      | extend PropName = tostring(Mod.displayName),
+               OldValue = tostring(Mod.oldValue),
+               NewValue = tostring(Mod.newValue)
+      | where PropName in~ (AnchorAttrs)
+      | project TimeGenerated, Channel = "AuditLogs", Actor,
+                TargetUpn, PropName, OldValue, NewValue, SourceIP;
+  union FromProvisioning, FromAudit
+  | join kind=inner (PrivilegedUsers) on $left.TargetUpn == $right.AccountUPN
+  | project TimeGenerated, Channel, Actor, SourceIP, TargetUpn, AssignedRoles,
+            PropName, OldValue, NewValue
+  | order by TimeGenerated desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: TargetUpn
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: Actor
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SourceIP
+customDetails:
+  Channel: Channel
+  PropName: PropName
+  AssignedRoles: AssignedRoles
+alertDetailsOverride:
+  alertDisplayNameFormat: "Match-anchor {{PropName}} modified on privileged user {{TargetUpn}}"
+  alertDescriptionFormat: "{{Actor}} modified matching anchor {{PropName}} on privileged user {{TargetUpn}}. Soft/Hard-match takeover indicator - see Channel custom detail."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT24H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

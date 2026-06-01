@@ -1,0 +1,92 @@
+id: 9b1a000f-100f-410f-910f-aadprov0000f
+name: New High-Risk TargetSystem in Provisioning
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects the first appearance (no history in prior 60 days) of a high-risk
+  TargetSystem in `AADProvisioningLogs`: SCIM endpoints, Workday, SuccessFactors,
+  Salesforce, AWS IAM Identity Center, ServiceNow, custom SCIM URIs. A new
+  high-risk target system means an admin (or attacker with sufficient role)
+  has wired Entra ID to a new external identity store. In the rogue-SCIM
+  abuse case the attacker is now pushing accounts outbound to a malicious
+  endpoint.
+  MITRE ATT&CK: T1136 (Create Account), T1098 (Account Manipulation),
+  T1567 (Exfiltration Over Web Service).
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AADProvisioningLogs
+queryFrequency: 6h
+queryPeriod: 14d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Persistence
+  - Exfiltration
+relevantTechniques:
+  - T1136
+  - T1098
+  - T1567
+query: |
+  let HighRiskKeywords = dynamic([
+      "scim","SCIM",
+      "workday","Workday",
+      "successfactors","SuccessFactors",
+      "salesforce","Salesforce",
+      "aws","AWS","IAM Identity Center",
+      "servicenow","ServiceNow",
+      "okta","Okta",
+      "saviynt","Saviynt"
+  ]);
+  let Historical =
+      AADProvisioningLogs
+      | where TimeGenerated between (ago(14d) .. ago(1d))
+      | extend TgtSystem = tostring(parse_json(TargetSystem).DisplayName)
+      | where isnotempty(TgtSystem)
+      | distinct TgtSystem;
+  AADProvisioningLogs
+  | where TimeGenerated > ago(1d)
+  | extend TgtSystem = tostring(parse_json(TargetSystem).DisplayName),
+           TgtDetail = tostring(TargetSystem),
+           SPName    = tostring(parse_json(ServicePrincipal).Name)
+  | where isnotempty(TgtSystem)
+  | where TgtSystem has_any (HighRiskKeywords) or TgtDetail has_any (HighRiskKeywords)
+  | where TgtSystem !in (Historical)
+  | summarize
+      Events     = count(),
+      FirstSeen  = min(TimeGenerated),
+      LastSeen   = max(TimeGenerated),
+      Operations = make_set(OperationName, 10),
+      SampleTargets = make_set(tostring(parse_json(TargetIdentity).userPrincipalName), 30)
+    by TgtSystem, SPName, TgtDetail
+  // Filter out single-event 'Test connection' probes admins fire when
+  // wiring a new connector. A real new-integration go-live generates
+  // many events on day one.
+  | where Events >= 5
+  | order by Events desc
+entityMappings:
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: Name
+        columnName: SPName
+customDetails:
+  TgtSystem: TgtSystem
+  Events: Events
+  SampleTargets: SampleTargets
+alertDetailsOverride:
+  alertDisplayNameFormat: "New high-risk provisioning target: {{TgtSystem}} via {{SPName}}"
+  alertDescriptionFormat: "First-seen TargetSystem {{TgtSystem}} via SP {{SPName}} - {{Events}} events. Validate against approved integration inventory."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: P1D
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []

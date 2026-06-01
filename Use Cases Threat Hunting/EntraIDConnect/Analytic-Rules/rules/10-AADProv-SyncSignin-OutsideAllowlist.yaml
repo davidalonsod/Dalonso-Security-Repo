@@ -1,0 +1,85 @@
+id: 9b1a000a-100a-410a-910a-aadprov0000a
+name: Entra Connector Sign-in Outside Allowlisted Public IP
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects successful sign-ins from `Sync_*` / `On-Premises Directory
+  Synchronization Service Account` UPNs originating from an IP address that is
+  NOT in the `HighValueAssets` watchlist tagged `EntraIDConnect`. The sync
+  account should only authenticate from the Entra Connect server's public IP
+  range - any other source is either a misconfiguration or active abuse.
+  Threshold is a single successful sign-in (any non-allowlisted IP is
+  notable), with non-interactive sign-ins included via
+  `AADNonInteractiveUserSignInLogs` since sync traffic largely lives there.
+  MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts).
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - SigninLogs
+      - AADNonInteractiveUserSignInLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - Persistence
+relevantTechniques:
+  - T1078
+query: |
+  // Allowlisted Entra Connect server IPs - falls back to empty set if watchlist missing
+  let AllowedIPs =
+      _GetWatchlist('EntraConnect_HighValueAssets')
+      | where tostring(Tags) has "EntraIDConnect"
+      | project IPAddress = tostring(IPAddress);
+  let SyncSignIns =
+      union isfuzzy=true
+        (SigninLogs                          | where TimeGenerated > ago(1h)),
+        (AADNonInteractiveUserSignInLogs     | where TimeGenerated > ago(1h))
+      | where ResultType == 0
+      | where UserPrincipalName startswith "Sync_"
+           or UserPrincipalName contains "DirSync"
+           or UserDisplayName has "On-Premises Directory Synchronization Service Account";
+  SyncSignIns
+  | where IPAddress !in (AllowedIPs) or isempty(IPAddress)
+  | summarize
+      SigninCount  = count(),
+      Apps         = make_set(AppDisplayName, 10),
+      ClientApps   = make_set(ClientAppUsed, 5),
+      UserAgents   = make_set(UserAgent, 5),
+      Locations    = make_set(Location, 5),
+      FirstSeen    = min(TimeGenerated),
+      LastSeen     = max(TimeGenerated)
+    by UserPrincipalName, IPAddress
+  | order by SigninCount desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  SigninCount: SigninCount
+  Apps: Apps
+  Locations: Locations
+alertDetailsOverride:
+  alertDisplayNameFormat: "Entra Connector {{UserPrincipalName}} signed in from non-allowlisted IP {{IPAddress}}"
+  alertDescriptionFormat: "Sync account {{UserPrincipalName}} signed in from {{IPAddress}} ({{SigninCount}} sign-ins) which is not in HighValueAssets:EntraIDConnect. Confirm against Entra Connect server NAT egress."
+  alertSeverityColumnName: ""
+  alertTacticsColumnName: ""
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT24H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+      - IP
+    groupByAlertDetails: []
+    groupByCustomDetails: []
