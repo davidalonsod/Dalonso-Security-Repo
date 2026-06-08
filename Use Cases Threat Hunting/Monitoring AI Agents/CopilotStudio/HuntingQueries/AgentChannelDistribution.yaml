@@ -1,0 +1,30 @@
+id: b2c3d4e5-2006-4b22-9d01-0123456789c6
+name: Copilot Studio - Channel distribution and new-channel first seen
+description: |
+  Profiles which channels (Teams, Direct Line, web chat, custom, design)
+  a Copilot Studio agent is reached on, and flags channels that appear in
+  the recent window but not in the 14-day baseline. A new publishing
+  channel can be an intended rollout - or an unauthorised embedding of the
+  agent in a new surface.
+query: |
+  let detectionWindow = 1d;
+  let evt = AppEvents | where Name in ("BotMessageReceived", "BotMessageSend")
+            | extend ChannelId = tostring(Properties["channelId"]);
+  let baseline = evt | where TimeGenerated between (ago(14d) .. ago(detectionWindow)) | distinct ChannelId;
+  evt
+  | where TimeGenerated > ago(detectionWindow)
+  | summarize Turns = count(), Users = dcount(UserId), ClientIPs = make_set(ClientIP, 25),
+              FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by ChannelId
+  | join kind=leftouter (baseline | extend InBaseline = true) on ChannelId
+  | extend Status = iff(isempty(InBaseline) or isnull(InBaseline), "NewChannel", "Known")
+  | project LastSeen, FirstSeen, ChannelId, Status, Turns, Users, ClientIPs
+  | order by Status asc, Turns desc
+tactics:
+  - InitialAccess
+techniques:
+  - T1078
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - CopilotStudio
+  - AI

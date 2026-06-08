@@ -1,0 +1,34 @@
+id: b2c3d4e5-2010-4b22-9d01-0123456789ca
+name: Copilot Studio - Topic / generative-answer trigger enumeration
+description: |
+  Profiles which named events a Copilot Studio agent emits beyond the
+  basic message turns - topic triggers, generative-answer events, QnA and
+  intent events - and highlights conversations that touch an unusually
+  high number of distinct event types. Rapid enumeration of many topics in
+  one conversation can indicate reconnaissance of the agent's capabilities.
+query: |
+  let lookback = 1d;
+  AppEvents
+  | where TimeGenerated > ago(lookback)
+  | where Name !in ("BotMessageReceived", "BotMessageSend")
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"])
+  | summarize
+        Events        = count(),
+        DistinctEvents = dcount(Name),
+        EventTypes    = make_set(Name, 50),
+        FirstSeen     = min(TimeGenerated),
+        LastSeen      = max(TimeGenerated)
+      by ConvId, ChannelId, UserId
+  | where DistinctEvents >= 1
+  | order by DistinctEvents desc, Events desc
+tactics:
+  - Discovery
+techniques:
+  - T1592
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - CopilotStudio
+  - AI

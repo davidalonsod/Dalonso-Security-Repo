@@ -1,0 +1,36 @@
+id: b2c3d4e5-2001-4b22-9d01-0123456789c1
+name: Copilot Studio - Conversation volume by user / session
+description: |
+  Surfaces the busiest Copilot Studio users, sessions and channels over
+  the lookback window so an analyst can spot scripted abuse, denial-of-
+  wallet pacing, or a single identity dominating an agent. Lower-volume
+  context than the flooding analytic rule, for proactive review.
+query: |
+  let lookback = 1d;
+  AppEvents
+  | where TimeGenerated > ago(lookback)
+  | where Name in ("BotMessageReceived", "BotMessageSend")
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      DesignMode = tostring(Properties["DesignMode"])
+  | summarize
+        InboundTurns  = countif(Name == "BotMessageReceived"),
+        OutboundTurns = countif(Name == "BotMessageSend"),
+        Conversations = dcount(ConvId),
+        Channels      = make_set(ChannelId, 10),
+        ClientIPs     = make_set(ClientIP, 25),
+        FirstSeen     = min(TimeGenerated),
+        LastSeen      = max(TimeGenerated)
+      by UserId, SessionId
+  | extend TurnsPerConversation = round(toreal(InboundTurns) / iff(Conversations == 0, 1, Conversations), 1)
+  | order by InboundTurns desc
+tactics:
+  - Impact
+techniques:
+  - T1499
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - CopilotStudio
+  - AI

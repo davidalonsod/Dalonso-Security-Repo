@@ -1,0 +1,46 @@
+id: b2c3d4e5-2005-4b22-9d01-0123456789c5
+name: Copilot Studio - Prompt-injection signals in user messages
+description: |
+  Broad sweep of inbound user messages for prompt-injection / instruction-
+  override / tool-coercion phrasing, ranked by how many distinct markers a
+  conversation triggers. Companion to the analytic rule, surfacing weaker
+  single-marker hits for tuning and proactive review. Requires "Log
+  sensitive properties".
+query: |
+  let lookback = 1d;
+  let injectionMarkers = dynamic([
+      "ignore previous instructions", "ignore all previous", "ignore your instructions",
+      "disregard the above", "disregard previous", "you are now", "act as",
+      "developer mode", "do anything now", "dan mode", "jailbreak",
+      "reveal your system prompt", "show your system prompt", "print your instructions",
+      "repeat the words above", "what are your instructions", "bypass your rules",
+      "without any restrictions", "pretend you are", "from now on you",
+      "new instructions:", "system:", "override", "you must now"
+  ]);
+  AppEvents
+  | where TimeGenerated > ago(lookback)
+  | where Name == "BotMessageReceived"
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      Text      = tolower(tostring(Properties["text"]))
+  | where isnotempty(Text)
+  | mv-apply Marker = injectionMarkers to typeof(string) on (
+        where Text contains Marker
+        | summarize Markers = make_set(Marker)
+    )
+  | extend MarkerCount = array_length(Markers)
+  | project TimeGenerated, UserId, ConvId, ChannelId, MarkerCount, Markers,
+            Text = substring(tostring(Properties["text"]), 0, 1024), ClientIP
+  | order by MarkerCount desc, TimeGenerated desc
+tactics:
+  - InitialAccess
+  - DefenseEvasion
+techniques:
+  - T1566
+  - T1562
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - CopilotStudio
+  - AI

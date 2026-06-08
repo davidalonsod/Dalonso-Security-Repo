@@ -1,0 +1,42 @@
+id: b2c3d4e5-2004-4b22-9d01-0123456789c4
+name: Copilot Studio - Sensitive content in agent responses
+description: |
+  Scans Copilot Studio outbound responses for secret-like material and
+  bulk PII (AWS keys, PEM private keys, JWTs, many email addresses, IBAN /
+  card-like numbers). Broader, lower-threshold companion to the
+  high-severity analytic rule - returns single-hit matches too, for
+  proactive review and tuning. Requires "Log sensitive properties".
+query: |
+  let lookback = 1d;
+  AppEvents
+  | where TimeGenerated > ago(lookback)
+  | where Name == "BotMessageSend"
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      Output    = tostring(Properties["text"])
+  | where isnotempty(Output)
+  | extend
+      AwsKey     = array_length(extract_all(@"(AKIA[0-9A-Z]{16})", Output)),
+      PrivateKey = iff(Output contains "-----BEGIN" and Output contains "PRIVATE KEY-----", 1, 0),
+      Jwt        = array_length(extract_all(@"(eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,})", Output)),
+      Emails     = array_length(extract_all(@"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", Output)),
+      CardLike   = array_length(extract_all(@"\b((?:\d[ \-]?){13,16})\b", Output))
+  | extend HitScore = AwsKey + PrivateKey + Jwt + iff(Emails >= 5, 1, 0) + iff(CardLike >= 1, 1, 0)
+  | where HitScore > 0
+  | project
+      TimeGenerated, UserId, ConvId, ChannelId,
+      AwsKey, PrivateKey, Jwt, Emails, CardLike, HitScore,
+      Output = substring(Output, 0, 1024)
+  | order by HitScore desc, TimeGenerated desc
+tactics:
+  - Exfiltration
+  - Collection
+techniques:
+  - T1567
+  - T1213
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - CopilotStudio
+  - AI

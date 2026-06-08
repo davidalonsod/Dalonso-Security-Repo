@@ -1,0 +1,37 @@
+id: b2c3d4e5-2003-4b22-9d01-0123456789c3
+name: Copilot Studio - Connector error storm by conversation
+description: |
+  Surfaces conversations and connector targets with a high rate of failed
+  calls (Success == false), broken down by result code. Useful to triage
+  backend enumeration, permission probing, throttling, or an action stuck
+  in a retry loop. Lower threshold than the analytic rule for proactive
+  review.
+query: |
+  let lookback = 1d;
+  AppDependencies
+  | where TimeGenerated > ago(lookback)
+  | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector"
+  | extend ConvId = tostring(Properties["conversationId"]),
+           ChannelId = tostring(Properties["channelId"])
+  | summarize
+        Total     = count(),
+        Failures  = countif(Success == false),
+        ResultCodes = make_set(ResultCode, 25),
+        Targets   = make_set(Target, 25),
+        FirstSeen = min(TimeGenerated),
+        LastSeen  = max(TimeGenerated)
+      by ConvId, ChannelId, Name
+  | extend FailureRate = round(100.0 * Failures / iff(Total == 0, 1, Total), 1)
+  | where Failures >= 5
+  | order by Failures desc
+tactics:
+  - Discovery
+  - Impact
+techniques:
+  - T1190
+  - T1499
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - CopilotStudio
+  - AI

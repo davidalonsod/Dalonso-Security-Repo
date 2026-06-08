@@ -1,0 +1,66 @@
+id: b2c3d4e5-2011-4b22-9d01-0123456789d1
+name: Copilot Studio - Indirect prompt-injection markers in agent response
+description: |
+  Surfaces likely indirect (data / workflow) prompt injection: a
+  conversation where instruction-override markers ("ignore previous
+  instructions", "you are now", "system prompt", "do anything now") appear
+  in the agent's OUTPUT (BotMessageSend) while the user's inbound messages
+  in that same conversation contain none. When the markers were never
+  typed by the user, the most likely source is content the agent ingested
+  - a SharePoint document, email, web page, or connector payload - i.e.
+  the poisoned-data variant of prompt injection.
+
+  Reads AppEvents and requires "Log sensitive properties" on the agent's
+  Application Insights settings so Properties.text is populated for both
+  inbound and outbound turns. Review the Samples column to confirm whether
+  the marker is genuinely adversarial or benign echoed content.
+query: |
+  let lookback = 7d;
+  let injectionMarkers = dynamic([
+      "ignore previous instructions", "ignore all previous", "disregard previous",
+      "you are now", "act as", "developer mode", "do anything now", "dan mode",
+      "system prompt", "your instructions", "reveal your prompt", "bypass your rules",
+      "without any restrictions", "from now on you", "new instructions:"
+  ]);
+  let inbound =
+      AppEvents
+      | where TimeGenerated > ago(lookback)
+      | where Name == "BotMessageReceived"
+      | extend ConvId = tostring(Properties["conversationId"]),
+               Text = tolower(tostring(Properties["text"]))
+      | summarize UserMarkerHits = countif(Text has_any (injectionMarkers)),
+                  UserMsgs = count() by ConvId;
+  let outbound =
+      AppEvents
+      | where TimeGenerated > ago(lookback)
+      | where Name == "BotMessageSend"
+      | extend ConvId = tostring(Properties["conversationId"]),
+               Output = tolower(tostring(Properties["text"]))
+      | where isnotempty(Output)
+      | where Output has_any (injectionMarkers)
+      | summarize BotMarkerHits = count(),
+                  Samples = make_set(substring(tostring(Properties["text"]), 0, 240), 5),
+                  FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated),
+                  UserId = take_any(UserId),
+                  ChannelId = take_any(tostring(Properties["channelId"])),
+                  ClientIP = take_any(ClientIP)
+        by ConvId;
+  outbound
+  | join kind=leftouter inbound on ConvId
+  | where coalesce(UserMarkerHits, 0) == 0
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project FirstSeen, LastSeen, AccountName, ConvId, ChannelId, ClientIP,
+            BotMarkerHits, UserMsgs, Samples
+  | order by BotMarkerHits desc
+tactics:
+  - InitialAccess
+  - Execution
+techniques:
+  - T1566
+  - T1059
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - CopilotStudio
+  - AI
+  - IndirectInjection

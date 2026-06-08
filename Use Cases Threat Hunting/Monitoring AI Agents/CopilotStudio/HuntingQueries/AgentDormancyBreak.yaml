@@ -1,0 +1,36 @@
+id: b2c3d4e5-2007-4b22-9d01-0123456789c7
+name: Copilot Studio - Dormant agent / connector reactivation
+description: |
+  Finds connector targets (and agent app versions) that were silent for
+  >=7 days and then became active again in the recent window. A dormant-
+  then-active pattern can indicate a re-enabled stale action, a forgotten
+  integration being abused, or staged tooling that only lights up during
+  an operation.
+query: |
+  let reactivationWindow = 1d;
+  let silenceDays = 7d;
+  let conn = AppDependencies
+             | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector";
+  let recent = conn | where TimeGenerated > ago(reactivationWindow)
+               | summarize RecentCalls = count(), LastSeen = max(TimeGenerated) by Target;
+  let priorActivity = conn
+               | where TimeGenerated between (ago(60d) .. ago(reactivationWindow + silenceDays))
+               | summarize PriorLastSeen = max(TimeGenerated) by Target;
+  let recentlySilent = conn
+               | where TimeGenerated between (ago(reactivationWindow + silenceDays) .. ago(reactivationWindow))
+               | distinct Target;
+  recent
+  | join kind=inner priorActivity on Target
+  | join kind=leftanti recentlySilent on Target
+  | extend DaysDormant = round(toreal(datetime_diff('day', LastSeen, PriorLastSeen)), 0)
+  | project LastSeen, Target, RecentCalls, PriorLastSeen, DaysDormant
+  | order by DaysDormant desc
+tactics:
+  - Persistence
+techniques:
+  - T1554
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - CopilotStudio
+  - AI

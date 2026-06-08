@@ -1,0 +1,41 @@
+id: b2c3d4e5-2002-4b22-9d01-0123456789c2
+name: Copilot Studio - Connector usage baseline deviation
+description: |
+  Compares each connector / action target's call volume in the recent
+  window against its own 14-day baseline and flags new or sharply spiking
+  connectors. New tool targets and sudden spikes are early indicators of
+  configuration drift, a newly added (possibly malicious) action, or an
+  attacker driving a backend through the agent.
+query: |
+  let detectionWindow = 1d;
+  let conn =
+      AppDependencies
+      | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector";
+  let baseline =
+      conn
+      | where TimeGenerated between (ago(14d) .. ago(detectionWindow))
+      | summarize BaselineCalls = count(), BaselineDays = dcount(bin(TimeGenerated, 1d)) by Target
+      | extend BaselineDailyAvg = toreal(BaselineCalls) / iff(BaselineDays == 0, 1, BaselineDays);
+  conn
+  | where TimeGenerated > ago(detectionWindow)
+  | summarize RecentCalls = count(), Connectors = make_set(Name, 10), LastSeen = max(TimeGenerated) by Target
+  | join kind=leftouter baseline on Target
+  | extend BaselineDailyAvg = coalesce(BaselineDailyAvg, 0.0)
+  | extend Status = case(
+        isnull(BaselineCalls),                       "NewConnector",
+        RecentCalls >= 3 * BaselineDailyAvg and RecentCalls >= 10, "SpikingConnector",
+        "Normal")
+  | where Status != "Normal"
+  | project LastSeen, Target, Connectors, RecentCalls, BaselineDailyAvg = round(BaselineDailyAvg, 1), Status
+  | order by Status asc, RecentCalls desc
+tactics:
+  - Execution
+  - Persistence
+techniques:
+  - T1059
+  - T1554
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - CopilotStudio
+  - AI
