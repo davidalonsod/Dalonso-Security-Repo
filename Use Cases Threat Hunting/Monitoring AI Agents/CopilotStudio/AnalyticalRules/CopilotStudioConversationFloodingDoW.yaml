@@ -1,0 +1,75 @@
+id: a1b2c3d4-1008-4a11-9c01-0123456789a8
+name: Copilot Studio - Conversation flooding / denial-of-wallet
+description: |
+  Raises an incident when a single channel/session drives an abnormally
+  high inbound message volume in the hour (>=200 user turns), or a single
+  conversation exceeds 100 turns. Sustained high-volume automated traffic
+  against a metered agent is a denial-of-wallet pattern (driving token /
+  message consumption and cost), and can also be scripted abuse or a
+  guardrail-hammering red-team run.
+
+  Reads inbound turns from AppEvents (Name == "BotMessageReceived"),
+  grouping by conversation and channel. Tune the thresholds to your
+  agent's normal traffic profile.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Impact
+relevantTechniques:
+- T1499
+query: |
+  AppEvents
+  | where Name == "BotMessageReceived"
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      DesignMode = tostring(Properties["DesignMode"])
+  | where DesignMode != "True"
+  | summarize
+        Turns          = count(),
+        Conversations  = dcount(ConvId),
+        FirstSeen      = min(TimeGenerated),
+        LastSeen       = max(TimeGenerated),
+        ClientIPs      = make_set(ClientIP, 25)
+      by SessionId, ChannelId, UserId
+  | where Turns >= 200 or Conversations >= 1 and Turns / Conversations >= 100
+  | extend AccountName = iff(isempty(UserId), strcat("session:", SessionId), UserId)
+  | project
+      LastSeen, FirstSeen, AccountName, SessionId, ChannelId, UserId,
+      Turns, Conversations, ClientIPs
+  | order by Turns desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- DenialOfWallet
+- Abuse

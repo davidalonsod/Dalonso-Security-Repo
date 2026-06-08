@@ -1,0 +1,86 @@
+id: a1b2c3d4-1014-4a11-9c01-0123456789b4
+name: Copilot Studio - ASCII smuggling / invisible-Unicode injection
+description: |
+  Raises an incident when an inbound Copilot Studio user message contains
+  invisible / non-rendering Unicode that is the hallmark of an ASCII
+  smuggling or hidden-instruction attack: characters from the Unicode Tags
+  block (U+E0000-U+E007F, used to encode hidden ASCII instructions),
+  zero-width characters (U+200B-U+200D, U+FEFF, U+2060), or bidirectional
+  overrides (U+202A-U+202E, U+2066-U+2069). These let an attacker pass
+  instructions the user cannot see, to bypass guardrails or smuggle
+  indirect prompt injection through copied content. Mirrors the Defender
+  for Cloud "ASCII Smuggling prompt injection detected" alert.
+
+  Reads inbound turns from AppEvents (Name == "BotMessageReceived") with
+  the prompt text in Properties.text (requires "Log sensitive properties"
+  on the agent's Application Insights settings).
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- DefenseEvasion
+- InitialAccess
+relevantTechniques:
+- T1027
+- T1566
+query: |
+  AppEvents
+  | where Name == "BotMessageReceived"
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      Prompt    = tostring(Properties["text"])
+  | where isnotempty(Prompt)
+  | extend
+      TagChars     = array_length(extract_all(@"([\x{E0000}-\x{E007F}])", Prompt)),
+      ZeroWidth    = array_length(extract_all(@"([\x{200B}-\x{200D}\x{FEFF}\x{2060}])", Prompt)),
+      BidiOverride = array_length(extract_all(@"([\x{202A}-\x{202E}\x{2066}-\x{2069}])", Prompt))
+  | where TagChars > 0 or ZeroWidth >= 3 or BidiOverride > 0
+  | extend Signal = case(
+      TagChars > 0,     "UnicodeTagSmuggling",
+      BidiOverride > 0, "BidiOverride",
+      "ZeroWidthObfuscation")
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project
+      TimeGenerated, Signal, AccountName, ConvId, ChannelId,
+      TagChars, ZeroWidth, BidiOverride,
+      Prompt = substring(Prompt, 0, 1024), SessionId, ClientIP, AppVersion
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- AsciiSmuggling
+- IndirectInjection

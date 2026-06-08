@@ -1,0 +1,122 @@
+id: a1b2c3d4-2001-4b21-9c11-aaaaaaaaaab1
+name: Copilot Studio - Goal hijacking / goal drift across a conversation
+description: |
+  Adapts the Microsoft AI Red Team v2.0 "goal hijacking" failure mode to
+  Copilot Studio telemetry. The user's opening message is benign, yet the
+  same conversation ends up driving several sensitive connector calls
+  (mail / http / sql / azure / sharepoint / dataverse / powershell). The
+  redirect can come from indirect injection, a poisoned knowledge source
+  or a connector result, so the prompt-injection / multi-stage rules do
+  not always catch it.
+
+  Heuristic (conservative to keep false positives low):
+    - The first BotMessageReceived.text in the conversation matches a
+      benign opener (summarise / translate / explain / draft / what is...)
+      AND contains no sensitive-intent vocabulary (delete / grant / admin
+      / secret / database / payment / exec...).
+    - Yet AppDependencies shows >= 3 sensitive connector calls in the same
+      conversationId within the lookback window.
+
+  Requires "Log sensitive properties" for the text-content half;
+  connector calls are read from metadata alone.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT2H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- DefenseEvasion
+relevantTechniques:
+- T1059
+- T1556
+query: |
+  let benignFirstWords = dynamic([
+      "summarise","summarize","translate","explain","help me","tell me",
+      "draft","write a","compose","describe","what is","how does",
+      "example","tutorial","define","outline","brainstorm","rephrase",
+      "improve the wording","proofread","check the grammar"
+  ]);
+  let sensitiveIntent = dynamic([
+      "delete","drop","grant","revoke","admin","password","secret","key",
+      "token","credential","database","table","customer","payment",
+      "invoice","payroll","exfil","send to","upload to","exec","execute",
+      "run command","ssh","sudo","privilege","impersonate"
+  ]);
+  let sensitiveConnectors = dynamic([
+      "office365","sendemail","sendmail","outlook","exchange",
+      "http","webhook","azuread","azure","sql","dataverse",
+      "sharepoint","onedrive","powershell","function","automate",
+      "logicapp","graph","keyvault","blob","storage"
+  ]);
+  let firstMsg =
+      AppEvents
+      | where TimeGenerated > ago(2h)
+      | where Name == "BotMessageReceived"
+      | extend ConvId = tostring(Properties["conversationId"]),
+               Text   = tolower(tostring(Properties["text"]))
+      | where isnotempty(Text)
+      | summarize arg_min(TimeGenerated, Text, UserId, ClientIP, ChannelId = tostring(Properties["channelId"])) by ConvId
+      | extend FirstInput      = substring(Text, 0, 1024),
+               BenignIntent    = Text has_any (benignFirstWords),
+               SensitiveIntent = Text has_any (sensitiveIntent);
+  let acts =
+      AppDependencies
+      | where TimeGenerated > ago(2h)
+      | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector"
+      | extend ConvId   = tostring(Properties["conversationId"]),
+               MatchKey = tolower(strcat(Name, " ", Target))
+      | where MatchKey has_any (sensitiveConnectors)
+      | summarize SensitiveCalls    = count(),
+                  Connectors        = make_set(Name, 16),
+                  DistinctConnectors = dcount(Name),
+                  Targets           = make_set(Target, 25),
+                  FirstSeen         = min(TimeGenerated),
+                  LastSeen          = max(TimeGenerated)
+              by ConvId;
+  firstMsg
+  | join kind=inner acts on ConvId
+  | where SensitiveCalls >= 3
+          and BenignIntent == true
+          and SensitiveIntent == false
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project LastSeen, AccountName, UserId, ConvId, ChannelId, ClientIP,
+            SensitiveCalls, DistinctConnectors, Connectors, Targets, FirstInput, FirstSeen
+  | order by SensitiveCalls desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- GoalHijacking
+- AIRT-v2

@@ -1,0 +1,131 @@
+id: a1b2c3d4-1013-4a11-9c01-0123456789b3
+name: Copilot Studio - Multi-stage attack chain in a single conversation
+description: |
+  High-fidelity correlator. Raises an incident when one Copilot Studio
+  conversation exhibits two or more distinct attack-stage signals -
+  prompt injection, authority / role-impersonation, bulk-exfiltration
+  intent, or jailbreak framing - optionally alongside connector / action
+  execution in the same conversation. A realistic attack chain stacks
+  these stages (inject -> escalate -> exfiltrate -> execute), so a
+  conversation hitting several at once is far more likely to be a genuine
+  attack than any single marker on its own.
+
+  Aggregates inbound turns from AppEvents (Name == "BotMessageReceived")
+  per conversationId and joins connector activity from AppDependencies.
+  The text signals require "Log sensitive properties" on the agent's
+  Application Insights settings; the connector-execution count works from
+  metadata alone.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- PrivilegeEscalation
+- Exfiltration
+relevantTechniques:
+- T1566
+- T1078
+- T1567
+query: |
+  let injectionMarkers = dynamic([
+      "ignore previous instructions", "ignore all previous", "disregard previous",
+      "you are now", "act as", "developer mode", "do anything now", "dan mode",
+      "reveal your system prompt", "show your system prompt", "bypass your rules",
+      "without any restrictions", "pretend you are", "from now on you"
+  ]);
+  let escalationMarkers = dynamic([
+      "i am the ceo", "i am the cfo", "as an administrator", "as the administrator",
+      "as an admin", "i have admin", "i am authorised", "i am authorized",
+      "i have permission to", "on behalf of the", "grant me access", "elevate my access"
+  ]);
+  let exfilMarkers = dynamic([
+      "show all", "list all", "list every", "export all", "give me every",
+      "give me the full list", "all records", "all customers", "every user",
+      "dump the", "entire database", "entire table", "select *"
+  ]);
+  let jailbreakMarkers = dynamic([
+      "developer mode", "do anything now", "dan mode", "ignore your safety",
+      "without restrictions", "bypass your rules", "disable your guardrails",
+      "unrestricted mode", "you have no rules"
+  ]);
+  let conns =
+      AppDependencies
+      | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector"
+      | extend ConvId = tostring(Properties["conversationId"])
+      | summarize ConnectorCalls = count(), Connectors = make_set(Name, 20),
+                  ConnectorFailures = countif(Success == false) by ConvId;
+  AppEvents
+  | where Name == "BotMessageReceived"
+  | extend
+      ConvId = tostring(Properties["conversationId"]),
+      Text   = tolower(tostring(Properties["text"]))
+  | where isnotempty(Text)
+  | extend
+      SigInjection  = Text has_any (injectionMarkers),
+      SigEscalation = Text has_any (escalationMarkers),
+      SigExfil      = Text has_any (exfilMarkers),
+      SigJailbreak  = Text has_any (jailbreakMarkers)
+  | summarize
+      Injection  = countif(SigInjection) > 0,
+      Escalation = countif(SigEscalation) > 0,
+      Exfil      = countif(SigExfil) > 0,
+      Jailbreak  = countif(SigJailbreak) > 0,
+      Messages   = count(),
+      FirstSeen  = min(TimeGenerated),
+      LastSeen   = max(TimeGenerated),
+      UserId     = take_any(UserId),
+      ChannelId  = take_any(tostring(Properties["channelId"])),
+      ClientIP   = take_any(ClientIP),
+      SampleText = make_set(substring(tostring(Properties["text"]), 0, 200), 5)
+      by ConvId
+  | extend Stages = toint(Injection) + toint(Escalation) + toint(Exfil) + toint(Jailbreak)
+  | where Stages >= 2
+  | join kind=leftouter conns on ConvId
+  | extend
+      AccountName    = iff(isempty(UserId), "unknown-agent", UserId),
+      ConnectorCalls = coalesce(ConnectorCalls, 0),
+      TimeGenerated  = LastSeen
+  | project
+      TimeGenerated, FirstSeen, LastSeen, AccountName, ConvId, ChannelId, ClientIP,
+      Stages, Injection, Escalation, Exfil, Jailbreak,
+      Messages, ConnectorCalls, ConnectorFailures, Connectors, SampleText
+  | order by Stages desc, LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- MultiStage
+- AttackChain

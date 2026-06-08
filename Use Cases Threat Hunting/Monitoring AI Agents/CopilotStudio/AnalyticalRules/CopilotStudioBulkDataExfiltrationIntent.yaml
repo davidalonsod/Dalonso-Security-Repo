@@ -1,0 +1,92 @@
+id: a1b2c3d4-1012-4a11-9c01-0123456789b2
+name: Copilot Studio - Bulk data-exfiltration intent in user message
+description: |
+  Raises an incident when an inbound Copilot Studio user message asks the
+  agent to return data in bulk ("show all records", "export all bookings",
+  "list every customer", "dump the table", "give me the full list")
+  instead of the single, scoped record the agent is meant to serve. This
+  is the classic prompt-driven exfiltration pattern where an
+  over-permissive agent or connector returns far more than the user is
+  entitled to.
+
+  Reads inbound turns from AppEvents (Name == "BotMessageReceived") with
+  the prompt text in Properties.text (requires "Log sensitive properties"
+  on the agent's Application Insights settings). Pair with
+  CopilotStudioSensitiveDataInResponse to confirm whether bulk content was
+  actually returned.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Collection
+- Exfiltration
+relevantTechniques:
+- T1213
+- T1530
+query: |
+  let exfilMarkers = dynamic([
+      "show all", "list all", "list every", "export all", "export the entire",
+      "give me all", "give me every", "give me the full list", "full list of",
+      "all records", "all customers", "all users", "all bookings", "all orders",
+      "all employees", "every record", "every customer", "every user",
+      "dump the", "dump all", "entire database", "entire table",
+      "complete list of", "everything you have on", "all the data",
+      "without any filter", "no limit", "select *"
+  ]);
+  AppEvents
+  | where Name == "BotMessageReceived"
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      Locale    = tostring(Properties["locale"]),
+      DesignMode = tostring(Properties["DesignMode"]),
+      Text      = tolower(tostring(Properties["text"]))
+  | where isnotempty(Text)
+  | mv-apply Marker = exfilMarkers to typeof(string) on (
+        where Text contains Marker
+        | summarize Markers = make_set(Marker)
+    )
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project
+      TimeGenerated, AccountName, ConvId, ChannelId, Locale, DesignMode,
+      Markers, Text = substring(tostring(Properties["text"]), 0, 1024),
+      SessionId, ClientIP, AppVersion
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- DataExfiltration
+- Collection

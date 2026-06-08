@@ -1,0 +1,150 @@
+id: a1b2c3d4-2003-4b23-9c13-aaaaaaaaaab3
+name: Copilot Studio - Session context contamination across a conversation
+description: |
+  Adapts the Microsoft AI Red Team v2.0 "session context contamination"
+  failure mode to Copilot Studio. An adversary plants data early in a
+  multi-turn conversation - an untrusted URL in user content or an
+  injection marker - that biases the agent so a sensitive connector call
+  fires later. Neither half is anomalous in isolation; the pattern only
+  emerges across the full conversation.
+
+  The rule splits each conversation (>= 5 user turns) into time quartiles
+  and requires both:
+    - First quartile carries a contamination signal: an external URL
+      whose host is not a known-safe Microsoft domain, or a prompt-
+      injection marker in the user text.
+    - Last quartile (or later AppDependencies activity) issues a
+      sensitive connector call (mail / http / sql / azure / sharepoint /
+      dataverse / powershell).
+
+  The 5-turn minimum suppresses single-shot interactions; the safe-host
+  allowlist suppresses first-party links. Requires "Log sensitive
+  properties" for the early-contamination text half.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT2H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- Execution
+- DefenseEvasion
+relevantTechniques:
+- T1566
+- T1059
+query: |
+  let injectionMarkers = dynamic([
+      "ignore previous instructions","disregard previous","you are now",
+      "developer mode","do anything now","reveal your system prompt",
+      "bypass your rules","forget the previous","new instructions",
+      "from now on you","store this and remember","next time the user asks"
+  ]);
+  let sensitiveConnectors = dynamic([
+      "office365","sendemail","sendmail","outlook","exchange",
+      "http","webhook","azuread","azure","sql","dataverse",
+      "sharepoint","onedrive","powershell","function","automate",
+      "logicapp","graph","keyvault","blob","storage"
+  ]);
+  let safeHostSuffixes = dynamic([
+      "microsoft.com","office.com","office365.com","sharepoint.com",
+      "microsoftonline.com","windows.net","azure.com","azureedge.net",
+      "live.com","bing.com","msn.com","dynamics.com","powerplatform.com"
+  ]);
+  let turns =
+      AppEvents
+      | where TimeGenerated > ago(2h)
+      | where Name == "BotMessageReceived"
+      | extend ConvId = tostring(Properties["conversationId"]),
+               Text   = tolower(tostring(Properties["text"])),
+               ChannelId = tostring(Properties["channelId"])
+      | where isnotempty(Text);
+  let convBounds =
+      turns
+      | summarize Turns = count(),
+                  Start = min(TimeGenerated),
+                  End   = max(TimeGenerated),
+                  AnyUser = take_any(UserId),
+                  AnyIp   = take_any(ClientIP),
+                  AnyChannel = take_any(ChannelId)
+              by ConvId
+      | where Turns >= 5;
+  let early =
+      turns
+      | join kind=inner convBounds on ConvId
+      | extend RangeMs = max_of(datetime_diff('millisecond', End, Start), 1)
+      | extend OffMs   = datetime_diff('millisecond', TimeGenerated, Start)
+      | extend Quartile = min_of(toint(OffMs * 4 / RangeMs), 3)
+      | where Quartile == 0
+      | extend Host = tolower(extract(@"https?://([A-Za-z0-9.\-]+)", 1, Text))
+      | extend HasInjection = Text has_any (injectionMarkers);
+  let earlyUrl =
+      early
+      | where isnotempty(Host)
+      | where not(Host has_any (safeHostSuffixes))
+      | summarize UrlHits = count(), UntrustedHosts = make_set(Host, 16) by ConvId;
+  let earlyInj =
+      early
+      | summarize InjHits = countif(HasInjection) by ConvId;
+  let lateActs =
+      AppDependencies
+      | where TimeGenerated > ago(2h)
+      | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector"
+      | extend ConvId   = tostring(Properties["conversationId"]),
+               MatchKey = tolower(strcat(Name, " ", Target))
+      | where MatchKey has_any (sensitiveConnectors)
+      | summarize SensitiveCalls  = count(),
+                  Connectors      = make_set(Name, 8),
+                  Targets         = make_set(Target, 16),
+                  LastSeen        = max(TimeGenerated),
+                  FirstSensitive  = min(TimeGenerated)
+              by ConvId;
+  earlyUrl
+  | join kind=fullouter earlyInj on ConvId
+  | extend ConvId = coalesce(ConvId, ConvId1)
+  | extend Contamination = coalesce(UrlHits, 0) + coalesce(InjHits, 0)
+  | where Contamination >= 1
+  | join kind=inner lateActs on ConvId
+  | join kind=leftouter convBounds on ConvId
+  | where SensitiveCalls >= 1
+  | extend AccountName = iff(isempty(AnyUser), "unknown-agent", AnyUser)
+  | project LastSeen, AccountName, UserId = AnyUser, ConvId, AnyChannel, AnyIp,
+            Contamination, UntrustedHosts, SensitiveCalls, Connectors, Targets, FirstSensitive
+  | order by Contamination desc, SensitiveCalls desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: AnyIp
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- SessionContamination
+- XPIA
+- AIRT-v2

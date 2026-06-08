@@ -1,0 +1,84 @@
+id: a1b2c3d4-1002-4a11-9c01-0123456789a2
+name: Copilot Studio - Secrets or bulk PII in agent response
+description: |
+  Raises an incident when a Copilot Studio agent's outbound response
+  contains secret-like material (AWS access key, PEM private key, JWT) or
+  bulk PII (>=10 email addresses) - a strong indicator the agent has been
+  coerced into leaking credentials, knowledge-base content, or a customer
+  list.
+
+  Reads outbound turns from AppEvents (Name == "BotMessageSend") with the
+  response text in Properties.text. The text key requires "Log sensitive
+  properties" to be enabled on the agent's Application Insights settings.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Exfiltration
+- Collection
+relevantTechniques:
+- T1567
+- T1213
+query: |
+  AppEvents
+  | where Name == "BotMessageSend"
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      Output    = tostring(Properties["text"])
+  | where isnotempty(Output)
+  | extend
+      AwsKey     = Output matches regex @"AKIA[0-9A-Z]{16}",
+      PrivateKey = Output contains "-----BEGIN" and Output contains "PRIVATE KEY-----",
+      Jwt        = Output matches regex @"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",
+      EmailCount = array_length(extract_all(@"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", Output))
+  | where AwsKey or PrivateKey or Jwt or EmailCount >= 10
+  | extend Signal = case(
+      AwsKey,            "AwsAccessKey",
+      PrivateKey,        "PrivateKey",
+      Jwt,               "JwtToken",
+      EmailCount >= 10,  "BulkEmailPII",
+      "Unknown")
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project
+      TimeGenerated, Signal, AccountName, ConvId, ChannelId, EmailCount,
+      Output = substring(Output, 0, 1024), SessionId, ClientIP, AppVersion
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- DataLeak
+- Secrets

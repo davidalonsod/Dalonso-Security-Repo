@@ -1,0 +1,90 @@
+id: a1b2c3d4-1001-4a11-9c01-0123456789a1
+name: Copilot Studio - Prompt-injection / instruction-override patterns in user message
+description: |
+  Raises an incident when an inbound Copilot Studio user message carries
+  classic prompt-injection / instruction-override markers ("ignore
+  previous instructions", "you are now", "developer mode", "reveal your
+  system prompt", tool-coercion phrasing). These are the cheapest and
+  most common attempts to subvert an agent's guardrails or exfiltrate its
+  configuration.
+
+  Reads the real Copilot Studio telemetry shape: bot turns land in the
+  AppEvents table (Name == "BotMessageReceived") with the property bag in
+  the dynamic Properties column (conversationId, channelId, text). The
+  text key is only populated when "Log sensitive properties" is enabled
+  on the agent's Application Insights settings.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- DefenseEvasion
+relevantTechniques:
+- T1566
+- T1562
+query: |
+  let injectionMarkers = dynamic([
+      "ignore previous instructions", "ignore all previous", "ignore your instructions",
+      "disregard the above", "disregard previous", "you are now", "act as",
+      "developer mode", "do anything now", "dan mode", "jailbreak",
+      "reveal your system prompt", "show your system prompt", "print your instructions",
+      "repeat the words above", "what are your instructions", "bypass your rules",
+      "without any restrictions", "pretend you are", "from now on you"
+  ]);
+  AppEvents
+  | where Name == "BotMessageReceived"
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      Locale    = tostring(Properties["locale"]),
+      DesignMode = tostring(Properties["DesignMode"]),
+      Text      = tolower(tostring(Properties["text"]))
+  | where isnotempty(Text)
+  | mv-apply Marker = injectionMarkers to typeof(string) on (
+        where Text contains Marker
+        | summarize Markers = make_set(Marker)
+    )
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project
+      TimeGenerated, AccountName, ConvId, ChannelId, Locale, DesignMode,
+      Markers, Text = substring(tostring(Properties["text"]), 0, 1024),
+      SessionId, ClientIP, AppVersion
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- PromptInjection
+- Guardrails

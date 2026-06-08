@@ -1,0 +1,112 @@
+id: a1b2c3d4-1016-4a11-9c01-0123456789b6
+name: Copilot Studio - URL / domain / IP matched against threat intelligence
+description: |
+  Extracts URLs (and their hosts / IPs) from Copilot Studio conversation
+  content - both inbound user prompts and outbound agent responses - and
+  correlates them against active Microsoft Sentinel threat-intelligence
+  indicators. A match means the agent either received or emitted a known
+  malicious / suspicious URL, domain, or IP, which can indicate a phishing
+  lure sent to the agent, a poisoned knowledge source, or a corrupted
+  agent surfacing attacker infrastructure. This is the high-fidelity
+  companion to CopilotStudioSuspiciousUrlInContent (which is heuristic):
+  here the verdict comes from the TI feed.
+
+  Joins against the modern ThreatIntelIndicators table (network observable
+  types url:value / domain-name:value / ipv4-addr:value / ipv6-addr:value)
+  and only considers active, non-revoked, in-date indicators. Reads agent
+  text from AppEvents (requires "Log sensitive properties" on the agent's
+  Application Insights settings).
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+- connectorId: ThreatIntelligence
+  dataTypes:
+  - ThreatIntelIndicators
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- CommandAndControl
+- InitialAccess
+relevantTechniques:
+- T1071
+- T1566
+query: |
+  let dt_lookBack = 1h;
+  let ioc_lookBack = 14d;
+  let networkIocTypes = dynamic(["url:value", "domain-name:value", "ipv4-addr:value", "ipv6-addr:value"]);
+  let TI =
+      ThreatIntelIndicators
+      | where TimeGenerated > ago(ioc_lookBack)
+      | where IsActive == true and Revoked == false
+      | where ObservableKey in (networkIocTypes)
+      | where isempty(ValidUntil) or ValidUntil > now()
+      | summarize arg_max(TimeGenerated, *) by IndicatorId = Id
+      | extend IOC = tolower(ObservableValue)
+      | where isnotempty(IOC);
+  let Content =
+      AppEvents
+      | where TimeGenerated > ago(dt_lookBack)
+      | where Name in ("BotMessageReceived", "BotMessageSend")
+      | extend
+          ConvId    = tostring(Properties["conversationId"]),
+          ChannelId = tostring(Properties["channelId"]),
+          Direction = iff(Name == "BotMessageReceived", "UserPrompt", "AgentResponse"),
+          Text      = tostring(Properties["text"])
+      | where isnotempty(Text)
+      | mv-expand Url = extract_all(@"(https?://[^\s\)\]\}""'<>]+)", Text) to typeof(string)
+      | extend
+          Url  = tolower(Url),
+          Host = tolower(tostring(extract(@"https?://([^/:\s]+)", 1, Url)))
+      | mv-expand IOC = pack_array(Url, Host) to typeof(string)
+      | where isnotempty(IOC);
+  Content
+  | join kind=inner TI on IOC
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project
+      TimeGenerated, Direction, AccountName, ConvId, ChannelId,
+      MatchedIOC = IOC, ObservableKey, Confidence,
+      ThreatType  = tostring(todynamic(Data).indicator_types[0]),
+      Description = tostring(todynamic(Data).description),
+      Url, Host, ClientIP, SessionId, AppVersion
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: URL
+  fieldMappings:
+  - identifier: Url
+    columnName: Url
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    - URL
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- ThreatIntelligence
+- MaliciousUrl

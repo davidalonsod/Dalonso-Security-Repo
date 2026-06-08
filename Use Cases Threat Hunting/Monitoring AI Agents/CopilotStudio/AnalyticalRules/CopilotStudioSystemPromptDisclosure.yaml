@@ -1,0 +1,92 @@
+id: a1b2c3d4-1004-4a11-9c01-0123456789a4
+name: Copilot Studio - System-prompt disclosure attempt and leak
+description: |
+  Correlates a user message asking the agent to disclose its hidden
+  configuration ("show your system prompt", "what are your instructions",
+  "repeat the words above") with a bot response in the same conversation
+  that leaks instruction-style markers ("You are", "Your role is",
+  "system:", "## Instructions"). Together these indicate a successful or
+  near-successful system-prompt extraction.
+
+  Joins inbound and outbound AppEvents turns on conversationId. Both the
+  prompt and response text require "Log sensitive properties" to be
+  enabled on the agent's Application Insights settings.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Discovery
+- Collection
+relevantTechniques:
+- T1082
+- T1213
+query: |
+  let disclosureMarkers = dynamic([
+      "system prompt", "your instructions", "your system message",
+      "repeat the words above", "what are your instructions",
+      "print your prompt", "reveal your prompt", "initial instructions",
+      "your configuration", "your guidelines"
+  ]);
+  let asks =
+      AppEvents
+      | where Name == "BotMessageReceived"
+      | extend ConvId = tostring(Properties["conversationId"]),
+               Prompt = tolower(tostring(Properties["text"]))
+      | where isnotempty(Prompt)
+      | where Prompt has_any (disclosureMarkers)
+      | project AskTime = TimeGenerated, ConvId, Prompt = substring(tostring(Properties["text"]), 0, 512),
+                UserId, ChannelId = tostring(Properties["channelId"]), ClientIP;
+  let leaks =
+      AppEvents
+      | where Name == "BotMessageSend"
+      | extend ConvId = tostring(Properties["conversationId"]),
+               Output = tostring(Properties["text"])
+      | where isnotempty(Output)
+      | where Output matches regex @"(?i)(you are an?|your role is|system:|##\s*instructions|the assistant)"
+      | project LeakTime = TimeGenerated, ConvId, Output = substring(Output, 0, 1024);
+  asks
+  | join kind=inner leaks on ConvId
+  | where LeakTime between (AskTime .. (AskTime + 10m))
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project
+      AskTime, LeakTime, AccountName, ConvId, ChannelId, ClientIP,
+      Prompt, Output,
+      LagSeconds = datetime_diff('second', LeakTime, AskTime)
+  | order by AskTime desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- SystemPromptDisclosure

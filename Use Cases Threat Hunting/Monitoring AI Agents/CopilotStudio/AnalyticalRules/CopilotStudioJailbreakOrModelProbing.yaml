@@ -1,0 +1,92 @@
+id: a1b2c3d4-1010-4a11-9c01-0123456789b0
+name: Copilot Studio - Jailbreak / model-probing markers
+description: |
+  Raises an incident when an inbound Copilot Studio user message contains
+  jailbreak-framework or model-fingerprinting markers - known jailbreak
+  persona names (DAN, STAN, "do anything now"), unrestricted-mode framing,
+  or repeated "which model / version are you" probing. This is distinct
+  from generic prompt injection: it targets the safety layer and the
+  model identity specifically.
+
+  Reads inbound turns from AppEvents (Name == "BotMessageReceived") with
+  the prompt text in Properties.text (requires "Log sensitive properties"
+  on the agent's Application Insights settings).
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- DefenseEvasion
+- Discovery
+relevantTechniques:
+- T1562
+- T1082
+query: |
+  let jailbreakMarkers = dynamic([
+      "dan mode", "do anything now", "stan mode", "developer mode enabled",
+      "unrestricted mode", "no restrictions", "without any filter",
+      "ignore your guidelines", "ignore safety", "bypass safety",
+      "hypothetical response", "opposite mode", "evil mode"
+  ]);
+  let modelProbes = dynamic([
+      "which model are you", "what model are you", "what version are you",
+      "are you gpt", "are you based on", "what llm", "which llm",
+      "what is your underlying model", "what ai model"
+  ]);
+  AppEvents
+  | where Name == "BotMessageReceived"
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      Text      = tolower(tostring(Properties["text"]))
+  | where isnotempty(Text)
+  | extend
+      Jailbreak  = Text has_any (jailbreakMarkers),
+      ModelProbe = Text has_any (modelProbes)
+  | where Jailbreak or ModelProbe
+  | extend Signal = case(Jailbreak and ModelProbe, "JailbreakAndModelProbe",
+                         Jailbreak, "Jailbreak",
+                         "ModelProbe")
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project
+      TimeGenerated, Signal, AccountName, ConvId, ChannelId,
+      Text = substring(tostring(Properties["text"]), 0, 1024),
+      SessionId, ClientIP, AppVersion
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- Jailbreak
+- ModelFingerprinting

@@ -1,0 +1,79 @@
+id: a1b2c3d4-1006-4a11-9c01-0123456789a6
+name: Copilot Studio - New connector first seen (14-day baseline)
+description: |
+  Raises an incident when a Copilot Studio agent invokes a connector /
+  action operation (Target) that has never appeared in the preceding
+  14-day baseline. A brand-new connector target can indicate a newly
+  published (and possibly malicious) action, configuration drift, or an
+  attacker who has added a tool to the agent to reach a new backend.
+
+  Reads connector invocations from AppDependencies (DependencyType ==
+  "Connector"). The baseline window is the 14 days before the detection
+  window; only Targets seen exclusively in the recent window fire.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- Persistence
+relevantTechniques:
+- T1059
+- T1554
+query: |
+  let detectionWindow = 1h;
+  let conn =
+      AppDependencies
+      | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector"
+      | extend ConvId = tostring(Properties["conversationId"]),
+               ChannelId = tostring(Properties["channelId"]);
+  let baseline =
+      conn
+      | where TimeGenerated < ago(detectionWindow)
+      | distinct Target;
+  conn
+  | where TimeGenerated >= ago(detectionWindow)
+  | join kind=leftanti baseline on Target
+  | summarize
+        Calls      = count(),
+        FirstSeen  = min(TimeGenerated),
+        LastSeen   = max(TimeGenerated),
+        Convs      = make_set(ConvId, 25),
+        Channels   = make_set(ChannelId, 10)
+      by Target, Name
+  | extend AccountName = strcat("connector:", Name)
+  | project LastSeen, FirstSeen, AccountName, Name, Target, Calls, Convs, Channels
+  | order by LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- Connectors
+- Baseline

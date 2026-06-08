@@ -1,0 +1,103 @@
+id: a1b2c3d4-1015-4a11-9c01-0123456789b5
+name: Copilot Studio - Suspicious or phishing URL in prompt or response
+description: |
+  Raises an incident when a URL with phishing / malicious characteristics
+  appears in a Copilot Studio conversation - either sent by the user
+  (BotMessageReceived) or emitted by the agent (BotMessageSend). Flags
+  raw-IP URLs, punycode / IDN homograph hosts (xn--), known URL shorteners,
+  credential-bait paths (login / verify / reset-password / wallet), and
+  risky / look-alike TLDs. Covers the Defender for Cloud "Phishing URL
+  shared", "Phishing attempt detected", and "Corrupted AI directed a
+  phishing attempt" alert family from your own telemetry.
+
+  Reads AppEvents text (requires "Log sensitive properties" on the agent's
+  Application Insights settings). Heuristic by design - treat as a triage
+  signal, not a verdict. To raise fidelity, join ClientIP / host against a
+  threat-intel watchlist or the ThreatIntelligenceIndicator table.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- Execution
+relevantTechniques:
+- T1566
+- T1204
+query: |
+  let shorteners = dynamic(["bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd","buff.ly","rb.gy","cutt.ly","rebrand.ly"]);
+  let baitPaths  = dynamic(["login","signin","verify","secure","account","update","reset","password","wallet","seed","mfa","authenticate","confirm"]);
+  let riskyTlds  = dynamic([".zip",".mov",".xyz",".top",".click",".country",".gq",".tk",".ml",".cf",".ga",".rest",".quest"]);
+  AppEvents
+  | where Name in ("BotMessageReceived", "BotMessageSend")
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      Direction = iff(Name == "BotMessageReceived", "UserPrompt", "AgentResponse"),
+      Text      = tostring(Properties["text"])
+  | where isnotempty(Text)
+  | mv-expand Url = extract_all(@"(https?://[^\s\)\]\}""'<>]+)", Text) to typeof(string)
+  | extend
+      Host = tolower(tostring(extract(@"https?://([^/:\s]+)", 1, Url))),
+      Path = tolower(tostring(extract(@"https?://[^/]+(/[^\s]*)?", 1, Url)))
+  | extend Tld = tolower(tostring(extract(@"(\.[a-z]+)$", 1, Host)))
+  | extend
+      RawIpHost  = Host matches regex @"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$",
+      Punycode   = Host contains "xn--",
+      Shortener  = Host in (shorteners),
+      RiskyTld   = set_has_element(riskyTlds, Tld),
+      BaitPath   = Path has_any (baitPaths),
+      AtTrick    = Url matches regex @"https?://[^/\s]+@"
+  | extend RiskScore = toint(RawIpHost) + toint(Punycode) + toint(Shortener)
+                     + toint(RiskyTld) + toint(BaitPath) + toint(AtTrick)
+  | where RiskScore > 0
+  | extend Reasons = trim(",", strcat(
+      iff(RawIpHost, "RawIP,", ""), iff(Punycode, "Punycode,", ""),
+      iff(Shortener, "Shortener,", ""), iff(RiskyTld, "RiskyTLD,", ""),
+      iff(BaitPath, "CredentialBaitPath,", ""), iff(AtTrick, "UserinfoTrick,", "")))
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project
+      TimeGenerated, Direction, RiskScore, Reasons, AccountName, ConvId, ChannelId,
+      Url = substring(Url, 0, 512), Host, SessionId, ClientIP, AppVersion
+  | order by RiskScore desc, TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+- entityType: URL
+  fieldMappings:
+  - identifier: Url
+    columnName: Url
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- Phishing
+- MaliciousUrl

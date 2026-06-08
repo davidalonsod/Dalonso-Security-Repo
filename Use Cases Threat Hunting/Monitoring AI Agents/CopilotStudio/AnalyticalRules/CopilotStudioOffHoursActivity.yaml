@@ -1,0 +1,76 @@
+id: a1b2c3d4-1009-4a11-9c01-0123456789a9
+name: Copilot Studio - Off-hours or non-published-channel activity
+description: |
+  Raises a low-severity incident when a published Copilot Studio agent is
+  used outside business hours (configurable window, default 20:00-06:00
+  UTC) on a non-design channel. Off-hours interactive use of a corporate
+  agent is worth a proactive look - it can be benign global usage, but it
+  is also when scripted abuse and credential-misuse tend to run.
+
+  Reads inbound turns from AppEvents (Name == "BotMessageReceived"),
+  excludes design-time (test) traffic, and buckets by hour of day. Adjust
+  the business-hours window and excluded channels to your environment.
+severity: Low
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+relevantTechniques:
+- T1078
+query: |
+  let businessStart = 6;   // 06:00 UTC
+  let businessEnd   = 20;  // 20:00 UTC
+  AppEvents
+  | where Name == "BotMessageReceived"
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      DesignMode = tostring(Properties["DesignMode"])
+  | where DesignMode != "True"
+  | where ChannelId !in ("pva-studio", "test")
+  | extend HourUtc = hourofday(TimeGenerated)
+  | where HourUtc < businessStart or HourUtc >= businessEnd
+  | summarize
+        Turns     = count(),
+        Convs     = dcount(ConvId),
+        FirstSeen = min(TimeGenerated),
+        LastSeen  = max(TimeGenerated),
+        ClientIPs = make_set(ClientIP, 25),
+        Hours     = make_set(HourUtc, 24)
+      by ChannelId, UserId
+  | extend AccountName = iff(isempty(UserId), strcat("channel:", ChannelId), UserId)
+  | project LastSeen, FirstSeen, AccountName, ChannelId, UserId, Turns, Convs, Hours, ClientIPs
+  | order by LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- Anomaly

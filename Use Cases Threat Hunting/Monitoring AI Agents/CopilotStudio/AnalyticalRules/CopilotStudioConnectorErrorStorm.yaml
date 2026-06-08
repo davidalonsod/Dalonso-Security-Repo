@@ -1,0 +1,76 @@
+id: a1b2c3d4-1005-4a11-9c01-0123456789a5
+name: Copilot Studio - Connector failure storm
+description: |
+  Raises an incident when a single Copilot Studio conversation drives an
+  abnormal burst of failed connector / action calls (>=10 failures in the
+  hour). A storm of connector failures can indicate enumeration of a
+  backend, credential / permission probing, an action stuck in a loop, or
+  an attacker fuzzing a tool the agent exposes.
+
+  Reads connector invocations from the AppDependencies table
+  (DependencyType == "Connector", AppRoleName == "Microsoft Copilot
+  Studio"), where Success == false marks a failed call and Target is the
+  connector operation (e.g. shared_msnweather/TomorrowsForecast).
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Discovery
+- Impact
+relevantTechniques:
+- T1046
+- T1499
+query: |
+  AppDependencies
+  | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector"
+  | extend ConvId = tostring(Properties["conversationId"]),
+           ChannelId = tostring(Properties["channelId"])
+  | where Success == false
+  | summarize
+        Failures      = count(),
+        Connectors    = make_set(Name, 25),
+        Targets       = make_set(Target, 25),
+        ResultCodes   = make_set(ResultCode, 25),
+        FirstFailure  = min(TimeGenerated),
+        LastFailure   = max(TimeGenerated)
+      by ConvId, ChannelId
+  | where Failures >= 10
+  | extend AccountName = iff(isempty(ConvId), "unknown-conversation", ConvId)
+  | project
+      LastFailure, FirstFailure, AccountName, ConvId, ChannelId,
+      Failures, Connectors, Targets, ResultCodes
+  | order by Failures desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- Connectors
+- Reliability

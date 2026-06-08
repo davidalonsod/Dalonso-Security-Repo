@@ -1,0 +1,121 @@
+id: a1b2c3d4-2002-4b22-9c12-aaaaaaaaaab2
+name: Copilot Studio - Extended capability / architecture disclosure
+description: |
+  Adapts the Microsoft AI Red Team v2.0 "capability / architecture
+  disclosure" failure mode to Copilot Studio. Complements
+  CopilotStudioSystemPromptDisclosure (which only looks at system-prompt
+  phrasing) by covering probes for the agent's connector / action list,
+  topics and skills, and intersecting the response against the agent's
+  actual recent connector inventory.
+
+  The false-positive control is the inventory intersection: the rule only
+  fires when the bot's response reflects >= 2 connector target prefixes
+  that the agent genuinely used in the last 7 days (>= 5 calls each).
+  Generic answers ("I can help you with weather") never reach the
+  threshold.
+
+  Both the prompt and response text require "Log sensitive properties"
+  to be enabled on the agent's Application Insights settings.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: P7D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Discovery
+- Collection
+relevantTechniques:
+- T1213
+- T1518
+query: |
+  let probes = dynamic([
+      "what connectors","list your connectors","what actions","what can you do",
+      "what topics","list your topics","what skills","what plugins",
+      "what flows","list your flows","what tools","describe your actions",
+      "what apis","what systems can you access","what can you connect to",
+      "what data sources","reveal your connectors","what is your configuration",
+      "what are your capabilities","what triggers do you have"
+  ]);
+  let leakMarkers = dynamic([
+      "connector","action","topic","flow","i have access to","i can use",
+      "i can connect to","available actions","my connectors","my topics",
+      "the following connectors","i can access","data source","i am able to call"
+  ]);
+  let known =
+      toscalar(
+          AppDependencies
+          | where TimeGenerated between (ago(7d) .. ago(1h))
+          | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector"
+          | extend TargetPrefix = tolower(tostring(split(Target, "/")[0]))
+          | where isnotempty(TargetPrefix) and strlen(TargetPrefix) >= 4
+          | summarize Calls = count() by TargetPrefix
+          | where Calls >= 5
+          | summarize KnownConnectors = make_set(TargetPrefix, 200)
+      );
+  let asks =
+      AppEvents
+      | where TimeGenerated > ago(1h)
+      | where Name == "BotMessageReceived"
+      | extend ConvId = tostring(Properties["conversationId"]),
+               Prompt = tolower(tostring(Properties["text"]))
+      | where isnotempty(Prompt) and Prompt has_any (probes)
+      | project AskTime = TimeGenerated, ConvId, Prompt = substring(tostring(Properties["text"]), 0, 512),
+                UserId, ClientIP, ChannelId = tostring(Properties["channelId"]);
+  let leaks =
+      AppEvents
+      | where TimeGenerated > ago(1h)
+      | where Name == "BotMessageSend"
+      | extend ConvId = tostring(Properties["conversationId"]),
+               Output = tolower(tostring(Properties["text"]))
+      | where isnotempty(Output) and Output has_any (leakMarkers)
+      | extend OutputTokens = extract_all(@"([a-z][a-z0-9_\-]{3,})", Output)
+      | extend LeakedConnectors = set_intersect(OutputTokens, known)
+      | extend LeakedCount = array_length(LeakedConnectors)
+      | where LeakedCount >= 2
+      | project LeakTime = TimeGenerated, ConvId, LeakedCount, LeakedConnectors,
+                OutputSample = substring(tostring(Properties["text"]), 0, 1024);
+  asks
+  | join kind=inner leaks on ConvId
+  | where LeakTime between (AskTime .. (AskTime + 10m))
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project AskTime, LeakTime, AccountName, UserId, ConvId, ChannelId, ClientIP,
+            LeakedCount, LeakedConnectors, Prompt, OutputSample,
+            LagSeconds = datetime_diff('second', LeakTime, AskTime)
+  | order by LeakedCount desc, AskTime desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- CapabilityDisclosure
+- AIRT-v2

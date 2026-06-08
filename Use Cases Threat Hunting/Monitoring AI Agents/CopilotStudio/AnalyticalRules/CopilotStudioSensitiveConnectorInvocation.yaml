@@ -1,0 +1,80 @@
+id: a1b2c3d4-1007-4a11-9c01-0123456789a7
+name: Copilot Studio - High-impact connector invoked
+description: |
+  Raises an incident when a Copilot Studio agent invokes a high-impact
+  connector / action - one that can run code, send mail, reach arbitrary
+  HTTP endpoints, query databases, or perform privileged Microsoft 365 /
+  Azure operations. These connectors are the agent's reach into the wider
+  estate and are the actions an attacker most wants to drive.
+
+  Reads AppDependencies (DependencyType == "Connector"). The match list
+  is keyed off the connector Name / Target substring. Tune the
+  sensitiveConnectors list to your approved high-impact action set.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- LateralMovement
+relevantTechniques:
+- T1059
+- T1648
+query: |
+  let sensitiveConnectors = dynamic([
+      "office365", "sendemail", "sendmail", "outlook", "exchange",
+      "http", "webhook", "azuread", "azure", "sql", "dataverse",
+      "sharepoint", "onedrive", "powershell", "function", "automate",
+      "logicapp", "graph", "keyvault", "blob", "storage"
+  ]);
+  AppDependencies
+  | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector"
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      MatchKey  = tolower(strcat(Name, " ", Target))
+  | where MatchKey has_any (sensitiveConnectors)
+  | summarize
+        Calls     = count(),
+        Targets   = make_set(Target, 25),
+        Success   = countif(Success == true),
+        Failures  = countif(Success == false),
+        FirstSeen = min(TimeGenerated),
+        LastSeen  = max(TimeGenerated)
+      by Name, ConvId, ChannelId
+  | extend AccountName = iff(isempty(ConvId), strcat("connector:", Name), ConvId)
+  | project LastSeen, FirstSeen, AccountName, Name, ConvId, ChannelId, Calls, Success, Failures, Targets
+  | order by LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- Connectors
+- HighImpact

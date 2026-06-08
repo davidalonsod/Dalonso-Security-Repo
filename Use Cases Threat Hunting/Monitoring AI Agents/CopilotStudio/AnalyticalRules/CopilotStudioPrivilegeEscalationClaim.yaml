@@ -1,0 +1,91 @@
+id: a1b2c3d4-1011-4a11-9c01-0123456789b1
+name: Copilot Studio - Authority / role-impersonation claim in user message
+description: |
+  Raises an incident when an inbound Copilot Studio user message asserts
+  an authority or role the channel cannot verify ("I am the CFO", "as an
+  administrator", "I'm authorised to", "on behalf of the board") in order
+  to coax the agent into releasing restricted data or running privileged
+  actions. Because the agent has no way to validate the claim, this social
+  -engineering pattern is a common privilege-escalation lever against
+  Copilot Studio agents.
+
+  Reads inbound turns from AppEvents (Name == "BotMessageReceived") with
+  the prompt text in Properties.text (requires "Log sensitive properties"
+  on the agent's Application Insights settings).
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- PrivilegeEscalation
+- InitialAccess
+relevantTechniques:
+- T1548
+- T1078
+query: |
+  let escalationMarkers = dynamic([
+      "i am the ceo", "i'm the ceo", "i am the cfo", "i'm the cfo",
+      "i am the cto", "i am your administrator", "as an administrator",
+      "as the administrator", "as an admin", "i am an admin", "i'm an admin",
+      "i have admin", "i am authorised", "i am authorized", "i'm authorised",
+      "i'm authorized", "i am allowed to", "i have permission to",
+      "on behalf of the", "i am from it", "i'm from security",
+      "by order of", "override the policy", "i outrank", "elevate my access",
+      "give me access to", "grant me access", "i should have access"
+  ]);
+  AppEvents
+  | where Name == "BotMessageReceived"
+  | extend
+      ConvId    = tostring(Properties["conversationId"]),
+      ChannelId = tostring(Properties["channelId"]),
+      Locale    = tostring(Properties["locale"]),
+      DesignMode = tostring(Properties["DesignMode"]),
+      Text      = tolower(tostring(Properties["text"]))
+  | where isnotempty(Text)
+  | mv-apply Marker = escalationMarkers to typeof(string) on (
+        where Text contains Marker
+        | summarize Markers = make_set(Marker)
+    )
+  | extend AccountName = iff(isempty(UserId), "unknown-agent", UserId)
+  | project
+      TimeGenerated, AccountName, ConvId, ChannelId, Locale, DesignMode,
+      Markers, Text = substring(tostring(Properties["text"]), 0, 1024),
+      SessionId, ClientIP, AppVersion
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- PrivilegeEscalation
+- SocialEngineering
