@@ -1,0 +1,104 @@
+id: 92a3b4c5-8888-4b02-9205-0123456789d5
+name: Foundry - Prompt-injection patterns in agent input
+description: |
+  Hunts Foundry / Agent Service inputs and tool arguments for known
+  prompt-injection markers: instructions to ignore previous guidance,
+  role-override phrases, tool-coercion phrases, system-prompt disclosure
+  requests, and base64 / data-URI blobs embedded in user content. This
+  catches injection attempts that Prompt Shields may not have flagged
+  (custom phrasings, novel jailbreaks) - pair it with the
+  guardrail-jailbreak rule for the model-verdict view.
+
+  Reads the real Foundry telemetry shape: spans in AppDependencies, bag
+  in Properties. The prompt text lives in gen_ai.input.messages and tool
+  arguments in gen_ai.tool.call.arguments, so both require
+  AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED. Without content
+  recording this rule will not fire.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- Execution
+relevantTechniques:
+- T1059
+- T1204
+query: |
+  let injectionPhrases = dynamic([
+      "ignore previous instructions",
+      "ignore prior instructions",
+      "disregard the above",
+      "you are now",
+      "act as system",
+      "system prompt:",
+      "developer mode",
+      "bypass safety",
+      "reveal your prompt",
+      "print your instructions",
+      "exfiltrate",
+      "send to attacker"
+  ]);
+  let toolCoercion = dynamic([
+      "regardless of restrictions",
+      "without confirming",
+      "skip approval",
+      "use admin privileges",
+      "elevate to"
+  ]);
+  AppDependencies
+  | where isnotempty(Properties["gen_ai.input.messages"])
+      or isnotempty(Properties["gen_ai.tool.call.arguments"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Prompt    = tostring(Properties["gen_ai.input.messages"]),
+      ToolName  = tostring(Properties["gen_ai.tool.name"]),
+      ToolArgs  = tostring(Properties["gen_ai.tool.call.arguments"])
+  | extend Haystack = tolower(strcat(Prompt, " ", ToolArgs))
+  | where Haystack has_any (injectionPhrases)
+      or Haystack has_any (toolCoercion)
+      or Haystack matches regex @"data:[a-z/+.\-]+;base64,[A-Za-z0-9+/=]{200,}"
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      TimeGenerated, AccountName, Agent, Model, ProjectId, ConvId,
+      ToolName, Prompt, ToolArgs
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- OWASP-LLM01

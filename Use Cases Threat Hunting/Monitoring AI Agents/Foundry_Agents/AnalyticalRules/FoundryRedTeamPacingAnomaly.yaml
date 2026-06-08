@@ -1,0 +1,123 @@
+id: d6e7f809-cccc-4f06-9209-0123456789d9
+name: Foundry - Automated red-team / fuzzing pacing
+description: |
+  Detects the pacing fingerprint left by automated LLM red-team / fuzzing
+  frameworks (Microsoft PyRIT, Confident-AI DeepTeam, custom adversarial
+  scripts) driving a Foundry / Agent Service agent. Automated drivers
+  generate volumetric patterns that differ from normal interactive use.
+
+  Three independent sub-signals are evaluated against a one-hour window;
+  any one firing raises the alert, two or more is a strong indicator of
+  automated abuse:
+
+    1. ConversationFanOut - one agent opens >=10 distinct conversation
+                            ids in a 10-minute bucket (parallel runs)
+    2. GuardrailHammer    - one agent accumulates >=5 content-filter
+                            jailbreak / prompt-shield trips in 1h
+    3. SustainedHighRate  - one agent sustains >=30 spans/min for
+                            >=5 minutes (mass fuzzing)
+
+  Reads AppDependencies with the property bag in Properties; guardrail
+  verdicts in microsoft.foundry.content_filter.results parsed defensively
+  (jailbreak / prompt_shield / indirect_attack). Tune the thresholds to
+  your tenant - heavy batch workloads can legitimately fan out.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Discovery
+- Impact
+relevantTechniques:
+- T1526
+- T1499
+query: |
+  let window = 1h;
+  let burstWindow = 10m;
+  let base =
+      AppDependencies
+      | where TimeGenerated > ago(window)
+      | where isnotempty(Properties["gen_ai.agent.name"])
+      | extend
+          Agent  = tostring(Properties["gen_ai.agent.name"]),
+          ConvId = tostring(Properties["gen_ai.conversation.id"]),
+          FilterRaw = tostring(Properties["microsoft.foundry.content_filter.results"])
+      | extend FilterArr = todynamic(FilterRaw)
+      | extend
+          Cfr0 = todynamic(FilterArr[0].content_filter_results),
+          Cfr1 = todynamic(FilterArr[1].content_filter_results);
+  let convFanOut =
+      base
+      | summarize Convs = dcount(ConvId)
+          by Agent, Bucket = bin(TimeGenerated, burstWindow)
+      | where Convs >= 10
+      | extend Signal = "ConversationFanOut", Value = todouble(Convs);
+  let guardrailHammer =
+      base
+      | extend Tripped = isnotempty(FilterRaw) and (
+            tobool(Cfr0.jailbreak.detected) or tobool(Cfr0.jailbreak.filtered)
+            or tobool(Cfr1.jailbreak.detected) or tobool(Cfr1.jailbreak.filtered)
+            or tobool(Cfr0.prompt_shield.detected) or tobool(Cfr0.prompt_shield.filtered)
+            or tobool(Cfr1.prompt_shield.detected) or tobool(Cfr1.prompt_shield.filtered)
+            or tobool(Cfr0.indirect_attack.detected) or tobool(Cfr0.indirect_attack.filtered)
+            or tobool(Cfr1.indirect_attack.detected) or tobool(Cfr1.indirect_attack.filtered))
+      | summarize Trips = countif(Tripped)
+          by Agent, Bucket = bin(TimeGenerated, window)
+      | where Trips >= 5
+      | extend Signal = "GuardrailHammer", Value = todouble(Trips);
+  let sustainedRate =
+      base
+      | summarize SpansPerMin = count()
+          by Agent, Minute = bin(TimeGenerated, 1m)
+      | where SpansPerMin >= 30
+      | summarize HighRateMinutes = count(), MaxRate = max(SpansPerMin)
+          by Agent
+      | where HighRateMinutes >= 5
+      | extend Signal = "SustainedHighRate", Value = todouble(MaxRate), Bucket = bin(now(), 1m);
+  union convFanOut, guardrailHammer, sustainedRate
+  | summarize
+      Signals       = make_set(Signal, 4),
+      SignalDetails = make_bag(pack(Signal, Value)),
+      FirstSeen     = min(Bucket),
+      LastSeen      = max(Bucket)
+      by Agent
+  | extend SignalCount = array_length(Signals)
+  | extend Confidence = iff(SignalCount >= 2, "High", "Medium")
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project LastSeen, AccountName, Agent, Signals, SignalDetails, SignalCount, Confidence, FirstSeen
+  | order by SignalCount desc, LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- OWASP-LLM01
+- OWASP-LLM10
+- PyRIT
+- DeepTeam

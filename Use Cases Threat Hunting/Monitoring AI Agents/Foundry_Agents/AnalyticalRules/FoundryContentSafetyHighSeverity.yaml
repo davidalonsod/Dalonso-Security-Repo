@@ -1,0 +1,90 @@
+id: 6f708192-5555-4eee-9202-0123456789d2
+name: Foundry - Content-safety high-severity filter hit
+description: |
+  Raises an incident when the Azure AI Content Safety filter returns a
+  high-severity verdict on a Foundry / Agent Service prompt or completion
+  in one of the four harm categories (hate, sexual, violence, self-harm).
+  High severity is used as the alert threshold to keep noise low; the
+  companion hunt (AgentContentSafetyFilterHits) surfaces low / medium for
+  proactive review.
+
+  Reads the real Foundry telemetry shape: spans in AppDependencies,
+  property bag in Properties, verdict in
+  microsoft.foundry.content_filter.results. Requires
+  AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED for the prompt text.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- Impact
+relevantTechniques:
+- T1059
+query: |
+  AppDependencies
+  | where isnotempty(Properties["microsoft.foundry.content_filter.results"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Prompt    = tostring(Properties["gen_ai.input.messages"]),
+      FilterArr = todynamic(tostring(Properties["microsoft.foundry.content_filter.results"]))
+  | mv-expand Entry = FilterArr
+  | extend
+      SourceType = tostring(Entry.source_type),
+      Blocked    = tobool(Entry.blocked),
+      Filter     = todynamic(Entry.content_filter_results)
+  | extend
+      HateSeverity     = tostring(Filter.hate.severity),
+      SexualSeverity   = tostring(Filter.sexual.severity),
+      ViolenceSeverity = tostring(Filter.violence.severity),
+      SelfHarmSeverity = tostring(Filter.self_harm.severity)
+  | extend MaxSeverity = case(
+      HateSeverity == "high" or SexualSeverity == "high" or ViolenceSeverity == "high" or SelfHarmSeverity == "high", "high",
+      HateSeverity == "medium" or SexualSeverity == "medium" or ViolenceSeverity == "medium" or SelfHarmSeverity == "medium", "medium",
+      "low")
+  | where MaxSeverity == "high"
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      TimeGenerated, AccountName, Agent, Model, ProjectId, ConvId,
+      HateSeverity, SexualSeverity, ViolenceSeverity, SelfHarmSeverity,
+      Prompt
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- ContentSafety

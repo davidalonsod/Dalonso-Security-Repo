@@ -1,0 +1,92 @@
+id: e7f8091a-dddd-4007-920a-0123456789da
+name: Foundry - Sensitive tool / capability invoked by agent
+description: |
+  Surfaces Foundry / Agent Service runs where the agent invoked a
+  high-impact tool / capability: code interpreters, shell / OS command
+  execution, file-system or file-search access, outbound HTTP / browser
+  fetch, database / SQL, or email send. These are the capabilities an
+  attacker abuses after a successful injection to pivot from "the model
+  said something" to "the agent did something".
+
+  Reads gen_ai.tool.name / gen_ai.tool.type from the AppDependencies span
+  property bag (Properties). Pair with the untrusted-tool-source rule
+  (to see whether the tool reached an unapproved host) and the
+  prompt-injection rule (to see whether the invocation followed an
+  injection). Tune the sensitiveTools list to match the tools your agents
+  are expected - or not expected - to use.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- Collection
+relevantTechniques:
+- T1059
+- T1213
+query: |
+  let sensitiveTools = dynamic([
+      "code_interpreter", "code-interpreter", "python", "shell", "bash",
+      "cmd", "powershell", "file_search", "file-search", "filesystem",
+      "http", "fetch", "browser", "email", "sendmail", "sql", "database"
+  ]);
+  AppDependencies
+  | where isnotempty(Properties["gen_ai.tool.name"])
+      or isnotempty(Properties["gen_ai.tool.type"])
+  | extend
+      Agent    = tostring(Properties["gen_ai.agent.name"]),
+      Model    = tostring(Properties["gen_ai.request.model"]),
+      ConvId   = tostring(Properties["gen_ai.conversation.id"]),
+      ToolName = tolower(tostring(Properties["gen_ai.tool.name"])),
+      ToolType = tolower(tostring(Properties["gen_ai.tool.type"])),
+      ToolArgs = tostring(Properties["gen_ai.tool.call.arguments"])
+  | where ToolName has_any (sensitiveTools) or ToolType has_any (sensitiveTools)
+  | summarize
+      Invocations = count(),
+      Tools       = make_set(ToolName, 16),
+      ToolTypes   = make_set(ToolType, 16),
+      SampleArgs  = take_any(ToolArgs),
+      FirstSeen   = min(TimeGenerated),
+      LastSeen    = max(TimeGenerated)
+      by Agent, Model, ConvId
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      LastSeen, AccountName, Agent, Model, ConvId, Invocations,
+      Tools, ToolTypes, SampleArgs, FirstSeen
+  | order by Invocations desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- OWASP-LLM07

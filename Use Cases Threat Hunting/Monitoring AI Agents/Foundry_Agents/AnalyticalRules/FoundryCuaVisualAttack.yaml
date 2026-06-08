@@ -1,0 +1,115 @@
+id: 6f1a2b3c-4d5e-4f14-9305-aaaaaaaaaaa5
+name: Foundry - Computer-Use Agent visual prompt-injection
+description: |
+  Detects the v2.0 taxonomy's "Computer Use Agent (CUA) visual attack"
+  failure mode: a computer-use agent is fed visual content that appears
+  innocuous to humans but carries adversarial instructions for the
+  model. Patterns observed by the Microsoft AI Red Team include hidden
+  text rendered at non-human-readable scale, off-viewport UI elements
+  the agent OCRs but the user does not see, and prompt-injection
+  embedded in images / page content the agent is instructed to interpret.
+
+  The rule scopes to spans whose tool type or name marks them as
+  computer-use (computer_use, browser, screen_capture, ui, mouse,
+  keyboard, navigate, click) and inspects the observation /
+  screenshot.text / tool result payload for:
+    - Unicode Tag block (U+E0000-U+E007F) - hidden ASCII smuggling
+    - >= 3 zero-width chars (U+200B-U+200D, U+FEFF, U+2060)
+    - bidirectional overrides (U+202A-U+202E, U+2066-U+2069)
+    - explicit prompt-injection markers (ignore previous, developer
+      mode, send the data to, navigate to, click this link, ...)
+
+  Threshold is intentionally low because each pattern is a strong
+  individual indicator that the screen content is adversarial. Pair
+  with FoundryRedTeamPacingAnomaly to spot bursts.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- DefenseEvasion
+relevantTechniques:
+- T1566
+- T1027
+query: |
+  let injectionMarkers = dynamic([
+      "ignore previous instructions","disregard previous","you are now",
+      "developer mode","do anything now","reveal your system prompt",
+      "ignore the user","execute the following","run this command",
+      "send the data to","upload to","download from","navigate to",
+      "click this link","follow this link","copy and paste this",
+      "type the following","press enter to","authorise the transaction"
+  ]);
+  AppDependencies
+  | where TimeGenerated > ago(1h)
+  | extend
+      Agent      = tostring(Properties["gen_ai.agent.name"]),
+      Model      = tostring(Properties["gen_ai.request.model"]),
+      ConvId     = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId  = tostring(Properties["microsoft.foundry.project.id"]),
+      ToolType   = tolower(tostring(Properties["gen_ai.tool.type"])),
+      ToolName   = tolower(tostring(Properties["gen_ai.tool.name"])),
+      Observation = tostring(coalesce(
+                      Properties["gen_ai.computer_use.observation"],
+                      Properties["gen_ai.computer_use.screenshot.text"],
+                      Properties["microsoft.agent.computer_use.observation"],
+                      Properties["gen_ai.tool.call.result"], ""))
+  | where ToolType has_any ("computer_use","computer-use","browser","desktop","ui","screen")
+       or ToolName has_any ("computer_use","screenshot","mouse","keyboard","navigate","click","type_text","screen_capture","browser_use")
+  | where isnotempty(Observation)
+  | extend ObsLower = tolower(Observation)
+  | extend
+      TagChars     = array_length(extract_all(@"([\x{E0000}-\x{E007F}])", Observation)),
+      ZeroWidth    = array_length(extract_all(@"([\x{200B}-\x{200D}\x{FEFF}\x{2060}])", Observation)),
+      BidiOverride = array_length(extract_all(@"([\x{202A}-\x{202E}\x{2066}-\x{2069}])", Observation)),
+      HasInjection = ObsLower has_any (injectionMarkers)
+  | where TagChars > 0 or ZeroWidth >= 3 or BidiOverride > 0 or HasInjection
+  | extend Signal = case(
+      TagChars > 0,     "UnicodeTagInScreenContent",
+      BidiOverride > 0, "BidiOverrideInScreenContent",
+      HasInjection,     "InstructionInScreenContent",
+                        "ZeroWidthInScreenContent")
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project TimeGenerated, Signal, AccountName, Agent, Model, ProjectId, ConvId,
+            ToolType, ToolName, TagChars, ZeroWidth, BidiOverride, HasInjection,
+            ObservationSample = substring(Observation, 0, 512)
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- ComputerUse
+- VisualInjection
+- AIRT-v2

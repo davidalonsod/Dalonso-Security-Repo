@@ -1,0 +1,89 @@
+id: 70819203-6666-4fff-9203-0123456789d3
+name: Foundry - Custom blocklist term matched
+description: |
+  Raises an incident when an organisation-defined custom blocklist term
+  is matched on a Foundry / Agent Service prompt or completion. Confirms
+  block lists are firing and surfaces users probing around restricted
+  terms (project code-names, regulated keywords, internal identifiers).
+
+  Reads the real Foundry telemetry shape: spans in AppDependencies,
+  property bag in Properties, verdict in
+  microsoft.foundry.content_filter.results. The custom-blocklist field
+  name varies by API version, so custom_blocklists and custom_blocklist
+  are both parsed defensively. Requires
+  AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED for the prompt text.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- DefenseEvasion
+relevantTechniques:
+- T1059
+- T1562
+query: |
+  AppDependencies
+  | where isnotempty(Properties["microsoft.foundry.content_filter.results"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Prompt    = tostring(Properties["gen_ai.input.messages"]),
+      FilterArr = todynamic(tostring(Properties["microsoft.foundry.content_filter.results"]))
+  | mv-expand Entry = FilterArr
+  | extend
+      SourceType = tostring(Entry.source_type),
+      Cfr        = todynamic(Entry.content_filter_results)
+  // Custom blocklists surface as named keys inside content_filter_results
+  // (e.g. "Profanity", or your own blocklist name) alongside the standard
+  // harm categories. Treat any non-standard key that tripped as a blocklist
+  // hit so the rule works regardless of the blocklist name.
+  | mv-expand Key = bag_keys(Cfr)
+  | extend BlockListName = tostring(Key)
+  | where BlockListName !in~ ("jailbreak", "prompt_shield", "indirect_attack", "hate", "sexual", "violence", "self_harm", "protected_material", "protected_material_code", "protected_material_text")
+  | extend Verdict = todynamic(Cfr[BlockListName])
+  | where tobool(Verdict.filtered) or tobool(Verdict.detected)
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      TimeGenerated, AccountName, SourceType, Agent, Model, ProjectId, ConvId,
+      BlockListName, VerdictJson = tostring(Verdict), Prompt
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- ContentSafety
+- Blocklist

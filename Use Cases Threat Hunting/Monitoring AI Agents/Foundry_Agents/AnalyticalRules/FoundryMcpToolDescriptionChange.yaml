@@ -1,0 +1,108 @@
+id: 6f1a2b3c-4d5e-4f11-9302-aaaaaaaaaaa2
+name: Foundry - MCP / plugin tool description changed
+description: |
+  Detects MCP / plugin tool description poisoning: a tool the agent has
+  been calling for days suddenly carries a different natural-language
+  description. Tool description poisoning is the v2.0 taxonomy's primary
+  agentic supply-chain compromise vector - the binary is unchanged, only
+  the natural-language instructions the model reads have been swapped.
+
+  The rule hashes gen_ai.tool.description (with fallbacks to
+  microsoft.agent.tool.description and mcp.tool.description) per
+  (server, tool) and alerts when a hash appears in the last hour that
+  was not present in the preceding 14-day baseline. Only established
+  (server, tool) pairs are evaluated (>= 10 baseline calls AND first
+  seen > 3 days ago) so legitimate onboarding does not fire the rule.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- DefenseEvasion
+- Persistence
+relevantTechniques:
+- T1195
+- T1554
+query: |
+  let baselineWindow = 14d;
+  let recentWindow   = 1h;
+  let toolDescs =
+      AppDependencies
+      | where TimeGenerated > ago(baselineWindow)
+      | extend
+          ToolName = tolower(tostring(Properties["gen_ai.tool.name"])),
+          ToolDesc = tostring(coalesce(
+                       Properties["gen_ai.tool.description"],
+                       Properties["microsoft.agent.tool.description"],
+                       Properties["mcp.tool.description"])),
+          ToolServer = tolower(tostring(coalesce(
+                       Properties["gen_ai.tool.server"],
+                       Properties["mcp.server.name"],
+                       Properties["microsoft.agent.tool.server"], "unknown")))
+      | where isnotempty(ToolName) and isnotempty(ToolDesc)
+      | extend NormDesc = trim(@"\s+", replace_regex(ToolDesc, @"\s+", " "))
+      | extend DescHash = hash_sha256(NormDesc);
+  let baseline =
+      toolDescs
+      | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+      | summarize Calls = count(),
+                  FirstSeen = min(TimeGenerated)
+          by ToolServer, ToolName, DescHash;
+  let stable =
+      baseline
+      | summarize Calls = sum(Calls), FirstSeen = min(FirstSeen)
+          by ToolServer, ToolName
+      | where Calls >= 10 and FirstSeen < ago(3d)
+      | distinct ToolServer, ToolName;
+  let recent =
+      toolDescs
+      | where TimeGenerated > ago(recentWindow)
+      | summarize Hits = count(),
+                  Sample = take_any(substring(ToolDesc, 0, 1024)),
+                  AnyAgent = take_any(tostring(Properties["gen_ai.agent.name"])),
+                  AnyConv  = take_any(tostring(Properties["gen_ai.conversation.id"])),
+                  FirstSeen = min(TimeGenerated)
+          by ToolServer, ToolName, DescHash;
+  recent
+  | join kind=leftanti baseline on ToolServer, ToolName, DescHash
+  | join kind=inner stable on ToolServer, ToolName
+  | where Hits >= 1
+  | extend AccountName = iff(isempty(AnyAgent), "unknown-agent", AnyAgent)
+  | project FirstSeen, AccountName, Agent = AnyAgent, ToolServer, ToolName,
+            DescHash, NewDescriptionSample = Sample, Hits, ConvId = AnyConv
+  | order by FirstSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: P1D
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- MCP
+- SupplyChain
+- AIRT-v2

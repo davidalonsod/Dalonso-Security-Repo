@@ -1,0 +1,120 @@
+id: 6f1a2b3c-4d5e-4f16-9307-aaaaaaaaaaa7
+name: Foundry - Extended capability / architecture disclosure
+description: |
+  Detects the v2.0 taxonomy's "capability / architecture disclosure"
+  failure mode beyond plain system-prompt extraction: the user probes
+  for the agent's tool list, function schemas, consent / HitL trigger
+  logic or memory interface, and the agent's response leaks structural
+  details (tool names, schemas, parameters, consent rules, memory
+  primitives). v2.0 highlights this as a key enabler of follow-on
+  attacks - turning black-box probing into a white-box exploit path.
+
+  This complements FoundrySystemPromptDisclosure (which only looks at
+  system-prompt phrasing) by:
+    - covering tool / schema / consent / memory probes, and
+    - intersecting the response against the project's actual recent
+      tool inventory (last 7 days, tools with >= 5 calls) so the rule
+      only fires when at least 3 real tool names from the project are
+      reflected back to the user.
+
+  The "real tool name" intersection is the false-positive control:
+  generic answers ("I can summarise text") never reach the threshold.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: P7D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Discovery
+- Collection
+relevantTechniques:
+- T1213
+- T1518
+query: |
+  let probes = dynamic([
+      "what tools","list your tools","what functions","describe your functions",
+      "what capabilities","what can you do","what actions","what plugins",
+      "list your plugins","list your skills","what skills","describe your tools",
+      "what is your schema","print your function","reveal your tools",
+      "when do you ask for approval","what triggers consent","what triggers hitl",
+      "what triggers your guardrails","describe your memory","what memories do you have",
+      "what are your operations","what is your tool list","describe your hooks",
+      "list your apis","what mcp servers"
+  ]);
+  let leakMarkers = dynamic([
+      "function:","tool:","name:","schema:","parameters","arguments",
+      "i have access to","i can use the","my available tools","my tools include",
+      "the following tools","tools available","available functions",
+      "i ask for approval","i require consent","my memory","memory store",
+      "my operations are","my mcp server","my plugins are"
+  ]);
+  let known =
+      toscalar(
+          AppDependencies
+          | where TimeGenerated between (ago(7d) .. ago(1h))
+          | extend ToolName = tolower(tostring(Properties["gen_ai.tool.name"]))
+          | where isnotempty(ToolName) and strlen(ToolName) >= 4
+          | summarize Calls = count() by ToolName
+          | where Calls >= 5
+          | summarize KnownTools = make_set(ToolName, 200)
+      );
+  AppDependencies
+  | where TimeGenerated > ago(1h)
+  | where isnotempty(Properties["gen_ai.input.messages"])
+          and isnotempty(Properties["gen_ai.output.messages"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Input     = tolower(tostring(Properties["gen_ai.input.messages"])),
+      Output    = tolower(tostring(Properties["gen_ai.output.messages"]))
+  | extend AskedAboutCapabilities = Input has_any (probes)
+  | extend LeaksStructure         = Output has_any (leakMarkers)
+  | where AskedAboutCapabilities and LeaksStructure
+  | extend OutputTokens = extract_all(@"([a-z][a-z0-9_\-]{3,})", Output)
+  | extend LeakedTools  = set_intersect(OutputTokens, known)
+  | extend LeakedToolCount = array_length(LeakedTools)
+  | where LeakedToolCount >= 3
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project TimeGenerated, AccountName, Agent, Model, ProjectId, ConvId,
+            LeakedToolCount, LeakedTools,
+            InputSample  = substring(Input, 0, 512),
+            OutputSample = substring(Output, 0, 1024)
+  | order by LeakedToolCount desc, TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- CapabilityDisclosure
+- AIRT-v2

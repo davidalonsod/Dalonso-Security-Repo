@@ -1,0 +1,120 @@
+id: 6f1a2b3c-4d5e-4f17-9308-aaaaaaaaaaa8
+name: Foundry - Inter-agent permission / role mismatch
+description: |
+  Detects the v2.0 taxonomy's "inter-agent trust escalation" failure
+  mode: an orchestrator delegates work to a sub-agent, and that sub-
+  agent then exercises tools that are not in its 14-day baseline
+  repertoire. The pattern mirrors the confused-deputy problem - the
+  orchestrator did not independently verify the sub-agent's claimed
+  permissions, and a compromised or self-asserting sub-agent reaches
+  capabilities it should not have.
+
+  The rule:
+    1. Identifies cross-agent invocations in the last hour (tool type
+       agent / connected_agent / agent_call, with the called agent
+       resolved from gen_ai.tool.target_agent / microsoft.agent.target_
+       agent.name / fallback to the tool name).
+    2. Looks at every tool the called sub-agent invokes within the next
+       30 minutes in the same conversation.
+    3. Joins leftanti against the sub-agent's 14-day tool baseline so
+       only tool names it has not used before are kept.
+    4. Fires only when (a) at least 2 distinct new tools are seen, OR
+       (b) any of the new tools is sensitive (code interpreter, shell,
+       exec, sql, email, http). Both conditions filter onboarding /
+       legitimate first-use noise.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- LateralMovement
+- PrivilegeEscalation
+relevantTechniques:
+- T1210
+- T1098
+query: |
+  let baselineWindow = 14d;
+  let recentWindow   = 1h;
+  let calleeBaseline =
+      AppDependencies
+      | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+      | extend Agent    = tostring(Properties["gen_ai.agent.name"]),
+               ToolName = tolower(tostring(Properties["gen_ai.tool.name"]))
+      | where isnotempty(Agent) and isnotempty(ToolName)
+      | distinct Agent, ToolName;
+  let crossInvocations =
+      AppDependencies
+      | where TimeGenerated > ago(recentWindow)
+      | extend
+          Caller   = tostring(Properties["gen_ai.agent.name"]),
+          ConvId   = tostring(Properties["gen_ai.conversation.id"]),
+          ToolName = tolower(tostring(Properties["gen_ai.tool.name"])),
+          ToolType = tolower(tostring(Properties["gen_ai.tool.type"])),
+          Callee   = tolower(tostring(coalesce(
+                        Properties["gen_ai.tool.target_agent"],
+                        Properties["microsoft.agent.target_agent.name"],
+                        Properties["gen_ai.tool.name"])))
+      | where ToolType == "agent" or ToolName has "connected_agent" or ToolName has "agent_call"
+      | project Caller, ConvId, Callee, InvocationTime = TimeGenerated;
+  let calleeUsage =
+      AppDependencies
+      | where TimeGenerated > ago(recentWindow)
+      | extend Agent    = tostring(Properties["gen_ai.agent.name"]),
+               ConvId   = tostring(Properties["gen_ai.conversation.id"]),
+               ToolName = tolower(tostring(Properties["gen_ai.tool.name"])),
+               ToolType = tolower(tostring(Properties["gen_ai.tool.type"]))
+      | where isnotempty(ToolName)
+      | project Agent, ConvId, ToolName, ToolType, ToolTime = TimeGenerated;
+  crossInvocations
+  | join kind=inner calleeUsage on ConvId
+  | where Agent == Callee or Agent has Callee or Callee has Agent
+  | where ToolTime between (InvocationTime .. (InvocationTime + 30m))
+  | join kind=leftanti calleeBaseline on Agent, ToolName
+  | summarize NewToolHits   = count(),
+              NewTools      = make_set(ToolName, 16),
+              NewToolTypes  = make_set(ToolType, 8),
+              FirstSeen     = min(ToolTime),
+              LastSeen      = max(ToolTime),
+              AnyCaller     = take_any(Caller)
+          by Agent, ConvId
+  | where NewToolHits >= 1
+          and (array_length(NewTools) >= 2
+               or NewToolTypes has_any ("code_interpreter","shell","exec","sql","email","http","deploy","azure_write"))
+  | extend AccountName = Agent, Caller = AnyCaller
+  | project LastSeen, AccountName, Caller, Agent, ConvId, NewToolHits,
+            NewTools, NewToolTypes, FirstSeen
+  | order by NewToolHits desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: P1D
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- InterAgent
+- TrustEscalation
+- AIRT-v2

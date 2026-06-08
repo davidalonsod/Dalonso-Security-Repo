@@ -1,0 +1,101 @@
+id: b4c5d6e7-aaaa-4d04-9207-0123456789d7
+name: Foundry - Anomalous token / cost spike per agent
+description: |
+  Detects a Foundry / Agent Service agent whose token consumption in the
+  last hour exceeds three times its 7-day per-hour median (or twice its
+  P95). Useful for catching token abuse, runaway agent / tool-call loops,
+  and cost-driven denial-of-wallet attacks.
+
+  Unlike the Copilot equivalent, Foundry exposes real usage counters, so
+  this rule sums gen_ai.usage.input_tokens + gen_ai.usage.output_tokens
+  from the AppDependencies spans (property bag in Properties). The
+  absolute floor (HourTokens > 50000) suppresses noise from low-traffic
+  agents - tune it and the spike ratio to your tenant. Pair with the
+  red-team pacing rule to confirm whether the spike is a tight tool loop.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: P7D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Impact
+relevantTechniques:
+- T1496
+- T1499
+query: |
+  let lookback = 7d;
+  let recentWindow = 1h;
+  let perHour =
+      AppDependencies
+      | where TimeGenerated > ago(lookback)
+      | where isnotempty(Properties["gen_ai.agent.name"])
+      | extend
+          Agent  = tostring(Properties["gen_ai.agent.name"]),
+          Model  = tostring(Properties["gen_ai.request.model"]),
+          InTok  = tolong(Properties["gen_ai.usage.input_tokens"]),
+          OutTok = tolong(Properties["gen_ai.usage.output_tokens"])
+      | extend TotalTok = coalesce(InTok, 0) + coalesce(OutTok, 0)
+      | summarize
+          HourTokens = sum(TotalTok),
+          HourRuns   = count(),
+          AnyModel   = take_any(Model)
+          by Agent, Hour = bin(TimeGenerated, 1h);
+  let baseline =
+      perHour
+      | where Hour < bin(now(), 1h) - recentWindow
+      | summarize
+          MedianHourTokens = percentile(HourTokens, 50),
+          P95HourTokens    = percentile(HourTokens, 95)
+          by Agent;
+  let recent =
+      perHour
+      | where Hour >= bin(now(), 1h) - recentWindow;
+  recent
+  | join kind=leftouter baseline on Agent
+  | extend
+      MedianHourTokens = coalesce(todouble(MedianHourTokens), 0.0),
+      P95HourTokens    = coalesce(todouble(P95HourTokens), 0.0)
+  | extend SpikeRatio = iff(MedianHourTokens > 0, todouble(HourTokens) / MedianHourTokens, todouble(HourTokens))
+  | where HourTokens > 50000
+      and (SpikeRatio >= 3.0 or HourTokens > P95HourTokens * 2)
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | extend Model = AnyModel
+  | project
+      Hour, AccountName, Agent, Model, HourRuns, HourTokens,
+      MedianHourTokens, P95HourTokens, SpikeRatio
+  | order by SpikeRatio desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- OWASP-LLM10

@@ -1,0 +1,115 @@
+id: 3c4d5e6f-1212-4311-9211-0123456789e1
+name: Foundry - Suspicious or phishing URL in prompt or response
+description: |
+  Raises an incident when a URL with phishing / malicious characteristics
+  appears in a Foundry / Agent Service exchange - either in the user input
+  (gen_ai.input.messages) or in the agent output (gen_ai.output.messages).
+  Flags raw-IP URLs, punycode / IDN homograph hosts (xn--), known URL
+  shorteners, credential-bait paths (login / verify / reset-password /
+  wallet), and risky / look-alike TLDs. This catches a phishing lure fed
+  to the agent, a poisoned knowledge source, or a steered agent surfacing
+  attacker infrastructure.
+
+  Reads gen_ai.input.messages / gen_ai.output.messages from the
+  AppDependencies span property bag (Properties). The message text only
+  exists when AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED is set, so
+  without content recording this rule will not fire. Heuristic by design -
+  treat as a triage signal, not a verdict, and pair with
+  FoundryThreatIntelUrlMatch for the threat-intel-backed view.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- Execution
+relevantTechniques:
+- T1566
+- T1204
+query: |
+  let shorteners = dynamic(["bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd","buff.ly","rb.gy","cutt.ly","rebrand.ly"]);
+  let baitPaths  = dynamic(["login","signin","verify","secure","account","update","reset","password","wallet","seed","mfa","authenticate","confirm"]);
+  let riskyTlds  = dynamic([".zip",".mov",".xyz",".top",".click",".country",".gq",".tk",".ml",".cf",".ga",".rest",".quest"]);
+  let Spans =
+      AppDependencies
+      | where isnotempty(Properties["gen_ai.input.messages"]) or isnotempty(Properties["gen_ai.output.messages"])
+      | extend
+          Agent     = tostring(Properties["gen_ai.agent.name"]),
+          Model     = tostring(Properties["gen_ai.request.model"]),
+          ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+          ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+          Input     = tostring(Properties["gen_ai.input.messages"]),
+          Output    = tostring(Properties["gen_ai.output.messages"]),
+          SrcIp     = tostring(column_ifexists("ClientIP", ""));
+  let FromInput  = Spans | where isnotempty(Input)  | extend Direction = "UserPrompt",    Text = Input;
+  let FromOutput = Spans | where isnotempty(Output) | extend Direction = "AgentResponse", Text = Output;
+  union FromInput, FromOutput
+  | mv-expand Url = extract_all(@"(https?://[^\s\)\]\}""'<>]+)", Text) to typeof(string)
+  | extend
+      Host = tolower(tostring(extract(@"https?://([^/:\s]+)", 1, Url))),
+      Path = tolower(tostring(extract(@"https?://[^/]+(/[^\s]*)?", 1, Url)))
+  | extend Tld = tolower(tostring(extract(@"(\.[a-z]+)$", 1, Host)))
+  | extend
+      RawIpHost  = Host matches regex @"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$",
+      Punycode   = Host contains "xn--",
+      Shortener  = Host in (shorteners),
+      RiskyTld   = set_has_element(riskyTlds, Tld),
+      BaitPath   = Path has_any (baitPaths),
+      AtTrick    = Url matches regex @"https?://[^/\s]+@"
+  | extend RiskScore = toint(RawIpHost) + toint(Punycode) + toint(Shortener)
+                     + toint(RiskyTld) + toint(BaitPath) + toint(AtTrick)
+  | where RiskScore > 0
+  | extend Reasons = trim(",", strcat(
+      iff(RawIpHost, "RawIP,", ""), iff(Punycode, "Punycode,", ""),
+      iff(Shortener, "Shortener,", ""), iff(RiskyTld, "RiskyTLD,", ""),
+      iff(BaitPath, "CredentialBaitPath,", ""), iff(AtTrick, "UserinfoTrick,", "")))
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      TimeGenerated, Direction, RiskScore, Reasons, AccountName, Agent, Model,
+      ProjectId, ConvId, Url = substring(Url, 0, 512), Host, SrcIp
+  | order by RiskScore desc, TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+- entityType: URL
+  fieldMappings:
+  - identifier: Url
+    columnName: Url
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIp
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- Phishing
+- MaliciousUrl

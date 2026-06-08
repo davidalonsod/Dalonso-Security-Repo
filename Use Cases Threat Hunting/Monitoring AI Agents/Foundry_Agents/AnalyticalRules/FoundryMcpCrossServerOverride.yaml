@@ -1,0 +1,119 @@
+id: 6f1a2b3c-4d5e-4f12-9303-aaaaaaaaaaa3
+name: Foundry - Cross-server MCP / plugin instruction override
+description: |
+  Detects the v2.0 taxonomy's "cross-server instruction override" MCP
+  abuse pattern: a malicious MCP / plugin server returns content that
+  attempts to override the behaviour of a tool from a different server
+  invoked in the same conversation. The attack surfaces in the natural-
+  language tool description, arguments or result and exploits protocol-
+  level trust assumptions (the model treats every connected server as
+  equally trusted).
+
+  The rule looks for override phrasing inside gen_ai.tool.description /
+  gen_ai.tool.call.arguments / gen_ai.tool.call.result AND requires the
+  conversation to span at least 2 distinct tool servers, which suppresses
+  single-server legitimate prompts that happen to use override-like
+  language.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT2H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- DefenseEvasion
+- Execution
+- LateralMovement
+relevantTechniques:
+- T1574
+- T1195
+query: |
+  let overrideMarkers = dynamic([
+      "ignore the description","ignore your tool description",
+      "instead use the","instead invoke","use the tool from",
+      "override the","switch to the","use server","forget the previous tool",
+      "this tool is deprecated, use","do not use this tool","call the function from",
+      "the real tool is","disregard the schema","actually invoke","route to server"
+  ]);
+  let markerRegex = strcat("(", strcat_array(overrideMarkers, "|"), ")");
+  let toolCalls =
+      AppDependencies
+      | where TimeGenerated > ago(1h)
+      | extend
+          Agent      = tostring(Properties["gen_ai.agent.name"]),
+          ConvId     = tostring(Properties["gen_ai.conversation.id"]),
+          Model      = tostring(Properties["gen_ai.request.model"]),
+          ToolName   = tolower(tostring(Properties["gen_ai.tool.name"])),
+          ToolServer = tolower(tostring(coalesce(
+                          Properties["gen_ai.tool.server"],
+                          Properties["mcp.server.name"],
+                          Properties["microsoft.agent.tool.server"], ""))),
+          ToolDesc   = tolower(tostring(coalesce(
+                          Properties["gen_ai.tool.description"],
+                          Properties["microsoft.agent.tool.description"],
+                          Properties["mcp.tool.description"], ""))),
+          ToolArgs   = tolower(tostring(Properties["gen_ai.tool.call.arguments"])),
+          ToolResult = tolower(tostring(Properties["gen_ai.tool.call.result"]))
+      | where isnotempty(ConvId) and isnotempty(ToolServer);
+  let convServers =
+      toolCalls
+      | summarize ServerCount = dcount(ToolServer),
+                  Servers     = make_set(ToolServer, 8)
+          by ConvId
+      | where ServerCount >= 2;
+  let suspect =
+      toolCalls
+      | extend Body = strcat(ToolDesc, " ", ToolArgs, " ", ToolResult)
+      | where Body matches regex markerRegex
+      | extend Marker = extract(markerRegex, 1, Body)
+      | summarize OverrideHits = count(),
+                  Markers   = make_set(Marker, 8),
+                  Tools     = make_set(ToolName, 16),
+                  AnyAgent  = take_any(Agent),
+                  AnyModel  = take_any(Model),
+                  FirstSeen = min(TimeGenerated),
+                  LastSeen  = max(TimeGenerated)
+          by ConvId;
+  suspect
+  | join kind=inner convServers on ConvId
+  | where OverrideHits >= 1
+  | extend AccountName = iff(isempty(AnyAgent), "unknown-agent", AnyAgent)
+  | project LastSeen, AccountName, Agent = AnyAgent, Model = AnyModel, ConvId,
+            OverrideHits, ServerCount, Servers, Tools, Markers, FirstSeen
+  | order by OverrideHits desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- MCP
+- AIRT-v2

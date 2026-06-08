@@ -1,0 +1,90 @@
+id: c5d6e7f8-bbbb-4e05-9208-0123456789d8
+name: Foundry - Sensitive data / secrets in agent output
+description: |
+  Detects a Foundry / Agent Service response that contains secret-like or
+  bulk-PII content: AWS access keys, PEM private-key blocks, JWTs,
+  credit-card-like number runs, or a large number of distinct email
+  addresses in a single output. This is the exfiltration / sensitive-data
+  exposure shape - an agent that has been steered (by injection, RAG
+  poisoning or a misconfigured tool) into emitting data it should not.
+
+  Reads gen_ai.output.messages from the AppDependencies span property bag
+  (Properties). The output text only exists when
+  AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED is set, so without
+  content recording this rule will not fire. The regexes are deliberately
+  broad - review hits and tune the patterns / bulk-email threshold to
+  your tenant to manage false positives.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Collection
+- Exfiltration
+relevantTechniques:
+- T1213
+- T1530
+- T1567
+query: |
+  AppDependencies
+  | where isnotempty(Properties["gen_ai.output.messages"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Output    = tostring(Properties["gen_ai.output.messages"])
+  | extend
+      HasAwsKey     = Output matches regex @"AKIA[0-9A-Z]{16}",
+      HasPrivateKey = Output contains "-----BEGIN" and Output contains "PRIVATE KEY-----",
+      HasJwt        = Output matches regex @"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",
+      HasCreditCard = Output matches regex @"\b(?:\d[ \-]?){13,16}\b",
+      EmailCount    = array_length(extract_all(@"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", Output))
+  | where HasAwsKey or HasPrivateKey or HasJwt or HasCreditCard or EmailCount >= 10
+  | extend Signal = strcat(
+      iff(HasAwsKey, "AWSAccessKey;", ""),
+      iff(HasPrivateKey, "PrivateKey;", ""),
+      iff(HasJwt, "JWT;", ""),
+      iff(HasCreditCard, "CreditCardLike;", ""),
+      iff(EmailCount >= 10, strcat("BulkEmails(", tostring(EmailCount), ");"), ""))
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      TimeGenerated, Signal, AccountName, Agent, Model, ProjectId,
+      ConvId, EmailCount
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- OWASP-LLM06

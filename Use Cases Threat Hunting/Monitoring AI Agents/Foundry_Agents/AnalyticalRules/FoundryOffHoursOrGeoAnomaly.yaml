@@ -1,0 +1,103 @@
+id: 8192a3b4-7777-4a01-9204-0123456789d4
+name: Foundry - Off-hours or anomalous-geo agent activity
+description: |
+  Surfaces Foundry / Agent Service runs that happen outside the
+  configured business-hours window, or from a country/region that is not
+  on the expected list. A common indicator of stolen API keys, automated
+  abuse running on a scheduler, or a geographically displaced caller.
+
+  Foundry telemetry has no human-user identity, so the pivot is the agent
+  (gen_ai.agent.name) and conversation (gen_ai.conversation.id). The
+  client geo / IP columns (ClientCountryOrRegion, ClientCity, ClientIP)
+  are only populated when the caller is an HTTP front end; for server-SDK
+  spans they may be empty, so the geo check is best-effort and skipped
+  when the allowed-country list is left empty. Tune businessStart /
+  businessEnd (UTC hours) and allowedCountries to your tenant.
+severity: Low
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- DefenseEvasion
+relevantTechniques:
+- T1078
+query: |
+  // Business hours expressed in UTC. Leave allowedCountries empty to
+  // disable the geo check (off-hours only).
+  let businessStart = 7;
+  let businessEnd = 20;
+  let allowedCountries = dynamic([]);
+  AppDependencies
+  | where isnotempty(Properties["gen_ai.agent.name"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Country   = tostring(column_ifexists("ClientCountryOrRegion", "")),
+      City      = tostring(column_ifexists("ClientCity", "")),
+      SrcIp     = tostring(column_ifexists("ClientIP", ""))
+  | extend Hour = hourofday(TimeGenerated)
+  | extend
+      OffHours     = Hour < businessStart or Hour >= businessEnd,
+      AnomalousGeo = array_length(allowedCountries) > 0
+                     and isnotempty(Country)
+                     and not(set_has_element(allowedCountries, Country))
+  | where OffHours or AnomalousGeo
+  | summarize
+      Runs       = count(),
+      Countries  = make_set(Country, 20),
+      Cities     = make_set(City, 20),
+      SrcIps     = make_set(SrcIp, 20),
+      OffHoursRuns   = countif(OffHours),
+      AnomalousGeoRuns = countif(AnomalousGeo),
+      FirstSeen  = min(TimeGenerated),
+      LastSeen   = max(TimeGenerated)
+      by Agent, Model, ProjectId, ConvId
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | extend SrcIpAddr = tostring(SrcIps[0])
+  | project
+      LastSeen, AccountName, Agent, Model, ProjectId, ConvId,
+      Runs, OffHoursRuns, AnomalousGeoRuns, Countries, Cities,
+      SrcIpAddr, FirstSeen
+  | order by LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI

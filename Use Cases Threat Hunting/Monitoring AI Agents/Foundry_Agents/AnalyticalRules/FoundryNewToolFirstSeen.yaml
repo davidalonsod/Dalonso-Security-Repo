@@ -1,0 +1,97 @@
+id: f8091a2b-eeee-4108-920b-0123456789dc
+name: Foundry - Agent invoking a tool for the first time
+description: |
+  Detects a Foundry / Agent Service agent invoking a tool it has never
+  used in the preceding 14 days. A genuinely new tool / capability in an
+  agent's repertoire is a strong supply-chain and abuse signal: a
+  poisoned tool definition, an injection that coaxes the agent into a
+  high-impact capability (code interpreter, shell, http, email, sql), or
+  a misconfigured agent suddenly gaining reach.
+
+  Reads gen_ai.tool.name / gen_ai.tool.type from the AppDependencies span
+  property bag (Properties). Uses a leftanti join against the 14-day
+  baseline so only the first appearance of an (agent, tool) pair fires.
+  New agents bootstrapping legitimately will be noisy for their first day
+  - tune the baseline window or suppress known onboarding windows.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- PrivilegeEscalation
+relevantTechniques:
+- T1059
+- T1098
+query: |
+  let baselineWindow = 14d;
+  let recentWindow = 1h;
+  let toolEvents =
+      AppDependencies
+      | where TimeGenerated > ago(baselineWindow)
+      | where isnotempty(Properties["gen_ai.tool.name"])
+      | extend
+          Agent     = tostring(Properties["gen_ai.agent.name"]),
+          Model     = tostring(Properties["gen_ai.request.model"]),
+          ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+          ToolName  = tolower(tostring(Properties["gen_ai.tool.name"])),
+          ToolType  = tolower(tostring(Properties["gen_ai.tool.type"]))
+      | where isnotempty(ToolName);
+  let baseline =
+      toolEvents
+      | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+      | distinct Agent, ToolName;
+  let recent =
+      toolEvents
+      | where TimeGenerated > ago(recentWindow)
+      | summarize
+          RecentCalls = count(),
+          FirstSeen   = min(TimeGenerated),
+          AnyModel    = take_any(Model),
+          AnyProject  = take_any(ProjectId),
+          ToolTypes   = make_set(ToolType, 8)
+          by Agent, ToolName;
+  recent
+  | join kind=leftanti baseline on Agent, ToolName
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | extend Model = AnyModel, ProjectId = AnyProject
+  | project
+      FirstSeen, AccountName, Agent, Model, ProjectId, ToolName,
+      ToolTypes, RecentCalls
+  | order by RecentCalls desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- OWASP-LLM07

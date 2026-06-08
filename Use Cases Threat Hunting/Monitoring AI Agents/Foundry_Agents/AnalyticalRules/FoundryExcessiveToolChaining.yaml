@@ -1,0 +1,88 @@
+id: 091a2b3c-ffff-4209-920c-0123456789dd
+name: Foundry - Excessive tool chaining in a single conversation
+description: |
+  Detects a Foundry / Agent Service conversation that fans out into an
+  unusually long or wide tool-call chain in a short window: many tool
+  invocations or many distinct tools driven by one conversation. This is
+  the autonomous-overreach / tool-abuse shape - a runaway agent loop, an
+  injection that turns the agent into an automation engine, or chained
+  capabilities being strung together toward a larger objective
+  (discovery -> data access -> exfiltration).
+
+  Reads gen_ai.tool.name from the AppDependencies span property bag
+  (Properties), grouped by gen_ai.conversation.id. Thresholds (>= 15 tool
+  calls or >= 6 distinct tools per conversation) are starting points -
+  tune to your busiest legitimate agents. Pair with the new-tool and
+  abnormal-tool-usage content for context.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT3H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+relevantTechniques:
+- T1059
+query: |
+  AppDependencies
+  | where isnotempty(Properties["gen_ai.tool.name"])
+  | where isnotempty(Properties["gen_ai.conversation.id"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ToolName  = tolower(tostring(Properties["gen_ai.tool.name"]))
+  | summarize
+      ToolCalls     = count(),
+      DistinctTools = dcount(ToolName),
+      Tools         = make_set(ToolName, 25),
+      FirstSeen     = min(TimeGenerated),
+      LastSeen      = max(TimeGenerated),
+      AnyAgent      = take_any(Agent),
+      AnyModel      = take_any(Model),
+      AnyProject    = take_any(ProjectId)
+      by ConvId
+  | extend DurationMin = datetime_diff('minute', LastSeen, FirstSeen)
+  | where ToolCalls >= 15 or DistinctTools >= 6
+  | extend Agent = AnyAgent, Model = AnyModel, ProjectId = AnyProject
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      LastSeen, AccountName, Agent, Model, ProjectId, ConvId,
+      ToolCalls, DistinctTools, DurationMin, Tools
+  | order by ToolCalls desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- OWASP-LLM08

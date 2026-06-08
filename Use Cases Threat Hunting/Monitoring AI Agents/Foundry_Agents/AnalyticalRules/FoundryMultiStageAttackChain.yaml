@@ -1,0 +1,132 @@
+id: 8293a4b5-1717-4316-9216-0123456789e6
+name: Foundry - Multi-stage attack chain in a single conversation
+description: |
+  High-fidelity correlator. Raises an incident when one Foundry / Agent
+  Service conversation exhibits two or more distinct attack-stage signals
+  - prompt injection, authority / role-impersonation, bulk-exfiltration
+  intent, or jailbreak framing - optionally alongside tool execution in
+  the same conversation. A realistic attack chain stacks these stages
+  (inject -> escalate -> exfiltrate -> execute), so a conversation hitting
+  several at once is far more likely to be a genuine attack than any
+  single marker on its own.
+
+  Aggregates input text signals from gen_ai.input.messages per
+  gen_ai.conversation.id and joins tool activity from gen_ai.tool.name in
+  the AppDependencies span property bag (Properties). The text signals
+  require AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED; the tool-call
+  count works from span metadata alone.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- PrivilegeEscalation
+- Exfiltration
+relevantTechniques:
+- T1566
+- T1078
+- T1567
+query: |
+  let injectionMarkers = dynamic([
+      "ignore previous instructions", "ignore all previous", "disregard previous",
+      "you are now", "act as", "developer mode", "do anything now", "dan mode",
+      "reveal your system prompt", "show your system prompt", "bypass your rules",
+      "without any restrictions", "pretend you are", "from now on you"
+  ]);
+  let escalationMarkers = dynamic([
+      "i am the ceo", "i am the cfo", "as an administrator", "as the administrator",
+      "as an admin", "i have admin", "i am authorised", "i am authorized",
+      "i have permission to", "on behalf of the", "grant me access", "elevate my access"
+  ]);
+  let exfilMarkers = dynamic([
+      "show all", "list all", "list every", "export all", "give me every",
+      "give me the full list", "all records", "all customers", "every user",
+      "dump the", "entire database", "entire table", "select *"
+  ]);
+  let jailbreakMarkers = dynamic([
+      "developer mode", "do anything now", "dan mode", "ignore your safety",
+      "without restrictions", "bypass your rules", "disable your guardrails",
+      "unrestricted mode", "you have no rules"
+  ]);
+  let tools =
+      AppDependencies
+      | where isnotempty(Properties["gen_ai.tool.name"])
+      | where isnotempty(Properties["gen_ai.conversation.id"])
+      | extend ConvId = tostring(Properties["gen_ai.conversation.id"])
+      | summarize ToolCalls = count(), Tools = make_set(tolower(tostring(Properties["gen_ai.tool.name"])), 20),
+                  DistinctTools = dcount(tolower(tostring(Properties["gen_ai.tool.name"]))) by ConvId;
+  AppDependencies
+  | where isnotempty(Properties["gen_ai.input.messages"])
+  | extend
+      ConvId = tostring(Properties["gen_ai.conversation.id"]),
+      Text   = tolower(tostring(Properties["gen_ai.input.messages"]))
+  | where isnotempty(Text)
+  | extend
+      SigInjection  = Text has_any (injectionMarkers),
+      SigEscalation = Text has_any (escalationMarkers),
+      SigExfil      = Text has_any (exfilMarkers),
+      SigJailbreak  = Text has_any (jailbreakMarkers)
+  | summarize
+      Injection  = countif(SigInjection) > 0,
+      Escalation = countif(SigEscalation) > 0,
+      Exfil      = countif(SigExfil) > 0,
+      Jailbreak  = countif(SigJailbreak) > 0,
+      Messages   = count(),
+      FirstSeen  = min(TimeGenerated),
+      LastSeen   = max(TimeGenerated),
+      Agent      = take_any(tostring(Properties["gen_ai.agent.name"])),
+      Model      = take_any(tostring(Properties["gen_ai.request.model"])),
+      ProjectId  = take_any(tostring(Properties["microsoft.foundry.project.id"])),
+      SrcIp      = take_any(tostring(column_ifexists("ClientIP", ""))),
+      SampleText = make_set(substring(tostring(Properties["gen_ai.input.messages"]), 0, 200), 5)
+      by ConvId
+  | extend Stages = toint(Injection) + toint(Escalation) + toint(Exfil) + toint(Jailbreak)
+  | where Stages >= 2
+  | join kind=leftouter tools on ConvId
+  | extend
+      AccountName = iff(isempty(Agent), "unknown-agent", Agent),
+      ToolCalls   = coalesce(ToolCalls, 0),
+      TimeGenerated = LastSeen
+  | project
+      TimeGenerated, FirstSeen, LastSeen, AccountName, Agent, Model, ProjectId,
+      ConvId, SrcIp, Stages, Injection, Escalation, Exfil, Jailbreak,
+      Messages, ToolCalls, DistinctTools, Tools, SampleText
+  | order by Stages desc, LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- MultiStage
+- AttackChain

@@ -1,0 +1,142 @@
+id: 6f1a2b3c-4d5e-4f13-9304-aaaaaaaaaaa4
+name: Foundry - Agent memory poisoning (write or recall to sensitive action)
+description: |
+  Detects the v2.0 taxonomy's memory-poisoning failure mode: an XPIA
+  payload seeds the agent's persistent memory and then propagates to
+  later sessions. Two sub-signals fire the alert:
+
+    1. PoisonedMemoryWrite: a memory write / store / upsert / thread-
+       message-create span whose persisted content matches injection
+       markers (ignore previous, developer mode, store this and remember,
+       next time the user asks, ...).
+    2. PoisonedRecallToSensitiveTool: a memory read / recall / retrieve
+       span whose returned content matches the same injection markers
+       AND a sensitive tool (code interpreter, shell, http, email,
+       sql, file write, resource create / delete) fires in the same
+       conversation within 30 minutes.
+
+  The rule probes gen_ai.memory.* / gen_ai.thread.* / microsoft.agent.
+  memory.* keys defensively because the memory semconv is still in
+  flux. The recall sub-signal requires a follow-on sensitive tool call
+  to suppress benign retrieval of preserved content.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT3H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Persistence
+- InitialAccess
+- Execution
+relevantTechniques:
+- T1546
+- T1566
+- T1059
+query: |
+  let injectionMarkers = dynamic([
+      "ignore previous instructions","disregard previous","you are now",
+      "developer mode","do anything now","dan mode","reveal your system prompt",
+      "show your system prompt","bypass your rules","without any restrictions",
+      "pretend you are","from now on you","store this and remember",
+      "remember to always","next time the user asks","in future conversations",
+      "save this rule","as a permanent instruction","keep this in memory"
+  ]);
+  let sensitiveTools = dynamic([
+      "code_interpreter","python","shell","bash","powershell","exec","run_code",
+      "http_request","fetch","invoke_url","send_email","send_message",
+      "execute_sql","query_database","file_write","write_file","upload",
+      "create_resource","delete_resource","azure_write","deploy"
+  ]);
+  let memoryEvents =
+      AppDependencies
+      | where TimeGenerated > ago(3h)
+      | extend
+          Agent  = tostring(Properties["gen_ai.agent.name"]),
+          ConvId = tostring(Properties["gen_ai.conversation.id"]),
+          OpType = tolower(tostring(coalesce(
+                      Properties["gen_ai.memory.operation"],
+                      Properties["gen_ai.thread.operation"],
+                      Properties["microsoft.agent.memory.operation"], ""))),
+          MemContent = tolower(tostring(coalesce(
+                      Properties["gen_ai.memory.content"],
+                      Properties["gen_ai.memory.value"],
+                      Properties["gen_ai.thread.message.content"],
+                      Properties["microsoft.agent.memory.content"], ""))),
+          SpanName = tolower(coalesce(Name, ""))
+      | where isnotempty(MemContent) or isnotempty(OpType)
+              or SpanName has_any ("memory","thread.message","store","recall");
+  let writes =
+      memoryEvents
+      | where (OpType has_any ("write","store","add","upsert","persist"))
+              or SpanName has_any ("memory.write","memory.store","memory.add","thread.message.create")
+      | where MemContent has_any (injectionMarkers)
+      | summarize Hits = count(),
+                  Samples = make_set(substring(MemContent, 0, 256), 3),
+                  FirstSeen = min(TimeGenerated),
+                  LastSeen  = max(TimeGenerated)
+              by Agent, ConvId
+      | extend Signal = "PoisonedMemoryWrite", Tools = dynamic([]);
+  let recalls =
+      memoryEvents
+      | where (OpType has_any ("read","recall","retrieve","get","fetch","search"))
+              or SpanName has_any ("memory.read","memory.recall","memory.search","thread.message.list")
+      | where MemContent has_any (injectionMarkers)
+      | summarize Hits = count(),
+                  Samples = make_set(substring(MemContent, 0, 256), 3),
+                  FirstSeen = min(TimeGenerated),
+                  LastSeen  = max(TimeGenerated)
+              by Agent, ConvId;
+  let sensitiveActs =
+      AppDependencies
+      | where TimeGenerated > ago(3h)
+      | extend Agent    = tostring(Properties["gen_ai.agent.name"]),
+               ConvId   = tostring(Properties["gen_ai.conversation.id"]),
+               ToolName = tolower(tostring(Properties["gen_ai.tool.name"])),
+               ToolType = tolower(tostring(Properties["gen_ai.tool.type"]))
+      | where ToolName has_any (sensitiveTools) or ToolType has_any (sensitiveTools)
+      | summarize ToolFires = count(), Tools = make_set(ToolName, 8),
+                  ToolFirst = min(TimeGenerated)
+              by Agent, ConvId;
+  let recallChain =
+      recalls
+      | join kind=inner sensitiveActs on Agent, ConvId
+      | where ToolFirst between (FirstSeen .. (LastSeen + 30m))
+      | project Agent, ConvId, FirstSeen, LastSeen, Hits, Samples, Tools,
+                Signal = "PoisonedRecallToSensitiveTool";
+  union writes, recallChain
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project LastSeen, AccountName, Agent, ConvId, Signal, Hits, Tools, Samples, FirstSeen
+  | order by LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: P1D
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- MemoryPoisoning
+- XPIA
+- AIRT-v2

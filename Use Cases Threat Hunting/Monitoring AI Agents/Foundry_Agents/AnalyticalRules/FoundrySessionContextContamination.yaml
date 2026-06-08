@@ -1,0 +1,153 @@
+id: 6f1a2b3c-4d5e-4f18-9309-aaaaaaaaaaa9
+name: Foundry - Session context contamination across spans
+description: |
+  Detects the v2.0 taxonomy's "session context contamination" failure
+  mode: an adversary plants data early in a multi-step session - via an
+  untrusted retrieval source or an injected instruction - that biases
+  the agent's reasoning so a sensitive action is taken later. Neither
+  the contaminating input nor the eventual sensitive call is anomalous
+  in isolation; the pattern only emerges across the full session.
+
+  The rule splits each conversation (>= 5 spans) into time quartiles
+  and requires both:
+    - First quartile (early) carries at least one contamination signal
+      - either an outbound URL whose host is not on the
+        FoundryTrustedToolSources watchlist, or a prompt-injection
+        marker inside the input or tool result.
+    - Last quartile (late) issues at least one sensitive tool call
+      (code interpreter, shell, http, email, sql, file write,
+      resource create / delete).
+
+  Conversations that do not contain both halves of the chain never
+  fire. The 5-span minimum suppresses single-shot interactions; the
+  trusted-source watchlist suppresses any allowlisted retrieval host.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT2H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- Execution
+- DefenseEvasion
+relevantTechniques:
+- T1566
+- T1059
+query: |
+  let injectionMarkers = dynamic([
+      "ignore previous instructions","disregard previous","you are now",
+      "developer mode","do anything now","reveal your system prompt",
+      "bypass your rules","forget the previous","new instructions",
+      "from now on you","store this and remember","next time the user asks"
+  ]);
+  let sensitiveTools = dynamic([
+      "code_interpreter","python","shell","bash","powershell","exec","run_code",
+      "http_request","fetch","invoke_url","send_email","send_message",
+      "execute_sql","query_database","file_write","write_file","upload",
+      "create_resource","delete_resource","azure_write","deploy"
+  ]);
+  let trusted =
+      _GetWatchlist('FoundryTrustedToolSources')
+      | project SourceUri = tolower(tostring(column_ifexists('SourceUri', '')))
+      | where isnotempty(SourceUri);
+  let conv =
+      AppDependencies
+      | where TimeGenerated > ago(2h)
+      | where isnotempty(Properties["gen_ai.conversation.id"])
+      | extend
+          ConvId     = tostring(Properties["gen_ai.conversation.id"]),
+          Agent      = tostring(Properties["gen_ai.agent.name"]),
+          Model      = tostring(Properties["gen_ai.request.model"]),
+          Input      = tolower(tostring(Properties["gen_ai.input.messages"])),
+          ToolName   = tolower(tostring(Properties["gen_ai.tool.name"])),
+          ToolType   = tolower(tostring(Properties["gen_ai.tool.type"])),
+          ToolArgs   = tolower(tostring(Properties["gen_ai.tool.call.arguments"])),
+          ToolResult = tolower(tostring(Properties["gen_ai.tool.call.result"]))
+      | extend SourceUri   = tolower(extract(@"https?://([A-Za-z0-9.\-]+)", 1, strcat(ToolArgs, " ", ToolResult)))
+      | extend IsSensitive = ToolName has_any (sensitiveTools) or ToolType has_any (sensitiveTools);
+  let convBounds =
+      conv
+      | summarize Spans = count(),
+                  Start = min(TimeGenerated),
+                  End   = max(TimeGenerated),
+                  AnyAgent = take_any(Agent),
+                  AnyModel = take_any(Model)
+              by ConvId
+      | where Spans >= 5;
+  let withQuartile =
+      conv
+      | join kind=inner convBounds on ConvId
+      | extend RangeMs = max_of(datetime_diff('millisecond', End, Start), 1)
+      | extend OffMs   = datetime_diff('millisecond', TimeGenerated, Start)
+      | extend Quartile = min_of(toint(OffMs * 4 / RangeMs), 3);
+  let earlyUrl =
+      withQuartile
+      | where Quartile == 0 and isnotempty(SourceUri)
+      | join kind=leftanti trusted on SourceUri
+      | summarize UrlHits = count(),
+                  UntrustedSources = make_set(SourceUri, 16)
+              by ConvId;
+  let earlyInj =
+      withQuartile
+      | where Quartile == 0
+      | extend HasInj = (Input has_any (injectionMarkers)) or (ToolResult has_any (injectionMarkers))
+      | summarize InjHits = countif(HasInj) by ConvId;
+  let lateActs =
+      withQuartile
+      | where Quartile >= 3 and IsSensitive
+      | summarize SensitiveCalls   = count(),
+                  SensitiveTools   = make_set(ToolName, 8),
+                  LastSeen         = max(TimeGenerated),
+                  FirstSensitive   = min(TimeGenerated),
+                  AnyAgent         = take_any(AnyAgent),
+                  AnyModel         = take_any(AnyModel)
+              by ConvId;
+  earlyUrl
+  | join kind=fullouter earlyInj on ConvId
+  | extend ConvId = coalesce(ConvId, ConvId1)
+  | extend Contamination = coalesce(UrlHits, 0) + coalesce(InjHits, 0)
+  | where Contamination >= 1
+  | join kind=inner lateActs on ConvId
+  | where SensitiveCalls >= 1
+  | extend AccountName = iff(isempty(AnyAgent), "unknown-agent", AnyAgent)
+  | project LastSeen, AccountName, Agent = AnyAgent, Model = AnyModel, ConvId,
+            Contamination, UntrustedSources, SensitiveCalls, SensitiveTools,
+            FirstSensitive
+  | order by Contamination desc, SensitiveCalls desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- SessionContamination
+- XPIA
+- AIRT-v2

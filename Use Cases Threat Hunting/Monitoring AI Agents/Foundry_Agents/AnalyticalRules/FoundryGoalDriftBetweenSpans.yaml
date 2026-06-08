@@ -1,0 +1,126 @@
+id: 6f1a2b3c-4d5e-4f15-9306-aaaaaaaaaaa6
+name: Foundry - Goal hijacking / goal drift across spans
+description: |
+  Detects the v2.0 taxonomy's "goal hijacking" failure mode: the user's
+  declared task at conversation start is benign, but the agent silently
+  ends up executing a different, sensitive objective later in the same
+  conversation. Goal hijacking does not always carry explicit injection
+  markers - the redirect can come from XPIA, memory recall, or a tool
+  result - so the multi-stage / injection / capability-disclosure rules
+  do not catch it on their own.
+
+  The heuristic here is conservative to keep false positives low:
+    - The first user input is short / framed as a benign request
+      (summarise, translate, explain, draft, describe, what is, ...)
+      AND contains no sensitive-intent vocabulary
+      (delete, drop, grant, admin, secret, database, payment, exec, ...).
+    - Yet the same conversation issues >= 3 sensitive tool calls
+      (code interpreter, shell, http, email, sql, file write, resource
+      create / delete) within 2 hours.
+
+  The combination of a benign opening, a missing sensitive intent and a
+  cluster of sensitive actions is the goal-drift signature.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT2H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- DefenseEvasion
+relevantTechniques:
+- T1059
+- T1556
+query: |
+  let benignFirstWords = dynamic([
+      "summarise","summarize","translate","explain","help me","tell me",
+      "draft","write a","compose","describe","what is","how does",
+      "example","tutorial","define","outline","brainstorm","rephrase",
+      "improve the wording","proofread","check the grammar"
+  ]);
+  let sensitiveIntent = dynamic([
+      "delete","drop","grant","revoke","admin","password","secret","key",
+      "token","credential","database","table","customer","payment",
+      "invoice","payroll","exfil","send to","upload to","exec","execute",
+      "run command","ssh","sudo","privilege","impersonate"
+  ]);
+  let sensitiveTools = dynamic([
+      "code_interpreter","python","shell","bash","powershell","exec","run_code",
+      "http_request","fetch","invoke_url","send_email","send_message",
+      "execute_sql","query_database","file_write","write_file","upload",
+      "create_resource","delete_resource","azure_write","deploy"
+  ]);
+  let conv =
+      AppDependencies
+      | where TimeGenerated > ago(2h)
+      | where isnotempty(Properties["gen_ai.conversation.id"])
+      | extend
+          ConvId   = tostring(Properties["gen_ai.conversation.id"]),
+          Agent    = tostring(Properties["gen_ai.agent.name"]),
+          Model    = tostring(Properties["gen_ai.request.model"]),
+          Input    = tolower(tostring(Properties["gen_ai.input.messages"])),
+          ToolName = tolower(tostring(Properties["gen_ai.tool.name"])),
+          ToolType = tolower(tostring(Properties["gen_ai.tool.type"]))
+      | extend IsSensitive = ToolName has_any (sensitiveTools) or ToolType has_any (sensitiveTools);
+  let firstMsg =
+      conv
+      | where isnotempty(Input)
+      | summarize arg_min(TimeGenerated, Input, Agent, Model) by ConvId
+      | extend
+          FirstInput      = substring(Input, 0, 1024),
+          BenignIntent    = Input has_any (benignFirstWords),
+          SensitiveIntent = Input has_any (sensitiveIntent);
+  let acts =
+      conv
+      | where IsSensitive
+      | summarize SensitiveCalls   = count(),
+                  Tools             = make_set(ToolName, 16),
+                  DistinctTools     = dcount(ToolName),
+                  FirstSeen         = min(TimeGenerated),
+                  LastSeen          = max(TimeGenerated)
+              by ConvId;
+  firstMsg
+  | join kind=inner acts on ConvId
+  | where SensitiveCalls >= 3
+          and BenignIntent == true
+          and SensitiveIntent == false
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project LastSeen, AccountName, Agent, Model, ConvId, SensitiveCalls,
+            DistinctTools, Tools, FirstInput, FirstSeen
+  | order by SensitiveCalls desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- GoalHijacking
+- AIRT-v2

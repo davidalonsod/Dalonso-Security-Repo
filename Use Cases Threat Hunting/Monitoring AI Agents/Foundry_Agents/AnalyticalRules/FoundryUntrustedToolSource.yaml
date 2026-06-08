@@ -1,0 +1,94 @@
+id: a3b4c5d6-9999-4c03-9206-0123456789d6
+name: Foundry - Agent grounded on untrusted tool / RAG source
+description: |
+  Detects a Foundry / Agent Service run where a tool call fetched content
+  from a host that is not on the approved-source list. Used to surface RAG
+  poisoning and "context smuggling" attacks where an attacker plants
+  content in a store the agent retrieves from, then steers the agent
+  through indirect prompt injection.
+
+  The trusted corpus is sourced from the "FoundryTrustedToolSources"
+  watchlist (alias: FoundryTrustedToolSources, column: SourceUri).
+  Populate that watchlist with the hostnames of approved tool / retrieval
+  endpoints before enabling the rule - while it is empty the leftanti
+  join treats every fetched host as untrusted. URLs are extracted from
+  gen_ai.tool.call.arguments and gen_ai.tool.call.result, so content
+  recording must be enabled for the arguments to be present.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- DefenseEvasion
+relevantTechniques:
+- T1195
+- T1199
+query: |
+  let trusted =
+      _GetWatchlist('FoundryTrustedToolSources')
+      | project SourceUri = tolower(tostring(column_ifexists('SourceUri', '')))
+      | where isnotempty(SourceUri);
+  AppDependencies
+  | where isnotempty(Properties["gen_ai.tool.name"])
+      or isnotempty(Properties["gen_ai.tool.call.arguments"])
+  | extend
+      Agent      = tostring(Properties["gen_ai.agent.name"]),
+      Model      = tostring(Properties["gen_ai.request.model"]),
+      ConvId     = tostring(Properties["gen_ai.conversation.id"]),
+      ToolName   = tostring(Properties["gen_ai.tool.name"]),
+      ToolType   = tostring(Properties["gen_ai.tool.type"]),
+      ToolArgs   = tostring(Properties["gen_ai.tool.call.arguments"]),
+      ToolResult = tostring(Properties["gen_ai.tool.call.result"])
+  | extend SourceUri = tolower(extract(@"https?://([A-Za-z0-9.\-]+)", 1, strcat(ToolArgs, " ", ToolResult)))
+  | where isnotempty(SourceUri)
+  | join kind=leftanti trusted on SourceUri
+  | summarize
+      UntrustedHits    = count(),
+      UntrustedSources = make_set(SourceUri, 64),
+      Tools            = make_set(ToolName, 16),
+      ToolTypes        = make_set(ToolType, 8),
+      FirstSeen        = min(TimeGenerated),
+      LastSeen         = max(TimeGenerated)
+      by Agent, Model, ConvId
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      LastSeen, AccountName, Agent, Model, ConvId, UntrustedHits,
+      UntrustedSources, Tools, ToolTypes, FirstSeen
+  | order by UntrustedHits desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- RAG

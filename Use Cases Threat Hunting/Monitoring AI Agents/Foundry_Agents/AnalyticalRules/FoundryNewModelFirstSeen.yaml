@@ -1,0 +1,97 @@
+id: 2b3c4d5e-1111-4310-9210-0123456789e0
+name: Foundry - Agent uses a model never seen before
+description: |
+  Detects a Foundry / Agent Service agent invoking a model
+  (gen_ai.request.model) that has not appeared for that agent in the
+  preceding 14-day baseline. A first-seen model is the shadow-model /
+  model-downgrade / unapproved-deployment shape: an agent silently
+  switched to a cheaper, unsanctioned or externally hosted model, or an
+  injection re-pointed it. Low noise by design - a model only fires once
+  per agent when it first appears, so legitimate roll-outs self-clear.
+
+  Reads gen_ai.request.model from the AppDependencies span property bag
+  (Properties), keyed on gen_ai.agent.name. The 14-day baseline is built
+  with a leftanti join, identical to the new-tool detection pattern. No
+  allowlist to maintain.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- DefenseEvasion
+- Execution
+relevantTechniques:
+- T1562
+- T1059
+query: |
+  let lookback = 1h;
+  let baselineWindow = 14d;
+  let recent =
+      AppDependencies
+      | where TimeGenerated > ago(lookback)
+      | where isnotempty(Properties["gen_ai.request.model"])
+      | extend
+          Agent     = tostring(Properties["gen_ai.agent.name"]),
+          Model     = tolower(tostring(Properties["gen_ai.request.model"])),
+          ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+          ConvId    = tostring(Properties["gen_ai.conversation.id"])
+      | where isnotempty(Model);
+  let baseline =
+      AppDependencies
+      | where TimeGenerated between (ago(baselineWindow) .. ago(lookback))
+      | where isnotempty(Properties["gen_ai.request.model"])
+      | extend
+          Agent = tostring(Properties["gen_ai.agent.name"]),
+          Model = tolower(tostring(Properties["gen_ai.request.model"]))
+      | where isnotempty(Model)
+      | distinct Agent, Model;
+  recent
+  | join kind=leftanti baseline on Agent, Model
+  | summarize
+      Calls     = count(),
+      FirstSeen = min(TimeGenerated),
+      LastSeen  = max(TimeGenerated),
+      AnyProject = take_any(ProjectId),
+      Convs     = make_set(ConvId, 10)
+      by Agent, Model
+  | extend ProjectId = AnyProject
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      LastSeen, AccountName, Agent, Model, ProjectId, Calls, FirstSeen, Convs
+  | order by LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- OWASP-LLM10

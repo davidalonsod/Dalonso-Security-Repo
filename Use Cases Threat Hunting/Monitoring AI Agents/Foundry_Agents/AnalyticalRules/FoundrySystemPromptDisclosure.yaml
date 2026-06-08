@@ -1,0 +1,89 @@
+id: e7f8091a-dddd-4007-920a-0123456789db
+name: Foundry - System prompt / instruction disclosure
+description: |
+  Detects a Foundry / Agent Service exchange where the user probes for the
+  agent's system prompt, developer message or hidden instructions AND the
+  agent's response echoes instruction-like content back. This is the
+  system-prompt-disclosure shape (OWASP LLM07): a successful extraction of
+  the guardrails, persona or tool list that an attacker then uses to craft
+  targeted jailbreaks.
+
+  Reads gen_ai.input.messages and gen_ai.output.messages from the
+  AppDependencies span property bag (Properties). Both message texts only
+  exist when AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED is set, so
+  without content recording this rule will not fire. The phrase lists are
+  deliberately broad - review hits and tune them to your agents'
+  legitimate prompts to manage false positives.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Collection
+- CredentialAccess
+relevantTechniques:
+- T1213
+- T1552
+query: |
+  AppDependencies
+  | where isnotempty(Properties["gen_ai.output.messages"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Input     = tolower(tostring(Properties["gen_ai.input.messages"])),
+      Output    = tostring(Properties["gen_ai.output.messages"])
+  | extend AskedForPrompt = Input has_any (
+        "system prompt", "initial instructions", "your instructions",
+        "reveal your prompt", "repeat the words above", "what are your rules",
+        "developer message", "print your system", "show me your prompt",
+        "ignore previous instructions", "what is your system message",
+        "everything above this line", "verbatim instructions")
+  | extend LeakMarker = Output has_any (
+        "you are an", "your role is", "# system", "system prompt",
+        "you must never", "do not reveal", "your instructions are",
+        "as an ai assistant", "you have access to the following tools",
+        "your available tools", "you should always", "never disclose")
+  | where AskedForPrompt and LeakMarker
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      TimeGenerated, AccountName, Agent, Model, ProjectId, ConvId,
+      Input, Output
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- OWASP-LLM07

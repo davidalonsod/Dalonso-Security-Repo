@@ -1,0 +1,96 @@
+id: 5e6f7081-4444-4ddd-9201-0123456789d1
+name: Foundry - Guardrail jailbreak / prompt-injection detected
+description: |
+  Raises an incident when a Foundry / Agent Service run trips a guardrail
+  that detects an attempt to override the agent's instructions: Prompt
+  Shields jailbreak detection or indirect (cross-document) prompt
+  injection. These are the highest-fidelity signals that someone is
+  trying to exfiltrate the system prompt, disable safety, or smuggle
+  instructions through tool / RAG content.
+
+  Reads the real Foundry telemetry shape: spans land in AppDependencies
+  with the property bag in Properties; guardrail verdicts in
+  microsoft.foundry.content_filter.results. Sub-key naming varies by API
+  version, so jailbreak / prompt_shield / indirect_attack are all parsed
+  defensively. Requires AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED
+  for the prompt text to be populated.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- DefenseEvasion
+- InitialAccess
+- Execution
+relevantTechniques:
+- T1562
+- T1059
+query: |
+  AppDependencies
+  | where isnotempty(Properties["microsoft.foundry.content_filter.results"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Prompt    = tostring(Properties["gen_ai.input.messages"]),
+      ToolName  = tostring(Properties["gen_ai.tool.name"]),
+      FilterArr = todynamic(tostring(Properties["microsoft.foundry.content_filter.results"]))
+  | mv-expand Entry = FilterArr
+  | extend
+      SourceType = tostring(Entry.source_type),
+      Blocked    = tobool(Entry.blocked),
+      Filter     = todynamic(Entry.content_filter_results)
+  | extend
+      JailbreakDetected = tobool(Filter.jailbreak.detected) or tobool(Filter.jailbreak.filtered),
+      PromptShieldHit   = tobool(Filter.prompt_shield.detected) or tobool(Filter.prompt_shield.filtered),
+      IndirectAttackHit = tobool(Filter.indirect_attack.detected) or tobool(Filter.indirect_attack.filtered)
+  | where JailbreakDetected or PromptShieldHit or IndirectAttackHit
+  | extend Signal = case(
+      JailbreakDetected, "Jailbreak",
+      PromptShieldHit,   "PromptShield",
+      IndirectAttackHit, "IndirectPromptInjection",
+      "Unknown")
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      TimeGenerated, Signal, SourceType, Blocked, AccountName, Agent, Model, ProjectId,
+      ConvId, ToolName, Prompt
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- ContentSafety
+- Guardrails
+- Jailbreak

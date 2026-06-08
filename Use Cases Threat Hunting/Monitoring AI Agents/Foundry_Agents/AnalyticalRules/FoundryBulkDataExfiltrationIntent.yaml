@@ -1,0 +1,95 @@
+id: 60718293-1515-4314-9214-0123456789e4
+name: Foundry - Bulk data-exfiltration intent in agent input
+description: |
+  Raises an incident when Foundry / Agent Service input asks the agent to
+  return data in bulk ("show all records", "export all", "list every
+  customer", "dump the table", "give me the full list", "select *")
+  instead of the single, scoped record the agent is meant to serve. This
+  is the classic prompt-driven exfiltration pattern where an
+  over-permissive agent or tool returns far more than the caller is
+  entitled to.
+
+  Reads gen_ai.input.messages from the AppDependencies span property bag
+  (Properties). The prompt text only exists when
+  AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED is set, so without
+  content recording this rule will not fire. Pair with
+  FoundrySensitiveDataInOutput to confirm whether bulk content was
+  actually returned.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Collection
+- Exfiltration
+relevantTechniques:
+- T1213
+- T1530
+query: |
+  let exfilMarkers = dynamic([
+      "show all", "list all", "list every", "export all", "export the entire",
+      "give me all", "give me every", "give me the full list", "full list of",
+      "all records", "all customers", "all users", "all bookings", "all orders",
+      "all employees", "every record", "every customer", "every user",
+      "dump the", "dump all", "entire database", "entire table",
+      "complete list of", "everything you have on", "all the data",
+      "without any filter", "no limit", "select *"
+  ]);
+  AppDependencies
+  | where isnotempty(Properties["gen_ai.input.messages"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Prompt    = tostring(Properties["gen_ai.input.messages"]),
+      SrcIp     = tostring(column_ifexists("ClientIP", ""))
+  | extend Text = tolower(Prompt)
+  | where isnotempty(Text)
+  | mv-apply Marker = exfilMarkers to typeof(string) on (
+        where Text contains Marker
+        | summarize Markers = make_set(Marker)
+    )
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project
+      TimeGenerated, AccountName, Agent, Model, ProjectId, ConvId,
+      Markers, Prompt = substring(Prompt, 0, 1024), SrcIp
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- DataExfiltration
+- Collection
+- OWASP-LLM06
