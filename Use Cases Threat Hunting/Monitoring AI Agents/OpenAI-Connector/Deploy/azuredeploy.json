@@ -1,0 +1,496 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "OpenAI connector - Microsoft Sentinel analytic rules and hunting queries (ported from the Microsoft 365 Copilot bundle).",
+    "author": "Sentinel-As-Code / Agent365 OpenAI bundle"
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace where Microsoft Sentinel is enabled."
+      }
+    },
+    "enableAnalyticRules": {
+      "metadata": {
+        "description": "Set to false to deploy the scheduled analytic rules in a disabled state. Hunting queries are always deployed."
+      },
+      "defaultValue": true,
+      "type": "bool"
+    }
+  },
+  "variables": {},
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'c3d4e5f6-3333-4ccc-9003-0123456789ad')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "OpenAI - Privileged config change followed by abuse signal",
+        "description": "Correlates a privileged OpenAI configuration or credential change\n(org settings, role change, key / service-account / project creation,\nmember invite) with a downstream abuse signal from the same actor\nwithin 24 hours: a model request that hit a content filter, was\ntruncated for length, or returned no finish reason.\n\nPorted from the Microsoft 365 Copilot \"Config-to-abuse chain\" rule.\nThe actor join key here is ActorSession.user.email (audit side) matched\nto AdditionalFields.input_user (runtime side). That mapping is\ntenant-specific - OpenAI's 'user' request parameter is only a reliable\nbridge if your callers set it to the same identity. Adjust or remove\nthe join predicate to fit your instrumentation.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let window = 1d;\nlet configChanges =\n    OpenAIAuditLogs\n    | where TimeGenerated > ago(window)\n    | where EventType has_any (\n          \"settings\", \"organization.updated\", \"logging\", \"retention\",\n          \"role\", \"user.added\", \"invite\", \"service_account.created\",\n          \"api_key.created\", \"project.created\")\n    | extend ActorEmail = tolower(tostring(ActorSession.user.email))\n    | where isnotempty(ActorEmail)\n    | project\n        ConfigTime = TimeGenerated, ConfigEvent = EventType,\n        ActorEmail, ConfigIp = tostring(ActorSession.ip_address);\nlet abuseSignals =\n    OpenAIChatCompletions\n    | where TimeGenerated > ago(window)\n    | where EventFinishReasons has_any (\"content_filter\", \"length\")\n        or array_length(EventFinishReasons) == 0\n    | extend ActorUser = tolower(tostring(AdditionalFields.input_user))\n    | where isnotempty(ActorUser)\n    | project\n        AbuseTime = TimeGenerated, ActorUser, ModelName,\n        EventFinishReasons, EventRequestId;\nconfigChanges\n| join kind=inner abuseSignals on $left.ActorEmail == $right.ActorUser\n| where AbuseTime between (ConfigTime .. ConfigTime + 24h)\n| project\n    ConfigTime, ConfigEvent, ActorEmail, ConfigIp,\n    AbuseTime, ModelName, EventFinishReasons, EventRequestId\n| order by ConfigTime desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P1D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Persistence",
+          "DefenseEvasion",
+          "Execution"
+        ],
+        "techniques": [
+          "T1098",
+          "T1556",
+          "T1059"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected",
+            "enabled": true,
+            "lookbackDuration": "PT24H"
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "ActorEmail"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ConfigIp"
+              }
+            ]
+          },
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "ModelName"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'b2c3d4e5-2222-4bbb-9002-0123456789ac')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "OpenAI - Organization security configuration change",
+        "description": "Detects changes to OpenAI organization-level security configuration:\norg settings, logging / retention policy, SSO / SCIM / MFA enforcement,\nrate limits, and member role changes. These are the OpenAI-platform\nequivalent of the Microsoft 365 Copilot admin config / system-prompt\noverride surface and are high-value persistence and defence-evasion\nprimitives for an attacker who has gained org-admin access.\n\nEventType strings vary by OpenAI audit-log version; the has_any list\nbelow is deliberately broad. Trim it to the exact event names emitted\nin your tenant once confirmed against a live OpenAIAuditLogs row.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "OpenAIAuditLogs\n| where EventType has_any (\n      \"organization.updated\", \"settings\", \"logging\", \"retention\",\n      \"rate_limit\", \"sso\", \"scim\", \"mfa\", \"domain\",\n      \"role.updated\", \"member.updated\", \"owner\")\n| where EventType !has \"login\"\n| extend\n    ActorEmail = tostring(ActorSession.user.email),\n    ActorIp = tostring(ActorSession.ip_address),\n    ProjectName = tostring(Project.name)\n| project\n    TimeGenerated, EventType, ActorEmail, ActorIp,\n    ProjectName, EventDetails, Id\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "DefenseEvasion",
+          "Persistence"
+        ],
+        "techniques": [
+          "T1562",
+          "T1098"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected",
+            "enabled": true,
+            "lookbackDuration": "PT6H"
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "ActorEmail"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ActorIp"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'e5f6a7b8-5555-4eee-9005-0123456789af')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "OpenAI - Automated red-team / fuzzing pacing fingerprint",
+        "description": "Detects the pacing signature of automated adversarial frameworks\n(PyRIT, DeepTeam, custom fuzzing harnesses) driving the OpenAI API:\na high request count from a single user with very regular, very small\ninter-arrival gaps (low median gap and low gap variance), which human\ninteraction does not produce.\n\nPorted from the Microsoft 365 Copilot \"Red-team pacing anomaly\" rule.\nTune the request-count floor and gap thresholds to your tenant's\nlegitimate batch / agent workloads, or allow-list known service\naccounts via AdditionalFields.input_user.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let window = 1h;\nOpenAIChatCompletions\n| where TimeGenerated > ago(window)\n| extend ActorUser = tostring(AdditionalFields.input_user)\n| where isnotempty(ActorUser)\n| order by ActorUser asc, TimeGenerated asc\n| extend PrevTime = prev(TimeGenerated), PrevUser = prev(ActorUser)\n| extend Gap = iff(ActorUser == PrevUser,\n                   todouble(datetime_diff('millisecond', TimeGenerated, PrevTime)),\n                   todouble(0))\n| where ActorUser == PrevUser\n| summarize\n    Requests = count(),\n    MedianGapMs = percentile(Gap, 50),\n    StdGapMs = stdev(Gap),\n    MinGapMs = min(Gap)\n    by ActorUser\n| where Requests >= 30 and MedianGapMs < 2000 and StdGapMs < 500\n| project ActorUser, Requests, MedianGapMs, StdGapMs, MinGapMs\n| order by Requests desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Discovery",
+          "Impact"
+        ],
+        "techniques": [
+          "T1526",
+          "T1499"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected",
+            "enabled": true,
+            "lookbackDuration": "PT6H"
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "ActorUser"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', '29daeb0c-9999-4c3c-9009-0123456789b3')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "OpenAI - Sensitive tool / function invocation",
+        "description": "Detects OpenAI API requests that invoke a function-calling tool listed\nin the AzureAI_SensitiveTools watchlist (e.g. send_email, run_powershell,\ngraph.write, delete_*). High-signal detection for excessive autonomy and\npost-jailbreak action, complementary to OpenAIToolUsageDrift (which flags\nthe first use of any new tool rather than a known-dangerous one).\n\nPorted from the AzureAI-ThreatHunting \"Sensitive tool invocation\" rule\n(R09), retargeted from AppTraces gen_ai.tool.name to the\nASimAgentEventLogs ToolName field. The two packs deliberately share the\nAzureAI_SensitiveTools watchlist so the high-risk tool list is maintained\nin one place across the AI estate.\n\nActorUser is AdditionalFields.input_user (the OpenAI 'user' request\nparameter); it is empty when callers do not set it - the tool match still\nfires, the per-user grouping just collapses.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let sensitiveTools = dynamic([\n    \"code_interpreter\", \"python\", \"shell\", \"bash\", \"cmd\", \"powershell\",\n    \"exec\", \"os\", \"subprocess\", \"http\", \"requests\", \"fetch\", \"curl\",\n    \"browser\", \"sql\", \"database\", \"query\", \"email\", \"sendmail\", \"smtp\",\n    \"file\", \"filesystem\", \"read_file\", \"write_file\", \"delete\", \"secrets\",\n    \"keyvault\", \"credentials\", \"ssh\", \"rdp\", \"admin\"\n]);\nOpenAIChatCompletions\n| where TimeGenerated > ago(15m)\n| where isnotempty(ToolName)\n| extend\n    Tool = tolower(tostring(ToolName)),\n    ActorUser = tostring(AdditionalFields.input_user)\n| where Tool has_any (sensitiveTools)\n| summarize\n    Hits = count(),\n    Models = make_set(ModelName, 10),\n    Requests = make_set(EventRequestId, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by ActorUser, Tool\n| project\n    FirstSeen, LastSeen, ActorUser, Tool, Hits, Models, Requests\n| order by Hits desc\n",
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT15M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Execution",
+          "Impact"
+        ],
+        "techniques": [
+          "T1059"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected",
+            "enabled": true,
+            "lookbackDuration": "PT5H"
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "ActorUser"
+              }
+            ]
+          },
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "Tool"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1111-4aaa-9001-0123456789ab')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "OpenAI - Anomalous token / cost spike per user",
+        "description": "Detects an OpenAI API user whose token consumption in the last hour\nexceeds three times its 7-day per-hour median for the same model.\nCatches token abuse, runaway agent loops, and cost-driven\ndenial-of-service / wallet-drain attacks.\n\nPorted from the Microsoft 365 Copilot \"Anomalous token / cost spike\"\nrule. Unlike Copilot (which lacks a token column and proxies on\nMessages[] cardinality), the OpenAI ASimAgentEventLogs feed carries\nreal InputTokensUsed / OutputTokensUsed counts, so this rule measures\ntrue token spend.\n\nThe per-user key is AdditionalFields.input_user (the OpenAI 'user'\nrequest parameter). If your callers do not set it, baseline on\nModelName alone or promote the API-key id instead.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let lookback = 7d;\nlet recentWindow = 1h;\nlet perHour =\n    OpenAIChatCompletions\n    | where TimeGenerated > ago(lookback)\n    | extend ActorUser = tostring(AdditionalFields.input_user)\n    | extend TotalTokens = todouble(InputTokensUsed) + todouble(OutputTokensUsed)\n    | summarize\n        HourTokens = sum(TotalTokens),\n        HourRequests = count()\n        by ModelName, ActorUser, Hour = bin(TimeGenerated, 1h);\nlet baseline =\n    perHour\n    | where Hour < bin(now(), 1h) - recentWindow\n    | summarize\n        MedianHourTokens = percentile(HourTokens, 50),\n        P95HourTokens = percentile(HourTokens, 95)\n        by ModelName, ActorUser;\nlet recent =\n    perHour\n    | where Hour >= bin(now(), 1h) - recentWindow;\nrecent\n| join kind=leftouter baseline on ModelName, ActorUser\n| extend\n    MedianHourTokens = coalesce(todouble(MedianHourTokens), 0.0),\n    P95HourTokens = coalesce(todouble(P95HourTokens), 0.0)\n| extend SpikeRatio = iff(MedianHourTokens > 0, HourTokens / MedianHourTokens, HourTokens)\n| where HourTokens > 50000\n    and (SpikeRatio >= 3.0 or HourTokens > P95HourTokens * 2)\n| project\n    Hour, ModelName, ActorUser, HourRequests, HourTokens,\n    MedianHourTokens, P95HourTokens, SpikeRatio\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Impact"
+        ],
+        "techniques": [
+          "T1496",
+          "T1499"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected",
+            "enabled": true,
+            "lookbackDuration": "PT6H"
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "ActorUser"
+              }
+            ]
+          },
+          {
+            "entityType": "CloudApplication",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "ModelName"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'd4e5f6a7-4444-4ddd-9004-0123456789ae')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "OpenAI - New tool / function first use per user",
+        "description": "Builds a 14-day baseline of the tools (function-calling targets)\neach OpenAI user invokes per model, then alerts when a tool not seen\nin that baseline is used in the last hour. Surfaces capability drift,\nnewly granted function access, and attacker-introduced tools.\n\nPorted from the Microsoft 365 Copilot \"Access drift\" and \"Abnormal\ntool usage\" detections, retargeted at the ASimAgentEventLogs ToolName\nfield. ActorUser is AdditionalFields.input_user; baseline on ModelName\nalone if your callers do not set the 'user' parameter.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let baselineWindow = 14d;\nlet recentWindow = 1h;\nlet known =\n    OpenAIChatCompletions\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n    | where isnotempty(ToolName)\n    | extend ActorUser = tostring(AdditionalFields.input_user)\n    | summarize by ModelName, ActorUser, ToolName;\nOpenAIChatCompletions\n| where TimeGenerated > ago(recentWindow)\n| where isnotempty(ToolName)\n| extend ActorUser = tostring(AdditionalFields.input_user)\n| join kind=leftanti known on ModelName, ActorUser, ToolName\n| summarize\n    FirstSeen = min(TimeGenerated),\n    Requests = count(),\n    Models = make_set(ModelName, 10)\n    by ActorUser, ToolName\n| project FirstSeen, ActorUser, ToolName, Requests, Models\n| order by FirstSeen desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Execution",
+          "PrivilegeEscalation"
+        ],
+        "techniques": [
+          "T1059",
+          "T1098"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "groupingConfiguration": {
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected",
+            "enabled": true,
+            "lookbackDuration": "PT6H"
+          },
+          "createIncident": true
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "ActorUser"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/07b8c9da-7777-4a1a-9007-0123456789b1')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "OpenAI - Credential / project sprawl anomaly",
+        "query": "let baselineWindow = 14d;\nlet recentWindow = 1d;\nlet creators =\n    OpenAIAuditLogs\n    | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))\n    | where EventType in (\n          \"api_key.created\", \"service_account.created\",\n          \"project.created\", \"user.added\", \"invite.sent\")\n    | extend ActorEmail = tolower(tostring(ActorSession.user.email))\n    | summarize PriorCreates = count() by ActorEmail;\nOpenAIAuditLogs\n| where TimeGenerated > ago(recentWindow)\n| where EventType in (\n      \"api_key.created\", \"service_account.created\",\n      \"project.created\", \"user.added\", \"invite.sent\")\n| extend\n    ActorEmail = tolower(tostring(ActorSession.user.email)),\n    ActorIp = tostring(ActorSession.ip_address)\n| summarize\n    RecentCreates = count(),\n    Types = make_set(EventType, 10),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by ActorEmail, ActorIp\n| join kind=leftouter creators on ActorEmail\n| extend PriorCreates = coalesce(PriorCreates, 0)\n| where PriorCreates == 0 or RecentCreates >= 3\n| project\n    FirstSeen, LastSeen, ActorEmail, ActorIp,\n    RecentCreates, PriorCreates, Types\n| order by RecentCreates desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for OpenAI credential and tenancy creation events (API keys, service accounts, projects, member invites / additions) performed by an actor with no creation history in the prior 14 days, or at a burst rate of three or more in the last day. Surface...",
+            "name": "description"
+          },
+          {
+            "value": "Persistence,PrivilegeEscalation",
+            "name": "tactics"
+          },
+          {
+            "value": "T1098,T1136",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/f6a7b8c9-6666-4fff-9006-0123456789b0')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "OpenAI - Off-hours or anomalous-geo org login",
+        "query": "let lookback = 30d;\nlet recentWindow = 1d;\nlet usual =\n    OpenAIAuditLogs\n    | where TimeGenerated between (ago(lookback) .. ago(recentWindow))\n    | where EventType startswith \"login\"\n    | extend\n        ActorEmail = tolower(tostring(ActorSession.user.email)),\n        Country = tostring(geo_info_from_ip_address(tostring(ActorSession.ip_address)).country)\n    | summarize\n        UsualHours = make_set(hourofday(TimeGenerated), 24),\n        UsualCountries = make_set(Country, 50)\n        by ActorEmail;\nOpenAIAuditLogs\n| where TimeGenerated > ago(recentWindow)\n| where EventType startswith \"login\"\n| extend\n    ActorEmail = tolower(tostring(ActorSession.user.email)),\n    ActorIp = tostring(ActorSession.ip_address),\n    Hour = hourofday(TimeGenerated)\n| extend Country = tostring(geo_info_from_ip_address(ActorIp).country)\n| join kind=leftouter usual on ActorEmail\n| extend\n    OffHours = isnotnull(UsualHours) and not(set_has_element(UsualHours, Hour)),\n    AnomalousGeo = isnotempty(Country) and isnotnull(UsualCountries)\n                   and not(set_has_element(UsualCountries, Country))\n| where OffHours or AnomalousGeo\n| project\n    TimeGenerated, ActorEmail, ActorIp, Country, Hour,\n    OffHours, AnomalousGeo, UsualCountries\n| order by TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for OpenAI organization logins that occur outside the actor's normal business hours or from a country the actor has not used in the last 30 days. Common indicator of session theft, API-key abuse, or geographically displaced impersonation. Ported ...",
+            "name": "description"
+          },
+          {
+            "value": "InitialAccess,DefenseEvasion",
+            "name": "tactics"
+          },
+          {
+            "value": "T1078,T1078.004",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/18c9daeb-8888-4b2b-9008-0123456789b2')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "OpenAI - Trace-level loop / long-duration anomalies",
+        "query": "let window = 1d;\nOpenAIChatCompletions\n| where TimeGenerated > ago(window)\n| extend ActorUser = tostring(AdditionalFields.input_user)\n| extend DurationMs = iff(isnotempty(EventEndTime) and isnotempty(EventStartTime),\n                          todouble(datetime_diff('millisecond', EventEndTime, EventStartTime)),\n                          todouble(0))\n| summarize\n    Requests = count(),\n    ToolCalls = countif(isnotempty(ToolName)),\n    DistinctTools = dcount(ToolName),\n    MaxDurationMs = max(DurationMs),\n    AvgDurationMs = avg(DurationMs),\n    TotalOutputTokens = sum(todouble(OutputTokensUsed))\n    by ActorUser, ModelName, bin(TimeGenerated, 5m)\n| where (ToolCalls >= 10 and DistinctTools <= 2)\n     or MaxDurationMs > 120000\n| project\n    TimeGenerated, ActorUser, ModelName, Requests, ToolCalls,\n    DistinctTools, MaxDurationMs, AvgDurationMs, TotalOutputTokens\n| order by TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Hunts for OpenAI request traces that look like runaway agent loops: tight tool-call repetition with low tool diversity (>= 10 tool calls in a 5-minute window across <= 2 distinct tools), or a single request whose end-to-end duration exceeds two minutes...",
+            "name": "description"
+          },
+          {
+            "value": "Impact,Execution",
+            "name": "tactics"
+          },
+          {
+            "value": "T1499,T1059",
+            "name": "techniques"
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "analyticRuleCount": {
+      "type": "int",
+      "value": 6
+    },
+    "huntingQueryCount": {
+      "type": "int",
+      "value": 3
+    },
+    "analyticRulesEnabled": {
+      "type": "bool",
+      "value": "[parameters('enableAnalyticRules')]"
+    }
+  }
+}
