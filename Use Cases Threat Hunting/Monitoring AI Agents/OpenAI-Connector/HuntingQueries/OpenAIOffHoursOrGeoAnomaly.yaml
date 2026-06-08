@@ -1,0 +1,56 @@
+id: f6a7b8c9-6666-4fff-9006-0123456789b0
+name: OpenAI - Off-hours or anomalous-geo org login
+description: |
+  Hunts for OpenAI organization logins that occur outside the actor's
+  normal business hours or from a country the actor has not used in the
+  last 30 days. Common indicator of session theft, API-key abuse, or
+  geographically displaced impersonation.
+
+  Ported from the Microsoft 365 Copilot "Off-hours or anomalous-geo"
+  hunt. The OpenAI audit log carries the source IP in
+  ActorSession.ip_address; country is derived with
+  geo_info_from_ip_address(). The baseline is built from the same
+  OpenAIAuditLogs login stream rather than SigninLogs.
+query: |
+  let lookback = 30d;
+  let recentWindow = 1d;
+  let usual =
+      OpenAIAuditLogs
+      | where TimeGenerated between (ago(lookback) .. ago(recentWindow))
+      | where EventType startswith "login"
+      | extend
+          ActorEmail = tolower(tostring(ActorSession.user.email)),
+          Country = tostring(geo_info_from_ip_address(tostring(ActorSession.ip_address)).country)
+      | summarize
+          UsualHours = make_set(hourofday(TimeGenerated), 24),
+          UsualCountries = make_set(Country, 50)
+          by ActorEmail;
+  OpenAIAuditLogs
+  | where TimeGenerated > ago(recentWindow)
+  | where EventType startswith "login"
+  | extend
+      ActorEmail = tolower(tostring(ActorSession.user.email)),
+      ActorIp = tostring(ActorSession.ip_address),
+      Hour = hourofday(TimeGenerated)
+  | extend Country = tostring(geo_info_from_ip_address(ActorIp).country)
+  | join kind=leftouter usual on ActorEmail
+  | extend
+      OffHours = isnotnull(UsualHours) and not(set_has_element(UsualHours, Hour)),
+      AnomalousGeo = isnotempty(Country) and isnotnull(UsualCountries)
+                     and not(set_has_element(UsualCountries, Country))
+  | where OffHours or AnomalousGeo
+  | project
+      TimeGenerated, ActorEmail, ActorIp, Country, Hour,
+      OffHours, AnomalousGeo, UsualCountries
+  | order by TimeGenerated desc
+tactics:
+  - InitialAccess
+  - DefenseEvasion
+techniques:
+  - T1078
+  - T1078.004
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - OpenAI
+  - AI

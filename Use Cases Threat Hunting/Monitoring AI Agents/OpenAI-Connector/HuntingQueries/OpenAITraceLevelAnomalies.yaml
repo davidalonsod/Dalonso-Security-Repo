@@ -1,0 +1,45 @@
+id: 18c9daeb-8888-4b2b-9008-0123456789b2
+name: OpenAI - Trace-level loop / long-duration anomalies
+description: |
+  Hunts for OpenAI request traces that look like runaway agent loops:
+  tight tool-call repetition with low tool diversity (>= 10 tool calls
+  in a 5-minute window across <= 2 distinct tools), or a single request
+  whose end-to-end duration exceeds two minutes. Indicates stuck agent
+  loops, cost-amplification, or denial-of-wallet behaviour.
+
+  Ported from the Microsoft 365 Copilot "Trace-level anomalies" hunt.
+  Duration is derived from EventEndTime - EventStartTime;
+  tool calls from the ASimAgentEventLogs ToolName field.
+query: |
+  let window = 1d;
+  OpenAIChatCompletions
+  | where TimeGenerated > ago(window)
+  | extend ActorUser = tostring(AdditionalFields.input_user)
+  | extend DurationMs = iff(isnotempty(EventEndTime) and isnotempty(EventStartTime),
+                            todouble(datetime_diff('millisecond', EventEndTime, EventStartTime)),
+                            todouble(0))
+  | summarize
+      Requests = count(),
+      ToolCalls = countif(isnotempty(ToolName)),
+      DistinctTools = dcount(ToolName),
+      MaxDurationMs = max(DurationMs),
+      AvgDurationMs = avg(DurationMs),
+      TotalOutputTokens = sum(todouble(OutputTokensUsed))
+      by ActorUser, ModelName, bin(TimeGenerated, 5m)
+  | where (ToolCalls >= 10 and DistinctTools <= 2)
+       or MaxDurationMs > 120000
+  | project
+      TimeGenerated, ActorUser, ModelName, Requests, ToolCalls,
+      DistinctTools, MaxDurationMs, AvgDurationMs, TotalOutputTokens
+  | order by TimeGenerated desc
+tactics:
+  - Impact
+  - Execution
+techniques:
+  - T1499
+  - T1059
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - OpenAI
+  - AI
