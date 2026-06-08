@@ -1,0 +1,75 @@
+id: e5f6a7b8-5555-4eee-9005-0123456789af
+name: OpenAI - Automated red-team / fuzzing pacing fingerprint
+description: |
+  Detects the pacing signature of automated adversarial frameworks
+  (PyRIT, DeepTeam, custom fuzzing harnesses) driving the OpenAI API:
+  a high request count from a single user with very regular, very small
+  inter-arrival gaps (low median gap and low gap variance), which human
+  interaction does not produce.
+
+  Ported from the Microsoft 365 Copilot "Red-team pacing anomaly" rule.
+  Tune the request-count floor and gap thresholds to your tenant's
+  legitimate batch / agent workloads, or allow-list known service
+  accounts via AdditionalFields.input_user.
+severity: Medium
+requiredDataConnectors:
+- connectorId: OpenAI
+  dataTypes:
+  - ASimAgentEventLogs
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Discovery
+- Impact
+relevantTechniques:
+- T1526
+- T1499
+query: |
+  let window = 1h;
+  OpenAIChatCompletions
+  | where TimeGenerated > ago(window)
+  | extend ActorUser = tostring(AdditionalFields.input_user)
+  | where isnotempty(ActorUser)
+  | order by ActorUser asc, TimeGenerated asc
+  | extend PrevTime = prev(TimeGenerated), PrevUser = prev(ActorUser)
+  | extend Gap = iff(ActorUser == PrevUser,
+                     todouble(datetime_diff('millisecond', TimeGenerated, PrevTime)),
+                     todouble(0))
+  | where ActorUser == PrevUser
+  | summarize
+      Requests = count(),
+      MedianGapMs = percentile(Gap, 50),
+      StdGapMs = stdev(Gap),
+      MinGapMs = min(Gap)
+      by ActorUser
+  | where Requests >= 30 and MedianGapMs < 2000 and StdGapMs < 500
+  | project ActorUser, Requests, MedianGapMs, StdGapMs, MinGapMs
+  | order by Requests desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorUser
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- OpenAI
+- AI

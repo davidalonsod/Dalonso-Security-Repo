@@ -1,0 +1,94 @@
+id: a1b2c3d4-1111-4aaa-9001-0123456789ab
+name: OpenAI - Anomalous token / cost spike per user
+description: |
+  Detects an OpenAI API user whose token consumption in the last hour
+  exceeds three times its 7-day per-hour median for the same model.
+  Catches token abuse, runaway agent loops, and cost-driven
+  denial-of-service / wallet-drain attacks.
+
+  Ported from the Microsoft 365 Copilot "Anomalous token / cost spike"
+  rule. Unlike Copilot (which lacks a token column and proxies on
+  Messages[] cardinality), the OpenAI ASimAgentEventLogs feed carries
+  real InputTokensUsed / OutputTokensUsed counts, so this rule measures
+  true token spend.
+
+  The per-user key is AdditionalFields.input_user (the OpenAI 'user'
+  request parameter). If your callers do not set it, baseline on
+  ModelName alone or promote the API-key id instead.
+severity: Medium
+requiredDataConnectors:
+- connectorId: OpenAI
+  dataTypes:
+  - ASimAgentEventLogs
+queryFrequency: PT1H
+queryPeriod: P7D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Impact
+relevantTechniques:
+- T1496
+- T1499
+query: |
+  let lookback = 7d;
+  let recentWindow = 1h;
+  let perHour =
+      OpenAIChatCompletions
+      | where TimeGenerated > ago(lookback)
+      | extend ActorUser = tostring(AdditionalFields.input_user)
+      | extend TotalTokens = todouble(InputTokensUsed) + todouble(OutputTokensUsed)
+      | summarize
+          HourTokens = sum(TotalTokens),
+          HourRequests = count()
+          by ModelName, ActorUser, Hour = bin(TimeGenerated, 1h);
+  let baseline =
+      perHour
+      | where Hour < bin(now(), 1h) - recentWindow
+      | summarize
+          MedianHourTokens = percentile(HourTokens, 50),
+          P95HourTokens = percentile(HourTokens, 95)
+          by ModelName, ActorUser;
+  let recent =
+      perHour
+      | where Hour >= bin(now(), 1h) - recentWindow;
+  recent
+  | join kind=leftouter baseline on ModelName, ActorUser
+  | extend
+      MedianHourTokens = coalesce(todouble(MedianHourTokens), 0.0),
+      P95HourTokens = coalesce(todouble(P95HourTokens), 0.0)
+  | extend SpikeRatio = iff(MedianHourTokens > 0, HourTokens / MedianHourTokens, HourTokens)
+  | where HourTokens > 50000
+      and (SpikeRatio >= 3.0 or HourTokens > P95HourTokens * 2)
+  | project
+      Hour, ModelName, ActorUser, HourRequests, HourTokens,
+      MedianHourTokens, P95HourTokens, SpikeRatio
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorUser
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: ModelName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- OpenAI
+- AI

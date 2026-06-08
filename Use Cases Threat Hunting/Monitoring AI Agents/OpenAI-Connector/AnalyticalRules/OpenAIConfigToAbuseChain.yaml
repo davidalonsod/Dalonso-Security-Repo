@@ -1,0 +1,98 @@
+id: c3d4e5f6-3333-4ccc-9003-0123456789ad
+name: OpenAI - Privileged config change followed by abuse signal
+description: |
+  Correlates a privileged OpenAI configuration or credential change
+  (org settings, role change, key / service-account / project creation,
+  member invite) with a downstream abuse signal from the same actor
+  within 24 hours: a model request that hit a content filter, was
+  truncated for length, or returned no finish reason.
+
+  Ported from the Microsoft 365 Copilot "Config-to-abuse chain" rule.
+  The actor join key here is ActorSession.user.email (audit side) matched
+  to AdditionalFields.input_user (runtime side). That mapping is
+  tenant-specific - OpenAI's 'user' request parameter is only a reliable
+  bridge if your callers set it to the same identity. Adjust or remove
+  the join predicate to fit your instrumentation.
+severity: High
+requiredDataConnectors:
+- connectorId: OpenAI
+  dataTypes:
+  - OpenAIAuditLogs_CL
+  - ASimAgentEventLogs
+queryFrequency: PT1H
+queryPeriod: P1D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Persistence
+- DefenseEvasion
+- Execution
+relevantTechniques:
+- T1098
+- T1556
+- T1059
+query: |
+  let window = 1d;
+  let configChanges =
+      OpenAIAuditLogs
+      | where TimeGenerated > ago(window)
+      | where EventType has_any (
+            "settings", "organization.updated", "logging", "retention",
+            "role", "user.added", "invite", "service_account.created",
+            "api_key.created", "project.created")
+      | extend ActorEmail = tolower(tostring(ActorSession.user.email))
+      | where isnotempty(ActorEmail)
+      | project
+          ConfigTime = TimeGenerated, ConfigEvent = EventType,
+          ActorEmail, ConfigIp = tostring(ActorSession.ip_address);
+  let abuseSignals =
+      OpenAIChatCompletions
+      | where TimeGenerated > ago(window)
+      | where EventFinishReasons has_any ("content_filter", "length")
+          or array_length(EventFinishReasons) == 0
+      | extend ActorUser = tolower(tostring(AdditionalFields.input_user))
+      | where isnotempty(ActorUser)
+      | project
+          AbuseTime = TimeGenerated, ActorUser, ModelName,
+          EventFinishReasons, EventRequestId;
+  configChanges
+  | join kind=inner abuseSignals on $left.ActorEmail == $right.ActorUser
+  | where AbuseTime between (ConfigTime .. ConfigTime + 24h)
+  | project
+      ConfigTime, ConfigEvent, ActorEmail, ConfigIp,
+      AbuseTime, ModelName, EventFinishReasons, EventRequestId
+  | order by ConfigTime desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorEmail
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ConfigIp
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: ModelName
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT24H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- OpenAI
+- AI

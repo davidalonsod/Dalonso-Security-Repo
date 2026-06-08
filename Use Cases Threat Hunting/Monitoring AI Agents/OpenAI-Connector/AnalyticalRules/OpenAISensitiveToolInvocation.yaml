@@ -1,0 +1,87 @@
+id: 29daeb0c-9999-4c3c-9009-0123456789b3
+name: OpenAI - Sensitive tool / function invocation
+description: |
+  Detects OpenAI API requests that invoke a function-calling tool listed
+  in the AzureAI_SensitiveTools watchlist (e.g. send_email, run_powershell,
+  graph.write, delete_*). High-signal detection for excessive autonomy and
+  post-jailbreak action, complementary to OpenAIToolUsageDrift (which flags
+  the first use of any new tool rather than a known-dangerous one).
+
+  Ported from the AzureAI-ThreatHunting "Sensitive tool invocation" rule
+  (R09), retargeted from AppTraces gen_ai.tool.name to the
+  ASimAgentEventLogs ToolName field. The two packs deliberately share the
+  AzureAI_SensitiveTools watchlist so the high-risk tool list is maintained
+  in one place across the AI estate.
+
+  ActorUser is AdditionalFields.input_user (the OpenAI 'user' request
+  parameter); it is empty when callers do not set it - the tool match still
+  fires, the per-user grouping just collapses.
+severity: High
+requiredDataConnectors:
+- connectorId: OpenAI
+  dataTypes:
+  - ASimAgentEventLogs
+queryFrequency: PT15M
+queryPeriod: PT15M
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- Impact
+relevantTechniques:
+- T1059
+query: |
+  let sensitiveTools = dynamic([
+      "code_interpreter", "python", "shell", "bash", "cmd", "powershell",
+      "exec", "os", "subprocess", "http", "requests", "fetch", "curl",
+      "browser", "sql", "database", "query", "email", "sendmail", "smtp",
+      "file", "filesystem", "read_file", "write_file", "delete", "secrets",
+      "keyvault", "credentials", "ssh", "rdp", "admin"
+  ]);
+  OpenAIChatCompletions
+  | where TimeGenerated > ago(15m)
+  | where isnotempty(ToolName)
+  | extend
+      Tool = tolower(tostring(ToolName)),
+      ActorUser = tostring(AdditionalFields.input_user)
+  | where Tool has_any (sensitiveTools)
+  | summarize
+      Hits = count(),
+      Models = make_set(ModelName, 10),
+      Requests = make_set(EventRequestId, 5),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by ActorUser, Tool
+  | project
+      FirstSeen, LastSeen, ActorUser, Tool, Hits, Models, Requests
+  | order by Hits desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorUser
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Tool
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- OpenAI
+- AI

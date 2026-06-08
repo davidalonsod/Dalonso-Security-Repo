@@ -1,0 +1,74 @@
+id: d4e5f6a7-4444-4ddd-9004-0123456789ae
+name: OpenAI - New tool / function first use per user
+description: |
+  Builds a 14-day baseline of the tools (function-calling targets)
+  each OpenAI user invokes per model, then alerts when a tool not seen
+  in that baseline is used in the last hour. Surfaces capability drift,
+  newly granted function access, and attacker-introduced tools.
+
+  Ported from the Microsoft 365 Copilot "Access drift" and "Abnormal
+  tool usage" detections, retargeted at the ASimAgentEventLogs ToolName
+  field. ActorUser is AdditionalFields.input_user; baseline on ModelName
+  alone if your callers do not set the 'user' parameter.
+severity: Medium
+requiredDataConnectors:
+- connectorId: OpenAI
+  dataTypes:
+  - ASimAgentEventLogs
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- PrivilegeEscalation
+relevantTechniques:
+- T1059
+- T1098
+query: |
+  let baselineWindow = 14d;
+  let recentWindow = 1h;
+  let known =
+      OpenAIChatCompletions
+      | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+      | where isnotempty(ToolName)
+      | extend ActorUser = tostring(AdditionalFields.input_user)
+      | summarize by ModelName, ActorUser, ToolName;
+  OpenAIChatCompletions
+  | where TimeGenerated > ago(recentWindow)
+  | where isnotempty(ToolName)
+  | extend ActorUser = tostring(AdditionalFields.input_user)
+  | join kind=leftanti known on ModelName, ActorUser, ToolName
+  | summarize
+      FirstSeen = min(TimeGenerated),
+      Requests = count(),
+      Models = make_set(ModelName, 10)
+      by ActorUser, ToolName
+  | project FirstSeen, ActorUser, ToolName, Requests, Models
+  | order by FirstSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorUser
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- OpenAI
+- AI

@@ -1,0 +1,73 @@
+id: b2c3d4e5-2222-4bbb-9002-0123456789ac
+name: OpenAI - Organization security configuration change
+description: |
+  Detects changes to OpenAI organization-level security configuration:
+  org settings, logging / retention policy, SSO / SCIM / MFA enforcement,
+  rate limits, and member role changes. These are the OpenAI-platform
+  equivalent of the Microsoft 365 Copilot admin config / system-prompt
+  override surface and are high-value persistence and defence-evasion
+  primitives for an attacker who has gained org-admin access.
+
+  EventType strings vary by OpenAI audit-log version; the has_any list
+  below is deliberately broad. Trim it to the exact event names emitted
+  in your tenant once confirmed against a live OpenAIAuditLogs row.
+severity: High
+requiredDataConnectors:
+- connectorId: OpenAI
+  dataTypes:
+  - OpenAIAuditLogs_CL
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- DefenseEvasion
+- Persistence
+relevantTechniques:
+- T1562
+- T1098
+query: |
+  OpenAIAuditLogs
+  | where EventType has_any (
+        "organization.updated", "settings", "logging", "retention",
+        "rate_limit", "sso", "scim", "mfa", "domain",
+        "role.updated", "member.updated", "owner")
+  | where EventType !has "login"
+  | extend
+      ActorEmail = tostring(ActorSession.user.email),
+      ActorIp = tostring(ActorSession.ip_address),
+      ProjectName = tostring(Project.name)
+  | project
+      TimeGenerated, EventType, ActorEmail, ActorIp,
+      ProjectName, EventDetails, Id
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorEmail
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ActorIp
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- OpenAI
+- AI
