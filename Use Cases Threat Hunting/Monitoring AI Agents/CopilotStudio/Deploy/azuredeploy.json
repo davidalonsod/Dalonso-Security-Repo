@@ -1,0 +1,1591 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Copilot Studio / Application Insights - Microsoft Sentinel analytic rules and hunting queries (read AppEvents / AppDependencies / Properties for BotMessageReceived/Send and connector calls).",
+    "author": "Sentinel-As-Code / Agent365 CopilotStudio-AppInsights bundle"
+  },
+  "parameters": {
+    "workspaceName": {
+      "metadata": {
+        "description": "Name of the Log Analytics workspace where Microsoft Sentinel is enabled and the Copilot Studio Application Insights telemetry is exported (e.g. SentinelPurview)."
+      },
+      "type": "string"
+    },
+    "enableAnalyticRules": {
+      "metadata": {
+        "description": "Set to false to deploy the scheduled analytic rules in a disabled state. Hunting queries are always deployed."
+      },
+      "defaultValue": true,
+      "type": "bool"
+    },
+    "enableWatchlist": {
+      "metadata": {
+        "description": "Set to false to skip deploying the CopilotStudioTrustedConnectors / CopilotStudioAgentMap watchlists (e.g. if you manage them separately). The untrusted-connector hunt depends on the trusted-connectors watchlist."
+      },
+      "defaultValue": true,
+      "type": "bool"
+    }
+  },
+  "variables": {},
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1014-4a11-9c01-0123456789b4')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - ASCII smuggling / invisible-Unicode injection",
+        "description": "Raises an incident when an inbound Copilot Studio user message contains\ninvisible / non-rendering Unicode that is the hallmark of an ASCII\nsmuggling or hidden-instruction attack: characters from the Unicode Tags\nblock (U+E0000-U+E007F, used to encode hidden ASCII instructions),\nzero-width characters (U+200B-U+200D, U+FEFF, U+2060), or bidirectional\noverrides (U+202A-U+202E, U+2066-U+2069). These let an attacker pass\ninstructions the user cannot see, to bypass guardrails or smuggle\nindirect prompt injection through copied content. Mirrors the Defender\nfor Cloud \"ASCII Smuggling prompt injection detected\" alert.\n\nReads inbound turns from AppEvents (Name == \"BotMessageReceived\") with\nthe prompt text in Properties.text (requires \"Log sensitive properties\"\non the agent's Application Insights settings).\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "AppEvents\n| where Name == \"BotMessageReceived\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    Prompt    = tostring(Properties[\"text\"])\n| where isnotempty(Prompt)\n| extend\n    TagChars     = array_length(extract_all(@\"([\\x{E0000}-\\x{E007F}])\", Prompt)),\n    ZeroWidth    = array_length(extract_all(@\"([\\x{200B}-\\x{200D}\\x{FEFF}\\x{2060}])\", Prompt)),\n    BidiOverride = array_length(extract_all(@\"([\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}])\", Prompt))\n| where TagChars > 0 or ZeroWidth >= 3 or BidiOverride > 0\n| extend Signal = case(\n    TagChars > 0,     \"UnicodeTagSmuggling\",\n    BidiOverride > 0, \"BidiOverride\",\n    \"ZeroWidthObfuscation\")\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project\n    TimeGenerated, Signal, AccountName, ConvId, ChannelId,\n    TagChars, ZeroWidth, BidiOverride,\n    Prompt = substring(Prompt, 0, 1024), SessionId, ClientIP, AppVersion\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "DefenseEvasion",
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1027",
+          "T1566"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1012-4a11-9c01-0123456789b2')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Bulk data-exfiltration intent in user message",
+        "description": "Raises an incident when an inbound Copilot Studio user message asks the\nagent to return data in bulk (\"show all records\", \"export all bookings\",\n\"list every customer\", \"dump the table\", \"give me the full list\")\ninstead of the single, scoped record the agent is meant to serve. This\nis the classic prompt-driven exfiltration pattern where an\nover-permissive agent or connector returns far more than the user is\nentitled to.\n\nReads inbound turns from AppEvents (Name == \"BotMessageReceived\") with\nthe prompt text in Properties.text (requires \"Log sensitive properties\"\non the agent's Application Insights settings). Pair with\nCopilotStudioSensitiveDataInResponse to confirm whether bulk content was\nactually returned.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let exfilMarkers = dynamic([\n    \"show all\", \"list all\", \"list every\", \"export all\", \"export the entire\",\n    \"give me all\", \"give me every\", \"give me the full list\", \"full list of\",\n    \"all records\", \"all customers\", \"all users\", \"all bookings\", \"all orders\",\n    \"all employees\", \"every record\", \"every customer\", \"every user\",\n    \"dump the\", \"dump all\", \"entire database\", \"entire table\",\n    \"complete list of\", \"everything you have on\", \"all the data\",\n    \"without any filter\", \"no limit\", \"select *\"\n]);\nAppEvents\n| where Name == \"BotMessageReceived\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    Locale    = tostring(Properties[\"locale\"]),\n    DesignMode = tostring(Properties[\"DesignMode\"]),\n    Text      = tolower(tostring(Properties[\"text\"]))\n| where isnotempty(Text)\n| mv-apply Marker = exfilMarkers to typeof(string) on (\n      where Text contains Marker\n      | summarize Markers = make_set(Marker)\n  )\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project\n    TimeGenerated, AccountName, ConvId, ChannelId, Locale, DesignMode,\n    Markers, Text = substring(tostring(Properties[\"text\"]), 0, 1024),\n    SessionId, ClientIP, AppVersion\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Collection",
+          "Exfiltration"
+        ],
+        "techniques": [
+          "T1213",
+          "T1530"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-2002-4b22-9c12-aaaaaaaaaab2')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Extended capability / architecture disclosure",
+        "description": "Adapts the Microsoft AI Red Team v2.0 \"capability / architecture\ndisclosure\" failure mode to Copilot Studio. Complements\nCopilotStudioSystemPromptDisclosure (which only looks at system-prompt\nphrasing) by covering probes for the agent's connector / action list,\ntopics and skills, and intersecting the response against the agent's\nactual recent connector inventory.\n\nThe false-positive control is the inventory intersection: the rule only\nfires when the bot's response reflects >= 2 connector target prefixes\nthat the agent genuinely used in the last 7 days (>= 5 calls each).\nGeneric answers (\"I can help you with weather\") never reach the\nthreshold.\n\nBoth the prompt and response text require \"Log sensitive properties\"\nto be enabled on the agent's Application Insights settings.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let probes = dynamic([\n    \"what connectors\",\"list your connectors\",\"what actions\",\"what can you do\",\n    \"what topics\",\"list your topics\",\"what skills\",\"what plugins\",\n    \"what flows\",\"list your flows\",\"what tools\",\"describe your actions\",\n    \"what apis\",\"what systems can you access\",\"what can you connect to\",\n    \"what data sources\",\"reveal your connectors\",\"what is your configuration\",\n    \"what are your capabilities\",\"what triggers do you have\"\n]);\nlet leakMarkers = dynamic([\n    \"connector\",\"action\",\"topic\",\"flow\",\"i have access to\",\"i can use\",\n    \"i can connect to\",\"available actions\",\"my connectors\",\"my topics\",\n    \"the following connectors\",\"i can access\",\"data source\",\"i am able to call\"\n]);\nlet known =\n    toscalar(\n        AppDependencies\n        | where TimeGenerated between (ago(7d) .. ago(1h))\n        | where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\"\n        | extend TargetPrefix = tolower(tostring(split(Target, \"/\")[0]))\n        | where isnotempty(TargetPrefix) and strlen(TargetPrefix) >= 4\n        | summarize Calls = count() by TargetPrefix\n        | where Calls >= 5\n        | summarize KnownConnectors = make_set(TargetPrefix, 200)\n    );\nlet asks =\n    AppEvents\n    | where TimeGenerated > ago(1h)\n    | where Name == \"BotMessageReceived\"\n    | extend ConvId = tostring(Properties[\"conversationId\"]),\n             Prompt = tolower(tostring(Properties[\"text\"]))\n    | where isnotempty(Prompt) and Prompt has_any (probes)\n    | project AskTime = TimeGenerated, ConvId, Prompt = substring(tostring(Properties[\"text\"]), 0, 512),\n              UserId, ClientIP, ChannelId = tostring(Properties[\"channelId\"]);\nlet leaks =\n    AppEvents\n    | where TimeGenerated > ago(1h)\n    | where Name == \"BotMessageSend\"\n    | extend ConvId = tostring(Properties[\"conversationId\"]),\n             Output = tolower(tostring(Properties[\"text\"]))\n    | where isnotempty(Output) and Output has_any (leakMarkers)\n    | extend OutputTokens = extract_all(@\"([a-z][a-z0-9_\\-]{3,})\", Output)\n    | extend LeakedConnectors = set_intersect(OutputTokens, known)\n    | extend LeakedCount = array_length(LeakedConnectors)\n    | where LeakedCount >= 2\n    | project LeakTime = TimeGenerated, ConvId, LeakedCount, LeakedConnectors,\n              OutputSample = substring(tostring(Properties[\"text\"]), 0, 1024);\nasks\n| join kind=inner leaks on ConvId\n| where LeakTime between (AskTime .. (AskTime + 10m))\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project AskTime, LeakTime, AccountName, UserId, ConvId, ChannelId, ClientIP,\n          LeakedCount, LeakedConnectors, Prompt, OutputSample,\n          LagSeconds = datetime_diff('second', LeakTime, AskTime)\n| order by LeakedCount desc, AskTime desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P7D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Discovery",
+          "Collection"
+        ],
+        "techniques": [
+          "T1213",
+          "T1518"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT12H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1005-4a11-9c01-0123456789a5')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Connector failure storm",
+        "description": "Raises an incident when a single Copilot Studio conversation drives an\nabnormal burst of failed connector / action calls (>=10 failures in the\nhour). A storm of connector failures can indicate enumeration of a\nbackend, credential / permission probing, an action stuck in a loop, or\nan attacker fuzzing a tool the agent exposes.\n\nReads connector invocations from the AppDependencies table\n(DependencyType == \"Connector\", AppRoleName == \"Microsoft Copilot\nStudio\"), where Success == false marks a failed call and Target is the\nconnector operation (e.g. shared_msnweather/TomorrowsForecast).\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "AppDependencies\n| where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\"\n| extend ConvId = tostring(Properties[\"conversationId\"]),\n         ChannelId = tostring(Properties[\"channelId\"])\n| where Success == false\n| summarize\n      Failures      = count(),\n      Connectors    = make_set(Name, 25),\n      Targets       = make_set(Target, 25),\n      ResultCodes   = make_set(ResultCode, 25),\n      FirstFailure  = min(TimeGenerated),\n      LastFailure   = max(TimeGenerated)\n    by ConvId, ChannelId\n| where Failures >= 10\n| extend AccountName = iff(isempty(ConvId), \"unknown-conversation\", ConvId)\n| project\n    LastFailure, FirstFailure, AccountName, ConvId, ChannelId,\n    Failures, Connectors, Targets, ResultCodes\n| order by Failures desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Discovery",
+          "Impact"
+        ],
+        "techniques": [
+          "T1046",
+          "T1499"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1008-4a11-9c01-0123456789a8')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Conversation flooding / denial-of-wallet",
+        "description": "Raises an incident when a single channel/session drives an abnormally\nhigh inbound message volume in the hour (>=200 user turns), or a single\nconversation exceeds 100 turns. Sustained high-volume automated traffic\nagainst a metered agent is a denial-of-wallet pattern (driving token /\nmessage consumption and cost), and can also be scripted abuse or a\nguardrail-hammering red-team run.\n\nReads inbound turns from AppEvents (Name == \"BotMessageReceived\"),\ngrouping by conversation and channel. Tune the thresholds to your\nagent's normal traffic profile.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "AppEvents\n| where Name == \"BotMessageReceived\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    DesignMode = tostring(Properties[\"DesignMode\"])\n| where DesignMode != \"True\"\n| summarize\n      Turns          = count(),\n      Conversations  = dcount(ConvId),\n      FirstSeen      = min(TimeGenerated),\n      LastSeen       = max(TimeGenerated),\n      ClientIPs      = make_set(ClientIP, 25)\n    by SessionId, ChannelId, UserId\n| where Turns >= 200 or Conversations >= 1 and Turns / Conversations >= 100\n| extend AccountName = iff(isempty(UserId), strcat(\"session:\", SessionId), UserId)\n| project\n    LastSeen, FirstSeen, AccountName, SessionId, ChannelId, UserId,\n    Turns, Conversations, ClientIPs\n| order by Turns desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Impact"
+        ],
+        "techniques": [
+          "T1499"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-2001-4b21-9c11-aaaaaaaaaab1')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Goal hijacking / goal drift across a conversation",
+        "description": "Adapts the Microsoft AI Red Team v2.0 \"goal hijacking\" failure mode to\nCopilot Studio telemetry. The user's opening message is benign, yet the\nsame conversation ends up driving several sensitive connector calls\n(mail / http / sql / azure / sharepoint / dataverse / powershell). The\nredirect can come from indirect injection, a poisoned knowledge source\nor a connector result, so the prompt-injection / multi-stage rules do\nnot always catch it.\n\nHeuristic (conservative to keep false positives low):\n  - The first BotMessageReceived.text in the conversation matches a\n    benign opener (summarise / translate / explain / draft / what is...)\n    AND contains no sensitive-intent vocabulary (delete / grant / admin\n    / secret / database / payment / exec...).\n  - Yet AppDependencies shows >= 3 sensitive connector calls in the same\n    conversationId within the lookback window.\n\nRequires \"Log sensitive properties\" for the text-content half;\nconnector calls are read from metadata alone.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let benignFirstWords = dynamic([\n    \"summarise\",\"summarize\",\"translate\",\"explain\",\"help me\",\"tell me\",\n    \"draft\",\"write a\",\"compose\",\"describe\",\"what is\",\"how does\",\n    \"example\",\"tutorial\",\"define\",\"outline\",\"brainstorm\",\"rephrase\",\n    \"improve the wording\",\"proofread\",\"check the grammar\"\n]);\nlet sensitiveIntent = dynamic([\n    \"delete\",\"drop\",\"grant\",\"revoke\",\"admin\",\"password\",\"secret\",\"key\",\n    \"token\",\"credential\",\"database\",\"table\",\"customer\",\"payment\",\n    \"invoice\",\"payroll\",\"exfil\",\"send to\",\"upload to\",\"exec\",\"execute\",\n    \"run command\",\"ssh\",\"sudo\",\"privilege\",\"impersonate\"\n]);\nlet sensitiveConnectors = dynamic([\n    \"office365\",\"sendemail\",\"sendmail\",\"outlook\",\"exchange\",\n    \"http\",\"webhook\",\"azuread\",\"azure\",\"sql\",\"dataverse\",\n    \"sharepoint\",\"onedrive\",\"powershell\",\"function\",\"automate\",\n    \"logicapp\",\"graph\",\"keyvault\",\"blob\",\"storage\"\n]);\nlet firstMsg =\n    AppEvents\n    | where TimeGenerated > ago(2h)\n    | where Name == \"BotMessageReceived\"\n    | extend ConvId = tostring(Properties[\"conversationId\"]),\n             Text   = tolower(tostring(Properties[\"text\"]))\n    | where isnotempty(Text)\n    | summarize arg_min(TimeGenerated, Text, UserId, ClientIP, ChannelId = tostring(Properties[\"channelId\"])) by ConvId\n    | extend FirstInput      = substring(Text, 0, 1024),\n             BenignIntent    = Text has_any (benignFirstWords),\n             SensitiveIntent = Text has_any (sensitiveIntent);\nlet acts =\n    AppDependencies\n    | where TimeGenerated > ago(2h)\n    | where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\"\n    | extend ConvId   = tostring(Properties[\"conversationId\"]),\n             MatchKey = tolower(strcat(Name, \" \", Target))\n    | where MatchKey has_any (sensitiveConnectors)\n    | summarize SensitiveCalls    = count(),\n                Connectors        = make_set(Name, 16),\n                DistinctConnectors = dcount(Name),\n                Targets           = make_set(Target, 25),\n                FirstSeen         = min(TimeGenerated),\n                LastSeen          = max(TimeGenerated)\n            by ConvId;\nfirstMsg\n| join kind=inner acts on ConvId\n| where SensitiveCalls >= 3\n        and BenignIntent == true\n        and SensitiveIntent == false\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project LastSeen, AccountName, UserId, ConvId, ChannelId, ClientIP,\n          SensitiveCalls, DistinctConnectors, Connectors, Targets, FirstInput, FirstSeen\n| order by SensitiveCalls desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Execution",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1059",
+          "T1556"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT12H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1010-4a11-9c01-0123456789b0')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Jailbreak / model-probing markers",
+        "description": "Raises an incident when an inbound Copilot Studio user message contains\njailbreak-framework or model-fingerprinting markers - known jailbreak\npersona names (DAN, STAN, \"do anything now\"), unrestricted-mode framing,\nor repeated \"which model / version are you\" probing. This is distinct\nfrom generic prompt injection: it targets the safety layer and the\nmodel identity specifically.\n\nReads inbound turns from AppEvents (Name == \"BotMessageReceived\") with\nthe prompt text in Properties.text (requires \"Log sensitive properties\"\non the agent's Application Insights settings).\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let jailbreakMarkers = dynamic([\n    \"dan mode\", \"do anything now\", \"stan mode\", \"developer mode enabled\",\n    \"unrestricted mode\", \"no restrictions\", \"without any filter\",\n    \"ignore your guidelines\", \"ignore safety\", \"bypass safety\",\n    \"hypothetical response\", \"opposite mode\", \"evil mode\"\n]);\nlet modelProbes = dynamic([\n    \"which model are you\", \"what model are you\", \"what version are you\",\n    \"are you gpt\", \"are you based on\", \"what llm\", \"which llm\",\n    \"what is your underlying model\", \"what ai model\"\n]);\nAppEvents\n| where Name == \"BotMessageReceived\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    Text      = tolower(tostring(Properties[\"text\"]))\n| where isnotempty(Text)\n| extend\n    Jailbreak  = Text has_any (jailbreakMarkers),\n    ModelProbe = Text has_any (modelProbes)\n| where Jailbreak or ModelProbe\n| extend Signal = case(Jailbreak and ModelProbe, \"JailbreakAndModelProbe\",\n                       Jailbreak, \"Jailbreak\",\n                       \"ModelProbe\")\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project\n    TimeGenerated, Signal, AccountName, ConvId, ChannelId,\n    Text = substring(tostring(Properties[\"text\"]), 0, 1024),\n    SessionId, ClientIP, AppVersion\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "DefenseEvasion",
+          "Discovery"
+        ],
+        "techniques": [
+          "T1562",
+          "T1082"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1013-4a11-9c01-0123456789b3')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Multi-stage attack chain in a single conversation",
+        "description": "High-fidelity correlator. Raises an incident when one Copilot Studio\nconversation exhibits two or more distinct attack-stage signals -\nprompt injection, authority / role-impersonation, bulk-exfiltration\nintent, or jailbreak framing - optionally alongside connector / action\nexecution in the same conversation. A realistic attack chain stacks\nthese stages (inject -> escalate -> exfiltrate -> execute), so a\nconversation hitting several at once is far more likely to be a genuine\nattack than any single marker on its own.\n\nAggregates inbound turns from AppEvents (Name == \"BotMessageReceived\")\nper conversationId and joins connector activity from AppDependencies.\nThe text signals require \"Log sensitive properties\" on the agent's\nApplication Insights settings; the connector-execution count works from\nmetadata alone.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let injectionMarkers = dynamic([\n    \"ignore previous instructions\", \"ignore all previous\", \"disregard previous\",\n    \"you are now\", \"act as\", \"developer mode\", \"do anything now\", \"dan mode\",\n    \"reveal your system prompt\", \"show your system prompt\", \"bypass your rules\",\n    \"without any restrictions\", \"pretend you are\", \"from now on you\"\n]);\nlet escalationMarkers = dynamic([\n    \"i am the ceo\", \"i am the cfo\", \"as an administrator\", \"as the administrator\",\n    \"as an admin\", \"i have admin\", \"i am authorised\", \"i am authorized\",\n    \"i have permission to\", \"on behalf of the\", \"grant me access\", \"elevate my access\"\n]);\nlet exfilMarkers = dynamic([\n    \"show all\", \"list all\", \"list every\", \"export all\", \"give me every\",\n    \"give me the full list\", \"all records\", \"all customers\", \"every user\",\n    \"dump the\", \"entire database\", \"entire table\", \"select *\"\n]);\nlet jailbreakMarkers = dynamic([\n    \"developer mode\", \"do anything now\", \"dan mode\", \"ignore your safety\",\n    \"without restrictions\", \"bypass your rules\", \"disable your guardrails\",\n    \"unrestricted mode\", \"you have no rules\"\n]);\nlet conns =\n    AppDependencies\n    | where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\"\n    | extend ConvId = tostring(Properties[\"conversationId\"])\n    | summarize ConnectorCalls = count(), Connectors = make_set(Name, 20),\n                ConnectorFailures = countif(Success == false) by ConvId;\nAppEvents\n| where Name == \"BotMessageReceived\"\n| extend\n    ConvId = tostring(Properties[\"conversationId\"]),\n    Text   = tolower(tostring(Properties[\"text\"]))\n| where isnotempty(Text)\n| extend\n    SigInjection  = Text has_any (injectionMarkers),\n    SigEscalation = Text has_any (escalationMarkers),\n    SigExfil      = Text has_any (exfilMarkers),\n    SigJailbreak  = Text has_any (jailbreakMarkers)\n| summarize\n    Injection  = countif(SigInjection) > 0,\n    Escalation = countif(SigEscalation) > 0,\n    Exfil      = countif(SigExfil) > 0,\n    Jailbreak  = countif(SigJailbreak) > 0,\n    Messages   = count(),\n    FirstSeen  = min(TimeGenerated),\n    LastSeen   = max(TimeGenerated),\n    UserId     = take_any(UserId),\n    ChannelId  = take_any(tostring(Properties[\"channelId\"])),\n    ClientIP   = take_any(ClientIP),\n    SampleText = make_set(substring(tostring(Properties[\"text\"]), 0, 200), 5)\n    by ConvId\n| extend Stages = toint(Injection) + toint(Escalation) + toint(Exfil) + toint(Jailbreak)\n| where Stages >= 2\n| join kind=leftouter conns on ConvId\n| extend\n    AccountName    = iff(isempty(UserId), \"unknown-agent\", UserId),\n    ConnectorCalls = coalesce(ConnectorCalls, 0),\n    TimeGenerated  = LastSeen\n| project\n    TimeGenerated, FirstSeen, LastSeen, AccountName, ConvId, ChannelId, ClientIP,\n    Stages, Injection, Escalation, Exfil, Jailbreak,\n    Messages, ConnectorCalls, ConnectorFailures, Connectors, SampleText\n| order by Stages desc, LastSeen desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "PrivilegeEscalation",
+          "Exfiltration"
+        ],
+        "techniques": [
+          "T1566",
+          "T1078",
+          "T1567"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1006-4a11-9c01-0123456789a6')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - New connector first seen (14-day baseline)",
+        "description": "Raises an incident when a Copilot Studio agent invokes a connector /\naction operation (Target) that has never appeared in the preceding\n14-day baseline. A brand-new connector target can indicate a newly\npublished (and possibly malicious) action, configuration drift, or an\nattacker who has added a tool to the agent to reach a new backend.\n\nReads connector invocations from AppDependencies (DependencyType ==\n\"Connector\"). The baseline window is the 14 days before the detection\nwindow; only Targets seen exclusively in the recent window fire.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let detectionWindow = 1h;\nlet conn =\n    AppDependencies\n    | where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\"\n    | extend ConvId = tostring(Properties[\"conversationId\"]),\n             ChannelId = tostring(Properties[\"channelId\"]);\nlet baseline =\n    conn\n    | where TimeGenerated < ago(detectionWindow)\n    | distinct Target;\nconn\n| where TimeGenerated >= ago(detectionWindow)\n| join kind=leftanti baseline on Target\n| summarize\n      Calls      = count(),\n      FirstSeen  = min(TimeGenerated),\n      LastSeen   = max(TimeGenerated),\n      Convs      = make_set(ConvId, 25),\n      Channels   = make_set(ChannelId, 10)\n    by Target, Name\n| extend AccountName = strcat(\"connector:\", Name)\n| project LastSeen, FirstSeen, AccountName, Name, Target, Calls, Convs, Channels\n| order by LastSeen desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Execution",
+          "Persistence"
+        ],
+        "techniques": [
+          "T1059",
+          "T1554"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1009-4a11-9c01-0123456789a9')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Off-hours or non-published-channel activity",
+        "description": "Raises a low-severity incident when a published Copilot Studio agent is\nused outside business hours (configurable window, default 20:00-06:00\nUTC) on a non-design channel. Off-hours interactive use of a corporate\nagent is worth a proactive look - it can be benign global usage, but it\nis also when scripted abuse and credential-misuse tend to run.\n\nReads inbound turns from AppEvents (Name == \"BotMessageReceived\"),\nexcludes design-time (test) traffic, and buckets by hour of day. Adjust\nthe business-hours window and excluded channels to your environment.\n",
+        "severity": "Low",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let businessStart = 6;   // 06:00 UTC\nlet businessEnd   = 20;  // 20:00 UTC\nAppEvents\n| where Name == \"BotMessageReceived\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    DesignMode = tostring(Properties[\"DesignMode\"])\n| where DesignMode != \"True\"\n| where ChannelId !in (\"pva-studio\", \"test\")\n| extend HourUtc = hourofday(TimeGenerated)\n| where HourUtc < businessStart or HourUtc >= businessEnd\n| summarize\n      Turns     = count(),\n      Convs     = dcount(ConvId),\n      FirstSeen = min(TimeGenerated),\n      LastSeen  = max(TimeGenerated),\n      ClientIPs = make_set(ClientIP, 25),\n      Hours     = make_set(HourUtc, 24)\n    by ChannelId, UserId\n| extend AccountName = iff(isempty(UserId), strcat(\"channel:\", ChannelId), UserId)\n| project LastSeen, FirstSeen, AccountName, ChannelId, UserId, Turns, Convs, Hours, ClientIPs\n| order by LastSeen desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1078"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1011-4a11-9c01-0123456789b1')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Authority / role-impersonation claim in user message",
+        "description": "Raises an incident when an inbound Copilot Studio user message asserts\nan authority or role the channel cannot verify (\"I am the CFO\", \"as an\nadministrator\", \"I'm authorised to\", \"on behalf of the board\") in order\nto coax the agent into releasing restricted data or running privileged\nactions. Because the agent has no way to validate the claim, this social\n-engineering pattern is a common privilege-escalation lever against\nCopilot Studio agents.\n\nReads inbound turns from AppEvents (Name == \"BotMessageReceived\") with\nthe prompt text in Properties.text (requires \"Log sensitive properties\"\non the agent's Application Insights settings).\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let escalationMarkers = dynamic([\n    \"i am the ceo\", \"i'm the ceo\", \"i am the cfo\", \"i'm the cfo\",\n    \"i am the cto\", \"i am your administrator\", \"as an administrator\",\n    \"as the administrator\", \"as an admin\", \"i am an admin\", \"i'm an admin\",\n    \"i have admin\", \"i am authorised\", \"i am authorized\", \"i'm authorised\",\n    \"i'm authorized\", \"i am allowed to\", \"i have permission to\",\n    \"on behalf of the\", \"i am from it\", \"i'm from security\",\n    \"by order of\", \"override the policy\", \"i outrank\", \"elevate my access\",\n    \"give me access to\", \"grant me access\", \"i should have access\"\n]);\nAppEvents\n| where Name == \"BotMessageReceived\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    Locale    = tostring(Properties[\"locale\"]),\n    DesignMode = tostring(Properties[\"DesignMode\"]),\n    Text      = tolower(tostring(Properties[\"text\"]))\n| where isnotempty(Text)\n| mv-apply Marker = escalationMarkers to typeof(string) on (\n      where Text contains Marker\n      | summarize Markers = make_set(Marker)\n  )\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project\n    TimeGenerated, AccountName, ConvId, ChannelId, Locale, DesignMode,\n    Markers, Text = substring(tostring(Properties[\"text\"]), 0, 1024),\n    SessionId, ClientIP, AppVersion\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "PrivilegeEscalation",
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1548",
+          "T1078"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1001-4a11-9c01-0123456789a1')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Prompt-injection / instruction-override patterns in user message",
+        "description": "Raises an incident when an inbound Copilot Studio user message carries\nclassic prompt-injection / instruction-override markers (\"ignore\nprevious instructions\", \"you are now\", \"developer mode\", \"reveal your\nsystem prompt\", tool-coercion phrasing). These are the cheapest and\nmost common attempts to subvert an agent's guardrails or exfiltrate its\nconfiguration.\n\nReads the real Copilot Studio telemetry shape: bot turns land in the\nAppEvents table (Name == \"BotMessageReceived\") with the property bag in\nthe dynamic Properties column (conversationId, channelId, text). The\ntext key is only populated when \"Log sensitive properties\" is enabled\non the agent's Application Insights settings.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let injectionMarkers = dynamic([\n    \"ignore previous instructions\", \"ignore all previous\", \"ignore your instructions\",\n    \"disregard the above\", \"disregard previous\", \"you are now\", \"act as\",\n    \"developer mode\", \"do anything now\", \"dan mode\", \"jailbreak\",\n    \"reveal your system prompt\", \"show your system prompt\", \"print your instructions\",\n    \"repeat the words above\", \"what are your instructions\", \"bypass your rules\",\n    \"without any restrictions\", \"pretend you are\", \"from now on you\"\n]);\nAppEvents\n| where Name == \"BotMessageReceived\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    Locale    = tostring(Properties[\"locale\"]),\n    DesignMode = tostring(Properties[\"DesignMode\"]),\n    Text      = tolower(tostring(Properties[\"text\"]))\n| where isnotempty(Text)\n| mv-apply Marker = injectionMarkers to typeof(string) on (\n      where Text contains Marker\n      | summarize Markers = make_set(Marker)\n  )\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project\n    TimeGenerated, AccountName, ConvId, ChannelId, Locale, DesignMode,\n    Markers, Text = substring(tostring(Properties[\"text\"]), 0, 1024),\n    SessionId, ClientIP, AppVersion\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1566",
+          "T1562"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1003-4a11-9c01-0123456789a3')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Secrets or bulk PII in user prompt",
+        "description": "Raises an incident when an inbound user message to a Copilot Studio\nagent contains secret-like material (AWS access key, PEM private key,\nJWT), a credit-card / PAN number, or bulk PII (>=10 email addresses).\nUsers pasting live credentials, card numbers, or customer lists into an\nagent is a data-governance and credential-exposure risk, and can also be\nthe setup stage for a poisoning or replay attack.\n\nReads inbound turns from AppEvents (Name == \"BotMessageReceived\") with\nthe prompt text in Properties.text (requires \"Log sensitive properties\"\non the agent's Application Insights settings).\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "AppEvents\n| where Name == \"BotMessageReceived\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    Prompt    = tostring(Properties[\"text\"])\n| where isnotempty(Prompt)\n| extend\n    AwsKey     = Prompt matches regex @\"AKIA[0-9A-Z]{16}\",\n    PrivateKey = Prompt contains \"-----BEGIN\" and Prompt contains \"PRIVATE KEY-----\",\n    Jwt        = Prompt matches regex @\"eyJ[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}\",\n    EmailCount = array_length(extract_all(@\"([A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,})\", Prompt)),\n    DigitsOnly = replace_regex(Prompt, @\"[ \\-]\", \"\")\n| extend\n    CardLike   = DigitsOnly matches regex @\"[3-6][0-9]{12,18}\"\n| where AwsKey or PrivateKey or Jwt or CardLike or EmailCount >= 10\n| extend Signal = case(\n    AwsKey,           \"AwsAccessKey\",\n    PrivateKey,       \"PrivateKey\",\n    Jwt,              \"JwtToken\",\n    CardLike,         \"CardNumberPII\",\n    EmailCount >= 10, \"BulkEmailPII\",\n    \"Unknown\")\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project\n    TimeGenerated, Signal, AccountName, ConvId, ChannelId, EmailCount, CardLike,\n    Prompt = substring(Prompt, 0, 1024), SessionId, ClientIP, AppVersion\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess",
+          "Collection"
+        ],
+        "techniques": [
+          "T1552",
+          "T1213"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1007-4a11-9c01-0123456789a7')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - High-impact connector invoked",
+        "description": "Raises an incident when a Copilot Studio agent invokes a high-impact\nconnector / action - one that can run code, send mail, reach arbitrary\nHTTP endpoints, query databases, or perform privileged Microsoft 365 /\nAzure operations. These connectors are the agent's reach into the wider\nestate and are the actions an attacker most wants to drive.\n\nReads AppDependencies (DependencyType == \"Connector\"). The match list\nis keyed off the connector Name / Target substring. Tune the\nsensitiveConnectors list to your approved high-impact action set.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let sensitiveConnectors = dynamic([\n    \"office365\", \"sendemail\", \"sendmail\", \"outlook\", \"exchange\",\n    \"http\", \"webhook\", \"azuread\", \"azure\", \"sql\", \"dataverse\",\n    \"sharepoint\", \"onedrive\", \"powershell\", \"function\", \"automate\",\n    \"logicapp\", \"graph\", \"keyvault\", \"blob\", \"storage\"\n]);\nAppDependencies\n| where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    MatchKey  = tolower(strcat(Name, \" \", Target))\n| where MatchKey has_any (sensitiveConnectors)\n| summarize\n      Calls     = count(),\n      Targets   = make_set(Target, 25),\n      Success   = countif(Success == true),\n      Failures  = countif(Success == false),\n      FirstSeen = min(TimeGenerated),\n      LastSeen  = max(TimeGenerated)\n    by Name, ConvId, ChannelId\n| extend AccountName = iff(isempty(ConvId), strcat(\"connector:\", Name), ConvId)\n| project LastSeen, FirstSeen, AccountName, Name, ConvId, ChannelId, Calls, Success, Failures, Targets\n| order by LastSeen desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Execution",
+          "LateralMovement"
+        ],
+        "techniques": [
+          "T1059",
+          "T1648"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1002-4a11-9c01-0123456789a2')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Secrets or bulk PII in agent response",
+        "description": "Raises an incident when a Copilot Studio agent's outbound response\ncontains secret-like material (AWS access key, PEM private key, JWT) or\nbulk PII (>=10 email addresses) - a strong indicator the agent has been\ncoerced into leaking credentials, knowledge-base content, or a customer\nlist.\n\nReads outbound turns from AppEvents (Name == \"BotMessageSend\") with the\nresponse text in Properties.text. The text key requires \"Log sensitive\nproperties\" to be enabled on the agent's Application Insights settings.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "AppEvents\n| where Name == \"BotMessageSend\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    Output    = tostring(Properties[\"text\"])\n| where isnotempty(Output)\n| extend\n    AwsKey     = Output matches regex @\"AKIA[0-9A-Z]{16}\",\n    PrivateKey = Output contains \"-----BEGIN\" and Output contains \"PRIVATE KEY-----\",\n    Jwt        = Output matches regex @\"eyJ[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}\",\n    EmailCount = array_length(extract_all(@\"([A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,})\", Output))\n| where AwsKey or PrivateKey or Jwt or EmailCount >= 10\n| extend Signal = case(\n    AwsKey,            \"AwsAccessKey\",\n    PrivateKey,        \"PrivateKey\",\n    Jwt,               \"JwtToken\",\n    EmailCount >= 10,  \"BulkEmailPII\",\n    \"Unknown\")\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project\n    TimeGenerated, Signal, AccountName, ConvId, ChannelId, EmailCount,\n    Output = substring(Output, 0, 1024), SessionId, ClientIP, AppVersion\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Exfiltration",
+          "Collection"
+        ],
+        "techniques": [
+          "T1567",
+          "T1213"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-2003-4b23-9c13-aaaaaaaaaab3')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Session context contamination across a conversation",
+        "description": "Adapts the Microsoft AI Red Team v2.0 \"session context contamination\"\nfailure mode to Copilot Studio. An adversary plants data early in a\nmulti-turn conversation - an untrusted URL in user content or an\ninjection marker - that biases the agent so a sensitive connector call\nfires later. Neither half is anomalous in isolation; the pattern only\nemerges across the full conversation.\n\nThe rule splits each conversation (>= 5 user turns) into time quartiles\nand requires both:\n  - First quartile carries a contamination signal: an external URL\n    whose host is not a known-safe Microsoft domain, or a prompt-\n    injection marker in the user text.\n  - Last quartile (or later AppDependencies activity) issues a\n    sensitive connector call (mail / http / sql / azure / sharepoint /\n    dataverse / powershell).\n\nThe 5-turn minimum suppresses single-shot interactions; the safe-host\nallowlist suppresses first-party links. Requires \"Log sensitive\nproperties\" for the early-contamination text half.\n",
+        "severity": "Medium",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let injectionMarkers = dynamic([\n    \"ignore previous instructions\",\"disregard previous\",\"you are now\",\n    \"developer mode\",\"do anything now\",\"reveal your system prompt\",\n    \"bypass your rules\",\"forget the previous\",\"new instructions\",\n    \"from now on you\",\"store this and remember\",\"next time the user asks\"\n]);\nlet sensitiveConnectors = dynamic([\n    \"office365\",\"sendemail\",\"sendmail\",\"outlook\",\"exchange\",\n    \"http\",\"webhook\",\"azuread\",\"azure\",\"sql\",\"dataverse\",\n    \"sharepoint\",\"onedrive\",\"powershell\",\"function\",\"automate\",\n    \"logicapp\",\"graph\",\"keyvault\",\"blob\",\"storage\"\n]);\nlet safeHostSuffixes = dynamic([\n    \"microsoft.com\",\"office.com\",\"office365.com\",\"sharepoint.com\",\n    \"microsoftonline.com\",\"windows.net\",\"azure.com\",\"azureedge.net\",\n    \"live.com\",\"bing.com\",\"msn.com\",\"dynamics.com\",\"powerplatform.com\"\n]);\nlet turns =\n    AppEvents\n    | where TimeGenerated > ago(2h)\n    | where Name == \"BotMessageReceived\"\n    | extend ConvId = tostring(Properties[\"conversationId\"]),\n             Text   = tolower(tostring(Properties[\"text\"])),\n             ChannelId = tostring(Properties[\"channelId\"])\n    | where isnotempty(Text);\nlet convBounds =\n    turns\n    | summarize Turns = count(),\n                Start = min(TimeGenerated),\n                End   = max(TimeGenerated),\n                AnyUser = take_any(UserId),\n                AnyIp   = take_any(ClientIP),\n                AnyChannel = take_any(ChannelId)\n            by ConvId\n    | where Turns >= 5;\nlet early =\n    turns\n    | join kind=inner convBounds on ConvId\n    | extend RangeMs = max_of(datetime_diff('millisecond', End, Start), 1)\n    | extend OffMs   = datetime_diff('millisecond', TimeGenerated, Start)\n    | extend Quartile = min_of(toint(OffMs * 4 / RangeMs), 3)\n    | where Quartile == 0\n    | extend Host = tolower(extract(@\"https?://([A-Za-z0-9.\\-]+)\", 1, Text))\n    | extend HasInjection = Text has_any (injectionMarkers);\nlet earlyUrl =\n    early\n    | where isnotempty(Host)\n    | where not(Host has_any (safeHostSuffixes))\n    | summarize UrlHits = count(), UntrustedHosts = make_set(Host, 16) by ConvId;\nlet earlyInj =\n    early\n    | summarize InjHits = countif(HasInjection) by ConvId;\nlet lateActs =\n    AppDependencies\n    | where TimeGenerated > ago(2h)\n    | where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\"\n    | extend ConvId   = tostring(Properties[\"conversationId\"]),\n             MatchKey = tolower(strcat(Name, \" \", Target))\n    | where MatchKey has_any (sensitiveConnectors)\n    | summarize SensitiveCalls  = count(),\n                Connectors      = make_set(Name, 8),\n                Targets         = make_set(Target, 16),\n                LastSeen        = max(TimeGenerated),\n                FirstSensitive  = min(TimeGenerated)\n            by ConvId;\nearlyUrl\n| join kind=fullouter earlyInj on ConvId\n| extend ConvId = coalesce(ConvId, ConvId1)\n| extend Contamination = coalesce(UrlHits, 0) + coalesce(InjHits, 0)\n| where Contamination >= 1\n| join kind=inner lateActs on ConvId\n| join kind=leftouter convBounds on ConvId\n| where SensitiveCalls >= 1\n| extend AccountName = iff(isempty(AnyUser), \"unknown-agent\", AnyUser)\n| project LastSeen, AccountName, UserId = AnyUser, ConvId, AnyChannel, AnyIp,\n          Contamination, UntrustedHosts, SensitiveCalls, Connectors, Targets, FirstSensitive\n| order by Contamination desc, SensitiveCalls desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT2H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "Execution",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1566",
+          "T1059"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT12H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "AnyIp"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1015-4a11-9c01-0123456789b5')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - Suspicious or phishing URL in prompt or response",
+        "description": "Raises an incident when a URL with phishing / malicious characteristics\nappears in a Copilot Studio conversation - either sent by the user\n(BotMessageReceived) or emitted by the agent (BotMessageSend). Flags\nraw-IP URLs, punycode / IDN homograph hosts (xn--), known URL shorteners,\ncredential-bait paths (login / verify / reset-password / wallet), and\nrisky / look-alike TLDs. Covers the Defender for Cloud \"Phishing URL\nshared\", \"Phishing attempt detected\", and \"Corrupted AI directed a\nphishing attempt\" alert family from your own telemetry.\n\nReads AppEvents text (requires \"Log sensitive properties\" on the agent's\nApplication Insights settings). Heuristic by design - treat as a triage\nsignal, not a verdict. To raise fidelity, join ClientIP / host against a\nthreat-intel watchlist or the ThreatIntelligenceIndicator table.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let shorteners = dynamic([\"bit.ly\",\"tinyurl.com\",\"t.co\",\"goo.gl\",\"ow.ly\",\"is.gd\",\"buff.ly\",\"rb.gy\",\"cutt.ly\",\"rebrand.ly\"]);\nlet baitPaths  = dynamic([\"login\",\"signin\",\"verify\",\"secure\",\"account\",\"update\",\"reset\",\"password\",\"wallet\",\"seed\",\"mfa\",\"authenticate\",\"confirm\"]);\nlet riskyTlds  = dynamic([\".zip\",\".mov\",\".xyz\",\".top\",\".click\",\".country\",\".gq\",\".tk\",\".ml\",\".cf\",\".ga\",\".rest\",\".quest\"]);\nAppEvents\n| where Name in (\"BotMessageReceived\", \"BotMessageSend\")\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    Direction = iff(Name == \"BotMessageReceived\", \"UserPrompt\", \"AgentResponse\"),\n    Text      = tostring(Properties[\"text\"])\n| where isnotempty(Text)\n| mv-expand Url = extract_all(@\"(https?://[^\\s\\)\\]\\}\"\"'<>]+)\", Text) to typeof(string)\n| extend\n    Host = tolower(tostring(extract(@\"https?://([^/:\\s]+)\", 1, Url))),\n    Path = tolower(tostring(extract(@\"https?://[^/]+(/[^\\s]*)?\", 1, Url)))\n| extend Tld = tolower(tostring(extract(@\"(\\.[a-z]+)$\", 1, Host)))\n| extend\n    RawIpHost  = Host matches regex @\"^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$\",\n    Punycode   = Host contains \"xn--\",\n    Shortener  = Host in (shorteners),\n    RiskyTld   = set_has_element(riskyTlds, Tld),\n    BaitPath   = Path has_any (baitPaths),\n    AtTrick    = Url matches regex @\"https?://[^/\\s]+@\"\n| extend RiskScore = toint(RawIpHost) + toint(Punycode) + toint(Shortener)\n                   + toint(RiskyTld) + toint(BaitPath) + toint(AtTrick)\n| where RiskScore > 0\n| extend Reasons = trim(\",\", strcat(\n    iff(RawIpHost, \"RawIP,\", \"\"), iff(Punycode, \"Punycode,\", \"\"),\n    iff(Shortener, \"Shortener,\", \"\"), iff(RiskyTld, \"RiskyTLD,\", \"\"),\n    iff(BaitPath, \"CredentialBaitPath,\", \"\"), iff(AtTrick, \"UserinfoTrick,\", \"\")))\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project\n    TimeGenerated, Direction, RiskScore, Reasons, AccountName, ConvId, ChannelId,\n    Url = substring(Url, 0, 512), Host, SessionId, ClientIP, AppVersion\n| order by RiskScore desc, TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "Execution"
+        ],
+        "techniques": [
+          "T1566",
+          "T1204"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          },
+          {
+            "entityType": "URL",
+            "fieldMappings": [
+              {
+                "identifier": "Url",
+                "columnName": "Url"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1004-4a11-9c01-0123456789a4')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - System-prompt disclosure attempt and leak",
+        "description": "Correlates a user message asking the agent to disclose its hidden\nconfiguration (\"show your system prompt\", \"what are your instructions\",\n\"repeat the words above\") with a bot response in the same conversation\nthat leaks instruction-style markers (\"You are\", \"Your role is\",\n\"system:\", \"## Instructions\"). Together these indicate a successful or\nnear-successful system-prompt extraction.\n\nJoins inbound and outbound AppEvents turns on conversationId. Both the\nprompt and response text require \"Log sensitive properties\" to be\nenabled on the agent's Application Insights settings.\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let disclosureMarkers = dynamic([\n    \"system prompt\", \"your instructions\", \"your system message\",\n    \"repeat the words above\", \"what are your instructions\",\n    \"print your prompt\", \"reveal your prompt\", \"initial instructions\",\n    \"your configuration\", \"your guidelines\"\n]);\nlet asks =\n    AppEvents\n    | where Name == \"BotMessageReceived\"\n    | extend ConvId = tostring(Properties[\"conversationId\"]),\n             Prompt = tolower(tostring(Properties[\"text\"]))\n    | where isnotempty(Prompt)\n    | where Prompt has_any (disclosureMarkers)\n    | project AskTime = TimeGenerated, ConvId, Prompt = substring(tostring(Properties[\"text\"]), 0, 512),\n              UserId, ChannelId = tostring(Properties[\"channelId\"]), ClientIP;\nlet leaks =\n    AppEvents\n    | where Name == \"BotMessageSend\"\n    | extend ConvId = tostring(Properties[\"conversationId\"]),\n             Output = tostring(Properties[\"text\"])\n    | where isnotempty(Output)\n    | where Output matches regex @\"(?i)(you are an?|your role is|system:|##\\s*instructions|the assistant)\"\n    | project LeakTime = TimeGenerated, ConvId, Output = substring(Output, 0, 1024);\nasks\n| join kind=inner leaks on ConvId\n| where LeakTime between (AskTime .. (AskTime + 10m))\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project\n    AskTime, LeakTime, AccountName, ConvId, ChannelId, ClientIP,\n    Prompt, Output,\n    LagSeconds = datetime_diff('second', LeakTime, AskTime)\n| order by AskTime desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Discovery",
+          "Collection"
+        ],
+        "techniques": [
+          "T1082",
+          "T1213"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'a1b2c3d4-1016-4a11-9c01-0123456789b6')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Copilot Studio - URL / domain / IP matched against threat intelligence",
+        "description": "Extracts URLs (and their hosts / IPs) from Copilot Studio conversation\ncontent - both inbound user prompts and outbound agent responses - and\ncorrelates them against active Microsoft Sentinel threat-intelligence\nindicators. A match means the agent either received or emitted a known\nmalicious / suspicious URL, domain, or IP, which can indicate a phishing\nlure sent to the agent, a poisoned knowledge source, or a corrupted\nagent surfacing attacker infrastructure. This is the high-fidelity\ncompanion to CopilotStudioSuspiciousUrlInContent (which is heuristic):\nhere the verdict comes from the TI feed.\n\nJoins against the modern ThreatIntelIndicators table (network observable\ntypes url:value / domain-name:value / ipv4-addr:value / ipv6-addr:value)\nand only considers active, non-revoked, in-date indicators. Reads agent\ntext from AppEvents (requires \"Log sensitive properties\" on the agent's\nApplication Insights settings).\n",
+        "severity": "High",
+        "enabled": "[parameters('enableAnalyticRules')]",
+        "query": "let dt_lookBack = 1h;\nlet ioc_lookBack = 14d;\nlet networkIocTypes = dynamic([\"url:value\", \"domain-name:value\", \"ipv4-addr:value\", \"ipv6-addr:value\"]);\nlet TI =\n    ThreatIntelIndicators\n    | where TimeGenerated > ago(ioc_lookBack)\n    | where IsActive == true and Revoked == false\n    | where ObservableKey in (networkIocTypes)\n    | where isempty(ValidUntil) or ValidUntil > now()\n    | summarize arg_max(TimeGenerated, *) by IndicatorId = Id\n    | extend IOC = tolower(ObservableValue)\n    | where isnotempty(IOC);\nlet Content =\n    AppEvents\n    | where TimeGenerated > ago(dt_lookBack)\n    | where Name in (\"BotMessageReceived\", \"BotMessageSend\")\n    | extend\n        ConvId    = tostring(Properties[\"conversationId\"]),\n        ChannelId = tostring(Properties[\"channelId\"]),\n        Direction = iff(Name == \"BotMessageReceived\", \"UserPrompt\", \"AgentResponse\"),\n        Text      = tostring(Properties[\"text\"])\n    | where isnotempty(Text)\n    | mv-expand Url = extract_all(@\"(https?://[^\\s\\)\\]\\}\"\"'<>]+)\", Text) to typeof(string)\n    | extend\n        Url  = tolower(Url),\n        Host = tolower(tostring(extract(@\"https?://([^/:\\s]+)\", 1, Url)))\n    | mv-expand IOC = pack_array(Url, Host) to typeof(string)\n    | where isnotempty(IOC);\nContent\n| join kind=inner TI on IOC\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project\n    TimeGenerated, Direction, AccountName, ConvId, ChannelId,\n    MatchedIOC = IOC, ObservableKey, Confidence,\n    ThreatType  = tostring(todynamic(Data).indicator_types[0]),\n    Description = tostring(todynamic(Data).description),\n    Url, Host, ClientIP, SessionId, AppVersion\n| order by TimeGenerated desc\n",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CommandAndControl",
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1071",
+          "T1566"
+        ],
+        "alertRuleTemplateName": null,
+        "eventGroupingSettings": {
+          "aggregationKind": "SingleAlert"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "lookbackDuration": "PT6H",
+            "groupByEntities": [
+              "Account",
+              "URL"
+            ],
+            "groupByCustomDetails": [],
+            "enabled": true,
+            "groupByAlertDetails": [],
+            "reopenClosedIncident": false,
+            "matchingMethod": "Selected"
+          }
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "Name",
+                "columnName": "AccountName"
+              }
+            ]
+          },
+          {
+            "entityType": "URL",
+            "fieldMappings": [
+              {
+                "identifier": "Url",
+                "columnName": "Url"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "ClientIP"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2006-4b22-9d01-0123456789c6')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Channel distribution and new-channel first seen",
+        "query": "let detectionWindow = 1d;\nlet evt = AppEvents | where Name in (\"BotMessageReceived\", \"BotMessageSend\")\n          | extend ChannelId = tostring(Properties[\"channelId\"]);\nlet baseline = evt | where TimeGenerated between (ago(14d) .. ago(detectionWindow)) | distinct ChannelId;\nevt\n| where TimeGenerated > ago(detectionWindow)\n| summarize Turns = count(), Users = dcount(UserId), ClientIPs = make_set(ClientIP, 25),\n            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by ChannelId\n| join kind=leftouter (baseline | extend InBaseline = true) on ChannelId\n| extend Status = iff(isempty(InBaseline) or isnull(InBaseline), \"NewChannel\", \"Known\")\n| project LastSeen, FirstSeen, ChannelId, Status, Turns, Users, ClientIPs\n| order by Status asc, Turns desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Profiles which channels (Teams, Direct Line, web chat, custom, design) a Copilot Studio agent is reached on, and flags channels that appear in the recent window but not in the 14-day baseline. A new publishing channel can be an intended rollout - or an...",
+            "name": "description"
+          },
+          {
+            "value": "InitialAccess",
+            "name": "tactics"
+          },
+          {
+            "value": "T1078",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2002-4b22-9d01-0123456789c2')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Connector usage baseline deviation",
+        "query": "let detectionWindow = 1d;\nlet conn =\n    AppDependencies\n    | where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\";\nlet baseline =\n    conn\n    | where TimeGenerated between (ago(14d) .. ago(detectionWindow))\n    | summarize BaselineCalls = count(), BaselineDays = dcount(bin(TimeGenerated, 1d)) by Target\n    | extend BaselineDailyAvg = toreal(BaselineCalls) / iff(BaselineDays == 0, 1, BaselineDays);\nconn\n| where TimeGenerated > ago(detectionWindow)\n| summarize RecentCalls = count(), Connectors = make_set(Name, 10), LastSeen = max(TimeGenerated) by Target\n| join kind=leftouter baseline on Target\n| extend BaselineDailyAvg = coalesce(BaselineDailyAvg, 0.0)\n| extend Status = case(\n      isnull(BaselineCalls),                       \"NewConnector\",\n      RecentCalls >= 3 * BaselineDailyAvg and RecentCalls >= 10, \"SpikingConnector\",\n      \"Normal\")\n| where Status != \"Normal\"\n| project LastSeen, Target, Connectors, RecentCalls, BaselineDailyAvg = round(BaselineDailyAvg, 1), Status\n| order by Status asc, RecentCalls desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Compares each connector / action target's call volume in the recent window against its own 14-day baseline and flags new or sharply spiking connectors. New tool targets and sudden spikes are early indicators of configuration drift, a newly added (possi...",
+            "name": "description"
+          },
+          {
+            "value": "Execution,Persistence",
+            "name": "tactics"
+          },
+          {
+            "value": "T1059,T1554",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2003-4b22-9d01-0123456789c3')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Connector error storm by conversation",
+        "query": "let lookback = 1d;\nAppDependencies\n| where TimeGenerated > ago(lookback)\n| where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\"\n| extend ConvId = tostring(Properties[\"conversationId\"]),\n         ChannelId = tostring(Properties[\"channelId\"])\n| summarize\n      Total     = count(),\n      Failures  = countif(Success == false),\n      ResultCodes = make_set(ResultCode, 25),\n      Targets   = make_set(Target, 25),\n      FirstSeen = min(TimeGenerated),\n      LastSeen  = max(TimeGenerated)\n    by ConvId, ChannelId, Name\n| extend FailureRate = round(100.0 * Failures / iff(Total == 0, 1, Total), 1)\n| where Failures >= 5\n| order by Failures desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Surfaces conversations and connector targets with a high rate of failed calls (Success == false), broken down by result code. Useful to triage backend enumeration, permission probing, throttling, or an action stuck in a retry loop. Lower threshold than...",
+            "name": "description"
+          },
+          {
+            "value": "Discovery,Impact",
+            "name": "tactics"
+          },
+          {
+            "value": "T1190,T1499",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2001-4b22-9d01-0123456789c1')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Conversation volume by user / session",
+        "query": "let lookback = 1d;\nAppEvents\n| where TimeGenerated > ago(lookback)\n| where Name in (\"BotMessageReceived\", \"BotMessageSend\")\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    DesignMode = tostring(Properties[\"DesignMode\"])\n| summarize\n      InboundTurns  = countif(Name == \"BotMessageReceived\"),\n      OutboundTurns = countif(Name == \"BotMessageSend\"),\n      Conversations = dcount(ConvId),\n      Channels      = make_set(ChannelId, 10),\n      ClientIPs     = make_set(ClientIP, 25),\n      FirstSeen     = min(TimeGenerated),\n      LastSeen      = max(TimeGenerated)\n    by UserId, SessionId\n| extend TurnsPerConversation = round(toreal(InboundTurns) / iff(Conversations == 0, 1, Conversations), 1)\n| order by InboundTurns desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Surfaces the busiest Copilot Studio users, sessions and channels over the lookback window so an analyst can spot scripted abuse, denial-of- wallet pacing, or a single identity dominating an agent. Lower-volume context than the flooding analytic rule, f...",
+            "name": "description"
+          },
+          {
+            "value": "Impact",
+            "name": "tactics"
+          },
+          {
+            "value": "T1499",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2007-4b22-9d01-0123456789c7')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Dormant agent / connector reactivation",
+        "query": "let reactivationWindow = 1d;\nlet silenceDays = 7d;\nlet conn = AppDependencies\n           | where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\";\nlet recent = conn | where TimeGenerated > ago(reactivationWindow)\n             | summarize RecentCalls = count(), LastSeen = max(TimeGenerated) by Target;\nlet priorActivity = conn\n             | where TimeGenerated between (ago(60d) .. ago(reactivationWindow + silenceDays))\n             | summarize PriorLastSeen = max(TimeGenerated) by Target;\nlet recentlySilent = conn\n             | where TimeGenerated between (ago(reactivationWindow + silenceDays) .. ago(reactivationWindow))\n             | distinct Target;\nrecent\n| join kind=inner priorActivity on Target\n| join kind=leftanti recentlySilent on Target\n| extend DaysDormant = round(toreal(datetime_diff('day', LastSeen, PriorLastSeen)), 0)\n| project LastSeen, Target, RecentCalls, PriorLastSeen, DaysDormant\n| order by DaysDormant desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Finds connector targets (and agent app versions) that were silent for >=7 days and then became active again in the recent window. A dormant- then-active pattern can indicate a re-enabled stale action, a forgotten integration being abused, or staged too...",
+            "name": "description"
+          },
+          {
+            "value": "Persistence",
+            "name": "tactics"
+          },
+          {
+            "value": "T1554",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2011-4b22-9d01-0123456789d1')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Indirect prompt-injection markers in agent response",
+        "query": "let lookback = 7d;\nlet injectionMarkers = dynamic([\n    \"ignore previous instructions\", \"ignore all previous\", \"disregard previous\",\n    \"you are now\", \"act as\", \"developer mode\", \"do anything now\", \"dan mode\",\n    \"system prompt\", \"your instructions\", \"reveal your prompt\", \"bypass your rules\",\n    \"without any restrictions\", \"from now on you\", \"new instructions:\"\n]);\nlet inbound =\n    AppEvents\n    | where TimeGenerated > ago(lookback)\n    | where Name == \"BotMessageReceived\"\n    | extend ConvId = tostring(Properties[\"conversationId\"]),\n             Text = tolower(tostring(Properties[\"text\"]))\n    | summarize UserMarkerHits = countif(Text has_any (injectionMarkers)),\n                UserMsgs = count() by ConvId;\nlet outbound =\n    AppEvents\n    | where TimeGenerated > ago(lookback)\n    | where Name == \"BotMessageSend\"\n    | extend ConvId = tostring(Properties[\"conversationId\"]),\n             Output = tolower(tostring(Properties[\"text\"]))\n    | where isnotempty(Output)\n    | where Output has_any (injectionMarkers)\n    | summarize BotMarkerHits = count(),\n                Samples = make_set(substring(tostring(Properties[\"text\"]), 0, 240), 5),\n                FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated),\n                UserId = take_any(UserId),\n                ChannelId = take_any(tostring(Properties[\"channelId\"])),\n                ClientIP = take_any(ClientIP)\n      by ConvId;\noutbound\n| join kind=leftouter inbound on ConvId\n| where coalesce(UserMarkerHits, 0) == 0\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project FirstSeen, LastSeen, AccountName, ConvId, ChannelId, ClientIP,\n          BotMarkerHits, UserMsgs, Samples\n| order by BotMarkerHits desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Surfaces likely indirect (data / workflow) prompt injection: a conversation where instruction-override markers (\"ignore previous instructions\", \"you are now\", \"system prompt\", \"do anything now\") appear in the agent's OUTPUT (BotMessageSend) while the u...",
+            "name": "description"
+          },
+          {
+            "value": "InitialAccess,Execution",
+            "name": "tactics"
+          },
+          {
+            "value": "T1566,T1059",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2005-4b22-9d01-0123456789c5')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Prompt-injection signals in user messages",
+        "query": "let lookback = 1d;\nlet injectionMarkers = dynamic([\n    \"ignore previous instructions\", \"ignore all previous\", \"ignore your instructions\",\n    \"disregard the above\", \"disregard previous\", \"you are now\", \"act as\",\n    \"developer mode\", \"do anything now\", \"dan mode\", \"jailbreak\",\n    \"reveal your system prompt\", \"show your system prompt\", \"print your instructions\",\n    \"repeat the words above\", \"what are your instructions\", \"bypass your rules\",\n    \"without any restrictions\", \"pretend you are\", \"from now on you\",\n    \"new instructions:\", \"system:\", \"override\", \"you must now\"\n]);\nAppEvents\n| where TimeGenerated > ago(lookback)\n| where Name == \"BotMessageReceived\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    Text      = tolower(tostring(Properties[\"text\"]))\n| where isnotempty(Text)\n| mv-apply Marker = injectionMarkers to typeof(string) on (\n      where Text contains Marker\n      | summarize Markers = make_set(Marker)\n  )\n| extend MarkerCount = array_length(Markers)\n| project TimeGenerated, UserId, ConvId, ChannelId, MarkerCount, Markers,\n          Text = substring(tostring(Properties[\"text\"]), 0, 1024), ClientIP\n| order by MarkerCount desc, TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Broad sweep of inbound user messages for prompt-injection / instruction- override / tool-coercion phrasing, ranked by how many distinct markers a conversation triggers. Companion to the analytic rule, surfacing weaker single-marker hits for tuning and ...",
+            "name": "description"
+          },
+          {
+            "value": "InitialAccess,DefenseEvasion",
+            "name": "tactics"
+          },
+          {
+            "value": "T1566,T1562",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2008-4b22-9d01-0123456789c8')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Connector latency / response-time anomaly",
+        "query": "let lookback = 7d;\nAppDependencies\n| where TimeGenerated > ago(lookback)\n| where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\"\n| make-series AvgDuration = avg(DurationMs) default = 0.0 on TimeGenerated step 1h by Target\n| extend (Anomalies, Score, Baseline) = series_decompose_anomalies(AvgDuration, 2.5, -1, 'linefit')\n| mv-expand TimeGenerated to typeof(datetime), AvgDuration to typeof(real),\n            Anomalies to typeof(long), Score to typeof(real), Baseline to typeof(real)\n| where Anomalies != 0\n| project TimeGenerated, Target, AvgDuration = round(AvgDuration, 0),\n          Baseline = round(Baseline, 0), Score = round(Score, 2), Anomalies\n| order by abs(Score) desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Uses series_decompose_anomalies over hourly connector latency (DurationMs) to surface targets whose response time deviates sharply from their own trend. Latency anomalies can indicate a degraded backend, throttling under abuse, or a connector being dri...",
+            "name": "description"
+          },
+          {
+            "value": "Impact",
+            "name": "tactics"
+          },
+          {
+            "value": "T1499",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2004-4b22-9d01-0123456789c4')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Sensitive content in agent responses",
+        "query": "let lookback = 1d;\nAppEvents\n| where TimeGenerated > ago(lookback)\n| where Name == \"BotMessageSend\"\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"]),\n    Output    = tostring(Properties[\"text\"])\n| where isnotempty(Output)\n| extend\n    AwsKey     = array_length(extract_all(@\"(AKIA[0-9A-Z]{16})\", Output)),\n    PrivateKey = iff(Output contains \"-----BEGIN\" and Output contains \"PRIVATE KEY-----\", 1, 0),\n    Jwt        = array_length(extract_all(@\"(eyJ[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,})\", Output)),\n    Emails     = array_length(extract_all(@\"([A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,})\", Output)),\n    CardLike   = array_length(extract_all(@\"\\b((?:\\d[ \\-]?){13,16})\\b\", Output))\n| extend HitScore = AwsKey + PrivateKey + Jwt + iff(Emails >= 5, 1, 0) + iff(CardLike >= 1, 1, 0)\n| where HitScore > 0\n| project\n    TimeGenerated, UserId, ConvId, ChannelId,\n    AwsKey, PrivateKey, Jwt, Emails, CardLike, HitScore,\n    Output = substring(Output, 0, 1024)\n| order by HitScore desc, TimeGenerated desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Scans Copilot Studio outbound responses for secret-like material and bulk PII (AWS keys, PEM private keys, JWTs, many email addresses, IBAN / card-like numbers). Broader, lower-threshold companion to the high-severity analytic rule - returns single-hit...",
+            "name": "description"
+          },
+          {
+            "value": "Exfiltration,Collection",
+            "name": "tactics"
+          },
+          {
+            "value": "T1567,T1213",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2012-4b22-9d01-0123456789d2')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Tool abuse via connector breadth and destructive operations",
+        "query": "let lookback = 1d;\nlet connectorBreadthThreshold = 4;\nlet destructiveVerbs = dynamic([\n    \"delete\", \"remove\", \"drop\", \"update\", \"patch\", \"put\", \"send\", \"post\",\n    \"create\", \"disable\", \"reset\", \"grant\", \"revoke\", \"purge\", \"wipe\"\n]);\nAppDependencies\n| where TimeGenerated > ago(lookback)\n| where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\"\n| extend\n    ConvId       = tostring(Properties[\"conversationId\"]),\n    ChannelId    = tostring(Properties[\"channelId\"]),\n    TargetPrefix = tolower(tostring(split(Target, \"/\")[0])),\n    Operation    = tolower(tostring(split(Target, \"/\")[1]))\n| summarize\n    Calls = count(),\n    DistinctConnectors = dcount(TargetPrefix),\n    DistinctOperations = dcount(Operation),\n    Connectors = make_set(TargetPrefix, 25),\n    DestructiveOps = make_set_if(Operation, Operation has_any (destructiveVerbs), 25),\n    Failures = countif(Success == false),\n    FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated),\n    UserId = take_any(UserId), ClientIP = take_any(ClientIP)\n    by ConvId, ChannelId\n| extend DestructiveCount = array_length(DestructiveOps)\n| where DistinctConnectors >= connectorBreadthThreshold or DestructiveCount > 0\n| extend AccountName = iff(isempty(UserId), \"unknown-agent\", UserId)\n| project FirstSeen, LastSeen, AccountName, ConvId, ChannelId, ClientIP,\n          Calls, DistinctConnectors, DistinctOperations, DestructiveCount,\n          DestructiveOps, Failures, Connectors\n| order by DistinctConnectors desc, DestructiveCount desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Surfaces possible tool / action manipulation (over-permissive connector execution). Aggregates Copilot Studio connector calls per conversation and flags conversations that either fan out across an unusually wide set of distinct connectors / operations,...",
+            "name": "description"
+          },
+          {
+            "value": "Execution,Impact",
+            "name": "tactics"
+          },
+          {
+            "value": "T1059,T1565",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2010-4b22-9d01-0123456789ca')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Topic / generative-answer trigger enumeration",
+        "query": "let lookback = 1d;\nAppEvents\n| where TimeGenerated > ago(lookback)\n| where Name !in (\"BotMessageReceived\", \"BotMessageSend\")\n| extend\n    ConvId    = tostring(Properties[\"conversationId\"]),\n    ChannelId = tostring(Properties[\"channelId\"])\n| summarize\n      Events        = count(),\n      DistinctEvents = dcount(Name),\n      EventTypes    = make_set(Name, 50),\n      FirstSeen     = min(TimeGenerated),\n      LastSeen      = max(TimeGenerated)\n    by ConvId, ChannelId, UserId\n| where DistinctEvents >= 1\n| order by DistinctEvents desc, Events desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Profiles which named events a Copilot Studio agent emits beyond the basic message turns - topic triggers, generative-answer events, QnA and intent events - and highlights conversations that touch an unusually high number of distinct event types. Rapid ...",
+            "name": "description"
+          },
+          {
+            "value": "Discovery",
+            "name": "tactics"
+          },
+          {
+            "value": "T1592",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2022-10-01",
+      "name": "[concat(parameters('workspaceName'), '/b2c3d4e5-2009-4b22-9d01-0123456789c9')]",
+      "properties": {
+        "category": "Hunting Queries",
+        "displayName": "Copilot Studio - Untrusted connector target (allowlist join)",
+        "query": "let lookback = 1d;\nlet trusted =\n    _GetWatchlist('CopilotStudioTrustedConnectors')\n    | project ConnectorTarget = tolower(tostring(column_ifexists('ConnectorTarget', '')))\n    | where isnotempty(ConnectorTarget);\nAppDependencies\n| where TimeGenerated > ago(lookback)\n| where AppRoleName == \"Microsoft Copilot Studio\" or DependencyType == \"Connector\"\n| extend\n    ConvId       = tostring(Properties[\"conversationId\"]),\n    ChannelId    = tostring(Properties[\"channelId\"]),\n    TargetLower  = tolower(Target),\n    TargetPrefix = tolower(tostring(split(Target, \"/\")[0]))\n| extend Trusted = TargetPrefix in (trusted) or TargetLower in (trusted)\n| where not(Trusted)\n| summarize Calls = count(), Convs = make_set(ConvId, 25), Channels = make_set(ChannelId, 10),\n            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by Name, Target, TargetPrefix\n| order by Calls desc\n",
+        "version": 2,
+        "tags": [
+          {
+            "value": "Flags Copilot Studio connector / action calls whose Target host is not on the approved CopilotStudioTrustedConnectors watchlist (column ConnectorTarget). A fetch or action against a host outside the approved set can indicate a poisoned / rogue action, ...",
+            "name": "description"
+          },
+          {
+            "value": "Exfiltration,CommandAndControl",
+            "name": "tactics"
+          },
+          {
+            "value": "T1567,T1071",
+            "name": "techniques"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'CopilotStudioAgentMap')]",
+      "condition": "[parameters('enableWatchlist')]",
+      "properties": {
+        "displayName": "Copilot Studio Agent -> Identity / Bot Map",
+        "description": "Maps each Copilot Studio agent to its bot/runtime identifier (the UserId prefix that appears in AppEvents, e.g. pva-studio<botid>) and, where applicable, the Entra identity it acts under. Provides friendly agent names for the AppEvents UserId values and a hook for future cross-table correlation hunts (joining AppEvents to AuditLogs / OfficeActivity / AzureActivity). Populate BotId with the value seen in the AppEvents UserId column and AgentName with the human-friendly agent name.",
+        "provider": "Custom",
+        "source": "Local file",
+        "itemsSearchKey": "BotId",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "BotId,AgentName,Environment,AppId,ObjectId,Owner,Description\npva-studioc09d8629-128b-4b3f-bb21-a4158182c15d,TestCopilotAgent,PurviewSpainTeam,,,,Seed example - replace with your agents (BotId is the AppEvents UserId value)\n"
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/watchlists",
+      "apiVersion": "2023-12-01-preview",
+      "name": "[concat(parameters('workspaceName'), '/Microsoft.SecurityInsights/', 'CopilotStudioTrustedConnectors')]",
+      "condition": "[parameters('enableWatchlist')]",
+      "properties": {
+        "displayName": "Copilot Studio Trusted Connector Targets",
+        "description": "Approved connector / action target prefixes for Copilot Studio agents. The AgentUntrustedConnectorTarget hunting query joins AppDependencies (DependencyType == 'Connector') against this list and treats any Target whose prefix is not present as untrusted. Populate ConnectorTarget with the lowercase target prefix as it appears in the AppDependencies Target column (e.g. shared_msnweather, shared_office365, shared_sql) or the full operation path. Replace the seed rows with your approved connector set before relying on the hunt - while only seed rows are present every other connector is reported as untrusted.",
+        "provider": "Custom",
+        "source": "Local file",
+        "itemsSearchKey": "ConnectorTarget",
+        "contentType": "text/csv",
+        "numberOfLinesToSkip": 0,
+        "rawContent": "ConnectorTarget,ConnectorName,Description\nshared_msnweather,MSN Weather,Seed example - weather connector used by the sample agent\nshared_office365,Office 365 Outlook,Seed example - approved mail connector\nshared_office365users,Office 365 Users,Seed example - approved directory lookup connector\n"
+      }
+    }
+  ],
+  "outputs": {
+    "analyticRuleCount": {
+      "value": 19,
+      "type": "int"
+    },
+    "huntingQueryCount": {
+      "value": 12,
+      "type": "int"
+    },
+    "watchlistCount": {
+      "value": 2,
+      "type": "int"
+    },
+    "analyticRulesEnabled": {
+      "value": "[parameters('enableAnalyticRules')]",
+      "type": "bool"
+    }
+  }
+}
