@@ -1,0 +1,53 @@
+id: 6a7b8c9d-4444-4d10-9104-0123456789c4
+name: Agent - Abnormal tool / capability usage mix
+description: |
+  Hunts Foundry / Agent Service agents whose 24-hour tool-invocation
+  profile differs sharply from their 14-day baseline: a new tool
+  appearing, or a per-tool call rate spiking far above baseline. Useful
+  for finding agent-exploitation and abuse of high-impact tools
+  (code interpreter, shell, http, email, sql) by an agent that previously
+  did not touch them - the Foundry equivalent of the Copilot abnormal
+  plugin-usage hunt.
+
+  Reads gen_ai.tool.name / gen_ai.tool.type from the AppDependencies span
+  property bag (Properties). Tools are pivoted per agent
+  (gen_ai.agent.name) because Foundry telemetry has no human-user field.
+query: |
+  let baselineWindow = 14d;
+  let recentWindow = 1d;
+  let toolEvents =
+      AppDependencies
+      | where TimeGenerated > ago(baselineWindow)
+      | where isnotempty(Properties["gen_ai.tool.name"])
+      | extend
+          Agent    = tostring(Properties["gen_ai.agent.name"]),
+          ToolName = tolower(tostring(Properties["gen_ai.tool.name"])),
+          ToolType = tolower(tostring(Properties["gen_ai.tool.type"]))
+      | where isnotempty(ToolName);
+  let baseline =
+      toolEvents
+      | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+      | summarize BaselineCalls = count() by Agent, ToolName;
+  let recent =
+      toolEvents
+      | where TimeGenerated > ago(recentWindow)
+      | summarize RecentCalls = count(), ToolTypes = make_set(ToolType, 8) by Agent, ToolName;
+  recent
+  | join kind=leftouter baseline on Agent, ToolName
+  | extend BaselineCalls = coalesce(BaselineCalls, 0)
+  | extend
+      IsNewTool  = BaselineCalls == 0,
+      SpikeRatio = iff(BaselineCalls > 0, todouble(RecentCalls) / todouble(BaselineCalls), todouble(RecentCalls))
+  | where IsNewTool or SpikeRatio >= 5.0
+  | order by IsNewTool desc, SpikeRatio desc, RecentCalls desc
+tactics:
+  - Execution
+  - PrivilegeEscalation
+techniques:
+  - T1059
+  - T1098
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

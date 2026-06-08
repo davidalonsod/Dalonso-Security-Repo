@@ -1,0 +1,58 @@
+id: 9d0e1f20-7777-4d13-9107-0123456789c9
+name: Agent - Dormancy break (silent agent reactivates)
+description: |
+  Hunts Foundry / Agent Service agents that fell silent for at least 7
+  days and then resumed activity in the last 24 hours. A dormant agent
+  suddenly waking is a classic abuse signal: a forgotten / orphaned agent
+  being repurposed, a stale identity whose credentials have been picked
+  up, or scheduled adversary activity. The gap between the last prior
+  span and the first recent span is reported as GapDays.
+
+  Reads gen_ai.agent.name from the AppDependencies span property bag
+  (Properties) over a 30-day window. Tune dormantThreshold (default 7d)
+  to your environment - agents that run weekly will be noisy at a lower
+  threshold.
+query: |
+  let dormancyWindow = 30d;
+  let dormantThreshold = 7d;
+  let recentWindow = 1d;
+  let activity =
+      AppDependencies
+      | where TimeGenerated > ago(dormancyWindow)
+      | where isnotempty(Properties["gen_ai.agent.name"])
+      | extend
+          Agent     = tostring(Properties["gen_ai.agent.name"]),
+          Model     = tostring(Properties["gen_ai.request.model"]),
+          ProjectId = tostring(Properties["microsoft.foundry.project.id"]);
+  let recent =
+      activity
+      | where TimeGenerated > ago(recentWindow)
+      | summarize
+          RecentRuns  = count(),
+          RecentFirst = min(TimeGenerated),
+          AnyModel    = take_any(Model),
+          AnyProject  = take_any(ProjectId)
+          by Agent;
+  let prior =
+      activity
+      | where TimeGenerated <= ago(recentWindow)
+      | summarize PriorLast = max(TimeGenerated), PriorRuns = count() by Agent;
+  recent
+  | join kind=inner prior on Agent
+  | extend GapDays = todouble(datetime_diff('hour', RecentFirst, PriorLast)) / 24.0
+  | where GapDays >= 7
+  | extend Model = AnyModel, ProjectId = AnyProject
+  | project
+      RecentFirst, Agent, Model, ProjectId, GapDays,
+      PriorLast, PriorRuns, RecentRuns
+  | order by GapDays desc
+tactics:
+  - Persistence
+  - DefenseEvasion
+techniques:
+  - T1078
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

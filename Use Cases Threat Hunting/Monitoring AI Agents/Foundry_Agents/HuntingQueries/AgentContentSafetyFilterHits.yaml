@@ -1,0 +1,62 @@
+id: 2b3c4d5e-1111-4aaa-9101-0123456789c1
+name: Agent - Content-safety filter hits (hate / sexual / violence / self-harm)
+description: |
+  Hunts Foundry / Agent Service runs where the Azure AI Content Safety
+  filter returned a non-safe result on the prompt or completion. Surfaces
+  the four standard harm categories (hate, sexual, violence, self-harm)
+  together with the severity reported by the filter, the offending agent,
+  the conversation id and the input messages so an analyst can triage the
+  prompt that tripped the guardrail.
+
+  Reads the real Foundry telemetry shape: spans land in AppDependencies
+  with the property bag in Properties; the content-filter verdict is in
+  microsoft.foundry.content_filter.results, and the prompt/response text in
+  gen_ai.input.messages / gen_ai.output.messages.
+query: |
+  let window = 1d;
+  AppDependencies
+  | where TimeGenerated > ago(window)
+  | where isnotempty(Properties["microsoft.foundry.content_filter.results"])
+  | extend
+      Agent      = tostring(Properties["gen_ai.agent.name"]),
+      Model      = tostring(Properties["gen_ai.request.model"]),
+      ConvId     = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId  = tostring(Properties["microsoft.foundry.project.id"]),
+      Prompt     = tostring(Properties["gen_ai.input.messages"]),
+      Response   = tostring(Properties["gen_ai.output.messages"]),
+      FilterArr  = todynamic(tostring(Properties["microsoft.foundry.content_filter.results"]))
+  | mv-expand Entry = FilterArr
+  | extend
+      SourceType = tostring(Entry.source_type),
+      Blocked    = tobool(Entry.blocked),
+      Filter     = todynamic(Entry.content_filter_results)
+  | extend
+      HateSeverity      = tostring(Filter.hate.severity),
+      HateFiltered      = tobool(Filter.hate.filtered),
+      SexualSeverity    = tostring(Filter.sexual.severity),
+      SexualFiltered    = tobool(Filter.sexual.filtered),
+      ViolenceSeverity  = tostring(Filter.violence.severity),
+      ViolenceFiltered  = tobool(Filter.violence.filtered),
+      SelfHarmSeverity  = tostring(Filter.self_harm.severity),
+      SelfHarmFiltered  = tobool(Filter.self_harm.filtered)
+  | where HateFiltered or SexualFiltered or ViolenceFiltered or SelfHarmFiltered
+       or HateSeverity in ("low","medium","high")
+       or SexualSeverity in ("low","medium","high")
+       or ViolenceSeverity in ("low","medium","high")
+       or SelfHarmSeverity in ("low","medium","high")
+  | project
+      TimeGenerated, Agent, Model, ProjectId, ConvId,
+      HateSeverity, SexualSeverity, ViolenceSeverity, SelfHarmSeverity,
+      Prompt, Response
+  | order by TimeGenerated desc
+tactics:
+  - Execution
+  - Impact
+techniques:
+  - T1059
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI
+  - ContentSafety

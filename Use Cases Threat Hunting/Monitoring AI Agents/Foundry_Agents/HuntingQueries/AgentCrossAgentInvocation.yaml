@@ -1,0 +1,54 @@
+id: 8c9d0e1f-6666-4d12-9106-0123456789c8
+name: Agent - Agent-to-agent invocation chains
+description: |
+  Hunts Foundry / Agent Service conversations that span more than one
+  agent, or where a tool invocation is itself another agent. Agent-to-
+  agent (A2A) chains - Copilot -> Security Agent -> Cloud Agent -> Finance
+  Agent - are an emerging lateral-movement and privilege-escalation path:
+  a low-privilege agent reaching a high-privilege one, or a recursive loop
+  amplifying blast radius. This hunt surfaces the chains so you can review
+  unusual or recursive ones.
+
+  Reads gen_ai.agent.name, gen_ai.tool.name and gen_ai.tool.type from the
+  AppDependencies span property bag (Properties), grouped by
+  gen_ai.conversation.id. Conversations touching two or more distinct
+  agents, or invoking an agent-typed tool, are returned.
+query: |
+  let spans =
+      AppDependencies
+      | where isnotempty(Properties["gen_ai.conversation.id"])
+      | extend
+          Agent     = tostring(Properties["gen_ai.agent.name"]),
+          ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+          ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+          ToolName  = tolower(tostring(Properties["gen_ai.tool.name"])),
+          ToolType  = tolower(tostring(Properties["gen_ai.tool.type"]))
+      | extend IsAgentTool = ToolType == "agent" or ToolName has "agent" or ToolName has "connected_agent";
+  spans
+  | summarize
+      Agents       = make_set(Agent, 20),
+      AgentCount   = dcountif(Agent, isnotempty(Agent)),
+      AgentToolHits = countif(IsAgentTool),
+      AgentTools   = make_set_if(ToolName, IsAgentTool, 20),
+      FirstSeen    = min(TimeGenerated),
+      LastSeen     = max(TimeGenerated),
+      AnyProject   = take_any(ProjectId)
+      by ConvId
+  | where AgentCount >= 2 or AgentToolHits > 0
+  | extend ChainDepth = AgentCount + AgentToolHits
+  | extend ProjectId = AnyProject
+  | project
+      LastSeen, ConvId, ProjectId, AgentCount, Agents,
+      AgentToolHits, AgentTools, ChainDepth, FirstSeen
+  | order by ChainDepth desc
+tactics:
+  - LateralMovement
+  - PrivilegeEscalation
+techniques:
+  - T1210
+  - T1098
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

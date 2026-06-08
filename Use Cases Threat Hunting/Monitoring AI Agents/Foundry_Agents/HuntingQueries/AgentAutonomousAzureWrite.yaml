@@ -1,0 +1,84 @@
+id: b1f20304-9999-4d15-9109-0123456789cb
+name: Agent - Autonomous privileged write in AzureActivity
+description: |
+  Correlates Foundry / Agent Service agents with privileged or write
+  operations they performed directly against Azure (control plane). This
+  is the Autonomous Action Risk shape: an agent creating cloud resources,
+  changing configuration, assigning roles or deleting things on its own.
+
+  The bridge is identity. Foundry telemetry records gen_ai.agent.name, but
+  AzureActivity records the AAD identity in Caller. This hunt joins the
+  AgentIdentityMap watchlist (agent -> AppId / ObjectId / Upn) so any
+  AzureActivity write / action / delete by a mapped agent identity is
+  surfaced, then enriches with the nearest agent span (conversation,
+  model, tool) within 15 minutes so you can see what the agent was doing
+  when it acted. Populate AgentIdentityMap or this hunt returns nothing.
+query: |
+  let lookback = 1d;
+  let enrichWindow = 15m;
+  let agentMap =
+      _GetWatchlist('AgentIdentityMap')
+      | project
+          AgentName = tostring(column_ifexists('AgentName', '')),
+          AppId     = tolower(tostring(column_ifexists('AppId', ''))),
+          ObjectId  = tolower(tostring(column_ifexists('ObjectId', ''))),
+          Upn       = tolower(tostring(column_ifexists('Upn', '')));
+  let agentIds = materialize(agentMap);
+  let agentSpans =
+      AppDependencies
+      | where TimeGenerated > ago(lookback + enrichWindow)
+      | where isnotempty(Properties["gen_ai.agent.name"])
+      | extend
+          AgentName = tostring(Properties["gen_ai.agent.name"]),
+          ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+          Model     = tostring(Properties["gen_ai.request.model"]),
+          ToolName  = tolower(tostring(Properties["gen_ai.tool.name"]))
+      | project SpanTime = TimeGenerated, AgentName, ConvId, Model, ToolName;
+  AzureActivity
+  | where TimeGenerated > ago(lookback)
+  | extend
+        OperationNameValue_  = tostring(column_ifexists('OperationNameValue', '')),
+        ActivityStatusValue_ = tostring(column_ifexists('ActivityStatusValue', '')),
+        Caller_              = tostring(column_ifexists('Caller', '')),
+        ResourceGroup_       = tostring(column_ifexists('ResourceGroup', '')),
+        CorrelationId_       = tostring(column_ifexists('CorrelationId', ''))
+  | where OperationNameValue_ has_any ("write", "action", "delete")
+       or ActivityStatusValue_ in ("Success", "Accepted", "Started")
+       and OperationNameValue_ has_any (
+          "roleAssignments", "roleDefinitions", "providers/Microsoft.Authorization",
+          "deployments/write", "virtualMachines/write", "storageAccounts/write",
+          "Microsoft.KeyVault", "networkSecurityGroups", "Microsoft.Resources/subscriptions/resourceGroups/write")
+  | extend Actor = tolower(Caller_)
+  | where isnotempty(Actor)
+  | join kind=inner (
+        agentIds
+        | extend Key = coalesce(ObjectId, AppId, Upn)
+        | mv-expand Key = pack_array(AppId, ObjectId, Upn) to typeof(string)
+        | where isnotempty(Key)
+        | project AgentName, Key
+    ) on $left.Actor == $right.Key
+  | extend OpTime = TimeGenerated
+  | join kind=leftouter agentSpans on AgentName
+  | where isnull(SpanTime) or abs(datetime_diff('minute', SpanTime, OpTime)) <= 15
+  | summarize
+        arg_min(abs(datetime_diff('second', coalesce(SpanTime, OpTime), OpTime)), SpanTime, ConvId, Model, ToolName)
+        by OpTime, AgentName, Actor, OperationNameValue_, ActivityStatusValue_,
+           ResourceGroup_, _ResourceId, CorrelationId_
+  | project
+      OpTime, AgentName, Actor, OperationNameValue = OperationNameValue_,
+      ActivityStatusValue = ActivityStatusValue_,
+      ResourceGroup = ResourceGroup_, _ResourceId, ConvId, Model, ToolName,
+      CorrelationId = CorrelationId_
+  | order by OpTime desc
+tactics:
+  - PrivilegeEscalation
+  - Impact
+techniques:
+  - T1098
+  - T1078
+  - T1496
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

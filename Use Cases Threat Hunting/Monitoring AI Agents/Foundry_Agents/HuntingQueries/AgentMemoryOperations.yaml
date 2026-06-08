@@ -1,0 +1,54 @@
+id: 6f1a2b3c-4d5e-4f19-930a-aaaaaaaaaaaa
+name: Agent - Memory operations (write / recall) inventory
+description: |
+  Surfaces every detected agent memory write / recall span so analysts
+  can review what an agent persists across sessions. Memory poisoning
+  via XPIA - where an injection seeds the agent's persistent memory and
+  propagates to later sessions - was identified as a high-frequency
+  pattern in the Microsoft AI Red Team v2.0 taxonomy. This hunt has
+  no threshold; pair with the FoundryAgentMemoryPoisoning analytic
+  rule for high-fidelity alerts.
+
+  The query probes gen_ai.memory.* / gen_ai.thread.* / microsoft.agent.
+  memory.* keys defensively because the memory semantic conventions
+  are still evolving.
+query: |
+  AppDependencies
+  | where TimeGenerated > ago(7d)
+  | extend
+      Agent   = tostring(Properties["gen_ai.agent.name"]),
+      ConvId  = tostring(Properties["gen_ai.conversation.id"]),
+      OpType  = tolower(tostring(coalesce(
+                  Properties["gen_ai.memory.operation"],
+                  Properties["gen_ai.thread.operation"],
+                  Properties["microsoft.agent.memory.operation"], ""))),
+      Content = tostring(coalesce(
+                  Properties["gen_ai.memory.content"],
+                  Properties["gen_ai.memory.value"],
+                  Properties["gen_ai.thread.message.content"],
+                  Properties["microsoft.agent.memory.content"], "")),
+      SpanName = tolower(coalesce(Name, ""))
+  | where isnotempty(Content)
+          or OpType in ("write","store","add","read","recall","retrieve","persist","upsert","fetch","search")
+          or SpanName has_any ("memory","thread.message","store","recall")
+  | extend Operation = case(
+      OpType has_any ("write","store","add","upsert","persist") or SpanName has_any ("memory.write","memory.store","memory.add","thread.message.create"), "Write",
+      OpType has_any ("read","recall","retrieve","get","fetch","search") or SpanName has_any ("memory.read","memory.recall","memory.search","thread.message.list"), "Read",
+      "Other")
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project TimeGenerated, AccountName, Agent, ConvId, Operation, SpanName,
+            ContentSample = substring(Content, 0, 512)
+  | order by TimeGenerated desc
+tactics:
+  - Persistence
+  - Collection
+techniques:
+  - T1546
+  - T1213
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI
+  - Memory
+  - AIRT-v2

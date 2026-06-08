@@ -1,0 +1,53 @@
+id: 7b8c9d0e-5555-4d11-9105-0123456789c7
+name: Agent - Model fingerprinting / capability probing
+description: |
+  Hunts Foundry / Agent Service conversations where the user repeatedly
+  probes the model's identity, version, training, parameters or runtime
+  configuration. Model fingerprinting (MITRE T1592 / AML reconnaissance)
+  is the pre-attack stage where an adversary works out which model and
+  guardrails they face so they can pick a matching jailbreak. Two or more
+  probing turns in one conversation is the trigger.
+
+  Reads gen_ai.input.messages from the AppDependencies span property bag
+  (Properties), grouped by gen_ai.conversation.id. Input text only exists
+  when AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED is set.
+query: |
+  AppDependencies
+  | where isnotempty(Properties["gen_ai.input.messages"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      Input     = tolower(tostring(Properties["gen_ai.input.messages"]))
+  | where Input has_any (
+        "what model are you", "which model", "are you gpt", "are you claude",
+        "are you gemini", "what llm", "underlying model", "base model",
+        "model version", "what version", "who trained you", "your training data",
+        "knowledge cutoff", "how many parameters", "context window",
+        "temperature setting", "system fingerprint", "what is your architecture",
+        "are you a large language model", "what company made you")
+  | summarize
+      Probes    = count(),
+      FirstSeen = min(TimeGenerated),
+      LastSeen  = max(TimeGenerated),
+      AnyModel  = take_any(Model),
+      AnyAgent  = take_any(Agent),
+      Samples   = make_set(substring(Input, 0, 200), 5)
+      by ConvId, ProjectId
+  | where Probes >= 2
+  | extend Agent = AnyAgent, Model = AnyModel
+  | project
+      LastSeen, Agent, Model, ProjectId, ConvId, Probes, Samples
+  | order by Probes desc
+tactics:
+  - Discovery
+  - Reconnaissance
+techniques:
+  - T1592
+  - T1595
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

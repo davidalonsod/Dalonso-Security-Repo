@@ -1,0 +1,50 @@
+id: a0e1f203-8888-4d14-9108-0123456789ca
+name: Agent - Token / cost anomaly by model dimension
+description: |
+  Hunts hourly token-consumption anomalies broken out per model, using
+  series_decompose_anomalies over a 14-day baseline. Where the per-agent
+  token-spike analytic rule answers "which agent spiked", this hunt slices
+  the spend by model dimension so you can spot cost / denial-of-wallet
+  anomalies concentrated on a specific (and often more expensive) model -
+  including ones spread thinly across many agents that no single per-agent
+  rule would catch.
+
+  Reads gen_ai.usage.input_tokens + gen_ai.usage.output_tokens from the
+  AppDependencies span property bag (Properties). Swap the "by Model"
+  grouping for Agent or a tool dimension to pivot cost differently. The
+  anomaly sensitivity (2.5) and the recentWindow filter are tunable.
+query: |
+  let lookback = 14d;
+  let step = 1h;
+  let recentWindow = 1d;
+  AppDependencies
+  | where TimeGenerated > ago(lookback)
+  | where isnotempty(Properties["gen_ai.usage.input_tokens"])
+       or isnotempty(Properties["gen_ai.usage.output_tokens"])
+  | extend
+      Model  = tostring(Properties["gen_ai.request.model"]),
+      InTok  = tolong(Properties["gen_ai.usage.input_tokens"]),
+      OutTok = tolong(Properties["gen_ai.usage.output_tokens"])
+  | extend Model = iff(isempty(Model), "unknown-model", Model)
+  | extend TotalTok = coalesce(InTok, 0) + coalesce(OutTok, 0)
+  | make-series Tokens = sum(TotalTok) default = 0
+      on TimeGenerated from ago(lookback) to now() step step by Model
+  | extend (anom, score, baseline) = series_decompose_anomalies(Tokens, 2.5)
+  | mv-expand
+      TimeGenerated to typeof(datetime),
+      Tokens   to typeof(long),
+      anom     to typeof(long),
+      score    to typeof(double),
+      baseline to typeof(long)
+  | where anom == 1 and Tokens > baseline and TimeGenerated > ago(recentWindow)
+  | project TimeGenerated, Model, Tokens, BaselineTokens = baseline, AnomalyScore = score
+  | order by AnomalyScore desc
+tactics:
+  - Impact
+techniques:
+  - T1496
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

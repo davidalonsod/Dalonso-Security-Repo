@@ -1,0 +1,62 @@
+id: 06172839-6666-4e12-9206-0123456789d0
+name: Agent - Tool error / retry storm
+description: |
+  Hunts a Foundry / Agent Service conversation where a single tool
+  (gen_ai.tool.name) fails repeatedly in a short window. A burst of failed
+  tool spans is the function-fuzzing / capability-probing shape - an
+  adversary (or a poisoned prompt) hammering a function with malformed or
+  permission-probing arguments to find one that works, or a runaway loop
+  retrying a denied action. Low noise: only conversations with a high
+  count of FAILED calls to the same tool surface.
+
+  Reads tool spans from AppDependencies. Success / ResultCode are native
+  dependency columns; both are wrapped in column_ifexists so the query
+  saves even before the connector is populated. Tune failThreshold to
+  your busiest legitimate agents.
+query: |
+  let lookback = 1d;
+  let failThreshold = 8;
+  AppDependencies
+  | where TimeGenerated > ago(lookback)
+  | where isnotempty(Properties["gen_ai.tool.name"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ToolName  = tolower(tostring(Properties["gen_ai.tool.name"])),
+      Success_   = tostring(column_ifexists('Success', '')),
+      ResultCode = tostring(column_ifexists('ResultCode', ''))
+  | extend Failed = Success_ =~ "false"
+                 or ResultCode startswith "4"
+                 or ResultCode startswith "5"
+  | summarize
+      TotalCalls   = count(),
+      FailedCalls  = countif(Failed),
+      FirstSeen    = min(TimeGenerated),
+      LastSeen     = max(TimeGenerated),
+      ResultCodes  = make_set(ResultCode, 10),
+      AnyAgent     = take_any(Agent),
+      AnyModel     = take_any(Model),
+      AnyProject   = take_any(ProjectId)
+      by ConvId, ToolName
+  | extend
+      DurationMin = datetime_diff('minute', LastSeen, FirstSeen),
+      FailRatio   = round(todouble(FailedCalls) / todouble(TotalCalls), 2)
+  | where FailedCalls >= failThreshold and FailRatio >= 0.5
+  | extend Agent = AnyAgent, Model = AnyModel, ProjectId = AnyProject
+  | project
+      LastSeen, Agent, Model, ProjectId, ConvId, ToolName,
+      FailedCalls, TotalCalls, FailRatio, DurationMin, ResultCodes
+  | order by FailedCalls desc
+tactics:
+  - Execution
+  - Discovery
+techniques:
+  - T1059
+  - T1592
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

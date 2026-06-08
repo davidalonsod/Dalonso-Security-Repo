@@ -1,0 +1,60 @@
+id: 7b8c9d0e-5555-4d11-9105-0123456789c5
+name: Agent - Grounding / retrieval source enumeration (RAG recon)
+description: |
+  Hunts Foundry / Agent Service agents that touch an unusually diverse set
+  of retrieval / grounding sources (URLs / hosts pulled by tools) in a
+  short window - the RAG-equivalent of port-scanning and a common
+  precursor to data discovery and staged exfiltration. The Foundry
+  equivalent of the Copilot grounding-source-enumeration hunt.
+
+  Source hosts are extracted from gen_ai.tool.call.arguments and
+  gen_ai.tool.call.result in the AppDependencies span property bag
+  (Properties), so AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED must be
+  set for the arguments to be present. Pivots per agent
+  (gen_ai.agent.name).
+query: |
+  let recentWindow = 1h;
+  let baselineWindow = 14d;
+  let sources =
+      AppDependencies
+      | where isnotempty(Properties["gen_ai.tool.call.arguments"])
+          or isnotempty(Properties["gen_ai.tool.call.result"])
+      | extend
+          Agent      = tostring(Properties["gen_ai.agent.name"]),
+          ToolArgs   = tostring(Properties["gen_ai.tool.call.arguments"]),
+          ToolResult = tostring(Properties["gen_ai.tool.call.result"])
+      | extend Host = tolower(extract(@"https?://([A-Za-z0-9.\-]+)", 1, strcat(ToolArgs, " ", ToolResult)))
+      | where isnotempty(Host);
+  let recent =
+      sources
+      | where TimeGenerated > ago(recentWindow)
+      | summarize
+          RecentDistinctSources = dcount(Host),
+          RecentSampleSources   = make_set(Host, 25),
+          RecentCalls           = count()
+          by Agent;
+  let baseline =
+      sources
+      | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+      | summarize BaselineDistinctSources = dcount(Host) by Agent;
+  recent
+  | join kind=leftouter baseline on Agent
+  | extend BaselineDistinctSources = coalesce(BaselineDistinctSources, 0)
+  | extend SpikeRatio = iff(BaselineDistinctSources > 0,
+                            todouble(RecentDistinctSources) / todouble(BaselineDistinctSources),
+                            todouble(RecentDistinctSources))
+  | where RecentDistinctSources >= 15 and (BaselineDistinctSources == 0 or SpikeRatio >= 5.0)
+  | project Agent, RecentDistinctSources, BaselineDistinctSources, SpikeRatio,
+            RecentCalls, RecentSampleSources
+  | order by SpikeRatio desc, RecentDistinctSources desc
+tactics:
+  - Discovery
+  - Collection
+techniques:
+  - T1083
+  - T1213
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

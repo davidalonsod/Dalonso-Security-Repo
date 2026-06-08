@@ -1,0 +1,73 @@
+id: d3140516-bbbb-4d17-910b-0123456789cd
+name: Agent - Sensitive document retrieval via OfficeActivity
+description: |
+  Correlates Foundry / Agent Service agent identities with SharePoint /
+  OneDrive file access recorded in OfficeActivity. This covers Sensitive
+  Retrieval and the data-access stage of the agent kill chain: an agent
+  identity reading documents - especially in bulk, or files whose names
+  look sensitive (secret, password, salary, confidential, PII, etc.).
+
+  OfficeActivity records the actor in UserId (UPN) or the app context.
+  This hunt joins the AgentIdentityMap watchlist (agent -> Upn / AppId /
+  ObjectId) so only file reads performed by a mapped agent identity are
+  returned, then ranks them by volume and sensitive-name matches. Populate
+  AgentIdentityMap (Upn especially) or this hunt returns nothing.
+query: |
+  let lookback = 1d;
+  let sensitiveName = dynamic([
+      "secret", "password", "passwd", "credential", "confidential",
+      "salary", "payroll", "ssn", "passport", "private", "api key",
+      "apikey", "token", "pii", "gdpr", "restricted", "do not share"]);
+  let agentKeys =
+      _GetWatchlist('AgentIdentityMap')
+      | project AgentName = tostring(column_ifexists('AgentName', '')),
+                AppId = tolower(tostring(column_ifexists('AppId', ''))),
+                ObjectId = tolower(tostring(column_ifexists('ObjectId', ''))),
+                Upn = tolower(tostring(column_ifexists('Upn', '')))
+      | mv-expand Key = pack_array(Upn, AppId, ObjectId) to typeof(string)
+      | where isnotempty(Key)
+      | distinct AgentName, Key;
+  OfficeActivity
+  | where TimeGenerated > ago(lookback)
+  | extend
+      RecordType_     = tostring(column_ifexists('RecordType', '')),
+      Operation_      = tostring(column_ifexists('Operation', '')),
+      UserId_         = tostring(column_ifexists('UserId', '')),
+      UserKey_        = tostring(column_ifexists('UserKey', '')),
+      OfficeObjectId_ = tostring(column_ifexists('OfficeObjectId', '')),
+      SourceFileName_ = tostring(column_ifexists('SourceFileName', '')),
+      OfficeWorkload_ = tostring(column_ifexists('OfficeWorkload', ''))
+  | where RecordType_ in ("SharePointFileOperation", "OneDrive")
+       or Operation_ in ("FileAccessed", "FileDownloaded", "FileSyncDownloadedFull",
+                        "FileAccessedExtended", "FilePreviewed")
+  | extend Actor = tolower(coalesce(UserId_, UserKey_))
+  | where isnotempty(Actor)
+  | join kind=inner agentKeys on $left.Actor == $right.Key
+  | extend FileLower = tolower(OfficeObjectId_), Doc = SourceFileName_
+  | extend SensitiveHit = SourceFileName_ has_any (sensitiveName)
+                       or FileLower has_any (sensitiveName)
+  | summarize
+      FileReads      = count(),
+      DistinctFiles  = dcount(OfficeObjectId_),
+      SensitiveReads = countif(SensitiveHit),
+      SampleDocs     = make_set(Doc, 15),
+      Sites          = make_set(OfficeWorkload_, 8),
+      FirstSeen      = min(TimeGenerated),
+      LastSeen       = max(TimeGenerated)
+      by AgentName, Actor
+  | where SensitiveReads > 0 or DistinctFiles >= 50
+  | project
+      LastSeen, AgentName, Actor, FileReads, DistinctFiles,
+      SensitiveReads, Sites, SampleDocs, FirstSeen
+  | order by SensitiveReads desc, DistinctFiles desc
+tactics:
+  - Collection
+  - Exfiltration
+techniques:
+  - T1213
+  - T1530
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

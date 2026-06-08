@@ -1,0 +1,78 @@
+id: c2031405-aaaa-4d16-910a-0123456789cc
+name: Agent - Identity / OAuth scope escalation in AuditLogs
+description: |
+  Correlates Foundry / Agent Service agents with Azure AD directory
+  changes that expand their reach or persistence: OAuth consent grants,
+  app role / delegated-permission additions, directory-role membership
+  changes, and credential / secret rotation on the agent's own app. This
+  covers OAuth Scope Escalation, Permission Changes and Agent Identity
+  Abuse from the autonomous-action-risk category.
+
+  AuditLogs records the actor in InitiatedBy (app.servicePrincipalId /
+  app.appId / user.userPrincipalName) and the target in TargetResources.
+  This hunt flags an event when EITHER the actor OR the target is a mapped
+  agent identity (AgentIdentityMap watchlist), so it catches both an agent
+  escalating its own privileges and someone granting an agent new scopes.
+query: |
+  let lookback = 1d;
+  let agentMap =
+      _GetWatchlist('AgentIdentityMap')
+      | project AgentName = tostring(column_ifexists('AgentName', '')),
+                AppId = tolower(tostring(column_ifexists('AppId', ''))),
+                ObjectId = tolower(tostring(column_ifexists('ObjectId', ''))),
+                Upn = tolower(tostring(column_ifexists('Upn', '')));
+  let agentKeys =
+      agentMap
+      | mv-expand Key = pack_array(AppId, ObjectId, Upn) to typeof(string)
+      | where isnotempty(Key)
+      | distinct AgentName, Key;
+  AuditLogs
+  | where TimeGenerated > ago(lookback)
+  | extend
+        OperationName_   = tostring(column_ifexists('OperationName', '')),
+        InitiatedBy_     = column_ifexists('InitiatedBy', dynamic({})),
+        TargetResources_ = column_ifexists('TargetResources', dynamic([])),
+        Result_          = tostring(column_ifexists('Result', '')),
+        ResultReason_    = tostring(column_ifexists('ResultReason', '')),
+        CorrelationId_   = tostring(column_ifexists('CorrelationId', ''))
+  | where OperationName_ has_any (
+        "Consent to application", "Add app role assignment",
+        "Add delegated permission grant", "Add OAuth2PermissionGrant",
+        "Add member to role", "Add eligible member to role",
+        "Add service principal credentials", "Update application - Certificates and secrets management",
+        "Add application", "Update application", "Add owner to service principal",
+        "Update service principal")
+  | extend
+        ActorSpn  = tolower(tostring(InitiatedBy_.app.servicePrincipalId)),
+        ActorApp  = tolower(tostring(InitiatedBy_.app.appId)),
+        ActorUser = tolower(tostring(InitiatedBy_.user.userPrincipalName))
+  | mv-apply T = TargetResources_ on (
+        extend TargetId = tolower(tostring(T.id)), TargetName = tostring(T.displayName)
+        | summarize TargetIds = make_set(TargetId, 16), TargetNames = make_set(TargetName, 16)
+    )
+  | extend ActorKeys  = pack_array(ActorSpn, ActorApp, ActorUser)
+  | extend MatchActor  = set_has_element(todynamic(toscalar(agentKeys | summarize make_set(Key))), ActorSpn)
+                      or set_has_element(todynamic(toscalar(agentKeys | summarize make_set(Key))), ActorApp)
+                      or set_has_element(todynamic(toscalar(agentKeys | summarize make_set(Key))), ActorUser)
+  | extend MatchTarget = set_intersect(todynamic(TargetIds), todynamic(toscalar(agentKeys | summarize make_set(Key))))
+  | where MatchActor or array_length(MatchTarget) > 0
+  | extend AgentRole = case(MatchActor and array_length(MatchTarget) > 0, "ActorAndTarget",
+                            MatchActor, "AgentIsActor",
+                            "AgentIsTarget")
+  | project
+      TimeGenerated, OperationName = OperationName_, AgentRole,
+      Actor = coalesce(ActorSpn, ActorApp, ActorUser),
+      TargetNames, TargetIds, Result = Result_, ResultReason = ResultReason_, CorrelationId = CorrelationId_
+  | order by TimeGenerated desc
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+techniques:
+  - T1098
+  - T1528
+  - T1556
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

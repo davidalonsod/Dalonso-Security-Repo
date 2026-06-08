@@ -1,0 +1,53 @@
+id: 8c9d0e1f-6666-4d12-9106-0123456789c6
+name: Agent - Trace-level interaction-path anomalies
+description: |
+  Hunts Foundry / Agent Service conversations whose execution trace is
+  abnormal: excessive span count, tight tool-call loops (the same tool
+  fired many times in a short window), or sustained high span rate. These
+  are the trace-level signatures of runaway agents, prompt-injected loops
+  and agent-exploitation campaigns that wedge the model into a stuck
+  state. The Foundry equivalent of the Copilot trace-level-anomalies hunt.
+
+  Reads AppDependencies with the property bag in Properties; conversation
+  identity from gen_ai.conversation.id, tool identity from
+  gen_ai.tool.name. Pair with the FoundryTokenCostSpike analytic rule to
+  separate legitimate heavy workloads from genuine misbehaviour.
+query: |
+  let window = 1d;
+  AppDependencies
+  | where TimeGenerated > ago(window)
+  | where isnotempty(Properties["gen_ai.conversation.id"])
+  | extend
+      Agent    = tostring(Properties["gen_ai.agent.name"]),
+      ConvId   = tostring(Properties["gen_ai.conversation.id"]),
+      ToolName = tostring(Properties["gen_ai.tool.name"])
+  | summarize
+      Spans       = count(),
+      ToolCalls   = countif(isnotempty(ToolName)),
+      DistinctTools = dcount(ToolName),
+      TopTool     = take_any(ToolName),
+      Tools       = make_set(ToolName, 16),
+      FirstSeen   = min(TimeGenerated),
+      LastSeen    = max(TimeGenerated)
+      by Agent, ConvId
+  | extend DurationMin = datetime_diff('minute', LastSeen, FirstSeen)
+  | extend SpansPerMin = iff(DurationMin > 0, todouble(Spans) / DurationMin, todouble(Spans))
+  | extend ToolLoopRatio = iff(DistinctTools > 0, todouble(ToolCalls) / DistinctTools, todouble(ToolCalls))
+  | where (Spans > 100)
+      or (ToolCalls > 50 and DistinctTools <= 2)
+      or (SpansPerMin > 5 and DurationMin >= 5)
+  | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
+  | project LastSeen, AccountName, Agent, ConvId, Spans, ToolCalls,
+            DistinctTools, ToolLoopRatio, SpansPerMin, DurationMin, Tools, FirstSeen
+  | order by Spans desc, SpansPerMin desc
+tactics:
+  - Impact
+  - Execution
+techniques:
+  - T1499
+  - T1059
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

@@ -1,0 +1,86 @@
+id: f5160718-dddd-4d19-910d-0123456789cf
+name: Agent - External exfiltration chain (sensitive output then egress)
+description: |
+  Stitches the exfiltration stage of the agent kill chain together: a
+  Foundry / Agent Service span that emitted sensitive / secret-like
+  content (or a tool fetch to an untrusted host), followed shortly by an
+  external egress action by the same agent identity in OfficeActivity -
+  an anonymous sharing link, external sharing invitation, or a file sent
+  to an external domain. Either half is suspicious; the two within a short
+  window is a strong external-exfiltration signal.
+
+  Bridges Foundry telemetry (gen_ai.*) to OfficeActivity through the
+  AgentIdentityMap watchlist. The sensitive-output detection reuses the
+  same secret / bulk-PII regexes as the FoundrySensitiveDataInOutput
+  rule. Requires content recording for the output half and a populated
+  AgentIdentityMap for the egress half.
+query: |
+  let lookback = 1d;
+  let joinWindow = 30m;
+  let agentKeys =
+      _GetWatchlist('AgentIdentityMap')
+      | project AgentName = tostring(column_ifexists('AgentName', '')),
+                AppId = tolower(tostring(column_ifexists('AppId', ''))),
+                ObjectId = tolower(tostring(column_ifexists('ObjectId', ''))),
+                Upn = tolower(tostring(column_ifexists('Upn', '')))
+      | mv-expand Key = pack_array(Upn, AppId, ObjectId) to typeof(string)
+      | where isnotempty(Key)
+      | distinct AgentName, Key;
+  let sensitiveSpans =
+      AppDependencies
+      | where TimeGenerated > ago(lookback)
+      | where isnotempty(Properties["gen_ai.output.messages"])
+      | extend
+          AgentName = tostring(Properties["gen_ai.agent.name"]),
+          ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+          Output    = tostring(Properties["gen_ai.output.messages"])
+      | extend Sensitive =
+            Output matches regex @"AKIA[0-9A-Z]{16}"
+         or (Output contains "-----BEGIN" and Output contains "PRIVATE KEY-----")
+         or Output matches regex @"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"
+         or array_length(extract_all(@"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", Output)) >= 10
+      | where Sensitive
+      | project SpanTime = TimeGenerated, AgentName, ConvId;
+  let egress =
+      OfficeActivity
+      | where TimeGenerated > ago(lookback)
+      | extend
+          Operation_             = tostring(column_ifexists('Operation', '')),
+          Recipients_            = tostring(column_ifexists('Recipients', '')),
+          UserId_                = tostring(column_ifexists('UserId', '')),
+          UserKey_               = tostring(column_ifexists('UserKey', '')),
+          SourceFileName_        = tostring(column_ifexists('SourceFileName', '')),
+          TargetUserOrGroupName_ = tostring(column_ifexists('TargetUserOrGroupName', '')),
+          SiteUrl_               = tostring(column_ifexists('SiteUrl', '')),
+          ClientIP_              = tostring(column_ifexists('ClientIP', ''))
+      | where Operation_ in (
+            "AnonymousLinkCreated", "SharingInvitationCreated",
+            "AddedToSecureLink", "CompanyLinkCreated", "SharingSet",
+            "FileSyncUploadedFull", "FileDownloaded")
+         or (Operation_ == "Send" and isnotempty(Recipients_))
+      | extend Actor = tolower(coalesce(UserId_, UserKey_))
+      | where isnotempty(Actor)
+      | join kind=inner agentKeys on $left.Actor == $right.Key
+      | project EgressTime = TimeGenerated, AgentName, Actor, EgressOp = Operation_,
+                Doc = SourceFileName_, Target = TargetUserOrGroupName_,
+                SiteUrl = SiteUrl_, ClientIP = ClientIP_;
+  egress
+  | join kind=inner sensitiveSpans on AgentName
+  | where EgressTime between (SpanTime .. (SpanTime + joinWindow))
+  | project
+      EgressTime, SpanTime, AgentName, Actor, EgressOp, Doc, Target,
+      SiteUrl, ConvId, ClientIP,
+      LagMinutes = datetime_diff('minute', EgressTime, SpanTime)
+  | order by EgressTime desc
+tactics:
+  - Exfiltration
+  - Collection
+techniques:
+  - T1567
+  - T1530
+  - T1213
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

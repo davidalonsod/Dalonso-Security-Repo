@@ -1,0 +1,49 @@
+id: 17283940-7777-4f13-9207-0123456789d1
+name: Agent - Same agent active across multiple projects
+description: |
+  Hunts a single Foundry / Agent Service agent (gen_ai.agent.name) whose
+  spans appear under two or more distinct project IDs
+  (microsoft.foundry.project.id) in the same window. An agent identity
+  crossing project boundaries is the tenancy-boundary / lateral-reach
+  shape - a shared or cloned agent reaching data planes it should not, or
+  an identity reused across environments. Low noise: most agents live in
+  exactly one project, so multi-project agents stand out cleanly.
+
+  Reads gen_ai.agent.name and microsoft.foundry.project.id from the
+  AppDependencies span property bag (Properties).
+query: |
+  let lookback = 1d;
+  AppDependencies
+  | where TimeGenerated > ago(lookback)
+  | where isnotempty(Properties["gen_ai.agent.name"])
+  | where isnotempty(Properties["microsoft.foundry.project.id"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"])
+  | summarize
+      Projects        = make_set(ProjectId, 20),
+      DistinctProjects = dcount(ProjectId),
+      Conversations   = dcount(ConvId),
+      Calls           = count(),
+      Models          = make_set(Model, 10),
+      FirstSeen       = min(TimeGenerated),
+      LastSeen        = max(TimeGenerated)
+      by Agent
+  | where DistinctProjects >= 2
+  | project
+      LastSeen, Agent, DistinctProjects, Projects, Conversations,
+      Calls, Models, FirstSeen
+  | order by DistinctProjects desc, Calls desc
+tactics:
+  - LateralMovement
+  - Discovery
+techniques:
+  - T1078
+  - T1580
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI

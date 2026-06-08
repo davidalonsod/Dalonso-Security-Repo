@@ -1,0 +1,63 @@
+id: 4d5e6f70-3333-4ccc-9103-0123456789c3
+name: Agent - Guardrail jailbreak / prompt-injection signals
+description: |
+  Hunts Foundry / Agent Service runs where a guardrail (Prompt Shields /
+  jailbreak or indirect prompt-injection detection) flagged the input.
+  These signals are the highest-fidelity indicator of someone trying to
+  override the agent's instructions, exfiltrate the system prompt, or
+  smuggle instructions through tool/RAG content. Surfaces the agent,
+  conversation, the prompt that tripped the shield and any tool arguments
+  in the same span.
+
+  Reads the real Foundry telemetry shape: spans in AppDependencies, bag in
+  Properties. Jailbreak / prompt-injection verdicts live inside
+  microsoft.foundry.content_filter.results; key naming varies by API
+  version (jailbreak, prompt_shield, indirect_attack), so all three are
+  parsed defensively.
+query: |
+  let window = 1d;
+  AppDependencies
+  | where TimeGenerated > ago(window)
+  | where isnotempty(Properties["microsoft.foundry.content_filter.results"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Prompt    = tostring(Properties["gen_ai.input.messages"]),
+      ToolName  = tostring(Properties["gen_ai.tool.name"]),
+      ToolArgs  = tostring(Properties["gen_ai.tool.call.arguments"]),
+      FilterArr = todynamic(tostring(Properties["microsoft.foundry.content_filter.results"]))
+  | mv-expand Entry = FilterArr
+  | extend
+      SourceType = tostring(Entry.source_type),
+      Blocked    = tobool(Entry.blocked),
+      Filter     = todynamic(Entry.content_filter_results)
+  | extend
+      JailbreakDetected = tobool(Filter.jailbreak.detected) or tobool(Filter.jailbreak.filtered),
+      PromptShieldHit   = tobool(Filter.prompt_shield.detected) or tobool(Filter.prompt_shield.filtered),
+      IndirectAttackHit = tobool(Filter.indirect_attack.detected) or tobool(Filter.indirect_attack.filtered)
+  | where JailbreakDetected or PromptShieldHit or IndirectAttackHit
+  | extend Signal = case(
+      JailbreakDetected, "Jailbreak",
+      PromptShieldHit,   "PromptShield",
+      IndirectAttackHit, "IndirectPromptInjection",
+      "Unknown")
+  | project
+      TimeGenerated, Signal, SourceType, Blocked, Agent, Model, ProjectId, ConvId,
+      ToolName, ToolArgs, Prompt
+  | order by TimeGenerated desc
+tactics:
+  - DefenseEvasion
+  - InitialAccess
+techniques:
+  - T1562
+  - T1059
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI
+  - ContentSafety
+  - Guardrails
+  - Jailbreak

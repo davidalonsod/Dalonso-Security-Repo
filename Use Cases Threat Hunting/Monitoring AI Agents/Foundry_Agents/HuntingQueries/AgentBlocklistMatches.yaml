@@ -1,0 +1,56 @@
+id: 3c4d5e6f-2222-4bbb-9102-0123456789c2
+name: Agent - Custom blocklist matches (blocked terms)
+description: |
+  Hunts Foundry / Agent Service runs where the Azure AI Content Safety
+  custom blocklist tripped, i.e. a prompt or completion matched a term on
+  an organisation-defined blocklist. Useful for confirming that block
+  lists are actually firing, for spotting users probing around blocked
+  terms, and for reviewing which terms are hit most often.
+
+  Reads the real Foundry telemetry shape: spans in AppDependencies, bag in
+  Properties. The content-filter verdict in
+  microsoft.foundry.content_filter.results carries the custom blocklist
+  detail; field naming varies by API version, so both custom_blocklists
+  and custom_blocklist are parsed defensively.
+query: |
+  let window = 1d;
+  AppDependencies
+  | where TimeGenerated > ago(window)
+  | where isnotempty(Properties["microsoft.foundry.content_filter.results"])
+  | extend
+      Agent     = tostring(Properties["gen_ai.agent.name"]),
+      Model     = tostring(Properties["gen_ai.request.model"]),
+      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+      ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
+      Prompt    = tostring(Properties["gen_ai.input.messages"]),
+      FilterArr = todynamic(tostring(Properties["microsoft.foundry.content_filter.results"]))
+  | mv-expand Entry = FilterArr
+  | extend
+      SourceType = tostring(Entry.source_type),
+      Cfr        = todynamic(Entry.content_filter_results)
+  // Custom blocklists surface as named keys inside content_filter_results
+  // (e.g. "Profanity", or your own blocklist name) alongside the standard
+  // harm categories. Treat any non-standard key that tripped as a blocklist
+  // hit so the rule works regardless of the blocklist name.
+  | mv-expand Key = bag_keys(Cfr)
+  | extend BlockListName = tostring(Key)
+  | where BlockListName !in~ ("jailbreak", "prompt_shield", "indirect_attack", "hate", "sexual", "violence", "self_harm", "protected_material", "protected_material_code", "protected_material_text")
+  | extend Verdict = todynamic(Cfr[BlockListName])
+  | where tobool(Verdict.filtered) or tobool(Verdict.detected)
+  | project
+      TimeGenerated, SourceType, Agent, Model, ProjectId, ConvId,
+      BlockListName, VerdictJson = tostring(Verdict), Prompt
+  | order by TimeGenerated desc
+tactics:
+  - Execution
+  - DefenseEvasion
+techniques:
+  - T1059
+  - T1562
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI
+  - ContentSafety
+  - Blocklist

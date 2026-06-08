@@ -1,0 +1,65 @@
+id: e4150617-cccc-4d18-910c-0123456789ce
+name: Agent - RAG / memory source poisoning via OfficeActivity
+description: |
+  Surfaces write / upload / modification activity against the SharePoint
+  and OneDrive locations that feed Foundry / Agent Service retrieval (RAG)
+  and agent memory. This covers RAG Poisoning and Memory Poisoning: an
+  attacker (or a compromised account) planting or editing documents in a
+  grounding source so the agent later retrieves adversarial content,
+  hidden directives or smuggled instructions.
+
+  This is a content-integrity hunt on the source side, complementary to
+  the retrieval-side AgentGroundingSourceEnumeration / FoundryUntrusted
+  ToolSource content. It flags writes to hosts on the FoundryTrustedTool
+  Sources watchlist (your known RAG sources) and, separately, any upload
+  of a file whose name carries instruction-like markers. Tune the
+  grounding-site list to the actual SharePoint sites your agents index.
+query: |
+  let lookback = 1d;
+  let injectionMarker = dynamic([
+      "ignore previous", "system prompt", "you must", "as an ai",
+      "disregard", "new instructions", "do not tell", "override",
+      ".prompt", ".instructions", "jailbreak"]);
+  let ragHosts =
+      _GetWatchlist('FoundryTrustedToolSources')
+      | project Host = tolower(tostring(column_ifexists('SourceUri', '')))
+      | where isnotempty(Host);
+  OfficeActivity
+  | where TimeGenerated > ago(lookback)
+  | extend
+      RecordType_     = tostring(column_ifexists('RecordType', '')),
+      Operation_      = tostring(column_ifexists('Operation', '')),
+      UserId_         = tostring(column_ifexists('UserId', '')),
+      UserKey_        = tostring(column_ifexists('UserKey', '')),
+      SiteUrl_        = tostring(column_ifexists('SiteUrl', '')),
+      SourceFileName_ = tostring(column_ifexists('SourceFileName', '')),
+      ClientIP_       = tostring(column_ifexists('ClientIP', '')),
+      UserAgent_      = tostring(column_ifexists('UserAgent', ''))
+  | where RecordType_ in ("SharePointFileOperation", "OneDrive")
+  | where Operation_ in ("FileUploaded", "FileModified", "FileModifiedExtended",
+                        "FileCheckedIn", "FileRenamed", "FileMoved",
+                        "FileSyncUploadedFull")
+  | extend
+      Actor    = tolower(coalesce(UserId_, UserKey_)),
+      SiteHost = tolower(tostring(parse_url(SiteUrl_).Host)),
+      Doc      = SourceFileName_
+  | extend
+      TargetsRagHost  = SiteHost in (ragHosts)
+                     or tolower(SiteUrl_) has_any (toscalar(ragHosts | summarize make_list(Host))),
+      InjectionInName = tolower(Doc) has_any (injectionMarker)
+  | where TargetsRagHost or InjectionInName
+  | project
+      TimeGenerated, Operation = Operation_, Actor, SiteUrl = SiteUrl_, SiteHost, Doc,
+      TargetsRagHost, InjectionInName, ClientIP = ClientIP_, UserAgent = UserAgent_
+  | order by TimeGenerated desc
+tactics:
+  - InitialAccess
+  - Persistence
+techniques:
+  - T1195
+  - T1565
+tags:
+  - Sentinel-As-Code
+  - Custom
+  - Foundry
+  - AI
