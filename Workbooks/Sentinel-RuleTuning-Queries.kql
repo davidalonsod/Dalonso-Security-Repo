@@ -1,0 +1,279 @@
+// =====================================================================
+// Agent365/AgentRiskDemo/Sentinel-RuleTuning-Queries.kql
+//
+// Collection of KQL queries for analytic-rule tuning and entity
+// triage in Microsoft Sentinel.
+//
+// Usage: paste each block separately into Sentinel > Logs (or Log
+// Analytics) of the relevant workspace. Each query is delimited by a
+// numbered header.
+//
+// Created on 11/06/2026.
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// 1. Ranking of rules by number of alerts (the noisiest) - 30d
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(30d)
+| where ProviderName == "ASI Scheduled Alerts"
+| summarize Alerts = count() by AlertName
+| sort by Alerts desc
+
+
+// ---------------------------------------------------------------------
+// 2. Volume + daily trend per rule (to spot spikes) - 30d
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(30d)
+| where ProviderName == "ASI Scheduled Alerts"
+| summarize Alerts = count() by AlertName, bin(TimeGenerated, 1d)
+| sort by AlertName asc, TimeGenerated asc
+
+
+// ---------------------------------------------------------------------
+// 3. Real incidents generated per rule - 30d
+// ---------------------------------------------------------------------
+SecurityIncident
+| where TimeGenerated > ago(30d)
+| where Status != "Closed" or Classification == ""
+| mv-expand AlertId = AlertIds
+| summarize Incidents = dcount(IncidentNumber) by Title
+| sort by Incidents desc
+
+
+// ---------------------------------------------------------------------
+// 4. Noise: alerts closed as FP / benign (raise threshold) - 30d
+// ---------------------------------------------------------------------
+SecurityIncident
+| where TimeGenerated > ago(30d)
+| where Status == "Closed"
+| summarize Total = count(),
+            FalsePositives = countif(Classification == "FalsePositive"),
+            BenignPositives = countif(Classification == "BenignPositive")
+        by Title
+| extend NoiseRatio = round(100.0 * (FalsePositives + BenignPositives) / Total, 1)
+| where Total >= 5
+| sort by NoiseRatio desc, Total desc
+
+
+// ---------------------------------------------------------------------
+// 5. Rule health/noise metric (combined view) - 30d
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(30d)
+| where ProviderName == "ASI Scheduled Alerts"
+| summarize Alerts = count(),
+            ActiveDays = dcount(bin(TimeGenerated, 1d)),
+            LastAlert = max(TimeGenerated)
+        by AlertName, AlertSeverity
+| extend AlertsPerDay = round(Alerts * 1.0 / ActiveDays, 1)
+| sort by AlertsPerDay desc
+
+
+// ---------------------------------------------------------------------
+// 6. Map alert name -> analytic rule (what to edit) - 30d
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(30d)
+| where ProviderName == "ASI Scheduled Alerts"
+| extend Rule = tostring(parse_json(ExtendedProperties)["Analytic Rule Name"])
+| summarize Alerts = count() by Rule, AlertName, AlertSeverity
+| sort by Alerts desc
+
+
+// ---------------------------------------------------------------------
+// 7. Users with the most alerts - 14d
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(14d)
+| mv-expand todynamic(Entities)
+| where Entities.Type == "account"
+| extend User = coalesce(
+        tostring(Entities.Name),
+        tostring(Entities.AadUserId),
+        tostring(Entities.UPNSuffix))
+| where isnotempty(User)
+| summarize Alerts = count(),
+            Rules = dcount(AlertName),
+            LastAlert = max(TimeGenerated)
+        by User
+| sort by Alerts desc
+
+
+// ---------------------------------------------------------------------
+// 8. Devices (hosts) with the most alerts - 14d
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(14d)
+| mv-expand todynamic(Entities)
+| where Entities.Type == "host"
+| extend Device = coalesce(
+        tostring(Entities.HostName),
+        tostring(Entities.DnsDomain),
+        tostring(Entities.NetBiosName))
+| where isnotempty(Device)
+| summarize Alerts = count(),
+            Rules = dcount(AlertName),
+            LastAlert = max(TimeGenerated)
+        by Device
+| sort by Alerts desc
+
+
+// ---------------------------------------------------------------------
+// 9. IPs with the most alerts - 14d
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(14d)
+| mv-expand todynamic(Entities)
+| where Entities.Type == "ip"
+| extend IP = tostring(Entities.Address)
+| where isnotempty(IP)
+| summarize Alerts = count(),
+            Rules = dcount(AlertName),
+            LastAlert = max(TimeGenerated)
+        by IP
+| sort by Alerts desc
+
+
+// ---------------------------------------------------------------------
+// 10. Rules that do NOT fire (no recent alerts) - review/retire
+//     Rules that fired some time ago but have been silent for 30d.
+//     Adjust the window to match each rule's expected cadence.
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(90d)
+| where ProviderName == "ASI Scheduled Alerts"
+| summarize LastAlert = max(TimeGenerated), Total = count() by AlertName
+| where LastAlert < ago(30d)
+| sort by LastAlert asc
+
+
+// ---------------------------------------------------------------------
+// 11. Rules with MANY alerts but FEW incidents (review grouping)
+//     High alert/incident ratio => candidate for alert grouping or
+//     event grouping to reduce noise.
+// ---------------------------------------------------------------------
+let alerts =
+    SecurityAlert
+    | where TimeGenerated > ago(30d)
+    | where ProviderName == "ASI Scheduled Alerts"
+    | summarize Alerts = count() by AlertName;
+let incidents =
+    SecurityIncident
+    | where TimeGenerated > ago(30d)
+    | summarize Incidents = dcount(IncidentNumber) by AlertName = Title;
+alerts
+| join kind=leftouter incidents on AlertName
+| extend Incidents = coalesce(Incidents, 0)
+| extend AlertsPerIncident = iff(Incidents == 0, todouble(Alerts), round(Alerts * 1.0 / Incidents, 1))
+| sort by AlertsPerIncident desc
+
+
+// ---------------------------------------------------------------------
+// 12. Mean time to resolve (MTTR) per rule - 30d
+//     Very low MTTR + benign classification = noise to tune.
+// ---------------------------------------------------------------------
+SecurityIncident
+| where TimeGenerated > ago(30d)
+| where Status == "Closed" and isnotempty(ClosedTime)
+| extend HoursToClose = datetime_diff('minute', ClosedTime, CreatedTime) / 60.0
+| summarize Incidents = count(),
+            MTTR_hours = round(avg(HoursToClose), 1),
+            Median_hours = round(percentile(HoursToClose, 50), 1)
+        by Title
+| where Incidents >= 3
+| sort by MTTR_hours asc
+
+
+// ---------------------------------------------------------------------
+// 13. Hourly distribution of alerts per rule (tune frequency)
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(30d)
+| where ProviderName == "ASI Scheduled Alerts"
+| extend Hour = hourofday(TimeGenerated)
+| summarize Alerts = count() by AlertName, Hour
+| sort by AlertName asc, Hour asc
+
+
+// ---------------------------------------------------------------------
+// 14. Rule overlap: same entity fired by multiple rules
+//     High number of rules per entity => possible redundant rule.
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(30d)
+| where ProviderName == "ASI Scheduled Alerts"
+| mv-expand todynamic(Entities)
+| where Entities.Type == "account"
+| extend Entity = tostring(Entities.Name)
+| where isnotempty(Entity)
+| summarize Rules = make_set(AlertName), RuleCount = dcount(AlertName)
+        by Entity
+| where RuleCount > 1
+| sort by RuleCount desc
+
+
+// ---------------------------------------------------------------------
+// 15. Rule execution health: failures / partial results
+//     Rules that fail (throttling, timeout, heavy query) => optimise.
+// ---------------------------------------------------------------------
+SentinelHealth
+| where TimeGenerated > ago(30d)
+| where OperationName == "Scheduled analytics rule run"
+| extend State = tostring(Status)
+| where State != "Success"
+| extend Rule = tostring(SentinelResourceName)
+| summarize Runs = count(),
+            LastFailure = max(TimeGenerated),
+            Reasons = make_set(Description, 5)
+        by Rule, State
+| sort by Runs desc
+
+
+// ---------------------------------------------------------------------
+// 16. KQL performance of the rules (duration / rows)
+//     Requires the LAQueryLogs diagnostic enabled on the workspace.
+// ---------------------------------------------------------------------
+LAQueryLogs
+| where TimeGenerated > ago(7d)
+| where RequestContext has "Alerting" or RequestContext has "Scheduled"
+| extend DurationSec = round(DurationMs / 1000.0, 1)
+| summarize Runs = count(),
+            AvgDurationSec = round(avg(DurationSec), 1),
+            MaxDurationSec = max(DurationSec),
+            AvgRows = round(avg(ResponseRowCount), 0)
+        by QueryText
+| sort by MaxDurationSec desc
+
+
+// ---------------------------------------------------------------------
+// 17. Specific entities firing a noisy rule (exclusions)
+//     Replace <RULE_NAME> with the rule to investigate.
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(30d)
+| where AlertName == "<RULE_NAME>"
+| mv-expand todynamic(Entities)
+| extend Type = tostring(Entities.Type),
+         Value = coalesce(
+            tostring(Entities.Name),
+            tostring(Entities.Address),
+            tostring(Entities.HostName))
+| where isnotempty(Value)
+| summarize Alerts = count() by Type, Value
+| sort by Alerts desc
+
+
+// ---------------------------------------------------------------------
+// 18. MITRE ATT&CK coverage by tactic (gaps / over-coverage)
+// ---------------------------------------------------------------------
+SecurityAlert
+| where TimeGenerated > ago(30d)
+| where ProviderName == "ASI Scheduled Alerts"
+| mv-expand Tactic = todynamic(Tactics)
+| extend Tactic = tostring(Tactic)
+| where isnotempty(Tactic)
+| summarize Alerts = count(), Rules = dcount(AlertName) by Tactic
+| sort by Alerts desc
