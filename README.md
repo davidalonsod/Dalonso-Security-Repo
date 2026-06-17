@@ -21,5 +21,7 @@ This repository is a curated collection of resources and hands-on content focuse
 - 📓 Notebooks  
   Jupyter Notebooks for advanced analytics, automation, and investigation workflows.
 
+ 📊 Sentinel and XDR Reports with sample investigation
+
 - 📚 Learning Resources  
  
