@@ -1,6 +1,6 @@
 # Revoke-SpAccess
 
-Two Microsoft Graph PowerShell scripts for revoking access on Entra ID
+Two Mcrosoft Graph PowerShell scripts for revoking access on Entra ID
 Service Principals and notifying the right people by email, end-to-end
 (no Logic Apps, no Power Automate).
 
