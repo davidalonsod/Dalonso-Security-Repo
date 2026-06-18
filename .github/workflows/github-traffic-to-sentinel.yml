@@ -1,0 +1,74 @@
+#
+# Agent365/AgentRiskDemo/GitHubTraffic/github-traffic-to-sentinel.yml
+#
+# Daily snapshot of GitHub repository Traffic (clones / views) into a
+# Microsoft Sentinel custom table, so you can chart 1-year trends.
+#
+# Place this file at .github/workflows/github-traffic-to-sentinel.yml in
+# the repository you want to monitor, then add the required secrets/vars.
+#
+# Prerequisites (one-off):
+#   1. Deploy Deploy-GitHubTrafficTable.bicep -> note the outputs.
+#   2. Create an Entra app registration with a federated credential for this
+#      repo (OIDC) and grant it 'Monitoring Metrics Publisher' on the DCR.
+#   3. Add the repo secrets / variables listed below.
+#
+# Secrets:
+#   GH_TRAFFIC_PAT     - classic PAT with 'repo' scope (admin of the repo)
+#   AZURE_CLIENT_ID    - app registration (client) ID
+#   AZURE_TENANT_ID    - Entra tenant ID
+#   AZURE_SUBSCRIPTION_ID
+# Variables (or secrets):
+#   DCE_ENDPOINT       - bicep output dceLogsIngestionUri
+#   DCR_IMMUTABLE_ID   - bicep output dcrImmutableId
+#   TARGET_REPOSITORY  - owner/repo, e.g. davidalonsod/Dalonso-Security-Repo
+#
+# Created on 17/06/2026.
+#
+
+name: GitHub Traffic to Sentinel
+
+on:
+  schedule:
+    # 06:00 UTC daily. GitHub keeps 14 days, so a daily run never loses data.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required for Azure OIDC login
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Acquire Azure Monitor token
+        id: token
+        shell: bash
+        run: |
+          TOKEN=$(az account get-access-token \
+            --resource "https://monitor.azure.com" \
+            --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "value=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Send Traffic snapshot to Sentinel
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TRAFFIC_PAT }}
+          AZURE_MONITOR_TOKEN: ${{ steps.token.outputs.value }}
+        run: |
+          ./Agent365/AgentRiskDemo/GitHubTraffic/Send-GitHubTrafficToSentinel.ps1 `
+            -Repository    "${{ vars.TARGET_REPOSITORY }}" `
+            -DceEndpoint   "${{ vars.DCE_ENDPOINT }}" `
+            -DcrImmutableId "${{ vars.DCR_IMMUTABLE_ID }}"
