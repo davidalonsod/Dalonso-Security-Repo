@@ -46,6 +46,12 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# Trim leading/trailing whitespace (including newlines that may come from
+# GitHub Actions variable expansion) to avoid malformed API URLs.
+$Repository    = $Repository.Trim()
+$DceEndpoint   = $DceEndpoint.Trim()
+$DcrImmutableId = $DcrImmutableId.Trim()
+
 if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
     throw 'No GitHub token provided. Set -GitHubToken or the GITHUB_TOKEN environment variable.'
 }
