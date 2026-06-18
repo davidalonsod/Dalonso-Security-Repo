@@ -49,9 +49,13 @@ Set-StrictMode -Version Latest
 # Strip any leading/trailing whitespace or newlines that can sneak in from
 # GitHub Actions variables / CLI args. A trailing newline in $Repository
 # corrupts the API URL (.../repo%0A/traffic/clones) and yields a 404.
+# The same problem can affect $DceEndpoint and $DcrImmutableId, so trim all
+# string inputs that originate from GitHub Actions vars or CLI args.
 $Repository = $Repository.Trim()
 $GitHubToken = $GitHubToken.Trim()
 $AzureMonitorToken = $AzureMonitorToken.Trim()
+$DceEndpoint = $DceEndpoint.Trim()
+$DcrImmutableId = $DcrImmutableId.Trim()
 
 if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
     throw 'No GitHub token provided. Set -GitHubToken or the GITHUB_TOKEN environment variable.'
