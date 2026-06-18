@@ -46,6 +46,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$Repository = $Repository.Trim()
+
 if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
     throw 'No GitHub token provided. Set -GitHubToken or the GITHUB_TOKEN environment variable.'
 }
