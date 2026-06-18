@@ -80,7 +80,7 @@ function Get-TrafficRows {
     catch {
         $statusCode = $_.Exception.Response.StatusCode.value__
         if ($statusCode -eq 404) {
-            throw "GitHub Traffic API returned 404 for '$Repository'. Ensure GITHUB_TOKEN is a PAT with access to this repository's traffic metrics (admin/maintainer), and TARGET_REPOSITORY has no extra characters."
+            throw "GitHub Traffic API returned 404 for '$Repository'. Check that -GitHubToken (or GITHUB_TOKEN) is a PAT with 'repo' scope and access to this repository's traffic metrics, and that Repository is a valid owner/repo name."
         }
         throw
     }
