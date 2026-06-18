@@ -50,6 +50,8 @@ Set-StrictMode -Version Latest
 # GitHub Actions variables / CLI args. A trailing newline in $Repository
 # corrupts the API URL (.../repo%0A/traffic/clones) and yields a 404.
 $Repository = $Repository.Trim()
+$GitHubToken = $GitHubToken.Trim()
+$AzureMonitorToken = $AzureMonitorToken.Trim()
 
 if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
     throw 'No GitHub token provided. Set -GitHubToken or the GITHUB_TOKEN environment variable.'
@@ -72,7 +74,16 @@ function Get-TrafficRows {
         [string] $BreakdownProperty   # 'clones' or 'views' (array property in the response)
     )
 
-    $resp = Invoke-RestMethod -Method Get -Uri $Url -Headers $ghHeaders
+    try {
+        $resp = Invoke-RestMethod -Method Get -Uri $Url -Headers $ghHeaders
+    }
+    catch {
+        $statusCode = $_.Exception.Response.StatusCode.value__
+        if ($statusCode -eq 404) {
+            throw "GitHub Traffic API returned 404 for '$Repository'. Ensure GITHUB_TOKEN is a PAT with access to this repository's traffic metrics (admin/maintainer), and TARGET_REPOSITORY has no extra characters."
+        }
+        throw
+    }
     $rows = @()
 
     foreach ($point in $resp.$BreakdownProperty) {
