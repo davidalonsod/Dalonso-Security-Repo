@@ -52,6 +52,8 @@ Set-StrictMode -Version Latest
 $Repository = $Repository.Trim()
 $GitHubToken = $GitHubToken.Trim()
 $AzureMonitorToken = $AzureMonitorToken.Trim()
+$DceEndpoint = $DceEndpoint.Trim()
+$DcrImmutableId = $DcrImmutableId.Trim()
 
 if ([string]::IsNullOrWhiteSpace($GitHubToken)) {
     throw 'No GitHub token provided. Set -GitHubToken or the GITHUB_TOKEN environment variable.'
