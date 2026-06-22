@@ -1,0 +1,460 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# 📈 GitHub Repository Traffic - 1 Year Trends\n---\nLong-term **clones**, **views**, **referrers**, **popular content** and **stars / forks / watchers** for your GitHub repository, reconstructed from daily snapshots stored in Sentinel (`GitHubTraffic_CL`). GitHub itself only keeps 14 days of traffic, so this workbook only shows history accumulated since the daily snapshot job started running.\n\n## What this workbook shows\n- **KPIs** — total and unique clones and views for the selected period.\n- **Clones / Views trend** — per-day line charts of traffic with unique cloners and visitors.\n- **Weekly trends** — week-over-week clones and views as connected lines (best for spotting short-term progress).\n- **Monthly aggregation & Monthly trends** — clones and views rolled up per month, as bars and as a trend line.\n- **Yearly trends** — clones and views totals per year.\n- **Detail table** — de-duplicated daily breakdown you can sort and export.\n- **Referring sites** — top external sources sending traffic (30-day and 1-year views).\n- **Popular content** — most viewed paths / pages in the repo (30-day and 1-year views).\n- **Stars, forks & watchers** — current social engagement counts.\n\n## How to use it\nUse the **Time range** and **Repository** selectors at the top to scope every chart. Granularity increases as more history accumulates: weekly lines appear after ~2 weeks, monthly after ~2 months, yearly after the calendar rolls over.\n\n> ℹ️ Duplicate per-day points (from overlapping 14-day snapshot windows) are de-duplicated at query time with `summarize max()` per day and metric. Referrers, popular content and social counts use the **latest** snapshot. Referrers and paths are rolling 14-day totals (GitHub exposes no per-day breakdown for them)."
+      },
+      "name": "title"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "a0000000-0001-4a00-9000-000000000001",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 31536000000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 2592000000 },
+                { "durationMs": 7776000000 },
+                { "durationMs": 15552000000 },
+                { "durationMs": 31536000000 }
+              ],
+              "allowCustom": true
+            }
+          },
+          {
+            "id": "a0000000-0002-4a00-9000-000000000002",
+            "version": "KqlParameterItem/1.0",
+            "name": "Repository",
+            "label": "Repository",
+            "type": 2,
+            "isRequired": true,
+            "query": "GitHubTraffic_CL\n| distinct RepoFullName\n| sort by RepoFullName asc",
+            "typeSettings": {
+              "additionalResourceOptions": [],
+              "showDefault": false
+            },
+            "timeContext": { "durationMs": 31536000000 },
+            "queryType": 0,
+            "resourceType": "microsoft.operationalinsights/workspaces"
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## KPIs"
+      },
+      "name": "kpis-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| summarize Count = max(Count), Uniques = max(Uniques) by Day = bin(TimeGenerated, 1d), MetricType\n| summarize\n    ['Total clones'] = sumif(Count, MetricType == 'clones'),\n    ['Unique cloners'] = sumif(Uniques, MetricType == 'clones'),\n    ['Total views'] = sumif(Count, MetricType == 'views'),\n    ['Unique visitors'] = sumif(Uniques, MetricType == 'views')",
+        "size": 3,
+        "title": "Totals for selected period",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "tiles",
+        "tileSettings": {
+          "showBorder": true
+        }
+      },
+      "name": "kpi-tiles"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Clones trend"
+      },
+      "name": "clones-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType == 'clones'\n| summarize Clones = max(Count), ['Unique cloners'] = max(Uniques) by bin(TimeGenerated, 1d)\n| sort by TimeGenerated asc\n| render timechart",
+        "size": 0,
+        "title": "Clones per day (with unique cloners)",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "clones-timechart"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Views trend"
+      },
+      "name": "views-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType == 'views'\n| summarize Views = max(Count), ['Unique visitors'] = max(Uniques) by bin(TimeGenerated, 1d)\n| sort by TimeGenerated asc\n| render timechart",
+        "size": 0,
+        "title": "Views per day (with unique visitors)",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "views-timechart"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Monthly aggregation"
+      },
+      "name": "monthly-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| summarize DailyCount = max(Count), DailyUniques = max(Uniques) by Day = bin(TimeGenerated, 1d), MetricType\n| summarize Total = sum(DailyCount), Uniques = sum(DailyUniques) by Month = startofmonth(Day), MetricType\n| sort by Month asc, MetricType asc",
+        "size": 0,
+        "title": "Monthly totals (clones and views)",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "monthly-barchart"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Weekly trends\nWeek-over-week progression of clones and views as connected lines. Weekly buckets (vs monthly) give enough points to draw a visible trend line even with a short history."
+      },
+      "name": "weekly-trend-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType == 'clones'\n| summarize DailyCount = max(Count), DailyUniques = max(Uniques) by Day = bin(TimeGenerated, 1d)\n| summarize Clones = sum(DailyCount), ['Unique cloners'] = sum(DailyUniques) by Week = startofweek(Day)\n| sort by Week asc\n| render timechart",
+        "size": 0,
+        "title": "Clones per week",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "clones-weekly-trend"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType == 'views'\n| summarize DailyCount = max(Count), DailyUniques = max(Uniques) by Day = bin(TimeGenerated, 1d)\n| summarize Views = sum(DailyCount), ['Unique visitors'] = sum(DailyUniques) by Week = startofweek(Day)\n| sort by Week asc\n| render timechart",
+        "size": 0,
+        "title": "Views per week",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "views-weekly-trend"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Monthly trends\nMonth-over-month progression of clones and views as connected lines. A line appears once at least 2 months of history have accumulated."
+      },
+      "name": "monthly-trend-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType == 'clones'\n| summarize DailyCount = max(Count), DailyUniques = max(Uniques) by Day = bin(TimeGenerated, 1d)\n| summarize Clones = sum(DailyCount), ['Unique cloners'] = sum(DailyUniques) by Month = startofmonth(Day)\n| sort by Month asc\n| render timechart",
+        "size": 0,
+        "title": "Clones per month",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "clones-monthly-trend"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType == 'views'\n| summarize DailyCount = max(Count), DailyUniques = max(Uniques) by Day = bin(TimeGenerated, 1d)\n| summarize Views = sum(DailyCount), ['Unique visitors'] = sum(DailyUniques) by Month = startofmonth(Day)\n| sort by Month asc\n| render timechart",
+        "size": 0,
+        "title": "Views per month",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "views-monthly-trend"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Yearly trends"
+      },
+      "name": "yearly-trend-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType in ('clones', 'views')\n| summarize DailyCount = max(Count) by Day = bin(TimeGenerated, 1d), MetricType\n| summarize Total = sum(DailyCount) by Year = startofyear(Day), MetricType\n| sort by Year asc, MetricType asc",
+        "size": 0,
+        "title": "Clones and views per year",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart",
+        "chartSettings": {
+          "xAxis": "Year",
+          "yAxis": [ "Total" ],
+          "group": "MetricType"
+        }
+      },
+      "name": "yearly-trend-chart"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Detail table"
+      },
+      "name": "detail-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| summarize Count = max(Count), Uniques = max(Uniques) by Day = bin(TimeGenerated, 1d), MetricType\n| project Day, MetricType, Count, Uniques\n| sort by Day desc, MetricType asc",
+        "size": 0,
+        "title": "Daily breakdown (de-duplicated)",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Count",
+              "formatter": 4,
+              "formatOptions": { "palette": "blue" }
+            },
+            {
+              "columnMatch": "Uniques",
+              "formatter": 4,
+              "formatOptions": { "palette": "green" }
+            }
+          ]
+        }
+      },
+      "name": "detail-table"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Referring sites\nGitHub only exposes a rolling 14-day total per referrer (no per-day breakdown), so each value is the peak 14-day total observed in the window. Left: last 30 days. Right: last year."
+      },
+      "name": "referrers-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType == 'referrer'\n| summarize Views = max(Count), ['Unique visitors'] = max(Uniques) by Site = Dimension\n| sort by Views desc",
+        "size": 0,
+        "title": "Top referrers - last 30 days",
+        "timeContext": { "durationMs": 2592000000 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Views",
+              "formatter": 4,
+              "formatOptions": { "palette": "blue" }
+            },
+            {
+              "columnMatch": "Unique visitors",
+              "formatter": 4,
+              "formatOptions": { "palette": "green" }
+            }
+          ]
+        }
+      },
+      "customWidth": "50",
+      "name": "referrers-table-30d"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType == 'referrer'\n| summarize Views = max(Count), ['Unique visitors'] = max(Uniques) by Site = Dimension\n| sort by Views desc",
+        "size": 0,
+        "title": "Top referrers - last year",
+        "timeContext": { "durationMs": 31536000000 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Views",
+              "formatter": 4,
+              "formatOptions": { "palette": "blue" }
+            },
+            {
+              "columnMatch": "Unique visitors",
+              "formatter": 4,
+              "formatOptions": { "palette": "green" }
+            }
+          ]
+        }
+      },
+      "customWidth": "50",
+      "name": "referrers-table-1y"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Popular content\nGitHub only exposes a rolling 14-day total per path (no per-day breakdown), so each value is the peak 14-day total observed in the window. Left: last 30 days. Right: last year."
+      },
+      "name": "paths-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType == 'path'\n| summarize Views = max(Count), ['Unique visitors'] = max(Uniques), Title = take_any(Title) by Dimension\n| project Content = iif(isempty(Title), Dimension, Title), Path = Dimension, Views, ['Unique visitors']\n| sort by Views desc",
+        "size": 0,
+        "title": "Most viewed paths - last 30 days",
+        "timeContext": { "durationMs": 2592000000 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Views",
+              "formatter": 4,
+              "formatOptions": { "palette": "blue" }
+            },
+            {
+              "columnMatch": "Unique visitors",
+              "formatter": 4,
+              "formatOptions": { "palette": "green" }
+            }
+          ]
+        }
+      },
+      "customWidth": "50",
+      "name": "paths-table-30d"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType == 'path'\n| summarize Views = max(Count), ['Unique visitors'] = max(Uniques), Title = take_any(Title) by Dimension\n| project Content = iif(isempty(Title), Dimension, Title), Path = Dimension, Views, ['Unique visitors']\n| sort by Views desc",
+        "size": 0,
+        "title": "Most viewed paths - last year",
+        "timeContext": { "durationMs": 31536000000 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Views",
+              "formatter": 4,
+              "formatOptions": { "palette": "blue" }
+            },
+            {
+              "columnMatch": "Unique visitors",
+              "formatter": 4,
+              "formatOptions": { "palette": "green" }
+            }
+          ]
+        }
+      },
+      "customWidth": "50",
+      "name": "paths-table-1y"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Stars, forks & watchers"
+      },
+      "name": "social-header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType in ('stars', 'forks', 'watchers')\n| summarize arg_max(TimeGenerated, Count) by MetricType\n| summarize Stars = sumif(Count, MetricType == 'stars'), Forks = sumif(Count, MetricType == 'forks'), Watchers = sumif(Count, MetricType == 'watchers')",
+        "size": 3,
+        "title": "Current totals",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "tiles",
+        "tileSettings": {
+          "showBorder": true
+        }
+      },
+      "name": "social-tiles"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubTraffic_CL\n| where RepoFullName == '{Repository}'\n| where MetricType in ('stars', 'forks', 'watchers')\n| summarize Count = max(Count) by bin(TimeGenerated, 1d), MetricType\n| sort by TimeGenerated asc\n| render timechart",
+        "size": 0,
+        "title": "Stars / forks / watchers over time",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "social-timechart"
+    }
+  ],
+  "fallbackResourceIds": [],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
