@@ -1,0 +1,459 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# Defender for Identity - Identity Security Dashboard\n\nIdentity posture and activity from **Microsoft Defender XDR Advanced Hunting** (Identity* tables), queried live.\n\n> **Data source: Advanced Hunting.** Every panel uses the **Advanced hunting** source against the **CyberSOC** workspace. If a panel shows no data after import, open **Advanced Editor** and confirm **Data source -> Advanced hunting**.\n\n**Layout:** Summary -> Authentication -> Failures / brute force -> Reconnaissance -> Directory changes -> Inventory."
+      },
+      "name": "header"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Capabilities & authoritative sources\r\n\r\nThis workbook runs on **live Advanced Hunting** (`Identity*`, `Alert*` tables). Some framework pages depend on data that is **not** in hunting tables - sensor health, Identity Secure Score, the recommendations catalog and computed attack paths. For those, use the authoritative Defender pages via the quick links below.\r\n\r\n| Framework page | In this workbook | Authoritative source |\r\n| --- | --- | --- |\r\n| **Landing / Executive** | Partial - activity KPIs (Section 1). Add freshness / coverage % / techniques | this page + link-outs |\r\n| **Coverage & Sensor Health** | KQL **telemetry freshness** only (feasible) | **Defender -> Settings -> Identities -> Sensors** (exact status, CSV export) |\r\n| **Detections & Incidents** | Covered - MDI alerts by kill-chain, severity, trend, top attacked users (Section 7) | Defender **Incidents** (`SecurityIncident`, `ProviderName == \"Microsoft XDR\"`) |\r\n| **Security Posture & Recommendations** | Link-out (not in AH) | **Secure Score** / **Exposure Management -> Recommendations** (Identities category) |\r\n| **Critical Assets & Exposure Paths** | Covered - sensitive/privileged, dormant, targeted (Section 8). Attack paths = link-out | Defender **Identity inventory** + **Exposure Management -> Attack paths** |\r\n| **Entity / Timeline Investigator** | Not built (single-entity deep dive) | - |\r\n\r\n**Quick links (authoritative pages):** [Sensors](https://security.microsoft.com/settings/identities) &bull; [Identity inventory](https://security.microsoft.com/identities) &bull; [Secure Score](https://security.microsoft.com/securescore) &bull; [Recommendations](https://security.microsoft.com/exposure-management/recommendations) &bull; [Attack paths](https://security.microsoft.com/exposure-management/attack-paths)\r\n\r\n**Data notes:** Advanced Hunting retains ~30 days, so freshness / dormancy widgets use a 30-day window. Sensor exact state and posture/recommendations require the Defender portal (or a daily sensor-CSV / recommendations snapshot into a custom table). For Tier-0 / expected-DC overlays, use Sentinel **watchlists** (`ExpectedDCs`, `Tier0Assets`, `SensitiveGroups`)."
+      },
+      "name": "capabilities"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Executive summary\nIdentity activity at a glance (last 30 days)."
+      },
+      "name": "h-exec"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let L = IdentityLogonEvents | where Timestamp > ago(30d);\\r\\nL | summarize Value = count() | extend Metric = \\\"Logon events\\\", Description = \\\"Total logons (30 days)\\\", Sort = 0\\r\\n| union (L | summarize Value = countif(ActionType == \\\"LogonFailed\\\") | extend Metric = \\\"Failed logons\\\", Description = \\\"Failed authentications (30 days)\\\", Sort = 1)\\r\\n| union (L | summarize Value = dcount(AccountUpn) | extend Metric = \\\"Active accounts\\\", Description = \\\"Distinct accounts authenticating\\\", Sort = 2)\\r\\n| union (L | summarize Value = dcountif(AccountUpn, ActionType == \\\"LogonFailed\\\") | extend Metric = \\\"Accounts with failures\\\", Description = \\\"Accounts with at least one failed logon\\\", Sort = 3)\\r\\n| union (L | summarize Value = dcount(DeviceName) | extend Metric = \\\"Devices\\\", Description = \\\"Distinct source devices\\\", Sort = 4)\\r\\n| order by Sort asc\\r\\n| project Metric, Value, Description\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Identity activity (last 30 days)",
+        "queryType": "advancedHunting",
+        "visualization": "tiles",
+        "tileSettings": {
+          "titleContent": {
+            "columnMatch": "Metric",
+            "formatter": 1
+          },
+          "leftContent": {
+            "columnMatch": "Value",
+            "formatter": 12,
+            "formatOptions": {
+              "palette": "blue"
+            }
+          },
+          "subtitleContent": {
+            "columnMatch": "Description",
+            "formatter": 1
+          },
+          "showBorder": true
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "exec-tiles",
+      "customWidth": "100"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Authentication, failures & reconnaissance\nLogon trend over time, brute-force candidates, and LDAP / SAMR reconnaissance."
+      },
+      "name": "h-auth"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"IdentityLogonEvents\\r\\n| where Timestamp > ago(30d)\\r\\n| summarize Successful = countif(ActionType == \\\"LogonSuccess\\\"), Failed = countif(ActionType == \\\"LogonFailed\\\") by bin(Timestamp, 1d)\\r\\n| order by Timestamp asc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Successful vs failed logons over time",
+        "queryType": "advancedHunting",
+        "visualization": "timechart",
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "auth-trend",
+      "customWidth": "70"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"IdentityLogonEvents\\r\\n| where Timestamp > ago(30d) and ActionType == \\\"LogonFailed\\\"\\r\\n| summarize FailedLogons = count(), Devices = dcount(DeviceName), Locations = dcount(Location) by Account = AccountUpn\\r\\n| order by FailedLogons desc\\r\\n| take 15\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Accounts with the most failed logons",
+        "queryType": "advancedHunting",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "FailedLogons",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "red"
+              }
+            }
+          ]
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "fail-accounts",
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"IdentityQueryEvents\\r\\n| where Timestamp > ago(30d)\\r\\n| summarize Queries = count(), Actors = dcount(AccountUpn), Devices = dcount(DeviceName) by QueryType = ActionType\\r\\n| order by Queries desc\\r\\n| take 15\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Reconnaissance queries by type",
+        "queryType": "advancedHunting",
+        "visualization": "barchart",
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "recon-type",
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"IdentityDirectoryEvents\\r\\n| where Timestamp > ago(30d)\\r\\n| summarize Events = count(), Actors = dcount(AccountUpn) by Action = ActionType\\r\\n| order by Events desc\\r\\n| take 20\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Directory events by action type",
+        "queryType": "advancedHunting",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Events",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "orange"
+              }
+            },
+            {
+              "columnMatch": "Actors",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "blue"
+              }
+            }
+          ]
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "dir-actions",
+      "customWidth": "50"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Detections & hunting\nMDI alerts by kill-chain, most-attacked users, recon / DCSync, logon anomalies and Kerberos downgrade."
+      },
+      "name": "h-detections"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AlertInfo\\r\\n| where Timestamp > ago(30d) and ServiceSource == \\\"Microsoft Defender for Identity\\\"\\r\\n| summarize Alerts = count() by KillChainStage = Category, Severity\\r\\n| order by Alerts desc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "MDI alerts by kill-chain stage & severity",
+        "queryType": "advancedHunting",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Severity",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  {
+                    "operator": "==",
+                    "thresholdValue": "High",
+                    "representation": "redBright",
+                    "text": "{0}{1}"
+                  },
+                  {
+                    "operator": "==",
+                    "thresholdValue": "Medium",
+                    "representation": "orange",
+                    "text": "{0}{1}"
+                  },
+                  {
+                    "operator": "Default",
+                    "representation": "yellow",
+                    "text": "{0}{1}"
+                  }
+                ]
+              }
+            },
+            {
+              "columnMatch": "Alerts",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "red"
+              }
+            }
+          ]
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "det-killchain",
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let mdi = AlertInfo | where Timestamp > ago(30d) and ServiceSource == \\\"Microsoft Defender for Identity\\\" | distinct AlertId;\\r\\nAlertEvidence\\r\\n| where Timestamp > ago(30d) and EntityType == \\\"User\\\" and isnotempty(AccountUpn)\\r\\n| join kind=inner mdi on AlertId\\r\\n| summarize Alerts = dcount(AlertId) by AttackedUser = AccountUpn\\r\\n| order by Alerts desc\\r\\n| take 10\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Top 5 attacked users",
+        "queryType": "advancedHunting",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Alerts",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "red"
+              }
+            }
+          ]
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "det-users",
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"IdentityQueryEvents\\r\\n| where Timestamp > ago(30d) and (ActionType == \\\"SAMR query\\\" or (ActionType == \\\"LDAP query\\\" and QueryType == \\\"AllObjects\\\") or ActionType == \\\"Domain trusts discovery\\\")\\r\\n| summarize Queries = count() by Actor = AccountUpn, Device = DeviceName, ActionType\\r\\n| order by Queries desc\\r\\n| take 20\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Reconnaissance (SAMR / LDAP AllObjects / trust discovery)",
+        "queryType": "advancedHunting",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Queries",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "red"
+              }
+            }
+          ]
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "det-recon",
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"IdentityLogonEvents\\r\\n| where Timestamp > ago(8d) and isnotempty(AccountUpn)\\r\\n| summarize Last24h = countif(Timestamp > ago(1d)), Prior7d = countif(Timestamp <= ago(1d)) by AccountUpn\\r\\n| extend Avg7d = Prior7d / 7.0\\r\\n| where Last24h > 5 and Avg7d >= 1 and Last24h > Avg7d * 2\\r\\n| extend SpikeRatio = round(Last24h / Avg7d, 1)\\r\\n| project Account = AccountUpn, Last24h, DailyAvgPrior7d = round(Avg7d, 1), SpikeRatio\\r\\n| order by SpikeRatio desc\\r\\n| take 5\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Top 5 users with anomalous logon increase",
+        "queryType": "advancedHunting",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "formatter": 8,
+              "columnMatch": "SpikeRatio",
+              "formatOptions": {
+                "palette": "redBright"
+              }
+            },
+            {
+              "formatter": 8,
+              "columnMatch": "Last24h",
+              "formatOptions": {
+                "palette": "orange"
+              }
+            }
+          ]
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "det-anomaly",
+      "customWidth": "50"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"IdentityLogonEvents\\r\\n| where Timestamp > ago(30d) and Protocol == \\\"Kerberos\\\" and isnotempty(AdditionalFields)\\r\\n| extend Encryption = tolower(tostring(AdditionalFields.EncryptionType))\\r\\n| where Encryption contains \\\"rc4\\\" or Encryption contains \\\"des\\\" or Encryption contains \\\"md5\\\" or Encryption contains \\\"export\\\"\\r\\n| summarize Events = count(), Accounts = dcount(AccountUpn) by Encryption, Device = DeviceName\\r\\n| order by Events desc\\r\\n| take 20\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Kerberos encryption downgrade (RC4 / DES)",
+        "queryType": "advancedHunting",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Events",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "red"
+              }
+            }
+          ]
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "det-krb",
+      "customWidth": "50"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## Critical assets, honeytokens & cross-domain\nSensitive identities, honeytoken activity, and Entra risky sign-ins for MDI-flagged users."
+      },
+      "name": "h-critical"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let I = IdentityInfo | summarize arg_max(Timestamp, *) by AccountObjectId | where Tags has \\\"Sensitive\\\";\\r\\nI | summarize Value = count() | extend Metric = \\\"Sensitive identities\\\", Description = \\\"MDI-flagged privileged/sensitive accounts\\\", Sort = 0\\r\\n| union (I | summarize Value = countif(IsAccountEnabled) | extend Metric = \\\"Enabled\\\", Description = \\\"Active sensitive accounts\\\", Sort = 1)\\r\\n| union (I | summarize Value = countif(RiskLevel in (\\\"High\\\", \\\"Medium\\\")) | extend Metric = \\\"At risk\\\", Description = \\\"Sensitive accounts at medium/high risk\\\", Sort = 2)\\r\\n| order by Sort asc\\r\\n| project Metric, Value, Description\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Sensitive identities at a glance",
+        "queryType": "advancedHunting",
+        "visualization": "tiles",
+        "tileSettings": {
+          "titleContent": {
+            "columnMatch": "Metric",
+            "formatter": 1
+          },
+          "leftContent": {
+            "columnMatch": "Value",
+            "formatter": 12,
+            "formatOptions": {
+              "palette": "red"
+            }
+          },
+          "subtitleContent": {
+            "columnMatch": "Description",
+            "formatter": 1
+          },
+          "showBorder": true
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "crit-tiles",
+      "customWidth": "100"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let sensitive = IdentityInfo | summarize arg_max(Timestamp, *) by AccountObjectId | where Tags has \\\"Sensitive\\\" | distinct AccountUpn;\\r\\nlet mdi = AlertInfo | where Timestamp > ago(30d) and ServiceSource == \\\"Microsoft Defender for Identity\\\" | distinct AlertId;\\r\\nAlertEvidence\\r\\n| where Timestamp > ago(30d) and EntityType == \\\"User\\\" and AccountUpn in (sensitive)\\r\\n| join kind=inner mdi on AlertId\\r\\n| summarize Alerts = dcount(AlertId) by Account = AccountUpn\\r\\n| order by Alerts desc\\r\\n| take 15\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Sensitive accounts targeted by MDI alerts",
+        "queryType": "advancedHunting",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Alerts",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "redBright"
+              }
+            }
+          ]
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "crit-targeted",
+      "customWidth": "100"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let ht = IdentityInfo | summarize arg_max(Timestamp, *) by AccountObjectId | where Tags has \\\"Honeytoken\\\" | distinct AccountUpn;\\r\\nIdentityLogonEvents\\r\\n| where Timestamp > ago(30d) and AccountUpn in (ht)\\r\\n| summarize Attempts = count(), LastSeen = max(Timestamp) by Honeytoken = AccountUpn, IPAddress, ActionType\\r\\n| order by Attempts desc\\r\\n| take 20\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Honeytoken interaction (any = suspicious)",
+        "queryType": "advancedHunting",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Attempts",
+              "formatter": 8,
+              "formatOptions": {
+                "palette": "redBright"
+              }
+            }
+          ]
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "ht-activity",
+      "customWidth": "50"
+    },
+    {
+      "customWidth": "50",
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let mdiUsers = AlertEvidence\\r\\n| where Timestamp > ago(30d) and EntityType == \\\"User\\\" and isnotempty(AccountObjectId)\\r\\n| join kind=inner (AlertInfo | where Timestamp > ago(30d) and ServiceSource == \\\"Microsoft Defender for Identity\\\" | distinct AlertId) on AlertId\\r\\n| distinct AccountObjectId;\\r\\nAADSignInEventsBeta\\r\\n| where Timestamp > ago(7d) and RiskLevelDuringSignIn in (\\\"high\\\",\\\"medium\\\")\\r\\n| where AccountObjectId in (mdiUsers)\\r\\n| summarize RiskySignIns = count(), Countries = dcount(Country), LastSeen = max(Timestamp) by Account = AccountUpn, RiskLevelDuringSignIn\\r\\n| order by RiskySignIns desc\\r\\n| take 20\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+        "size": 0,
+        "title": "Entra risky sign-ins by MDI-flagged users",
+        "queryType": "advancedHunting",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "formatter": 8,
+              "columnMatch": "RiskySignIns",
+              "formatOptions": {
+                "palette": "redBright"
+              }
+            }
+          ]
+        },
+        "crossComponentResources": [
+          "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+        ]
+      },
+      "name": "cd-entrarisky"
+    }
+  ],
+  "styleSettings": {},
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
