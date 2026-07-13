@@ -8,4 +8,6 @@ Workbook Sentinel for CISOs whth KPIs for a SOC https://youtu.be/UCmmu87giEE
 
 Workbook Advanced Hunting https://youtu.be/AgPaitYlSqM
 
+Monitoring AI Agents: Observability in Foundry & Copilot Studio" https://www.youtube.com/watch?v=5Axu9dJ2lfw
+
 Build a Microsoft Sentinel Data Connector with Natural Language (No Coding Required!)  https://youtu.be/7Le6oACqG1A
