@@ -1,6 +1,11 @@
+Video Demo 
+
+Avoid Azure Billing Surprises: Sentinel Anomaly Alerts and Detect Data Ingestion Spike https://youtu.be/U3Fx_U56igg
+
 # Sentinel Data Ingestion Control
 
 ARM-deployable monitoring pack for **any** Microsoft Sentinel workspace: **5 analytic rules** + **16 ingestion & cost monitoring queries** + **15 cost optimization queries** for data ingestion anomaly detection, noise identification, cost management, M365 E5 benefit tracking, Auxiliary table monitoring, and retention compliance.
+
 
 ## Folder Structure
 
