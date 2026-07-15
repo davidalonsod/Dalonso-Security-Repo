@@ -13,3 +13,5 @@ Monitoring AI Agents: Observability in Foundry & Copilot Studio" https://www.you
 Build a Microsoft Sentinel Data Connector with Natural Language (No Coding Required!)  https://youtu.be/7Le6oACqG1A
 
 Secure and monitor Compromised Service Principals Non-Human Identities (NHI) with Microsoft Sentinel https://youtu.be/LW-rTQUovHo
+
+Stop Active Directory Attacks: Advanced Monitoring with Microsoft Sentinel https://youtu.be/zYLU93U22Ew
