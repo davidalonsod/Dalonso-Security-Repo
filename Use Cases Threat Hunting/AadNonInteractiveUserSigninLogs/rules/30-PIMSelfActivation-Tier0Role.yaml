@@ -1,0 +1,98 @@
+id: b7e4d3c2-5a6f-4b8c-9d0e-3f2a1b4c5d6e
+name: PIM Self-Activation of Tier-0 Directory Role
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects when a user self-activates a high-privilege (tier-0) Entra ID directory role
+  through Privileged Identity Management (PIM) - for example Global Administrator or
+  Privileged Role Administrator. PIM activations are technically brokered by the MS-PIM
+  service principal, so the real actor is taken from InitiatedBy.user (the human), NOT from
+  the app initiator. This rule reports the activating USER as the entity.
+
+  Note: legitimate administrators activate tier-0 roles routinely, so this detection is
+  intended for visibility and verification rather than high-confidence malicious activity.
+  Tune by allowlisting expected admins/PIM windows, or correlate with risky sign-ins,
+  unfamiliar IPs or immediate non-interactive token use (see rule 12).
+  MITRE ATT&CK: T1078 (Valid Accounts), T1098 (Account Manipulation)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+relevantTechniques:
+  - T1078
+  - T1098
+query: |
+  // Tier-0 / high-impact Entra ID directory roles worth surfacing on PIM activation.
+  let Tier0Roles = dynamic([
+      "Global Administrator",
+      "Privileged Role Administrator",
+      "Privileged Authentication Administrator",
+      "Security Administrator",
+      "Application Administrator",
+      "Cloud Application Administrator",
+      "Hybrid Identity Administrator",
+      "Domain Name Administrator",
+      "Exchange Administrator",
+      "SharePoint Administrator",
+      "User Administrator",
+      "Conditional Access Administrator"
+  ]);
+  AuditLogs
+  | where TimeGenerated > ago(1h)
+  | where OperationName has "Add member to role completed (PIM activation)"
+  | where Result =~ "success"
+  // The actor is the human who activated the role, not the MS-PIM broker SP.
+  | extend UserPrincipalName = tostring(InitiatedBy.user.userPrincipalName)
+  | extend UserId            = tostring(InitiatedBy.user.id)
+  | extend UserIPAddress     = tostring(InitiatedBy.user.ipAddress)
+  | where isnotempty(UserPrincipalName)
+  | extend RoleName = tostring(TargetResources[0].displayName)
+  | where RoleName has_any (Tier0Roles)
+  | summarize
+      ActivationCount = count(),
+      Roles           = make_set(RoleName, 10),
+      IPAddresses     = make_set(UserIPAddress, 10),
+      FirstActivation = min(TimeGenerated),
+      LastActivation  = max(TimeGenerated)
+      by UserPrincipalName, UserId
+  | extend IPAddress = tostring(IPAddresses[0])
+  | order by LastActivation desc
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: UserPrincipalName
+      - identifier: AadUserId
+        columnName: UserId
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  ActivationCount: ActivationCount
+  Roles: Roles
+  IPAddresses: IPAddresses
+  FirstActivation: FirstActivation
+  LastActivation: LastActivation
+alertDetailsOverride:
+  alertDisplayNameFormat: "PIM Tier-0 Activation - {{UserPrincipalName}} activated {{Roles}}"
+  alertDescriptionFormat: "User {{UserPrincipalName}} self-activated a tier-0 directory role via PIM ({{ActivationCount}} activation(s)) from {{IPAddress}}. Confirm this is authorized administrative activity within an approved change window."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []

@@ -1,0 +1,160 @@
+id: a8f3c2d1-4b5e-4a6f-9c8d-2e1f0a3b4c5d
+name: Workload Identity - SP Self-Privilege Escalation via App Role Assignment
+version: 1.0.0
+kind: Scheduled
+description: |
+  Detects a service principal (workload identity) that elevates itself - or another service
+  principal it controls - by adding app role assignments or delegated permission grants.
+  SP-initiated escalation is a stealthy vector not covered by Azure RBAC built-ins: a
+  compromised SP can call Microsoft Graph to assign itself high-value app roles such as
+  Directory.ReadWrite.All or RoleManagement.ReadWrite.Directory, bypassing normal IAM
+  workflows. This is the cloud-native equivalent of a process elevating its own token.
+
+  Scope note: this rule fires ONLY when the action is initiated by a service principal with
+  NO human user behind it. Role changes driven by a user - including PIM activations, which
+  are technically brokered by the MS-PIM service principal - are intentionally excluded here
+  and are covered by the dedicated PIM detection (rule 12). This prevents the false positive
+  where a user self-activating Global Administrator via PIM is misattributed to MS-PIM.
+
+  Built-in differentiation: the Sentinel built-in "Service Principal assigned privileged role"
+  detects Azure RBAC role assignments from a user to an SP. This rule instead detects an SP
+  acting AS THE INITIATOR to grant app roles / permissions to itself or to a sibling SP it
+  controls (lateral privilege spread), which no known built-in covers.
+  MITRE ATT&CK: T1098.003 (Account Manipulation: Additional Cloud Roles)
+severity: High
+requiredDataConnectors:
+  - connectorId: AzureActiveDirectory
+    dataTypes:
+      - AuditLogs
+queryFrequency: 1h
+queryPeriod: 7d
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - PrivilegeEscalation
+  - Persistence
+relevantTechniques:
+  - T1098
+query: |
+  // High-value Microsoft Graph app roles / Entra ID directory roles that constitute escalation.
+  let DangerousAppRoles = dynamic([
+      "RoleManagement.ReadWrite.Directory",
+      "Application.ReadWrite.All",
+      "AppRoleAssignment.ReadWrite.All",
+      "Directory.ReadWrite.All",
+      "User.ReadWrite.All",
+      "Group.ReadWrite.All",
+      "Mail.ReadWrite",
+      "MailboxSettings.ReadWrite",
+      "full_access_as_app",
+      "Exchange.ManageAsApp",
+      "Global Administrator",
+      "Application Administrator",
+      "Cloud Application Administrator",
+      "Privileged Role Administrator",
+      "Privileged Authentication Administrator"
+  ]);
+  AuditLogs
+  | where TimeGenerated > ago(1h)
+  // Only app-role / permission-grant operations (directory-role & consent ops removed on purpose).
+  | where OperationName in (
+      "Add app role assignment to service principal",
+      "Add delegated permission grant",
+      "Add app role assignment grant"
+  )
+  | where Result =~ "success"
+  | extend InitiatorSPId   = tostring(InitiatedBy.app.servicePrincipalId)
+  | extend InitiatorSPName = tostring(InitiatedBy.app.displayName)
+  | extend InitiatorAppId  = tostring(InitiatedBy.app.appId)
+  | extend InitiatorUserId = tostring(InitiatedBy.user.id)
+  | extend InitiatorUPN    = tostring(InitiatedBy.user.userPrincipalName)
+  // Must be SP-initiated AND have no human behind it -> excludes PIM / admin / user-driven actions.
+  | where isnotempty(InitiatorSPId)
+  | where isempty(InitiatorUserId) and isempty(InitiatorUPN)
+  // Defense in depth: drop Microsoft first-party governance brokers (MS-PIM "initiates" PIM changes).
+  | where InitiatorAppId != "01fc33a7-78ba-4d2f-a4b7-768e336e890e"
+  | where InitiatorSPName !has "MS-PIM" and InitiatorSPName !has "Privileged Identity Management"
+  | extend TargetObjectId   = tostring(TargetResources[0].id)
+  | extend TargetObjectName = tostring(TargetResources[0].displayName)
+  | extend TargetType       = tostring(TargetResources[0].type)
+  // Resolve the actual permission / role granted from modifiedProperties.
+  | mv-expand ModProp = TargetResources[0].modifiedProperties
+  | where tostring(ModProp.displayName) in (
+      "AppRole.Value",
+      "DelegatedPermissionGrant.Scope",
+      "ServicePrincipal.OAuth2PermissionGrants"
+  )
+  | extend GrantedPermission = tostring(ModProp.newValue)
+  | extend IsSelfGrant     = InitiatorSPId == TargetObjectId
+  | extend IsDangerousPerm = GrantedPermission has_any (DangerousAppRoles)
+  // Self-grant (any permission) OR a dangerous permission granted to ANOTHER service principal.
+  | where IsSelfGrant or (IsDangerousPerm and TargetType =~ "ServicePrincipal")
+  | summarize
+      EscalationCount    = count(),
+      GrantedPermissions = make_set(GrantedPermission, 20),
+      TargetObjects      = make_set(TargetObjectName, 10),
+      TargetObjectIds    = make_set(TargetObjectId, 10),
+      Operations         = make_set(OperationName, 5),
+      SelfGrantCount     = countif(IsSelfGrant),
+      DangerousPermCount = countif(IsDangerousPerm),
+      FirstEscalation    = min(TimeGenerated),
+      LastEscalation     = max(TimeGenerated)
+      by InitiatorSPName, InitiatorSPId
+  // Corroborate: was this SP recently created or had credentials added in the last 7 days?
+  | join kind=leftouter (
+      AuditLogs
+      | where TimeGenerated > ago(7d)
+      | where OperationName in (
+          "Add service principal",
+          "Add service principal credentials",
+          "Update service principal"
+      )
+      | where Result =~ "success"
+      | extend SPId = tostring(TargetResources[0].id)
+      | summarize RecentOps = make_set(OperationName, 5) by SPId
+      | extend IsNewOrModified = true
+  ) on $left.InitiatorSPId == $right.SPId
+  | extend IsNewOrModified = coalesce(IsNewOrModified, false)
+  | extend SeverityLevel = case(
+      SelfGrantCount > 0 and DangerousPermCount > 0, "Critical - SP granted itself a dangerous permission",
+      SelfGrantCount > 0,                            "High - SP self-grant (any permission)",
+      DangerousPermCount > 0 and IsNewOrModified,    "Critical - New/modified SP granting dangerous permissions",
+      DangerousPermCount > 0,                        "High - SP granting dangerous permissions to another SP",
+      "Medium")
+  | project
+      InitiatorSPName, InitiatorSPId,
+      EscalationCount, SelfGrantCount, DangerousPermCount,
+      GrantedPermissions, TargetObjects, TargetObjectIds,
+      Operations, RecentOps, IsNewOrModified,
+      SeverityLevel, FirstEscalation, LastEscalation
+  | order by LastEscalation desc
+entityMappings:
+  - entityType: CloudApplication
+    fieldMappings:
+      - identifier: Name
+        columnName: InitiatorSPName
+      - identifier: AppId
+        columnName: InitiatorSPId
+customDetails:
+  InitiatorSPId: InitiatorSPId
+  EscalationCount: EscalationCount
+  SelfGrantCount: SelfGrantCount
+  DangerousPermCount: DangerousPermCount
+  GrantedPermissions: GrantedPermissions
+  TargetObjects: TargetObjects
+  IsNewOrModified: IsNewOrModified
+  SeverityLevel: SeverityLevel
+alertDetailsOverride:
+  alertDisplayNameFormat: "SP Self-Escalation - {{InitiatorSPName}} ({{SeverityLevel}})"
+  alertDescriptionFormat: "Service principal '{{InitiatorSPName}}' added {{EscalationCount}} app role assignment(s) / permission grant(s) ({{SelfGrantCount}} self-grant, {{DangerousPermCount}} dangerous). Verify this workload identity is authorized to manage app roles."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []
