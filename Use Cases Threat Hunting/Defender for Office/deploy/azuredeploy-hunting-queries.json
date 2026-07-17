@@ -1,0 +1,569 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Deploys 21 Microsoft Defender for Office 365 hunting queries as Sentinel savedSearches (Hunting Queries category)."
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Microsoft Sentinel Log Analytics workspace name"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-01-Malicious-Email-Delivered-to-Inbox')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Malicious Email Delivered to Inbox (Block Failure)",
+        "category": "Hunting Queries",
+        "query": "EmailEvents\n| where Timestamp > ago(7d)\n| where ThreatTypes has_any (\"Phish\", \"Malware\")\n| where DeliveryAction == \"Delivered\"\n| where DeliveryLocation in (\"Inbox/folder\", \"Inbox\")\n| project Timestamp, NetworkMessageId, SenderFromAddress, RecipientEmailAddress,\n          Subject, ThreatTypes, ThreatNames, DetectionMethods,\n          DeliveryLocation, LatestDeliveryLocation\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Surfaces emails that carried a Phish/Malware verdict yet were still delivered to the user's Inbox - the highest residual-risk point in Defender for Office 365. Each row is a malicious message sitting in a mailbox. Value: demonstrates MDO effectiveness and"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-02-Phishing-Campaign-Clustering')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Phishing Campaign Clustering",
+        "category": "Hunting Queries",
+        "query": "EmailEvents\n| where Timestamp > ago(7d)\n| where ThreatTypes has \"Phish\"\n| summarize\n    Recipients = dcount(RecipientEmailAddress),\n    Messages   = count(),\n    Senders    = make_set(SenderFromAddress, 15),\n    Delivered  = countif(DeliveryAction == \"Delivered\"),\n    FirstSeen  = min(Timestamp),\n    LastSeen   = max(Timestamp)\n    by Subject, SenderFromDomain\n| where Recipients >= 5\n| sort by Recipients desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Groups similar phishing messages (subject + sender domain) to move from \"one email\" to \"a campaign\" and size the blast radius. Prioritise clusters where Delivered > 0. Value: turns isolated detections into campaign-level situational awareness. Triage: a s"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Reconnaissance"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-03-Confirmed-Malware-Attachments')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Confirmed Malware Attachments",
+        "category": "Hunting Queries",
+        "query": "EmailAttachmentInfo\n| where Timestamp > ago(7d)\n| where ThreatTypes has \"Malware\"\n| project Timestamp, NetworkMessageId, SenderFromAddress, RecipientEmailAddress,\n          FileName, FileType, SHA256, ThreatNames, DetectionMethods, FileSize\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Lists email attachments with a confirmed Malware verdict. Each SHA256 is a pivot point into endpoint telemetry to confirm whether the file executed. Value: bridges MDO (mail) to MDE (endpoint). Triage: pivot each SHA256 to DeviceFileEvents / DeviceProcess"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-04-Dangerous-File-Types-Delivered')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Dangerous File Types Delivered",
+        "category": "Hunting Queries",
+        "query": "let RiskyTypes = dynamic([\"exe\",\"scr\",\"js\",\"vbs\",\"ps1\",\"lnk\",\"iso\",\"img\",\"hta\",\"cmd\",\"bat\",\"wsf\",\"jar\",\"one\"]);\nEmailAttachmentInfo\n| where Timestamp > ago(7d)\n| where FileType in~ (RiskyTypes)\n    or FileName has_any (\".exe\",\".scr\",\".js\",\".lnk\",\".iso\",\".img\",\".hta\",\".one\",\".vbs\")\n| join kind=inner (\n    EmailEvents\n    | where DeliveryAction == \"Delivered\"\n    | project NetworkMessageId, DeliveryLocation, Subject, EmailDirection\n) on NetworkMessageId\n| project Timestamp, SenderFromAddress, RecipientEmailAddress, FileName, FileType,\n          Subject, DeliveryLocation, EmailDirection, SHA256\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects high-risk attachment extensions that reached the mailbox even without a threat verdict (evasion / zero-day). Container formats (iso, img, lnk, one) are common evasion vectors. Value: catches malicious delivery that slipped past verdict-based block"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Execution"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566,T1204"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-05-SafeLinks-ClickThrough-To-Blocked-URL')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Safe Links Click-Through to Blocked URL",
+        "category": "Hunting Queries",
+        "query": "UrlClickEvents\n| where Timestamp > ago(7d)\n| where ActionType == \"ClickAllowed\" or IsClickedThrough != \"\"\n| where ThreatTypes has_any (\"Phish\", \"Malware\")\n| project Timestamp, AccountUpn, Url, ThreatTypes, DetectionMethods,\n          IPAddress, IsClickedThrough, Workload, NetworkMessageId\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "High-value MDO use case: users who, despite the Safe Links warning page, chose to continue to a malicious link. Each click-through user is a compromise candidate. Value: identifies real user exposure that survived a protective control. Triage: review each"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Execution"
+          },
+          {
+            "name": "techniques",
+            "value": "T1204"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-06-Users-Clicked-Confirmed-Malicious')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Users Who Clicked Later-Confirmed Malicious Mail",
+        "category": "Hunting Queries",
+        "query": "let MaliciousMail =\n    EmailEvents\n    | where Timestamp > ago(14d)\n    | where ThreatTypes has_any (\"Phish\", \"Malware\")\n    | project NetworkMessageId, RecipientEmailAddress, Subject, ThreatTypes;\nUrlClickEvents\n| where Timestamp > ago(14d)\n| join kind=inner MaliciousMail on NetworkMessageId\n| project Timestamp, AccountUpn, Url, Subject, ThreatTypes, IsClickedThrough,\n          IPAddress, Workload\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Correlates EmailEvents (verdict) with UrlClickEvents (click) to find real exposure: users who clicked a link in a message that was (or later became) Phish/Malware. Value: turns a campaign into a concrete victim list. Triage: prioritise credential reset an"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Execution"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566,T1204"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-07-Email-Auth-Failures-Spoofing')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Email Auth Failures (SPF/DKIM/DMARC Spoofing)",
+        "category": "Hunting Queries",
+        "query": "EmailEvents\n| where Timestamp > ago(7d)\n| where EmailDirection == \"Inbound\"\n| extend Auth = parse_json(AuthenticationDetails)\n| extend SPF = tostring(Auth.SPF), DKIM = tostring(Auth.DKIM),\n         DMARC = tostring(Auth.DMARC), CompAuth = tostring(Auth.CompAuth)\n| where DMARC == \"fail\" or (SPF == \"fail\" and DKIM == \"fail\")\n| summarize Messages = count(),\n            Recipients = dcount(RecipientEmailAddress),\n            Delivered = countif(DeliveryAction == \"Delivered\")\n    by SenderFromDomain, SPF, DKIM, DMARC, CompAuth\n| where Delivered > 0\n| sort by Messages desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects impersonation of trusted domains via inbound email authentication results. DMARC failures on delivered mail claiming to be from your own or partner domains are strong spoofing / BEC indicators. Value: exposes domain spoofing that reached mailboxes"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566,T1656"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-08-BEC-DisplayName-Impersonation')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - BEC Display-Name Impersonation",
+        "category": "Hunting Queries",
+        "query": "let Execs = dynamic([\"CEO Name\",\"CFO Name\",\"Managing Director\"]);\nlet CorpDomains = dynamic([\"contoso.com\",\"contoso.es\"]);\nEmailEvents\n| where Timestamp > ago(14d)\n| where EmailDirection == \"Inbound\"\n| where SenderDisplayName has_any (Execs)\n| where not(SenderFromDomain in~ (CorpDomains))\n| project Timestamp, SenderDisplayName, SenderFromAddress, SenderFromDomain,\n          RecipientEmailAddress, Subject, DeliveryAction, DeliveryLocation\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Detects inbound emails whose display name imitates an executive but whose sender domain is NOT corporate - the classic CEO-fraud / BEC pattern. Customise the Execs and CorpDomains lists before operationalising. Triage: an exec display name from gmail / lo"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Collection"
+          },
+          {
+            "name": "techniques",
+            "value": "T1656,T1534"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-09-Lookalike-Typosquat-Domains')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Lookalike / Typosquatting Domains in URLs",
+        "category": "Hunting Queries",
+        "query": "let Brand = \"contoso\";\nlet LegitSuffix = \"contoso.com\";\nEmailUrlInfo\n| where Timestamp > ago(7d)\n| where UrlDomain has Brand and UrlDomain !endswith LegitSuffix\n| summarize Messages = dcount(NetworkMessageId), Urls = make_set(Url, 10),\n            FirstSeen = min(Timestamp), LastSeen = max(Timestamp)\n    by UrlDomain\n| sort by Messages desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Attackers register domains that resemble your brand. This query surfaces typosquatting / lookalike domains embedded in email URLs (e.g. contoso-support.com, cont0so.com, contoso.secure-login.net). Customise Brand and the legitimate-domain suffix. Triage: "
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Reconnaissance"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-10-ZAP-Gaps-Post-Delivery-Threats')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - ZAP Gaps - Threats Detected After Delivery",
+        "category": "Hunting Queries",
+        "query": "EmailPostDeliveryEvents\n| where Timestamp > ago(7d)\n| where Action has \"ZAP\" or ActionType has \"ZAP\"\n| project Timestamp, NetworkMessageId, RecipientEmailAddress, Action, ActionType,\n          ActionTrigger, ActionResult, DeliveryLocation, ThreatTypes\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "EmailPostDeliveryEvents shows which already-delivered emails were pulled by Zero-hour Auto Purge (ZAP) - and, crucially, which ones could NOT be removed. Value: exposes residual risk where ZAP failed. Triage: focus on ActionResult != \"Success\" - malicious"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-11-Exposure-Window-Delivery-To-Remediation')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Exposure Window - Delivery to Remediation",
+        "category": "Hunting Queries",
+        "query": "let Delivered =\n    EmailEvents\n    | where Timestamp > ago(14d) and ThreatTypes != \"\"\n    | project NetworkMessageId, DeliveredTime = Timestamp, RecipientEmailAddress,\n              Subject, ThreatTypes;\nEmailPostDeliveryEvents\n| where Timestamp > ago(14d)\n| join kind=inner Delivered on NetworkMessageId\n| extend ExposureMinutes = datetime_diff('minute', Timestamp, DeliveredTime)\n| where ExposureMinutes >= 0\n| project DeliveredTime, RemediatedTime = Timestamp, ExposureMinutes,\n          RecipientEmailAddress, Subject, ThreatTypes, Action, ActionResult\n| sort by ExposureMinutes desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Computes how long a malicious email sat in the mailbox before it was removed - a direct KPI for MDO effectiveness and SOC response time. Value: quantifies dwell time of malicious mail; great leadership metric. Triage: long exposure windows (hours/days) in"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-12-Quishing-QR-Phishing-Images')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Quishing (QR Phishing) and Suspicious Images",
+        "category": "Hunting Queries",
+        "query": "EmailAttachmentInfo\n| where Timestamp > ago(7d)\n| where FileType in~ (\"png\",\"jpg\",\"jpeg\",\"gif\",\"bmp\",\"svg\")\n| join kind=inner (\n    EmailEvents\n    | where EmailDirection == \"Inbound\"\n    | where UrlCount <= 1\n    | where ThreatTypes has \"Phish\" or DetectionMethods has_any (\"Spoof\",\"Impersonation\")\n    | project NetworkMessageId, Subject, SenderFromAddress, RecipientEmailAddress, DeliveryAction\n) on NetworkMessageId\n| project Timestamp, SenderFromAddress, RecipientEmailAddress, FileName, FileType,\n          Subject, DeliveryAction\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "QR-code phishing evades URL analysis by embedding the link inside an image attachment. This query finds inbound mail carrying an image with few/no analysable URLs and phishing / impersonation signals. Triage: an image-only email with a credential/MFA them"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-13-Compromised-Internal-Sender')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Compromised Internal Sender (Intra-Org Phishing)",
+        "category": "Hunting Queries",
+        "query": "EmailEvents\n| where Timestamp > ago(7d)\n| where EmailDirection == \"Intra-org\"\n| where ThreatTypes has_any (\"Phish\", \"Malware\")\n| summarize Recipients = dcount(RecipientEmailAddress),\n            Messages   = count(),\n            Subjects   = make_set(Subject, 10),\n            FirstSeen  = min(Timestamp),\n            LastSeen   = max(Timestamp)\n    by SenderFromAddress\n| where Recipients >= 3\n| sort by Recipients desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "A malicious email sent from INSIDE the org usually means a compromised account used for lateral phishing. Flags internal senders pushing Phish/Malware to several colleagues. Value: early signal of account takeover being weaponised for internal spread. Tri"
+          },
+          {
+            "name": "tactics",
+            "value": "LateralMovement,InitialAccess"
+          },
+          {
+            "name": "techniques",
+            "value": "T1534,T1566"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-14-Malicious-Campaign-Overview-EmailClusterId')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Malicious Campaign Overview (EmailClusterId)",
+        "category": "Hunting Queries",
+        "query": "EmailEvents\n| where Timestamp > ago(30d)\n| where isnotempty(EmailClusterId)\n| where ThreatTypes has_any (\"Phish\", \"Malware\")\n| summarize\n    Messages    = count(),\n    Recipients  = dcount(RecipientEmailAddress),\n    Delivered   = countif(DeliveryAction == \"Delivered\"),\n    Blocked     = countif(DeliveryAction == \"Blocked\"),\n    Senders     = make_set(SenderFromAddress, 15),\n    Subjects    = make_set(Subject, 10),\n    ThreatMix   = make_set(ThreatTypes, 10),\n    Detections  = make_set(DetectionMethods, 10),\n    FirstSeen   = min(Timestamp),\n    LastSeen    = max(Timestamp)\n    by EmailClusterId\n| where Recipients >= 5\n| extend DeliveredRatio = round(todouble(Delivered) / Messages, 2)\n| sort by Recipients desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Reconstructs malicious mail campaigns directly from EmailEvents using Defender's own EmailClusterId, so it works regardless of CampaignInfo availability. Aggregates each cluster's reach, delivery success and threat mix. Value: campaign-level view (who/wha"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Reconnaissance"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-15-Campaign-View-CampaignInfo')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Campaign View via CampaignInfo",
+        "category": "Hunting Queries",
+        "query": "// Validate columns first:  CampaignInfo | getschema\nCampaignInfo\n| where Timestamp > ago(30d)\n// Common fields (adjust to your tenant schema after getschema):\n//   CampaignId, ThreatType, MessageCount, RecipientCount, StartTime, EndTime\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Reads Defender for Office 365 curated Campaign Views from the CampaignInfo Advanced Hunting table to list active malicious campaigns targeting the tenant. IMPORTANT: CampaignInfo is a newer/evolving MDO table and its columns can vary by tenant/ring. Run `"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Reconnaissance"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-16-Campaign-Exposure-Delivered-Clicked')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Campaign Exposure (Delivered + Clicked)",
+        "category": "Hunting Queries",
+        "query": "let Campaigns =\n    EmailEvents\n    | where Timestamp > ago(14d)\n    | where isnotempty(EmailClusterId)\n    | where ThreatTypes has_any (\"Phish\", \"Malware\")\n    | project NetworkMessageId, EmailClusterId, Subject, ThreatTypes, RecipientEmailAddress;\nUrlClickEvents\n| where Timestamp > ago(14d)\n| join kind=inner Campaigns on NetworkMessageId\n| summarize\n    Clicks       = count(),\n    ClickThrough = countif(IsClickedThrough != \"\" and IsClickedThrough != \"0\"),\n    Victims      = dcount(AccountUpn),\n    VictimList   = make_set(AccountUpn, 40),\n    Urls         = make_set(Url, 10),\n    LastClick    = max(Timestamp)\n    by EmailClusterId, ThreatTypes\n| sort by Victims desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Joins malicious campaign clusters (EmailClusterId) to Safe Links clicks to reveal the campaigns that not only landed but were actually clicked - the campaigns with real, human exposure. Triage: these clusters are the priority for user reset/awareness. The"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Execution"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566,T1204"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-20-Teams-SafeLinks-ClickThrough')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Teams Safe Links Click-Through",
+        "category": "Hunting Queries",
+        "query": "UrlClickEvents\n| where Timestamp > ago(7d)\n| where Workload == \"Microsoft Teams\" or Workload has \"Teams\"\n| where ThreatTypes has_any (\"Phish\", \"Malware\") or IsClickedThrough != \"\"\n| project Timestamp, AccountUpn, Url, ThreatTypes, DetectionMethods,\n          IPAddress, IsClickedThrough, Workload\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "UrlClickEvents also records Safe Links clicks inside Microsoft Teams (Workload == \"Microsoft Teams\"). This finds users who clicked - or clicked through a warning to - a malicious link in Teams. Value: Teams is increasingly abused for phishing that bypasse"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Execution"
+          },
+          {
+            "name": "techniques",
+            "value": "T1204"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-22-Malicious-Files-SharePoint-OneDrive')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Malicious Files in SharePoint / OneDrive",
+        "category": "Hunting Queries",
+        "query": "// Validate columns first:  FileMaliciousContentInfo | getschema\nFileMaliciousContentInfo\n| where Timestamp > ago(14d)\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Defender for Office 365 (Safe Attachments for SharePoint, OneDrive and Teams) flags malicious files stored in collaboration. FileMaliciousContentInfo surfaces those detections. IMPORTANT: run `FileMaliciousContentInfo | getschema` to confirm columns (expe"
+          },
+          {
+            "name": "tactics",
+            "value": "LateralMovement,Collection"
+          },
+          {
+            "name": "techniques",
+            "value": "T1080,T1213"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-23-Mass-Download-After-Phishing')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Mass File Download / Exfil After Phishing Click",
+        "category": "Hunting Queries",
+        "query": "let Clickers =\n    UrlClickEvents\n    | where Timestamp > ago(3d)\n    | where ThreatTypes has_any (\"Phish\", \"Malware\")\n    | summarize ClickTime = min(Timestamp) by AccountUpn\n    | where isnotempty(AccountUpn);\nCloudAppEvents\n| where Timestamp > ago(3d)\n| where ActionType in (\"FileDownloaded\", \"FileSyncDownloadedFull\", \"FileAccessed\")\n| where Application has_any (\"SharePoint\", \"OneDrive\")\n| extend Upn = tolower(AccountDisplayName)\n| join kind=inner (Clickers | extend Upn = tolower(AccountUpn)) on Upn\n| where Timestamp between (ClickTime .. ClickTime + 6h)\n| summarize Downloads = count(),\n            Files = dcount(ObjectName),\n            Apps = make_set(Application, 5),\n            IPs = make_set(IPAddress, 10),\n            FirstDownload = min(Timestamp),\n            LastDownload = max(Timestamp)\n    by AccountUpn, ClickTime\n| where Downloads >= 50\n| sort by Downloads desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Correlates users who clicked a malicious link (UrlClickEvents) with a subsequent burst of SharePoint/OneDrive file downloads (CloudAppEvents) - a classic post-compromise collection/exfiltration pattern. Triage: a spike of FileDownloaded / FileSyncDownload"
+          },
+          {
+            "name": "tactics",
+            "value": "Collection,Exfiltration"
+          },
+          {
+            "name": "techniques",
+            "value": "T1213,T1567"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-25-Suspicious-Inbox-Rule-After-Click')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Suspicious Inbox Rule After Phishing Click",
+        "category": "Hunting Queries",
+        "query": "let Clickers =\n    UrlClickEvents\n    | where Timestamp > ago(3d)\n    | where ThreatTypes has_any (\"Phish\", \"Malware\") or IsClickedThrough != \"\"\n    | summarize ClickTime = min(Timestamp) by AccountUpn\n    | where isnotempty(AccountUpn);\nCloudAppEvents\n| where Timestamp > ago(3d)\n| where ActionType in (\"New-InboxRule\", \"Set-InboxRule\", \"UpdateInboxRules\")\n| extend Rule = tostring(RawEventData.Parameters)\n| where Rule has_any (\"ForwardTo\", \"RedirectTo\", \"ForwardAsAttachmentTo\",\n                      \"DeleteMessage\", \"MarkAsRead\", \"MoveToFolder\")\n| extend Upn = tolower(AccountDisplayName)\n| join kind=inner (Clickers | extend Upn = tolower(AccountUpn)) on Upn\n| where Timestamp between (ClickTime .. ClickTime + 6h)\n| project Timestamp, AccountUpn, ClickTime, ActionType, Rule, IPAddress, Application\n| sort by Timestamp desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "A hallmark of Business Email Compromise: shortly after a user clicks a malicious link, an inbox rule is created that forwards, redirects, deletes or marks-as-read mail (to hide the attacker's activity). Correlates UrlClickEvents with CloudAppEvents inbox-"
+          },
+          {
+            "name": "tactics",
+            "value": "Persistence,Collection,DefenseEvasion"
+          },
+          {
+            "name": "techniques",
+            "value": "T1114,T1564"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/savedSearches",
+      "apiVersion": "2020-08-01",
+      "name": "[concat(parameters('workspace'), '/', 'MDO-29-KillChain-Email-Click-Identity-Cloud')]",
+      "properties": {
+        "etag": "*",
+        "displayName": "MDO Hunting - Kill Chain - Email to Click to Identity to Cloud",
+        "category": "Hunting Queries",
+        "query": "let lookback = 7d;\nlet malicious =\n    EmailEvents\n    | where Timestamp > ago(lookback)\n    | where ThreatTypes has_any (\"Phish\", \"Malware\") and DeliveryAction == \"Delivered\"\n    | project NetworkMessageId, RecipientEmailAddress, Subject, ThreatTypes;\nlet clicks =\n    UrlClickEvents\n    | where Timestamp > ago(lookback)\n    | join kind=inner malicious on NetworkMessageId\n    | summarize ClickTime = min(Timestamp), Url = any(Url), Subject = any(Subject),\n                ThreatTypes = any(ThreatTypes) by AccountUpn\n    | where isnotempty(AccountUpn);\nlet cloud =\n    CloudAppEvents\n    | where Timestamp > ago(lookback)\n    | where ActionType in (\"New-InboxRule\",\"Set-InboxRule\",\"UpdateInboxRules\",\n                           \"FileDownloaded\",\"FileSyncDownloadedFull\",\n                           \"Consent to application\",\"Add-MailboxPermission\")\n    | summarize CloudActions = make_set(ActionType, 10), CloudActivityTime = min(Timestamp)\n            by Upn = tolower(AccountDisplayName);\nclicks\n| extend Upn = tolower(AccountUpn)\n| join kind=leftouter cloud on Upn\n| extend Stage = case(\n      isnotempty(CloudActivityTime), \"4-CloudActivity (contain now)\",\n      \"3-Clicked (identity-risk review)\")\n| project AccountUpn, ClickTime, Subject, ThreatTypes, Url,\n          CloudActions, CloudActivityTime, Stage\n| sort by Stage desc, ClickTime desc",
+        "version": 2,
+        "tags": [
+          {
+            "name": "description",
+            "value": "Reconstructs the full phishing kill chain across products: a malicious email that was delivered (MDO) -> the user clicked (Safe Links) -> a risky/successful sign-in followed (Entra) -> post-compromise cloud activity (inbox rule, download, consent). One ro"
+          },
+          {
+            "name": "tactics",
+            "value": "InitialAccess,Execution,Persistence"
+          },
+          {
+            "name": "techniques",
+            "value": "T1566,T1204,T1098"
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "deployedHuntingQueries": {
+      "type": "int",
+      "value": 21
+    }
+  }
+}
