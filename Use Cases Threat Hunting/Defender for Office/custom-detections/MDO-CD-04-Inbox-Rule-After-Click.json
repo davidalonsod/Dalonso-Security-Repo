@@ -1,0 +1,28 @@
+{
+  "displayName": "MDO - Suspicious Inbox Rule After Phishing Click",
+  "isEnabled": true,
+  "queryCondition": {
+    "queryText": "let Clickers = UrlClickEvents\n    | where Timestamp > ago(3h)\n    | where ThreatTypes has_any (\"Phish\", \"Malware\") or (isnotempty(IsClickedThrough) and IsClickedThrough != \"0\")\n    | summarize ClickTime = min(Timestamp) by AccountUpn\n    | where isnotempty(AccountUpn);\nCloudAppEvents\n| where Timestamp > ago(3h)\n| where ActionType in (\"New-InboxRule\", \"Set-InboxRule\", \"UpdateInboxRules\")\n| extend Rule = tostring(RawEventData.Parameters)\n| where Rule has_any (\"ForwardTo\", \"RedirectTo\", \"ForwardAsAttachmentTo\", \"DeleteMessage\", \"MarkAsRead\", \"MoveToFolder\")\n| extend Upn = tolower(AccountDisplayName)\n| join kind=inner (Clickers | extend Upn = tolower(AccountUpn)) on Upn\n| where Timestamp between (ClickTime .. ClickTime + 6h)\n| project Timestamp, ReportId, AccountObjectId, AccountUpn, ClickTime, ActionType, Rule, IPAddress"
+  },
+  "schedule": {
+    "period": "3H"
+  },
+  "detectionAction": {
+    "alertTemplate": {
+      "title": "Inbox rule created after malicious link click",
+      "description": "A user who recently clicked a malicious link then created an inbox rule that forwards, redirects, deletes or hides mail - a hallmark of Business Email Compromise / account takeover.",
+      "severity": "high",
+      "category": "Collection",
+      "recommendedActions": "Remove the malicious inbox rule, reset the user's credentials, revoke sessions, and review OAuth grants and mailbox delegates for additional persistence.",
+      "mitreTechniques": ["T1114", "T1564"],
+      "impactedAssets": [
+        {
+          "@odata.type": "#microsoft.graph.security.impactedUserAsset",
+          "identifier": "accountObjectId"
+        }
+      ]
+    },
+    "organizationalScope": null,
+    "responseActions": []
+  }
+}
