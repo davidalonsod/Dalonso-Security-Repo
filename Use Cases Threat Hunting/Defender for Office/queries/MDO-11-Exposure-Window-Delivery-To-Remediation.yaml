@@ -1,0 +1,33 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e11
+name: MDO Hunting - Exposure Window - Delivery to Remediation
+description: |
+  Computes how long a malicious email sat in the mailbox before it was removed - a direct
+  KPI for MDO effectiveness and SOC response time.
+
+  Value: quantifies dwell time of malicious mail; great leadership metric.
+  Triage: long exposure windows (hours/days) indicate late detection - use to justify
+  policy tuning and demonstrate containment times.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailEvents
+      - EmailPostDeliveryEvents
+tactics:
+  - InitialAccess
+relevantTechniques:
+  - T1566
+query: |
+  let Delivered =
+      EmailEvents
+      | where Timestamp > ago(14d) and ThreatTypes != ""
+      | project NetworkMessageId, DeliveredTime = Timestamp, RecipientEmailAddress,
+                Subject, ThreatTypes;
+  EmailPostDeliveryEvents
+  | where Timestamp > ago(14d)
+  | join kind=inner Delivered on NetworkMessageId
+  | extend ExposureMinutes = datetime_diff('minute', Timestamp, DeliveredTime)
+  | where ExposureMinutes >= 0
+  | project DeliveredTime, RemediatedTime = Timestamp, ExposureMinutes,
+            RecipientEmailAddress, Subject, ThreatTypes, Action, ActionResult
+  | sort by ExposureMinutes desc
+version: 1.0.0

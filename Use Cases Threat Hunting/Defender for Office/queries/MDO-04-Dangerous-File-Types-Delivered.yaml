@@ -1,0 +1,36 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e04
+name: MDO Hunting - Dangerous File Types Delivered
+description: |
+  Detects high-risk attachment extensions that reached the mailbox even without a threat
+  verdict (evasion / zero-day). Container formats (iso, img, lnk, one) are common evasion
+  vectors.
+
+  Value: catches malicious delivery that slipped past verdict-based blocking.
+  Triage: watch for double extensions and lure names ("invoice", "CV", "payment"). Pivot
+  SHA256 to endpoint tables.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailAttachmentInfo
+      - EmailEvents
+tactics:
+  - InitialAccess
+  - Execution
+relevantTechniques:
+  - T1566
+  - T1204
+query: |
+  let RiskyTypes = dynamic(["exe","scr","js","vbs","ps1","lnk","iso","img","hta","cmd","bat","wsf","jar","one"]);
+  EmailAttachmentInfo
+  | where Timestamp > ago(7d)
+  | where FileType in~ (RiskyTypes)
+      or FileName has_any (".exe",".scr",".js",".lnk",".iso",".img",".hta",".one",".vbs")
+  | join kind=inner (
+      EmailEvents
+      | where DeliveryAction == "Delivered"
+      | project NetworkMessageId, DeliveryLocation, Subject, EmailDirection
+  ) on NetworkMessageId
+  | project Timestamp, SenderFromAddress, RecipientEmailAddress, FileName, FileType,
+            Subject, DeliveryLocation, EmailDirection, SHA256
+  | sort by Timestamp desc
+version: 1.0.0

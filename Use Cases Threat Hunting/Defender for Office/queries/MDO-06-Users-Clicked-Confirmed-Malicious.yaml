@@ -1,0 +1,33 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e06
+name: MDO Hunting - Users Who Clicked Later-Confirmed Malicious Mail
+description: |
+  Correlates EmailEvents (verdict) with UrlClickEvents (click) to find real exposure: users
+  who clicked a link in a message that was (or later became) Phish/Malware.
+
+  Value: turns a campaign into a concrete victim list.
+  Triage: prioritise credential reset and targeted awareness for the returned users; cross
+  AccountUpn with anomalous sign-in signals.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailEvents
+      - UrlClickEvents
+tactics:
+  - InitialAccess
+  - Execution
+relevantTechniques:
+  - T1566
+  - T1204
+query: |
+  let MaliciousMail =
+      EmailEvents
+      | where Timestamp > ago(14d)
+      | where ThreatTypes has_any ("Phish", "Malware")
+      | project NetworkMessageId, RecipientEmailAddress, Subject, ThreatTypes;
+  UrlClickEvents
+  | where Timestamp > ago(14d)
+  | join kind=inner MaliciousMail on NetworkMessageId
+  | project Timestamp, AccountUpn, Url, Subject, ThreatTypes, IsClickedThrough,
+            IPAddress, Workload
+  | sort by Timestamp desc
+version: 1.0.0

@@ -1,0 +1,44 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e23
+name: MDO Hunting - Mass File Download / Exfil After Phishing Click
+description: |
+  Correlates users who clicked a malicious link (UrlClickEvents) with a subsequent burst of
+  SharePoint/OneDrive file downloads (CloudAppEvents) - a classic post-compromise
+  collection/exfiltration pattern.
+
+  Triage: a spike of FileDownloaded / FileSyncDownloadedFull within hours of a malicious
+  click is high-signal data theft. Contain the identity and review the accessed files.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - UrlClickEvents
+      - CloudAppEvents
+tactics:
+  - Collection
+  - Exfiltration
+relevantTechniques:
+  - T1213
+  - T1567
+query: |
+  let Clickers =
+      UrlClickEvents
+      | where Timestamp > ago(3d)
+      | where ThreatTypes has_any ("Phish", "Malware")
+      | summarize ClickTime = min(Timestamp) by AccountUpn
+      | where isnotempty(AccountUpn);
+  CloudAppEvents
+  | where Timestamp > ago(3d)
+  | where ActionType in ("FileDownloaded", "FileSyncDownloadedFull", "FileAccessed")
+  | where Application has_any ("SharePoint", "OneDrive")
+  | extend Upn = tolower(AccountDisplayName)
+  | join kind=inner (Clickers | extend Upn = tolower(AccountUpn)) on Upn
+  | where Timestamp between (ClickTime .. ClickTime + 6h)
+  | summarize Downloads = count(),
+              Files = dcount(ObjectName),
+              Apps = make_set(Application, 5),
+              IPs = make_set(IPAddress, 10),
+              FirstDownload = min(Timestamp),
+              LastDownload = max(Timestamp)
+      by AccountUpn, ClickTime
+  | where Downloads >= 50
+  | sort by Downloads desc
+version: 1.0.0

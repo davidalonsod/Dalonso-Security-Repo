@@ -1,0 +1,40 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e25
+name: MDO Hunting - Suspicious Inbox Rule After Phishing Click
+description: |
+  A hallmark of Business Email Compromise: shortly after a user clicks a malicious link, an
+  inbox rule is created that forwards, redirects, deletes or marks-as-read mail (to hide the
+  attacker's activity). Correlates UrlClickEvents with CloudAppEvents inbox-rule operations.
+
+  Triage: any forwarding/redirect rule created within hours of a malicious click is
+  high-confidence account takeover. Remove the rule, reset credentials, revoke sessions.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - UrlClickEvents
+      - CloudAppEvents
+tactics:
+  - Persistence
+  - Collection
+  - DefenseEvasion
+relevantTechniques:
+  - T1114
+  - T1564
+query: |
+  let Clickers =
+      UrlClickEvents
+      | where Timestamp > ago(3d)
+      | where ThreatTypes has_any ("Phish", "Malware") or IsClickedThrough != ""
+      | summarize ClickTime = min(Timestamp) by AccountUpn
+      | where isnotempty(AccountUpn);
+  CloudAppEvents
+  | where Timestamp > ago(3d)
+  | where ActionType in ("New-InboxRule", "Set-InboxRule", "UpdateInboxRules")
+  | extend Rule = tostring(RawEventData.Parameters)
+  | where Rule has_any ("ForwardTo", "RedirectTo", "ForwardAsAttachmentTo",
+                        "DeleteMessage", "MarkAsRead", "MoveToFolder")
+  | extend Upn = tolower(AccountDisplayName)
+  | join kind=inner (Clickers | extend Upn = tolower(AccountUpn)) on Upn
+  | where Timestamp between (ClickTime .. ClickTime + 6h)
+  | project Timestamp, AccountUpn, ClickTime, ActionType, Rule, IPAddress, Application
+  | sort by Timestamp desc
+version: 1.0.0

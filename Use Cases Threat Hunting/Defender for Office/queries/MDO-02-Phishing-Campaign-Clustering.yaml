@@ -1,0 +1,33 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e02
+name: MDO Hunting - Phishing Campaign Clustering
+description: |
+  Groups similar phishing messages (subject + sender domain) to move from "one email" to
+  "a campaign" and size the blast radius. Prioritise clusters where Delivered > 0.
+
+  Value: turns isolated detections into campaign-level situational awareness.
+  Triage: a single subject hitting dozens of recipients is a targeted campaign that may
+  warrant an org-wide advisory. Pivot delivered clusters to UrlClickEvents for exposure.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailEvents
+tactics:
+  - InitialAccess
+  - Reconnaissance
+relevantTechniques:
+  - T1566
+query: |
+  EmailEvents
+  | where Timestamp > ago(7d)
+  | where ThreatTypes has "Phish"
+  | summarize
+      Recipients = dcount(RecipientEmailAddress),
+      Messages   = count(),
+      Senders    = make_set(SenderFromAddress, 15),
+      Delivered  = countif(DeliveryAction == "Delivered"),
+      FirstSeen  = min(Timestamp),
+      LastSeen   = max(Timestamp)
+      by Subject, SenderFromDomain
+  | where Recipients >= 5
+  | sort by Recipients desc
+version: 1.0.0

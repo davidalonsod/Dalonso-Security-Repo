@@ -1,0 +1,33 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e13
+name: MDO Hunting - Compromised Internal Sender (Intra-Org Phishing)
+description: |
+  A malicious email sent from INSIDE the org usually means a compromised account used for
+  lateral phishing. Flags internal senders pushing Phish/Malware to several colleagues.
+
+  Value: early signal of account takeover being weaponised for internal spread.
+  Triage: escalate to identity response (password reset, session revocation) and review the
+  sender's recent sign-ins and inbox rules.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailEvents
+tactics:
+  - LateralMovement
+  - InitialAccess
+relevantTechniques:
+  - T1534
+  - T1566
+query: |
+  EmailEvents
+  | where Timestamp > ago(7d)
+  | where EmailDirection == "Intra-org"
+  | where ThreatTypes has_any ("Phish", "Malware")
+  | summarize Recipients = dcount(RecipientEmailAddress),
+              Messages   = count(),
+              Subjects   = make_set(Subject, 10),
+              FirstSeen  = min(Timestamp),
+              LastSeen   = max(Timestamp)
+      by SenderFromAddress
+  | where Recipients >= 3
+  | sort by Recipients desc
+version: 1.0.0

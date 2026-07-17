@@ -1,0 +1,40 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e16
+name: MDO Hunting - Campaign Exposure (Delivered + Clicked)
+description: |
+  Joins malicious campaign clusters (EmailClusterId) to Safe Links clicks to reveal the
+  campaigns that not only landed but were actually clicked - the campaigns with real,
+  human exposure.
+
+  Triage: these clusters are the priority for user reset/awareness. The AccountUpn list is
+  your victim shortlist.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailEvents
+      - UrlClickEvents
+tactics:
+  - InitialAccess
+  - Execution
+relevantTechniques:
+  - T1566
+  - T1204
+query: |
+  let Campaigns =
+      EmailEvents
+      | where Timestamp > ago(14d)
+      | where isnotempty(EmailClusterId)
+      | where ThreatTypes has_any ("Phish", "Malware")
+      | project NetworkMessageId, EmailClusterId, Subject, ThreatTypes, RecipientEmailAddress;
+  UrlClickEvents
+  | where Timestamp > ago(14d)
+  | join kind=inner Campaigns on NetworkMessageId
+  | summarize
+      Clicks       = count(),
+      ClickThrough = countif(IsClickedThrough != "" and IsClickedThrough != "0"),
+      Victims      = dcount(AccountUpn),
+      VictimList   = make_set(AccountUpn, 40),
+      Urls         = make_set(Url, 10),
+      LastClick    = max(Timestamp)
+      by EmailClusterId, ThreatTypes
+  | sort by Victims desc
+version: 1.0.0

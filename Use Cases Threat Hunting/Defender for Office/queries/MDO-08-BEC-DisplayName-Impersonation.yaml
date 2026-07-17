@@ -1,0 +1,31 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e08
+name: MDO Hunting - BEC Display-Name Impersonation
+description: |
+  Detects inbound emails whose display name imitates an executive but whose sender domain
+  is NOT corporate - the classic CEO-fraud / BEC pattern.
+
+  Customise the Execs and CorpDomains lists before operationalising.
+  Triage: an exec display name from gmail / lookalike domains is a high-confidence fraud
+  lead; verify out-of-band before any financial action.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailEvents
+tactics:
+  - InitialAccess
+  - Collection
+relevantTechniques:
+  - T1656
+  - T1534
+query: |
+  let Execs = dynamic(["CEO Name","CFO Name","Managing Director"]);
+  let CorpDomains = dynamic(["contoso.com","contoso.es"]);
+  EmailEvents
+  | where Timestamp > ago(14d)
+  | where EmailDirection == "Inbound"
+  | where SenderDisplayName has_any (Execs)
+  | where not(SenderFromDomain in~ (CorpDomains))
+  | project Timestamp, SenderDisplayName, SenderFromAddress, SenderFromDomain,
+            RecipientEmailAddress, Subject, DeliveryAction, DeliveryLocation
+  | sort by Timestamp desc
+version: 1.0.0

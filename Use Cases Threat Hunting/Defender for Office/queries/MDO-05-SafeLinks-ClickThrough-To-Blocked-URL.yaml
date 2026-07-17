@@ -1,0 +1,27 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e05
+name: MDO Hunting - Safe Links Click-Through to Blocked URL
+description: |
+  High-value MDO use case: users who, despite the Safe Links warning page, chose to
+  continue to a malicious link. Each click-through user is a compromise candidate.
+
+  Value: identifies real user exposure that survived a protective control.
+  Triage: review each user's subsequent sign-ins (AADSignInEventsBeta / SigninLogs) for
+  credential-theft signals; consider forced password reset and session revocation.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - UrlClickEvents
+tactics:
+  - InitialAccess
+  - Execution
+relevantTechniques:
+  - T1204
+query: |
+  UrlClickEvents
+  | where Timestamp > ago(7d)
+  | where ActionType == "ClickAllowed" or IsClickedThrough != ""
+  | where ThreatTypes has_any ("Phish", "Malware")
+  | project Timestamp, AccountUpn, Url, ThreatTypes, DetectionMethods,
+            IPAddress, IsClickedThrough, Workload, NetworkMessageId
+  | sort by Timestamp desc
+version: 1.0.0

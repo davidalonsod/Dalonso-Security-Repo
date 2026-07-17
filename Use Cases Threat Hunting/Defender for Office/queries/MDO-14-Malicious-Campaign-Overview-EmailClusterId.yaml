@@ -1,0 +1,40 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e14
+name: MDO Hunting - Malicious Campaign Overview (EmailClusterId)
+description: |
+  Reconstructs malicious mail campaigns directly from EmailEvents using Defender's own
+  EmailClusterId, so it works regardless of CampaignInfo availability. Aggregates each
+  cluster's reach, delivery success and threat mix.
+
+  Value: campaign-level view (who/what/how many) for the last 30 days.
+  Triage: prioritise clusters with Delivered > 0 and many recipients; pivot to
+  UrlClickEvents (MDO-16) for real click exposure.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailEvents
+tactics:
+  - InitialAccess
+  - Reconnaissance
+relevantTechniques:
+  - T1566
+query: |
+  EmailEvents
+  | where Timestamp > ago(30d)
+  | where isnotempty(EmailClusterId)
+  | where ThreatTypes has_any ("Phish", "Malware")
+  | summarize
+      Messages    = count(),
+      Recipients  = dcount(RecipientEmailAddress),
+      Delivered   = countif(DeliveryAction == "Delivered"),
+      Blocked     = countif(DeliveryAction == "Blocked"),
+      Senders     = make_set(SenderFromAddress, 15),
+      Subjects    = make_set(Subject, 10),
+      ThreatMix   = make_set(ThreatTypes, 10),
+      Detections  = make_set(DetectionMethods, 10),
+      FirstSeen   = min(Timestamp),
+      LastSeen    = max(Timestamp)
+      by EmailClusterId
+  | where Recipients >= 5
+  | extend DeliveredRatio = round(todouble(Delivered) / Messages, 2)
+  | sort by Recipients desc
+version: 1.0.0

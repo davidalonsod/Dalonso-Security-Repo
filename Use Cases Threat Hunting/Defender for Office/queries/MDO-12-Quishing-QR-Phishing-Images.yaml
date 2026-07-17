@@ -1,0 +1,33 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e12
+name: MDO Hunting - Quishing (QR Phishing) and Suspicious Images
+description: |
+  QR-code phishing evades URL analysis by embedding the link inside an image attachment.
+  This query finds inbound mail carrying an image with few/no analysable URLs and phishing
+  / impersonation signals.
+
+  Triage: an image-only email with a credential/MFA theme is a classic quishing pattern.
+  Pair with targeted awareness. Consider adding QR-aware detonation policies.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailAttachmentInfo
+      - EmailEvents
+tactics:
+  - InitialAccess
+relevantTechniques:
+  - T1566
+query: |
+  EmailAttachmentInfo
+  | where Timestamp > ago(7d)
+  | where FileType in~ ("png","jpg","jpeg","gif","bmp","svg")
+  | join kind=inner (
+      EmailEvents
+      | where EmailDirection == "Inbound"
+      | where UrlCount <= 1
+      | where ThreatTypes has "Phish" or DetectionMethods has_any ("Spoof","Impersonation")
+      | project NetworkMessageId, Subject, SenderFromAddress, RecipientEmailAddress, DeliveryAction
+  ) on NetworkMessageId
+  | project Timestamp, SenderFromAddress, RecipientEmailAddress, FileName, FileType,
+            Subject, DeliveryAction
+  | sort by Timestamp desc
+version: 1.0.0

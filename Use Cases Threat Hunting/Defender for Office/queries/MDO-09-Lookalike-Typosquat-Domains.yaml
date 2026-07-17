@@ -1,0 +1,29 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e09
+name: MDO Hunting - Lookalike / Typosquatting Domains in URLs
+description: |
+  Attackers register domains that resemble your brand. This query surfaces typosquatting /
+  lookalike domains embedded in email URLs (e.g. contoso-support.com, cont0so.com,
+  contoso.secure-login.net).
+
+  Customise Brand and the legitimate-domain suffix.
+  Triage: consider blocking the domains and adding them to brand-abuse monitoring.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailUrlInfo
+tactics:
+  - InitialAccess
+  - Reconnaissance
+relevantTechniques:
+  - T1566
+query: |
+  let Brand = "contoso";
+  let LegitSuffix = "contoso.com";
+  EmailUrlInfo
+  | where Timestamp > ago(7d)
+  | where UrlDomain has Brand and UrlDomain !endswith LegitSuffix
+  | summarize Messages = dcount(NetworkMessageId), Urls = make_set(Url, 10),
+              FirstSeen = min(Timestamp), LastSeen = max(Timestamp)
+      by UrlDomain
+  | sort by Messages desc
+version: 1.0.0

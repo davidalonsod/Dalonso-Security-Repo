@@ -1,0 +1,35 @@
+id: 8f3b1a20-6c11-4e2a-9d41-0a1b2c3d4e07
+name: MDO Hunting - Email Auth Failures (SPF/DKIM/DMARC Spoofing)
+description: |
+  Detects impersonation of trusted domains via inbound email authentication results.
+  DMARC failures on delivered mail claiming to be from your own or partner domains are
+  strong spoofing / BEC indicators.
+
+  Value: exposes domain spoofing that reached mailboxes.
+  Triage: focus on Delivered > 0 for sender domains you own or trust; consider tightening
+  the anti-spoofing / DMARC enforcement policy.
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailEvents
+tactics:
+  - InitialAccess
+  - Persistence
+relevantTechniques:
+  - T1566
+  - T1656
+query: |
+  EmailEvents
+  | where Timestamp > ago(7d)
+  | where EmailDirection == "Inbound"
+  | extend Auth = parse_json(AuthenticationDetails)
+  | extend SPF = tostring(Auth.SPF), DKIM = tostring(Auth.DKIM),
+           DMARC = tostring(Auth.DMARC), CompAuth = tostring(Auth.CompAuth)
+  | where DMARC == "fail" or (SPF == "fail" and DKIM == "fail")
+  | summarize Messages = count(),
+              Recipients = dcount(RecipientEmailAddress),
+              Delivered = countif(DeliveryAction == "Delivered")
+      by SenderFromDomain, SPF, DKIM, DMARC, CompAuth
+  | where Delivered > 0
+  | sort by Messages desc
+version: 1.0.0
