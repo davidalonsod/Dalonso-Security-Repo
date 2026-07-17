@@ -1,0 +1,58 @@
+id: 7a1c2d30-1e11-4b21-9c01-0a1b2c3d4f05
+name: "MDO — Illicit OAuth App Consent (Consent Phishing)"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Fires when a user grants delegated consent to an OAuth application - the key event in
+  consent-phishing / illicit-grant attacks that give an attacker persistent access to mail
+  and files. Review the app, publisher and scopes. Promoted from hunting query MDO-26.
+  MITRE ATT&CK: T1528 (Steal Application Access Token), T1566 (Phishing).
+severity: High
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - CloudAppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - CredentialAccess
+  - InitialAccess
+relevantTechniques:
+  - T1528
+  - T1566
+query: |
+  CloudAppEvents
+  | where Timestamp > ago(1h)
+  | where ActionType in ("Consent to application", "Add delegated permission grant")
+  | extend AppName = tostring(RawEventData.ObjectName)
+  | project Timestamp, ReportId, AccountObjectId, AccountDisplayName, ActionType, AppName,
+            IPAddress, IsAdminOperation, UserAgent
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: AadUserId
+        columnName: AccountObjectId
+      - identifier: Name
+        columnName: AccountDisplayName
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  ConsentedApp: AppName
+  ConsentAction: ActionType
+  AdminOperation: IsAdminOperation
+alertDetailsOverride:
+  alertDisplayNameFormat: "OAuth consent granted by {{AccountDisplayName}} to '{{AppName}}'"
+  alertDescriptionFormat: "{{AccountDisplayName}} granted OAuth consent to app '{{AppName}}' from {{IPAddress}}. Review publisher and scopes; revoke if illicit (consent-phishing persistence)."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account

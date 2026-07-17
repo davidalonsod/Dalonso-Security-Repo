@@ -1,0 +1,61 @@
+id: 7a1c2d30-1e11-4b21-9c01-0a1b2c3d4f01
+name: "MDO — Safe Links Click-Through to Malicious URL"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Fires when a user clicks (or clicks through the warning page to) a URL that Defender for
+  Office 365 Safe Links classified as Phish or Malware. Each hit is a high-confidence
+  compromise candidate. Low noise because the verdict is confirmed. Promoted from hunting
+  query MDO-05. MITRE ATT&CK: T1566 (Phishing), T1204.001 (Malicious Link).
+severity: High
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - UrlClickEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+  - Execution
+relevantTechniques:
+  - T1566
+  - T1204
+query: |
+  UrlClickEvents
+  | where Timestamp > ago(1h)
+  | where ActionType == "ClickAllowed" or (isnotempty(IsClickedThrough) and IsClickedThrough != "0")
+  | where ThreatTypes has_any ("Phish", "Malware")
+  | where isnotempty(AccountUpn)
+  | project Timestamp, ReportId, AccountUpn, Url, ThreatTypes, DetectionMethods,
+            IPAddress, IsClickedThrough, Workload, NetworkMessageId
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountUpn
+  - entityType: URL
+    fieldMappings:
+      - identifier: Url
+        columnName: Url
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  ThreatTypes: ThreatTypes
+  Workload: Workload
+  ClickedThrough: IsClickedThrough
+alertDetailsOverride:
+  alertDisplayNameFormat: "Malicious link clicked by {{AccountUpn}} ({{ThreatTypes}})"
+  alertDescriptionFormat: "{{AccountUpn}} clicked a {{ThreatTypes}} URL protected by Safe Links from {{IPAddress}}. Treat as a compromise candidate: review sign-ins and reset credentials."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account

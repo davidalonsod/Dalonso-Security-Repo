@@ -1,0 +1,65 @@
+id: 7a1c2d30-1e11-4b21-9c01-0a1b2c3d4f04
+name: "MDO — Suspicious Inbox Rule After Phishing Click"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Fires when a user who recently clicked a malicious link then creates an inbox rule that
+  forwards, redirects, deletes or hides mail - a hallmark of Business Email Compromise.
+  Correlates UrlClickEvents with CloudAppEvents inbox-rule operations. Promoted from hunting
+  query MDO-25. MITRE ATT&CK: T1114 (Email Collection), T1564 (Hide Artifacts).
+severity: High
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - UrlClickEvents
+      - CloudAppEvents
+queryFrequency: PT1H
+queryPeriod: PT3H
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - Collection
+  - DefenseEvasion
+relevantTechniques:
+  - T1114
+  - T1564
+query: |
+  let Clickers =
+      UrlClickEvents
+      | where Timestamp > ago(3h)
+      | where ThreatTypes has_any ("Phish", "Malware") or (isnotempty(IsClickedThrough) and IsClickedThrough != "0")
+      | summarize ClickTime = min(Timestamp) by AccountUpn
+      | where isnotempty(AccountUpn);
+  CloudAppEvents
+  | where Timestamp > ago(3h)
+  | where ActionType in ("New-InboxRule", "Set-InboxRule", "UpdateInboxRules")
+  | extend Rule = tostring(RawEventData.Parameters)
+  | where Rule has_any ("ForwardTo", "RedirectTo", "ForwardAsAttachmentTo", "DeleteMessage", "MarkAsRead", "MoveToFolder")
+  | extend Upn = tolower(AccountDisplayName)
+  | join kind=inner (Clickers | extend Upn = tolower(AccountUpn)) on Upn
+  | where Timestamp between (ClickTime .. ClickTime + 6h)
+  | project Timestamp, ReportId, AccountUpn, ClickTime, ActionType, Rule, IPAddress
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: AccountUpn
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: IPAddress
+customDetails:
+  InboxRuleOp: ActionType
+  RuleParameters: Rule
+alertDetailsOverride:
+  alertDisplayNameFormat: "Inbox rule created by {{AccountUpn}} after malicious click"
+  alertDescriptionFormat: "{{AccountUpn}} created inbox rule '{{ActionType}}' shortly after clicking a malicious link (from {{IPAddress}}). Strong BEC / account-takeover signal - remove the rule and contain the identity."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account

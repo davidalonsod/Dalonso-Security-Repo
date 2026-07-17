@@ -1,0 +1,58 @@
+id: 7a1c2d30-1e11-4b21-9c01-0a1b2c3d4f03
+name: "MDO — Compromised Internal Sender (Intra-Org Phishing)"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Fires when an internal mailbox sends Phish/Malware to 3 or more colleagues within the
+  window - a strong account-takeover signal being weaponised for lateral phishing. Promoted
+  from hunting query MDO-13. MITRE ATT&CK: T1534 (Internal Spearphishing), T1566 (Phishing).
+severity: High
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailEvents
+queryFrequency: PT1H
+queryPeriod: PT3H
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - LateralMovement
+  - InitialAccess
+relevantTechniques:
+  - T1534
+  - T1566
+query: |
+  EmailEvents
+  | where Timestamp > ago(3h)
+  | where EmailDirection == "Intra-org"
+  | where ThreatTypes has_any ("Phish", "Malware")
+  | summarize
+      Recipients = dcount(RecipientEmailAddress),
+      Messages   = count(),
+      Subjects   = make_set(Subject, 8),
+      ThreatMix  = make_set(ThreatTypes, 5),
+      ReportId   = take_any(ReportId),
+      Timestamp  = min(Timestamp)
+      by SenderFromAddress
+  | where Recipients >= 3
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: SenderFromAddress
+customDetails:
+  Recipients: Recipients
+  Messages: Messages
+  ThreatMix: ThreatMix
+alertDetailsOverride:
+  alertDisplayNameFormat: "Internal sender {{SenderFromAddress}} spreading phishing ({{Recipients}} recipients)"
+  alertDescriptionFormat: "{{SenderFromAddress}} sent {{Messages}} malicious intra-org messages to {{Recipients}} colleagues. Likely compromised - reset credentials and revoke sessions."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account

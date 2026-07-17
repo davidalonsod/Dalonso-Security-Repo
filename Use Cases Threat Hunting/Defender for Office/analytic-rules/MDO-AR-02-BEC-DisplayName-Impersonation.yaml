@@ -1,0 +1,59 @@
+id: 7a1c2d30-1e11-4b21-9c01-0a1b2c3d4f02
+name: "MDO — BEC Display-Name Impersonation of Executive"
+version: 1.0.0
+kind: Scheduled
+description: |
+  Fires when an inbound email uses an executive's display name but originates from a
+  non-corporate sender domain - the classic CEO-fraud / BEC pattern. Customise the Execs and
+  CorpDomains lists before enabling. Promoted from hunting query MDO-08.
+  MITRE ATT&CK: T1566 (Phishing).
+severity: Medium
+requiredDataConnectors:
+  - connectorId: MicrosoftThreatProtection
+    dataTypes:
+      - EmailEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+tactics:
+  - InitialAccess
+relevantTechniques:
+  - T1566
+query: |
+  let Execs = dynamic(["CEO Name","CFO Name","Managing Director"]);
+  let CorpDomains = dynamic(["contoso.com","contoso.es"]);
+  EmailEvents
+  | where Timestamp > ago(1h)
+  | where EmailDirection == "Inbound"
+  | where SenderDisplayName has_any (Execs)
+  | where not(SenderFromDomain in~ (CorpDomains))
+  | project Timestamp, ReportId, SenderDisplayName, SenderFromAddress, SenderFromDomain,
+            RecipientEmailAddress, Subject, DeliveryAction, NetworkMessageId
+entityMappings:
+  - entityType: Account
+    fieldMappings:
+      - identifier: FullName
+        columnName: RecipientEmailAddress
+  - entityType: MailMessage
+    fieldMappings:
+      - identifier: NetworkMessageId
+        columnName: NetworkMessageId
+      - identifier: Sender
+        columnName: SenderFromAddress
+customDetails:
+  SpoofedName: SenderDisplayName
+  SenderDomain: SenderFromDomain
+  DeliveryAction: DeliveryAction
+alertDetailsOverride:
+  alertDisplayNameFormat: "BEC impersonation: '{{SenderDisplayName}}' from {{SenderFromDomain}}"
+  alertDescriptionFormat: "Inbound mail to {{RecipientEmailAddress}} spoofs executive display name '{{SenderDisplayName}}' from non-corporate domain {{SenderFromDomain}}. Verify out-of-band before any financial action."
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT5H
+    matchingMethod: AnyAlert
+    groupByEntities:
+      - Account

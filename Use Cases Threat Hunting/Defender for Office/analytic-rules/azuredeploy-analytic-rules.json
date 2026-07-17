@@ -1,0 +1,379 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Deploys 5 Microsoft Defender for Office 365 scheduled analytic rules to Microsoft Sentinel."
+  },
+  "parameters": {
+    "workspace": {
+      "type": "string",
+      "metadata": {
+        "description": "Microsoft Sentinel Log Analytics workspace name"
+      }
+    },
+    "deployAnalyticRulesEnabled": {
+      "type": "bool",
+      "defaultValue": true,
+      "allowedValues": [
+        true,
+        false
+      ],
+      "metadata": {
+        "description": "User choice for the initial state of every deployed analytic rule: true = deploy ENABLED (default), false = deploy DISABLED for a staged rollout / review before incidents are generated."
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','7a1c2d30-1e11-4b21-9c01-0a1b2c3d4f01')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "MDO - Safe Links Click-Through to Malicious URL",
+        "description": "Fires when a user clicks (or clicks through the warning page to) a URL that Defender for\nOffice 365 Safe Links classified as Phish or Malware. Each hit is a high-confidence\ncompromise candidate. Low noise because the verdict is confirmed. Promoted from hunting\nquery MDO-05. MITRE ATT&CK: T1566 (Phishing), T1204.001 (Malicious Link).",
+        "severity": "High",
+        "enabled": "[parameters('deployAnalyticRulesEnabled')]",
+        "query": "UrlClickEvents\n| where Timestamp > ago(1h)\n| where ActionType == \"ClickAllowed\" or (isnotempty(IsClickedThrough) and IsClickedThrough != \"0\")\n| where ThreatTypes has_any (\"Phish\", \"Malware\")\n| where isnotempty(AccountUpn)\n| project Timestamp, ReportId, AccountUpn, Url, ThreatTypes, DetectionMethods,\n          IPAddress, IsClickedThrough, Workload, NetworkMessageId",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess",
+          "Execution"
+        ],
+        "techniques": [
+          "T1566",
+          "T1204"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "AccountUpn"
+              }
+            ]
+          },
+          {
+            "entityType": "URL",
+            "fieldMappings": [
+              {
+                "identifier": "Url",
+                "columnName": "Url"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "ThreatTypes": "ThreatTypes",
+          "Workload": "Workload",
+          "ClickedThrough": "IsClickedThrough"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Malicious link clicked by {{AccountUpn}} ({{ThreatTypes}})",
+          "alertDescriptionFormat": "{{AccountUpn}} clicked a {{ThreatTypes}} URL protected by Safe Links from {{IPAddress}}. Treat as a compromise candidate: review sign-ins and reset credentials."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','7a1c2d30-1e11-4b21-9c01-0a1b2c3d4f02')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "MDO - BEC Display-Name Impersonation of Executive",
+        "description": "Fires when an inbound email uses an executive's display name but originates from a\nnon-corporate sender domain - the classic CEO-fraud / BEC pattern. Customise the Execs and\nCorpDomains lists before enabling. Promoted from hunting query MDO-08.\nMITRE ATT&CK: T1566 (Phishing).",
+        "severity": "Medium",
+        "enabled": "[parameters('deployAnalyticRulesEnabled')]",
+        "query": "let Execs = dynamic([\"CEO Name\",\"CFO Name\",\"Managing Director\"]);\nlet CorpDomains = dynamic([\"contoso.com\",\"contoso.es\"]);\nEmailEvents\n| where Timestamp > ago(1h)\n| where EmailDirection == \"Inbound\"\n| where SenderDisplayName has_any (Execs)\n| where not(SenderFromDomain in~ (CorpDomains))\n| project Timestamp, ReportId, SenderDisplayName, SenderFromAddress, SenderFromDomain,\n          RecipientEmailAddress, Subject, DeliveryAction, NetworkMessageId",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1566"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "RecipientEmailAddress"
+              }
+            ]
+          },
+          {
+            "entityType": "MailMessage",
+            "fieldMappings": [
+              {
+                "identifier": "NetworkMessageId",
+                "columnName": "NetworkMessageId"
+              },
+              {
+                "identifier": "Sender",
+                "columnName": "SenderFromAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "SpoofedName": "SenderDisplayName",
+          "SenderDomain": "SenderFromDomain",
+          "DeliveryAction": "DeliveryAction"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "BEC impersonation: '{{SenderDisplayName}}' from {{SenderFromDomain}}",
+          "alertDescriptionFormat": "Inbound mail to {{RecipientEmailAddress}} spoofs executive display name '{{SenderDisplayName}}' from non-corporate domain {{SenderFromDomain}}. Verify out-of-band before any financial action."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','7a1c2d30-1e11-4b21-9c01-0a1b2c3d4f03')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "MDO - Compromised Internal Sender (Intra-Org Phishing)",
+        "description": "Fires when an internal mailbox sends Phish/Malware to 3 or more colleagues within the\nwindow - a strong account-takeover signal being weaponised for lateral phishing. Promoted\nfrom hunting query MDO-13. MITRE ATT&CK: T1534 (Internal Spearphishing), T1566 (Phishing).",
+        "severity": "High",
+        "enabled": "[parameters('deployAnalyticRulesEnabled')]",
+        "query": "EmailEvents\n| where Timestamp > ago(3h)\n| where EmailDirection == \"Intra-org\"\n| where ThreatTypes has_any (\"Phish\", \"Malware\")\n| summarize\n    Recipients = dcount(RecipientEmailAddress),\n    Messages   = count(),\n    Subjects   = make_set(Subject, 8),\n    ThreatMix  = make_set(ThreatTypes, 5),\n    ReportId   = take_any(ReportId),\n    Timestamp  = min(Timestamp)\n    by SenderFromAddress\n| where Recipients >= 3",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT3H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "LateralMovement",
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1534",
+          "T1566"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "SenderFromAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "Recipients": "Recipients",
+          "Messages": "Messages",
+          "ThreatMix": "ThreatMix"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Internal sender {{SenderFromAddress}} spreading phishing ({{Recipients}} recipients)",
+          "alertDescriptionFormat": "{{SenderFromAddress}} sent {{Messages}} malicious intra-org messages to {{Recipients}} colleagues. Likely compromised - reset credentials and revoke sessions."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','7a1c2d30-1e11-4b21-9c01-0a1b2c3d4f04')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "MDO - Suspicious Inbox Rule After Phishing Click",
+        "description": "Fires when a user who recently clicked a malicious link then creates an inbox rule that\nforwards, redirects, deletes or hides mail - a hallmark of Business Email Compromise.\nCorrelates UrlClickEvents with CloudAppEvents inbox-rule operations. Promoted from hunting\nquery MDO-25. MITRE ATT&CK: T1114 (Email Collection), T1564 (Hide Artifacts).",
+        "severity": "High",
+        "enabled": "[parameters('deployAnalyticRulesEnabled')]",
+        "query": "let Clickers =\n    UrlClickEvents\n    | where Timestamp > ago(3h)\n    | where ThreatTypes has_any (\"Phish\", \"Malware\") or (isnotempty(IsClickedThrough) and IsClickedThrough != \"0\")\n    | summarize ClickTime = min(Timestamp) by AccountUpn\n    | where isnotempty(AccountUpn);\nCloudAppEvents\n| where Timestamp > ago(3h)\n| where ActionType in (\"New-InboxRule\", \"Set-InboxRule\", \"UpdateInboxRules\")\n| extend Rule = tostring(RawEventData.Parameters)\n| where Rule has_any (\"ForwardTo\", \"RedirectTo\", \"ForwardAsAttachmentTo\", \"DeleteMessage\", \"MarkAsRead\", \"MoveToFolder\")\n| extend Upn = tolower(AccountDisplayName)\n| join kind=inner (Clickers | extend Upn = tolower(AccountUpn)) on Upn\n| where Timestamp between (ClickTime .. ClickTime + 6h)\n| project Timestamp, ReportId, AccountUpn, ClickTime, ActionType, Rule, IPAddress",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT3H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "Collection",
+          "DefenseEvasion"
+        ],
+        "techniques": [
+          "T1114",
+          "T1564"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "FullName",
+                "columnName": "AccountUpn"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "InboxRuleOp": "ActionType",
+          "RuleParameters": "Rule"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Inbox rule created by {{AccountUpn}} after malicious click",
+          "alertDescriptionFormat": "{{AccountUpn}} created inbox rule '{{ActionType}}' shortly after clicking a malicious link (from {{IPAddress}}). Strong BEC / account-takeover signal - remove the rule and contain the identity."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2022-11-01-preview",
+      "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/','7a1c2d30-1e11-4b21-9c01-0a1b2c3d4f05')]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "MDO - Illicit OAuth App Consent (Consent Phishing)",
+        "description": "Fires when a user grants delegated consent to an OAuth application - the key event in\nconsent-phishing / illicit-grant attacks that give an attacker persistent access to mail\nand files. Review the app, publisher and scopes. Promoted from hunting query MDO-26.\nMITRE ATT&CK: T1528 (Steal Application Access Token), T1566 (Phishing).",
+        "severity": "High",
+        "enabled": "[parameters('deployAnalyticRulesEnabled')]",
+        "query": "CloudAppEvents\n| where Timestamp > ago(1h)\n| where ActionType in (\"Consent to application\", \"Add delegated permission grant\")\n| extend AppName = tostring(RawEventData.ObjectName)\n| project Timestamp, ReportId, AccountObjectId, AccountDisplayName, ActionType, AppName,\n          IPAddress, IsAdminOperation, UserAgent",
+        "queryFrequency": "PT1H",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT1H",
+        "suppressionEnabled": false,
+        "tactics": [
+          "CredentialAccess",
+          "InitialAccess"
+        ],
+        "techniques": [
+          "T1528",
+          "T1566"
+        ],
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              {
+                "identifier": "AadUserId",
+                "columnName": "AccountObjectId"
+              },
+              {
+                "identifier": "Name",
+                "columnName": "AccountDisplayName"
+              }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "IPAddress"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "ConsentedApp": "AppName",
+          "ConsentAction": "ActionType",
+          "AdminOperation": "IsAdminOperation"
+        },
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "OAuth consent granted by {{AccountDisplayName}} to '{{AppName}}'",
+          "alertDescriptionFormat": "{{AccountDisplayName}} granted OAuth consent to app '{{AppName}}' from {{IPAddress}}. Review publisher and scopes; revoke if illicit (consent-phishing persistence)."
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AnyAlert",
+            "groupByEntities": [
+              "Account"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "deployedAnalyticRules": {
+      "type": "int",
+      "value": 5
+    }
+  }
+}
