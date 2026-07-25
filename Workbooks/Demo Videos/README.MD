@@ -15,3 +15,5 @@ Build a Microsoft Sentinel Data Connector with Natural Language (No Coding Requi
 Secure and monitor Compromised Service Principals Non-Human Identities (NHI) with Microsoft Sentinel https://youtu.be/LW-rTQUovHo
 
 Stop Active Directory Attacks: Advanced Monitoring with Microsoft Sentinel https://youtu.be/zYLU93U22Ew
+ 
+Boost SOC Visibility: Defender for Office Workbook with Sentinel & Advanced Hunting https://youtu.be/zXUjATEWxJs
