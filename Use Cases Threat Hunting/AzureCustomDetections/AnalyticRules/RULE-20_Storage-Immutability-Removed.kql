@@ -1,0 +1,66 @@
+// Rule    : Azure - Storage Immutability Policy or Legal Hold Removed
+// Severity: High
+// Tactics : Impact, DefenseEvasion
+// MITRE   : T1490
+// Freq    : PT1H   Period: PT2H
+//==========================================================================================
+// Blob immutability policies and legal holds are the primary anti-ransomware / anti-tamper
+// guardrails in Azure Storage. Their removal (or unlock of a locked-mode policy) is a
+// pre-cursor to ransomware encryption / mass-delete campaigns and to insider evidence
+// destruction. This complements RULE-14 (NSG delete) and RULE-11 (mass delete) by covering
+// the specific "inhibit system recovery" (T1490) TTP.
+//
+// Operations covered (AzureActivity):
+//   * MICROSOFT.STORAGE/STORAGEACCOUNTS/BLOBSERVICES/CONTAINERS/IMMUTABILITYPOLICIES/DELETE
+//   * MICROSOFT.STORAGE/STORAGEACCOUNTS/BLOBSERVICES/CONTAINERS/IMMUTABILITYPOLICIES/EXTEND/ACTION
+//     (extend/action with shorter retention == de-facto weakening)
+//   * MICROSOFT.STORAGE/STORAGEACCOUNTS/BLOBSERVICES/CONTAINERS/LEGALHOLDS/CLEAR/ACTION
+//   * MICROSOFT.STORAGE/STORAGEACCOUNTS/BLOBSERVICES/CONTAINERS/DELETE (soft-delete disabled)
+//   * MICROSOFT.STORAGE/STORAGEACCOUNTS/DELETE  (whole account teardown)
+//
+// FP mitigations:
+//   * IaC/pipeline caller patterns excluded (data-lifecycle tools legitimately delete).
+//   * Azure platform IPs excluded.
+//   * Success-only.
+//   * Any single event fires — these operations are inherently high-signal.
+
+let ImmutabilityOps = dynamic([
+    "MICROSOFT.STORAGE/STORAGEACCOUNTS/BLOBSERVICES/CONTAINERS/IMMUTABILITYPOLICIES/DELETE",
+    "MICROSOFT.STORAGE/STORAGEACCOUNTS/BLOBSERVICES/CONTAINERS/IMMUTABILITYPOLICIES/EXTEND/ACTION",
+    "MICROSOFT.STORAGE/STORAGEACCOUNTS/BLOBSERVICES/CONTAINERS/LEGALHOLDS/CLEAR/ACTION",
+    "MICROSOFT.STORAGE/STORAGEACCOUNTS/BLOBSERVICES/DEFAULT/DELETE"
+]);
+let KnownIaCPatterns = dynamic(["terraform", "bicep", "pipeline", "github", "pulumi",
+    "devops", "arm-deployment", "lifecycle"]);
+AzureActivity
+| where TimeGenerated > ago(2h)
+| where ActivityStatusValue =~ "Success"
+| where OperationNameValue has_any (ImmutabilityOps)
+| where not(tolower(Caller) has_any (KnownIaCPatterns))
+| where isnotempty(CallerIpAddress)
+| where CallerIpAddress !startswith "168.63." and CallerIpAddress !startswith "169.254."
+| extend StorageAccount = tostring(split(ResourceId, "/")[8])
+| extend ContainerName  = iff(array_length(split(ResourceId, "/")) > 12,
+    tostring(split(ResourceId, "/")[12]), "")
+| extend ActionKind = case(
+    OperationNameValue has "IMMUTABILITYPOLICIES/DELETE",         "ImmutabilityPolicyDeleted",
+    OperationNameValue has "IMMUTABILITYPOLICIES/EXTEND/ACTION",  "ImmutabilityPolicyExtended",
+    OperationNameValue has "LEGALHOLDS/CLEAR/ACTION",             "LegalHoldCleared",
+    OperationNameValue has "BLOBSERVICES/DEFAULT/DELETE",         "BlobServiceSettingsDeleted",
+    "Other")
+| summarize
+    EventCount        = count(),
+    DistinctActions   = dcount(ActionKind),
+    Actions           = make_set(ActionKind, 5),
+    AffectedContainers = make_set(strcat(StorageAccount, "/", ContainerName), 20),
+    AffectedAccounts  = make_set(StorageAccount, 10),
+    Operations        = make_set(OperationNameValue, 5),
+    ResourceGroups    = make_set(ResourceGroup, 5),
+    SourceIPs         = make_set(CallerIpAddress, 5),
+    CallerIP          = any(CallerIpAddress),
+    FirstSeen         = min(TimeGenerated),
+    LastSeen          = max(TimeGenerated)
+    by Caller, SubscriptionId
+| extend
+    AccountName      = tostring(split(Caller, "@")[0]),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])

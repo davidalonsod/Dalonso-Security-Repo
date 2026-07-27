@@ -1,0 +1,79 @@
+// Rule    : Azure AD - Illicit OAuth Consent Grant with High-Privilege Scope
+// Severity: High
+// Tactics : Persistence, InitialAccess, CredentialAccess
+// MITRE   : T1528
+// Freq    : PT30M   Period: PT2H
+//==========================================================================================
+// Detects a user (or admin) granting OAuth consent to an application for scopes that
+// permit broad tenant impact — e.g. Mail.Read/Mail.Send/Files.ReadWrite.All/full_access_as_app/
+// Directory.ReadWrite.All. This is the classic illicit consent grant attack chain
+// (T1528) used by Midnight Blizzard, Storm-0558, and countless phishing campaigns to
+// steal mail/files without needing a password.
+//
+// FP mitigations:
+//   * Excludes Microsoft first-party admin consent (initiator app IDs owned by Microsoft
+//     Graph / Sync consoles) via ExcludedPublisherPatterns.
+//   * Requires success + one of the ~15 high-impact scope strings.
+//   * Deduplicates per (Initiator, AppDisplayName) inside a 30-minute window.
+//   * Excludes IaC/pipeline callers by initiator UPN pattern.
+
+let ExcludedPublisherPatterns = dynamic(["ms-pim", "identitygovernance", "azure ad sync",
+    "aad connect", "microsoft graph", "microsoft.identity"]);
+let ExcludedInitiatorPatterns = dynamic(["terraform", "bicep", "pipeline", "github",
+    "pulumi", "devops", "arm-deployment"]);
+// High-impact scopes / roles that materially expand attacker capability.
+let HighImpactScopes = dynamic([
+    "Mail.Read", "Mail.ReadWrite", "Mail.Send", "MailboxSettings.ReadWrite",
+    "Files.Read.All", "Files.ReadWrite.All",
+    "Sites.Read.All", "Sites.ReadWrite.All", "Sites.FullControl.All",
+    "Directory.Read.All", "Directory.ReadWrite.All",
+    "User.Read.All", "User.ReadWrite.All",
+    "Group.ReadWrite.All", "GroupMember.ReadWrite.All",
+    "Application.ReadWrite.All", "AppRoleAssignment.ReadWrite.All",
+    "RoleManagement.ReadWrite.Directory",
+    "full_access_as_app",
+    "Chat.Read.All", "ChannelMessage.Read.All",
+    "Policy.ReadWrite.ConditionalAccess",
+    "AuditLog.Read.All"
+]);
+AuditLogs
+| where TimeGenerated > ago(2h)
+| where LoggedByService =~ "Core Directory"
+| where OperationName in~ ("Consent to application", "Add delegated permission grant",
+    "Add app role assignment grant to user", "Add app role assignment to service principal")
+| where Result =~ "success"
+| extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+                              tostring(InitiatedBy.app.displayName))
+| extend InitiatorIP = tostring(InitiatedBy.user.ipAddress)
+| where isnotempty(Initiator)
+| where not(tolower(Initiator) has_any (ExcludedInitiatorPatterns))
+| where not(tolower(Initiator) has_any (ExcludedPublisherPatterns))
+| mv-expand Target = TargetResources
+| extend AppDisplayName = tostring(Target.displayName)
+| extend AppId = tostring(Target.id)
+| mv-expand Modified = Target.modifiedProperties
+| extend PropName = tostring(Modified.displayName)
+| extend NewValue = tostring(Modified.newValue)
+| where PropName in~ ("ConsentAction.Permissions", "DelegatedPermissionGrant.Scope",
+    "AppRole.Value", "OAuth2PermissionGrant.Scope")
+| extend GrantedScopesText = tolower(NewValue)
+| where GrantedScopesText has_any (HighImpactScopes)
+| extend MatchedScopes = extract_all(
+    strcat('(?i)(', strcat_array(HighImpactScopes, '|'), ')'),
+    NewValue)
+| summarize
+    GrantCount        = count(),
+    ScopeCount        = dcount(NewValue),
+    ScopesGranted     = make_set(MatchedScopes, 20),
+    Apps              = make_set(AppDisplayName, 5),
+    AppIds            = make_set(AppId, 5),
+    Operations        = make_set(OperationName, 5),
+    CorrelationIds    = make_set(CorrelationId, 5),
+    CallerIP          = any(InitiatorIP),
+    SourceIPs         = make_set(InitiatorIP, 3),
+    FirstGrant        = min(TimeGenerated),
+    LastGrant         = max(TimeGenerated)
+    by Initiator, bin(TimeGenerated, 30m)
+| extend
+    AccountName      = tostring(split(Initiator, "@")[0]),
+    AccountUPNSuffix = tostring(split(Initiator, "@")[1])

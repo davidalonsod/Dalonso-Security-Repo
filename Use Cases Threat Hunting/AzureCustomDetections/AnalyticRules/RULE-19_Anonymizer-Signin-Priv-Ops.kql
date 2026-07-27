@@ -1,0 +1,97 @@
+// Rule    : Azure - Sign-in from Anonymizer / Tor / Anonymous IP Followed by Management Ops
+// Severity: High
+// Tactics : InitialAccess, DefenseEvasion
+// MITRE   : T1078.004
+// Freq    : PT30M   Period: PT2H
+//==========================================================================================
+// AAD's own risk engine tags sign-ins with riskEventTypes containing "anonymizedIPAddress"
+// or "unfamiliarFeatures". This rule fires when a *successful* sign-in with an anonymizer
+// signal is followed within 1 hour by ANY Azure management-plane write/delete/action from
+// the same IP — a strong indicator of attacker session takeover or password-spray success
+// via Tor/VPN proxies. Correlates both SigninLogs (users) and AADServicePrincipalSignInLogs
+// (workload identities).
+//
+// FP mitigations:
+//   * ResultType == 0 (successful auth only — noisy failed anonymizer attempts filtered out).
+//   * Requires at least 1 management-plane WRITE/DELETE/ACTION within 1h from the same IP.
+//   * Excludes IaC caller name patterns.
+//   * Excludes RFC1918 and Azure platform IPs (anonymizer IPs are always public).
+
+let AnonymizerRiskTypes = dynamic(["anonymizedIPAddress", "anonymousIPAddress"]);
+let PrivateOrPlatform  = dynamic(["10.", "172.16.", "172.17.", "172.18.", "172.19.",
+    "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.",
+    "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", "192.168.", "127.",
+    "169.254.", "168.63."]);
+let ExcludedCallerPatterns = dynamic(["terraform", "bicep", "pipeline", "github",
+    "pulumi", "devops", "arm-deployment"]);
+// --- Interactive user sign-ins from anonymizer IPs (successful) ---
+let AnonUserSignins = SigninLogs
+    | where TimeGenerated > ago(2h)
+    | where ResultType == 0
+    | where isnotempty(IPAddress)
+    | where not(IPAddress has_any (PrivateOrPlatform))
+    // column_ifexists() keeps the rule deployable where RiskEventTypes_V2 / RiskEventTypes
+    // are not present in the workspace SigninLogs schema (schema drift across connectors).
+    | extend RiskTypesText = strcat(
+        tostring(column_ifexists("RiskEventTypes_V2", dynamic([]))), " ",
+        tostring(column_ifexists("RiskEventTypes", dynamic([]))))
+    | where RiskTypesText has_any (AnonymizerRiskTypes)
+        or  RiskLevelAggregated in~ ("medium", "high")
+    | project SigninTime = TimeGenerated, UserPrincipalName, AnonIP = IPAddress,
+              UserDisplayName, AppDisplayName, Location, RiskLevelAggregated,
+              RiskEventTypes = RiskTypesText, ConditionalAccessStatus;
+// --- Service principal sign-ins from anonymizer IPs (successful) ---
+let AnonSPSignins = AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(2h)
+    | where ResultType == 0
+    | where isnotempty(IPAddress)
+    | where not(IPAddress has_any (PrivateOrPlatform))
+    // AADServicePrincipalSignInLogs carries no Identity-Protection risk columns in most
+    // workspaces; column_ifexists() keeps this branch valid (and inert) rather than failing
+    // semantic validation. It activates automatically if the columns are ever present.
+    | where strcat(
+        tostring(column_ifexists("RiskEventTypes_V2", dynamic([]))), " ",
+        tostring(column_ifexists("RiskEventTypes", dynamic([])))) has_any (AnonymizerRiskTypes)
+    | project SPSigninTime = TimeGenerated, ServicePrincipalName, ServicePrincipalId,
+              AnonIP = IPAddress, AppId, SPConditionalAccessStatus = ConditionalAccessStatus;
+// --- Combined anonymizer sign-ins (one column per identity kind) ---
+let AllAnonSignins = AnonUserSignins
+    | project AnonIP, SigninTime, Identity = UserPrincipalName, IdentityKind = "User",
+              Context = strcat("app=", AppDisplayName, "; loc=", tostring(Location),
+                               "; risk=", tostring(RiskLevelAggregated))
+    | union (
+        AnonSPSignins
+        | project AnonIP, SigninTime = SPSigninTime, Identity = ServicePrincipalName,
+                  IdentityKind = "ServicePrincipal",
+                  Context = strcat("appId=", AppId, "; caStatus=", tostring(SPConditionalAccessStatus))
+    );
+// --- Management-plane writes/deletes/actions from same IPs, within 1h AFTER sign-in ---
+AzureActivity
+| where TimeGenerated > ago(2h)
+| where ActivityStatusValue =~ "Success"
+| where OperationNameValue has_any ("WRITE", "DELETE", "ACTION")
+| where not(OperationNameValue has_any ("READ", "LIST", "GET"))
+| where not(tolower(Caller) has_any (ExcludedCallerPatterns))
+| where isnotempty(CallerIpAddress)
+| where not(CallerIpAddress has_any (PrivateOrPlatform))
+| join kind=inner AllAnonSignins on $left.CallerIpAddress == $right.AnonIP
+| where TimeGenerated >= SigninTime and TimeGenerated <= SigninTime + 1h
+| summarize
+    MGMTOpCount     = count(),
+    DistinctOps     = dcount(OperationNameValue),
+    Operations      = make_set(OperationNameValue, 10),
+    AffectedResources = make_set(ResourceId, 10),
+    SubscriptionIds = make_set(SubscriptionId, 5),
+    CallerIP        = any(CallerIpAddress),
+    SigninIdentity  = any(Identity),
+    IdentityKind    = any(IdentityKind),
+    SigninContext   = any(Context),
+    FirstMgmtOp     = min(TimeGenerated),
+    LastMgmtOp      = max(TimeGenerated),
+    SigninTime      = any(SigninTime)
+    by Caller, AnonIP
+// Even a single WRITE from an anonymizer IP is high-signal; require just >=1 op.
+| where MGMTOpCount >= 1
+| extend
+    AccountName      = coalesce(tostring(split(Caller, "@")[0]), SigninIdentity),
+    AccountUPNSuffix = tostring(split(Caller, "@")[1])
