@@ -1,0 +1,25 @@
+// Hunt     : Hunt - Storage Anonymous and SAS-Token Access Timeline (90 Days)
+// Tactics  : Collection, Exfiltration
+// MITRE    : T1530
+// Purpose  : Surface the full timeline of anonymous and SAS-authenticated access to Storage Blobs from public IPs over 90 days. Use to baseline normal patterns, confirm Rule-13 alerts, and identify persistent low-and-slow exfiltration that stays under the hourly threshold.
+//==========================================================================================
+
+let PrivateRanges = dynamic(["10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.",
+    "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.",
+    "172.29.", "172.30.", "172.31.", "192.168.", "168.63.", "169.254."]);
+StorageBlobLogs
+| where TimeGenerated > ago(90d)
+| where AuthenticationType in~ ("Anonymous", "SasToken")
+| where StatusCode == 200
+| where isnotempty(CallerIpAddress)
+| where not(CallerIpAddress has_any (PrivateRanges))
+| summarize
+    AccessCount        = count(),
+    DistinctBlobs      = dcount(ObjectKey),
+    DistinctContainers = dcount(tostring(split(ObjectKey, "/")[0])),
+    TotalBytesGB       = round(sum(ResponseBodySize) / 1073741824.0, 3),
+    Operations         = make_set(OperationName, 5),
+    EarliestAccess     = min(TimeGenerated),
+    LatestAccess       = max(TimeGenerated)
+    by CallerIpAddress, AuthenticationType, AccountName, bin(TimeGenerated, 1d)
+| order by TotalBytesGB desc, AccessCount desc

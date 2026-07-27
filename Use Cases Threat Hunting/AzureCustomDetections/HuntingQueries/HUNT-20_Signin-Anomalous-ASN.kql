@@ -1,0 +1,27 @@
+// Hunt     : Hunt - Sign-in from Anomalous Network Location (ASN) per Identity (30d)
+// Tactics  : InitialAccess
+// MITRE    : T1078.004
+// Purpose  : Per-user ASN baseline. Flags a successful interactive sign-in from an autonomous
+//            system (network operator) the user has never authenticated from in the prior 30
+//            days. Complements geo/impossible-travel by catching hosting/VPS ASNs that share a
+//            country with the user's normal ISP.
+//==========================================================================================
+
+let Window = 30d;
+let Recent = 1d;
+let Baseline = SigninLogs
+    | where TimeGenerated between (ago(Window) .. ago(Recent))
+    | where ResultType == 0
+    | extend ASN = tostring(AutonomousSystemNumber)
+    | where isnotempty(ASN)
+    | summarize KnownASNs = make_set(ASN, 200) by UserPrincipalName;
+SigninLogs
+| where TimeGenerated > ago(Recent)
+| where ResultType == 0
+| extend ASN = tostring(AutonomousSystemNumber)
+| where isnotempty(ASN)
+| join kind=leftouter Baseline on UserPrincipalName
+| where isempty(KnownASNs) or not(set_has_element(KnownASNs, ASN))
+| project TimeGenerated, UserPrincipalName, ASN, IPAddress, AppDisplayName,
+    Location, ConditionalAccessStatus, RiskLevelAggregated
+| order by TimeGenerated desc

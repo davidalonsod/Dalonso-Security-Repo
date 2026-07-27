@@ -1,0 +1,36 @@
+﻿// Hunt     : Hunt - Privileged Azure Management Operations Outside Business Hours (UTC 07-19)
+// Tactics  : DefenseEvasion,Persistence
+// MITRE    : T1078.004
+// Purpose  : Identifies identities performing sensitive management operations outside UTC 07:00-19:00 weekdays. Attackers in different time zones or running automated scripts often operate outside normal business hours. Review against expected schedules.
+//==========================================================================================
+
+let BizStartUTC = 7;      // business-day start hour (UTC) — tune to your primary region
+let BizEndUTC   = 19;     // business-day end hour (UTC)
+let MinOffHoursOps = 5;   // suppress trivial 1-2 op off-hours activity (noise floor)
+AzureActivity
+| where TimeGenerated > ago(30d)
+| where ActivityStatusValue =~ "Success"
+| where OperationNameValue has_any (
+    "ROLEASSIGNMENTS/WRITE",
+    "ROLEASSIGNMENTS/DELETE",
+    "VIRTUALMACHINES/WRITE",
+    "DIAGNOSTICSETTINGS/DELETE",
+    "KEYVAULTS/WRITE",
+    "AUTOMATION/AUTOMATIONACCOUNTS/RUNBOOKS/WRITE",
+    "LOCKS/DELETE",
+    "POLICYASSIGNMENTS/DELETE")
+| where isnotempty(Caller)
+| extend HourUTC = hourofday(TimeGenerated)
+| extend DayOfWeek = dayofweek(TimeGenerated)
+| extend IsOffHours = HourUTC < BizStartUTC or HourUTC >= BizEndUTC or DayOfWeek == 0d or DayOfWeek == 6d
+| where IsOffHours == true
+| summarize
+    OffHoursOpCount = count(),
+    Operations = make_set(OperationNameValue, 10),
+    HoursActive = make_set(HourUTC, 24),
+    SourceIPs = make_set(CallerIpAddress, 5)
+    by Caller, SubscriptionId
+// Tuned: only surface identities with a meaningful off-hours burst (>= MinOffHoursOps),
+// not every single after-hours action, and made the business window configurable.
+| where OffHoursOpCount >= MinOffHoursOps
+| order by OffHoursOpCount desc

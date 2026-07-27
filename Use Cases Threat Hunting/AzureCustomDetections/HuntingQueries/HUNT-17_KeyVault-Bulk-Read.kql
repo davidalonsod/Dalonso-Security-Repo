@@ -1,0 +1,24 @@
+// Hunt     : Hunt - KeyVault Secret or Key Bulk Read (potential dump)
+// Tactics  : CredentialAccess, Collection
+// MITRE    : T1552.001, T1555
+// Purpose  : Surfaces identities reading/listing 25+ Key Vault secrets, keys, or certificates
+//            within a single hour — the signature of a credential-dump sweep after a vault is
+//            compromised. Tune the ReadThreshold to your busiest legitimate consumer.
+//==========================================================================================
+
+let Window = 7d;
+let ReadThreshold = 25;
+AzureActivity
+| where TimeGenerated > ago(Window)
+| where OperationNameValue has_any (
+    "VAULTS/SECRETS/READ", "VAULTS/KEYS/READ", "VAULTS/CERTIFICATES/READ",
+    "VAULTS/SECRETS/GETSECRET/ACTION", "VAULTS/SECRETS/LIST")
+| where ActivityStatusValue =~ "Success"
+| summarize
+    ReadCount = count(),
+    DistinctObjects = dcount(_ResourceId),
+    Vaults = make_set(tostring(split(_ResourceId, "/")[8]), 20),
+    Operations = make_set(OperationNameValue, 5)
+    by Caller, CallerIpAddress, bin(TimeGenerated, 1h)
+| where ReadCount >= ReadThreshold
+| order by ReadCount desc

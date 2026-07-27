@@ -1,0 +1,23 @@
+// Hunt     : Hunt - Caller IP Concentration Across Many Identities (7d)
+// Tactics  : LateralMovement, CredentialAccess
+// MITRE    : T1550
+// Purpose  : Surfaces a single source IP driving management-plane operations for 5+ distinct
+//            identities in 7 days. Beyond shared corporate egress (allowlist those), this is a
+//            classic token-theft / credential-replay signature where one attacker host wields
+//            many stolen identities. Add trusted egress IPs to the NetworkAllowlist watchlist.
+//==========================================================================================
+
+let Window = 7d;
+let IdentityThreshold = 5;
+AzureActivity
+| where TimeGenerated > ago(Window)
+| where isnotempty(CallerIpAddress) and isnotempty(Caller)
+| where CallerIpAddress !startswith "168.63." and CallerIpAddress !startswith "169.254."
+| summarize
+    Identities = dcount(Caller),
+    Callers = make_set(Caller, 25),
+    Ops = count(),
+    Operations = make_set(OperationNameValue, 10)
+    by CallerIpAddress
+| where Identities >= IdentityThreshold
+| order by Identities desc, Ops desc

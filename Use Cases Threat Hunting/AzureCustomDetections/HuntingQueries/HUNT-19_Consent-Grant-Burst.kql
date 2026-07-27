@@ -1,0 +1,23 @@
+// Hunt     : Hunt - AAD App Consent Grant Burst (potential illicit consent attack)
+// Tactics  : Persistence, InitialAccess
+// MITRE    : T1528
+// Purpose  : Broad companion to RULE-18. Surfaces any initiator granting 5+ OAuth consents /
+//            permission grants within a single hour (any scope, not just high-impact). Use to
+//            baseline consent behaviour and to catch phishing waves where a single user is
+//            tricked into consenting to a cluster of malicious apps.
+//==========================================================================================
+
+let Window = 7d;
+let GrantThreshold = 5;
+AuditLogs
+| where TimeGenerated > ago(Window)
+| where OperationName has_any ("Consent to application", "Add delegated permission grant",
+    "Add app role assignment grant to user")
+| where Result =~ "success"
+| extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))
+| extend AppName = tostring(TargetResources[0].displayName)
+| where isnotempty(Initiator)
+| summarize Grants = count(), Apps = make_set(AppName, 25), Operations = make_set(OperationName, 5)
+    by Initiator, bin(TimeGenerated, 1h)
+| where Grants >= GrantThreshold
+| order by Grants desc

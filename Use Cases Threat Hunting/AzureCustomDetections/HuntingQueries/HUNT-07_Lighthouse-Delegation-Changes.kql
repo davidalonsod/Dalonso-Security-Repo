@@ -1,0 +1,16 @@
+﻿// Hunt     : Hunt - Azure Lighthouse Managed Services Delegation Changes (90d)
+// Tactics  : Persistence
+// MITRE    : T1098
+// Purpose  : Shows all Azure Lighthouse (ManagedServices) delegation events. Attackers who gain Owner rights may create Lighthouse delegations to grant a foreign tenant persistent cross-subscription access that survives password resets.
+//==========================================================================================
+
+AzureActivity
+| where TimeGenerated > ago(90d)
+| where OperationNameValue has "MICROSOFT.MANAGEDSERVICES"
+| where ActivityStatusValue =~ "Success"
+| extend OperationType = case(
+    OperationNameValue has "DELETE", "Delegation Removed",
+    OperationNameValue has "WRITE", "Delegation Added or Modified",
+    "Other")
+| project TimeGenerated, OperationType, Caller, Operation = OperationNameValue, ResourceId, CallerIpAddress, SubscriptionId
+| order by TimeGenerated desc

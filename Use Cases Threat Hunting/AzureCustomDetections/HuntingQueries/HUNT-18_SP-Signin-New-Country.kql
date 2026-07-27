@@ -1,0 +1,24 @@
+// Hunt     : Hunt - Service Principal Sign-in from New Country (30d baseline)
+// Tactics  : InitialAccess
+// MITRE    : T1078.004
+// Purpose  : Per-SP geo baseline. Flags a successful workload-identity sign-in from a country
+//            the SP has never authenticated from in the prior 30 days. Workload identities are
+//            typically pinned to a small set of regions; a new country implies token theft or
+//            credential abuse. Pairs with RULE-10 (SP CA bypass) and RULE-19 (anonymizer).
+//==========================================================================================
+
+let Window = 30d;
+let Recent = 1d;
+let Baseline = AADServicePrincipalSignInLogs
+    | where TimeGenerated between (ago(Window) .. ago(Recent))
+    | where ResultType == 0
+    | summarize KnownCountries = make_set(tostring(LocationDetails.countryOrRegion), 50) by ServicePrincipalId;
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(Recent)
+| where ResultType == 0
+| extend Country = tostring(LocationDetails.countryOrRegion)
+| where isnotempty(Country)
+| join kind=leftouter Baseline on ServicePrincipalId
+| where isempty(KnownCountries) or not(set_has_element(KnownCountries, Country))
+| project TimeGenerated, ServicePrincipalName, ServicePrincipalId, Country, IPAddress, AppId, ResultType
+| order by TimeGenerated desc

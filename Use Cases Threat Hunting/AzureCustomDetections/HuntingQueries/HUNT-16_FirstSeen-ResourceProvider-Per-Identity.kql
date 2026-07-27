@@ -1,0 +1,26 @@
+// Hunt     : Hunt - First-Seen Azure Resource Provider per Identity (30d)
+// Tactics  : Discovery, Persistence
+// MITRE    : T1078, T1580
+// Purpose  : Flags identities invoking an Azure Resource Provider (e.g. Microsoft.Compute,
+//            Microsoft.KeyVault) for the FIRST time in 30 days. A compromised identity that
+//            suddenly touches a provider it has never used is a strong lateral-movement /
+//            discovery signal. Pairs with RULE-09 (new IP) and RULE-12 (mass creation).
+//==========================================================================================
+
+let Window = 30d;
+let Recent = 1d;
+let Baseline = AzureActivity
+    | where TimeGenerated between (ago(Window) .. ago(Recent))
+    | where isnotempty(Caller) and isnotempty(OperationNameValue)
+    | extend ResourceProvider = tostring(split(OperationNameValue, '/')[0])
+    | summarize PriorProviders = make_set(ResourceProvider, 1000) by Caller;
+AzureActivity
+| where TimeGenerated > ago(Recent)
+| where isnotempty(Caller) and isnotempty(OperationNameValue)
+| extend ResourceProvider = tostring(split(OperationNameValue, '/')[0])
+| join kind=leftouter Baseline on Caller
+| where isempty(PriorProviders) or not(set_has_element(PriorProviders, ResourceProvider))
+| summarize FirstSeen = min(TimeGenerated), Ops = count(),
+    Providers = make_set(ResourceProvider, 10), IPs = make_set(CallerIpAddress, 10)
+    by Caller
+| order by FirstSeen desc

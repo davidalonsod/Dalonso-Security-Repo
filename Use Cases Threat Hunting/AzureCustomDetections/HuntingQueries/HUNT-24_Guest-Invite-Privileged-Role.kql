@@ -1,0 +1,36 @@
+// Hunt     : Hunt - Guest (B2B) Invitation Followed by Privileged Role (30d)
+// Tactics  : Persistence, PrivilegeEscalation
+// MITRE    : T1078.004, T1098.003
+// Purpose  : Correlates external guest (B2B) invitations/redemptions with a subsequent
+//            privileged role assignment to that same guest within 7 days. Attackers who gain
+//            admin rights invite an attacker-controlled external identity and grant it standing
+//            access that survives the victim's password resets. Investigate every hit.
+//==========================================================================================
+
+let Window = 30d;
+let CorrelationWindow = 7d;
+let GuestInvites = AuditLogs
+    | where TimeGenerated > ago(Window)
+    | where OperationName has_any ("Invite external user", "Redeem external user invite", "Add external user")
+    | where Result =~ "success"
+    | extend GuestUPN = tostring(TargetResources[0].userPrincipalName)
+    | extend GuestId = tostring(TargetResources[0].id)
+    | extend Inviter = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))
+    | where isnotempty(GuestId)
+    | project InviteTime = TimeGenerated, GuestUPN, GuestId, Inviter;
+let PrivRoleGrants = AuditLogs
+    | where TimeGenerated > ago(Window)
+    | where OperationName has_any ("Add member to role", "Add eligible member to role",
+        "Add app role assignment to service principal")
+    | where Result =~ "success"
+    | extend RoleName = tostring(TargetResources[0].displayName)
+    | mv-expand TR = TargetResources
+    | extend GranteeId = tostring(TR.id), GranteeUPN = tostring(TR.userPrincipalName)
+    | where isnotempty(GranteeId)
+    | project RoleTime = TimeGenerated, RoleName, GranteeId, GranteeUPN,
+        Grantor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName));
+GuestInvites
+| join kind=inner PrivRoleGrants on $left.GuestId == $right.GranteeId
+| where RoleTime between (InviteTime .. (InviteTime + CorrelationWindow))
+| project InviteTime, RoleTime, GuestUPN, Inviter, RoleName, Grantor, GuestId
+| order by RoleTime desc

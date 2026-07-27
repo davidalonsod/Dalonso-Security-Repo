@@ -1,0 +1,34 @@
+// Hunt     : Hunt - Risky & Anonymizer Sign-in Timeline (30d)
+// Tactics  : InitialAccess, DefenseEvasion
+// MITRE    : T1078.004, T1090.003
+// Purpose  : Broad companion to RULE-19. Timeline of successful sign-ins that AAD Identity
+//            Protection flagged as risky or anonymizer-sourced (Tor/anonymous VPN), across both
+//            users and workload identities. Use to baseline anonymizer usage, hunt for
+//            low-and-slow access under the alert-rule window, and pivot on repeat IPs/ASNs.
+//==========================================================================================
+
+let Window = 30d;
+let AnonRiskTypes = dynamic(["anonymizedIPAddress", "anonymousIPAddress"]);
+let UserRisky = SigninLogs
+    | where TimeGenerated > ago(Window)
+    | where ResultType == 0
+    | where isnotempty(IPAddress)
+    | extend RiskTypes = tostring(column_ifexists("RiskEventTypes_V2", dynamic([])))
+    | where RiskTypes has_any (AnonRiskTypes)
+        or RiskLevelAggregated in~ ("medium", "high")
+        or RiskState =~ "atRisk"
+    | project TimeGenerated, IdentityKind = "User", Identity = UserPrincipalName,
+        IPAddress, Location = tostring(Location), AppDisplayName,
+        RiskLevel = tostring(RiskLevelAggregated), RiskTypes,
+        ConditionalAccessStatus;
+let SPRisky = AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(Window)
+    | where ResultType == 0
+    | where isnotempty(IPAddress)
+    | extend RiskTypes = tostring(column_ifexists("RiskEventTypes_V2", dynamic([])))
+    | where RiskTypes has_any (AnonRiskTypes)
+    | project TimeGenerated, IdentityKind = "ServicePrincipal", Identity = ServicePrincipalName,
+        IPAddress, Location = tostring(LocationDetails.countryOrRegion), AppDisplayName = AppId,
+        RiskLevel = "n/a", RiskTypes, ConditionalAccessStatus;
+union UserRisky, SPRisky
+| order by TimeGenerated desc

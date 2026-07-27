@@ -1,0 +1,46 @@
+// Hunt     : Hunt - TI Indicator Match in Azure Management Plane - Extended 90 Days
+// Tactics  : InitialAccess,Persistence,Impact
+// MITRE    : T1078,T1098,T1496
+// Purpose  : Extended 90-day TI correlation against ThreatIntelIndicators (STIX 2.1) with lower confidence threshold (>=50). No IsActive/Revoked filters -- intentionally covers expired and revoked indicators to surface historical management plane access from adversary-controlled IPs before indicators were activated or feeds were ingested.
+//==========================================================================================
+
+let PrivateRanges = dynamic(["10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.",
+    "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.",
+    "172.28.", "172.29.", "172.30.", "172.31.", "127.", "169.254.", "168.63."]);
+let TIIPIndicators = ThreatIntelIndicators
+    | where TimeGenerated > ago(90d)
+    | where Confidence >= 50
+    | where ObservableKey =~ "ipv4-addr:value"
+    | where isnotempty(ObservableValue)
+    | where not(ObservableValue has_any (PrivateRanges))
+    | summarize
+        ThreatType     = any(tostring(Data.indicator_types)),
+        TI_Description = any(tostring(Data.description)),
+        ConfScore      = max(Confidence),
+        ActivityGroups = any(Tags),
+        TLPLevel       = any(tostring(AdditionalFields.TLPLevel)),
+        IsActive       = any(IsActive),
+        Revoked        = any(Revoked)
+        by TI_IP = ObservableValue;
+AzureActivity
+| where TimeGenerated > ago(90d)
+| where isnotempty(CallerIpAddress)
+| where not(CallerIpAddress has_any (PrivateRanges))
+| join kind=inner TIIPIndicators on $left.CallerIpAddress == $right.TI_IP
+| project
+    TimeGenerated,
+    Caller,
+    CallerIpAddress,
+    OperationNameValue,
+    ActivityStatusValue,
+    ResourceGroup,
+    SubscriptionId,
+    TI_IP,
+    ThreatType,
+    TI_Description,
+    ConfScore,
+    ActivityGroups,
+    TLPLevel,
+    IsActive,
+    Revoked
+| order by TimeGenerated desc

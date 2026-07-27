@@ -1,0 +1,48 @@
+// Hunt     : Hunt - NSG Deletion and Firewall Rule Modification History (30 Days)
+// Tactics  : DefenseEvasion
+// MITRE    : T1562.007
+// Purpose  : Show the complete history of NSG deletions AND individual security rule modifications (inbound/outbound allow-all rules added) over 30 days. Helps determine whether Rule-14 alerts are isolated events or part of a broader network exposure campaign.
+//==========================================================================================
+
+let NSGOps = dynamic([
+    "MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/DELETE",
+    "MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/WRITE",
+    "MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/SECURITYRULES/WRITE",
+    "MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/SECURITYRULES/DELETE"
+]);
+AzureActivity
+| where TimeGenerated > ago(30d)
+| where OperationNameValue has_any (NSGOps)
+| where ActivityStatusValue =~ "Success"
+| extend ChangeType = case(
+    OperationNameValue has "DELETE" and OperationNameValue has "NETWORKSECURITYGROUPS/DELETE", "NSG Deleted",
+    OperationNameValue has "SECURITYRULES/DELETE", "Security Rule Deleted",
+    OperationNameValue has "SECURITYRULES/WRITE",  "Security Rule Modified/Added",
+    OperationNameValue has "NETWORKSECURITYGROUPS/WRITE", "NSG Created/Modified",
+    "Other")
+// Parse the security-rule body to surface DANGEROUS any-any allow-from-Internet rules,
+// which are the actual attacker objective (exposing RDP/SSH/management ports).
+| extend Props        = parse_json(Properties)
+| extend RuleAccess   = tostring(Props.requestbody.properties.access)
+| extend RuleDirection = tostring(Props.requestbody.properties.direction)
+| extend SourcePrefix = tostring(Props.requestbody.properties.sourceAddressPrefix)
+| extend DestPortRange = tostring(Props.requestbody.properties.destinationPortRange)
+| extend IsDangerousAllowAny = ChangeType == "Security Rule Modified/Added"
+    and RuleAccess =~ "Allow"
+    and RuleDirection =~ "Inbound"
+    and SourcePrefix in ("*", "0.0.0.0/0", "Internet", "any")
+    and DestPortRange in ("*", "0-65535")
+| project
+    TimeGenerated,
+    Caller,
+    CallerIpAddress,
+    ChangeType,
+    IsDangerousAllowAny,
+    RuleAccess,
+    RuleDirection,
+    SourcePrefix,
+    DestPortRange,
+    ResourceId,
+    ResourceGroup,
+    SubscriptionId
+| order by IsDangerousAllowAny desc, TimeGenerated desc

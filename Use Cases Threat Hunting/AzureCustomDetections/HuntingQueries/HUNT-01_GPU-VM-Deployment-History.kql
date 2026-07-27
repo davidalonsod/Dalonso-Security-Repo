@@ -1,0 +1,15 @@
+﻿// Hunt     : Hunt - GPU and High-Compute VM Deployment History (90d)
+// Tactics  : Impact
+// MITRE    : T1496
+// Purpose  : Inventory all successful GPU/high-compute VM deployments over the past 90 days. Use to baseline legitimate deployers before tuning Rule-01, and to investigate potential cryptojacking campaigns.
+//==========================================================================================
+
+let GPUSKUs = dynamic(["Standard_NC", "Standard_NV", "Standard_ND", "Standard_NP", "Standard_HB", "Standard_HC"]);
+AzureActivity
+| where TimeGenerated > ago(90d)
+| where OperationNameValue has_any ("VIRTUALMACHINES/WRITE", "VIRTUALMACHINESCALESETS/WRITE")
+| where ActivityStatusValue =~ "Success"
+| where Properties has_any (GPUSKUs)
+| project TimeGenerated, Caller, CallerIpAddress, SubscriptionId, ResourceGroup, ResourceId, Properties
+| extend SKUHint = extract(@'Standard_(?:NC|NV|ND|NP|HB|HC)[^"]*', 0, Properties)
+| order by TimeGenerated desc

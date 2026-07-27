@@ -1,0 +1,42 @@
+// Hunt     : Hunt - Storage Data-Protection Config Changes: Immutability / Legal Hold / Soft-Delete (30d)
+// Tactics  : Impact, DefenseEvasion
+// MITRE    : T1490 (Inhibit System Recovery), T1562
+// Purpose  : Broad companion to RULE-20. Timeline of every change that weakens Azure Storage
+//            recovery guardrails — immutability policies, legal holds, blob/container soft-delete,
+//            versioning, and account deletion. Use to confirm RULE-20 alerts and to spot slow,
+//            piecemeal guardrail erosion that stays under the alert rule's window.
+//==========================================================================================
+
+let Window = 30d;
+let ProtectionOps = dynamic([
+    "IMMUTABILITYPOLICIES/DELETE",
+    "IMMUTABILITYPOLICIES/EXTEND/ACTION",
+    "IMMUTABILITYPOLICIES/LOCK/ACTION",
+    "LEGALHOLDS/CLEAR/ACTION",
+    "LEGALHOLDS/SETLEGALHOLD/ACTION",
+    "BLOBSERVICES/DEFAULT/DELETE",
+    "BLOBSERVICES/DEFAULT/WRITE",
+    "STORAGEACCOUNTS/DELETE"
+]);
+AzureActivity
+| where TimeGenerated > ago(Window)
+| where ActivityStatusValue =~ "Success"
+| where OperationNameValue has_any (ProtectionOps)
+| extend StorageAccount = tostring(split(ResourceId, "/")[8])
+| extend ChangeKind = case(
+    OperationNameValue has "IMMUTABILITYPOLICIES/DELETE",        "Immutability Policy Deleted",
+    OperationNameValue has "IMMUTABILITYPOLICIES/EXTEND",        "Immutability Policy Extended/Changed",
+    OperationNameValue has "IMMUTABILITYPOLICIES/LOCK",          "Immutability Policy Locked",
+    OperationNameValue has "LEGALHOLDS/CLEAR",                   "Legal Hold Cleared",
+    OperationNameValue has "LEGALHOLDS/SETLEGALHOLD",            "Legal Hold Set",
+    OperationNameValue has "BLOBSERVICES/DEFAULT/DELETE",        "Blob Service Settings Deleted",
+    OperationNameValue has "BLOBSERVICES/DEFAULT/WRITE",         "Blob Service Settings Changed (soft-delete/versioning)",
+    OperationNameValue has "STORAGEACCOUNTS/DELETE",             "Storage Account Deleted",
+    "Other")
+| extend WeakensRecovery = ChangeKind in (
+    "Immutability Policy Deleted", "Immutability Policy Extended/Changed",
+    "Legal Hold Cleared", "Blob Service Settings Deleted",
+    "Blob Service Settings Changed (soft-delete/versioning)", "Storage Account Deleted")
+| project TimeGenerated, Caller, CallerIpAddress, ChangeKind, WeakensRecovery,
+    StorageAccount, ResourceId, ResourceGroup, SubscriptionId
+| order by WeakensRecovery desc, TimeGenerated desc

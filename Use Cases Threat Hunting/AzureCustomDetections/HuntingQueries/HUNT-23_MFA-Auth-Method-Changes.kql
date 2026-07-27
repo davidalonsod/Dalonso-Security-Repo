@@ -1,0 +1,36 @@
+// Hunt     : Hunt - MFA / Authentication Method Registration Changes (30d)
+// Tactics  : Persistence, CredentialAccess
+// MITRE    : T1098.005 (Device Registration), T1556.006 (MFA)
+// Purpose  : Surfaces registration/removal of authentication methods (phone, authenticator,
+//            FIDO2, TAP, email). Attackers who phish a session frequently register their OWN
+//            MFA method to establish durable access, or remove the victim's methods. Focus on
+//            events where the initiator differs from the target (admin-on-behalf-of), or a
+//            burst of self-service changes shortly after a risky sign-in.
+//==========================================================================================
+
+let Window = 30d;
+let MethodOps = dynamic([
+    "User registered security info",
+    "User changed default security info",
+    "User deleted security info",
+    "Admin registered security info",
+    "Admin updated security info",
+    "Admin deleted security info",
+    "User registered all required security info",
+    "Register security information",
+    "Reset security information"
+]);
+AuditLogs
+| where TimeGenerated > ago(Window)
+| where LoggedByService in~ ("Authentication Methods", "Self-service Password Management", "Core Directory")
+| where OperationName has_any (MethodOps)
+| extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))
+| extend InitiatorId = tostring(InitiatedBy.user.id)
+| extend InitiatorIP = tostring(InitiatedBy.user.ipAddress)
+| extend TargetUPN = tostring(TargetResources[0].userPrincipalName)
+| extend TargetId = tostring(TargetResources[0].id)
+| extend MethodDetail = tostring(TargetResources[0].modifiedProperties)
+| extend ActorIsNotTarget = isnotempty(InitiatorId) and isnotempty(TargetId) and InitiatorId != TargetId
+| project TimeGenerated, OperationName, Result, Initiator, InitiatorIP, TargetUPN,
+    ActorIsNotTarget, MethodDetail, CorrelationId
+| order by ActorIsNotTarget desc, TimeGenerated desc

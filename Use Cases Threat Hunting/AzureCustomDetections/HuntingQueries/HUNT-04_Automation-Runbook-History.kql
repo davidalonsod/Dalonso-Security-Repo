@@ -1,0 +1,13 @@
+﻿// Hunt     : Hunt - Azure Automation Runbook Create, Modify, Publish History (90d)
+// Tactics  : Execution,Persistence
+// MITRE    : T1059.009
+// Purpose  : Full history of Automation Account object changes. Use to identify newly created runbooks, unexpected content changes, and newly added webhooks (used for C2 callbacks). Correlate Caller with Rule-05 first-time-caller alerts.
+//==========================================================================================
+
+AzureActivity
+| where TimeGenerated > ago(90d)
+| where OperationNameValue has "AUTOMATION"
+| where OperationNameValue has_any ("RUNBOOKS", "WEBHOOKS", "SCHEDULES", "VARIABLES", "MODULES")
+| where ActivityStatusValue =~ "Success"
+| project TimeGenerated, Caller, Operation = OperationNameValue, ResourceName = tostring(split(ResourceId, "/")[-1]), ResourceId, CallerIpAddress, ResourceGroup, SubscriptionId
+| order by TimeGenerated desc

@@ -1,0 +1,28 @@
+﻿// Hunt     : Hunt - Storage Blob High-Volume Read by Single IP (Potential Exfiltration)
+// Tactics  : Exfiltration
+// MITRE    : T1530
+// Purpose  : Identify IPs that performed high-volume blob reads (>500 reads/hr or >1 GB/hr). Correlate with SAS token generation (Rule-04) to confirm exfiltration via ephemeral SAS credentials.
+//==========================================================================================
+
+StorageBlobLogs
+| where TimeGenerated > ago(30d)
+| where OperationName == "GetBlob"
+| where StatusCode == "200"
+| where isnotempty(CallerIpAddress)
+| where CallerIpAddress !startswith "168.63." and CallerIpAddress !startswith "169.254."
+| summarize
+    ReadCount = count(),
+    TotalBytesGB = round(sum(ResponseBodySize) / 1073741824.0, 2),
+    DistinctBlobs = dcount(ObjectKey),
+    AuthTypes = make_set(AuthenticationType, 3),
+    Requesters = make_set(RequesterObjectId, 5),
+    StorageAccounts = make_set(AccountName, 5),
+    EarliestRead = min(TimeGenerated),
+    LatestRead = max(TimeGenerated)
+    by CallerIpAddress, bin(TimeGenerated, 1h)
+// Tuned: raised read-count floor 500 -> 1000/hr (busy app/CDN tiers routinely exceed 500);
+// kept the 1 GB/hr byte floor; added DistinctBlobs >= 200 to catch broad low-byte object
+// enumeration that stays under both volume floors. Surfaces RequesterObjectId + AuthTypes
+// so anonymous/SAS egress can be separated from AAD-authenticated app reads.
+| where ReadCount > 1000 or TotalBytesGB > 1.0 or DistinctBlobs >= 200
+| order by TotalBytesGB desc

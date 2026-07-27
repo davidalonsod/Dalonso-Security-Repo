@@ -1,0 +1,33 @@
+// Hunt     : Hunt - Federation & Domain Trust Changes (Golden SAML / Persistence) (30d)
+// Tactics  : Persistence, PrivilegeEscalation, DefenseEvasion
+// MITRE    : T1484.002 (Domain Trust Modification), T1556
+// Purpose  : Detects changes to Entra ID federation / domain authentication settings. Adding
+//            or modifying a federated domain (or issuer/token-signing config) lets an attacker
+//            forge SAML tokens for ANY user ("Golden SAML" — Midnight Blizzard / NOBELIUM).
+//            These events are rare and almost always high-signal. Review EVERY hit against a
+//            known change ticket. No threshold — this is a review-all timeline.
+//==========================================================================================
+
+let FederationOps = dynamic([
+    "Set federation settings on domain",
+    "Set domain authentication",
+    "Update domain",
+    "Add unverified domain",
+    "Add verified domain",
+    "Verify domain",
+    "Verify email verified domain",
+    "Add partner to cross-tenant access setting",
+    "Update a partner cross-tenant access setting",
+    "Update federation settings"
+]);
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where LoggedByService in~ ("Core Directory", "AAD Cloud Sync", "Authentication Methods")
+| where OperationName in~ (FederationOps)
+| where Result =~ "success"
+| extend Initiator = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))
+| extend InitiatorIP = tostring(InitiatedBy.user.ipAddress)
+| extend TargetDomain = tostring(TargetResources[0].displayName)
+| extend ModifiedProps = tostring(TargetResources[0].modifiedProperties)
+| project TimeGenerated, OperationName, Initiator, InitiatorIP, TargetDomain, ModifiedProps, Result, CorrelationId
+| order by TimeGenerated desc
