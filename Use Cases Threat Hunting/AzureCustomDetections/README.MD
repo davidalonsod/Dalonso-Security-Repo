@@ -1,10 +1,13 @@
 # Azure — Custom Detections Package
 
+Demo - Stop Azure Attacks: Advanced Monitoring with Microsoft Sentinel https://youtu.be/32TfrYzizUY
+
 > **Workspace:** `xxxxx`  
 > **Created:** March 9, 2026  
 > **Status:** Testing-ready (ARM template validated)
 
 Custom analytic rules and hunting queries for Microsoft Sentinel that **do not duplicate any confirmed live built-in detections** in the workspace. All rules are grounded in live table schema discovery, real AzureActivity operation names observed in the environment, and comprehensive false-positive mitigations.
+
 
 
 ## Folder Structure
