@@ -1,5 +1,7 @@
 # AD Security Events — Custom Detections Package
 
+Stop Active Directory Attacks: Advanced Monitoring with Microsoft Sentinel https://youtu.be/zYLU93U22Ew
+
 > **Workspace:** `LAWSentinel`
 > **Created:** March 23, 2026
 > **Primary table:** `SecurityEvent` · Secondary: `SigninLogs`, `AzureActivity`, `IdentityLogonEvents`, `DeviceProcessEvents`, `WindowsEvent`
