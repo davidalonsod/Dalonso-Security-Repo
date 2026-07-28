@@ -17,3 +17,5 @@ Secure and monitor Compromised Service Principals Non-Human Identities (NHI) wit
 Stop Active Directory Attacks: Advanced Monitoring with Microsoft Sentinel https://youtu.be/zYLU93U22Ew
  
 Boost SOC Visibility: Defender for Office Workbook with Sentinel & Advanced Hunting https://youtu.be/zXUjATEWxJs
+
+Stop Azure Attacks: Advanced Monitoring with Microsoft Sentinel  https://youtu.be/32TfrYzizUY
