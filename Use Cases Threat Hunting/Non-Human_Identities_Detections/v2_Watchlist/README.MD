@@ -1,6 +1,8 @@
 # Workload Identities — Custom Detections Package
 
-> **Workspace:** `LAWSentinel`  
+Secure and monitor Compromised Service Principals Non-Human Identities (NHI) with Microsoft Sentinel https://youtu.be/LW-rTQUovHo
+
+> **Workspace:** `xxxx`  
 > **Created:** March 12, 2026  
 > **Updated:** March 13, 2026  
 > **Status:** Production-ready (ARM template validated — 17 analytic rules)
