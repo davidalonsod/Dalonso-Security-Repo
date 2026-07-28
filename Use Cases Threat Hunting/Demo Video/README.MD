@@ -7,3 +7,7 @@ Secure and monitor Compromised Service Principals Non-Human Identities (NHI) wit
 Stop Active Directory Attacks: Advanced Monitoring with Microsoft Sentinel https://youtu.be/zYLU93U22Ew
 
 The Email and Collaboration Security Gap: Threat Hunting with Defender for Office https://youtu.be/1Sj-L_GGEj4
+
+Stop Azure Attacks: Advanced Monitoring with Microsoft Sentinel https://youtu.be/32TfrYzizUY
+
+
