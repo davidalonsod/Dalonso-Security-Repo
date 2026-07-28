@@ -1,5 +1,7 @@
 # Workload Identities — Custom Detections Package
 
+Secure and monitor Compromised Service Principals Non-Human Identities (NHI) with Microsoft Sentinel https://youtu.be/LW-rTQUovHo
+
 > **Workspace:** `******`  
 > **Created:** March 12, 2026  
 > **Updated:** March 13, 2026  
