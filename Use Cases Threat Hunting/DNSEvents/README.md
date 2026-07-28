@@ -15,7 +15,7 @@ Detection and hunting content for **Windows DNS Server** logs ingested via the *
 7. [MITRE ATT&CK Coverage](#mitre-attck-coverage)
 8. [Prerequisites](#prerequisites)
 9. [Deployment](#deployment)
-   
+10. [References](#references)
 
 ---
 
@@ -35,8 +35,8 @@ Log Analytics Workspace
        │
        ▼
 Microsoft Sentinel
-  ├── Analytic Rules  (20 rules)
-  └── Hunting Queries (30 queries)
+  ├── Analytic Rules  (21 rules)
+  └── Hunting Queries (40 queries)
 ```
 
 ---
@@ -333,6 +333,95 @@ Impact              : T1498.002 (DNS amplification)
 
 ## Deployment
 
+### Network Allowlist Watchlist (false-positive suppression)
+
+All 14 `ASimDnsActivityLogs`-based rules call a KQL function
+`ExcludeAllowlistedIPs()` that filters out `SrcIpAddr` values matching the
+`NetworkAllowlist` Sentinel watchlist (sanctioned internal resolvers,
+management subnets, DNS sinkholes). The 3 `SecurityEvent`-only rules
+(ClickFix nslookup, Certutil-after-DNS, DNSAdmins privesc) keep their
+host-centric logic unchanged.
+
+The watchlist + function are deployed automatically by the ARM template.
+For scheduled sync from Entra Named Locations, see
+[`Watchlists/README.md`](Watchlists/README.md).
+
+### New ARM template parameters
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `workspaceName` | (required) | Sentinel workspace name. |
+| `enableAnalyticRules` | `true` | If `false`, all 21 rules deploy in **disabled** state for staged rollout. |
+| `watchlistAlias` | `NetworkAllowlist` | Alias of the trusted-IP exclusion watchlist. |
+| `functionAlias` | `ExcludeAllowlistedIPs_WindowsDNS` | KQL `savedSearches` alias for the filter function. |
+| `watchlistRawContent` | empty (seed RFC1918) | Override CSV content (CRLF-separated; header `IPOrRange,Description,Owner,AddedDate`). Daily sync runbook replaces this with Entra Named Locations. |
+
+### Threshold tuning (May 2026)
+
+Inline thresholds have been raised ~2-3x to reduce production noise.
+Override per-rule via the Sentinel rule editor if needed.
+
+| # | Rule | Threshold | Old → New |
+|---|---|---|---|
+| 01 | DNS TXT Tunneling | `TxtQueryCount` | 100 → **250** |
+| 02 | DNS C2 Beaconing | `QueryCount` | 20 → **50** |
+| 04 | DGA High-Entropy | `DgaLikeDomains` | 10 → **25** |
+| 06 | DNS Amplification | `AmpQueryCount` | 200 → **500** |
+| 07 | DNS Rebinding | `QueryCount` | 5 → **10** |
+| 08 | DNS Data Exfil long labels | `MaxLabelLen` / `EstimatedKB` | 35/50 → **45/100** |
+| 09 | WPAD Auto-Discovery | `UniqueHosts` | 3 → **5** |
+| 10 | DNS Internal Recon Sweep | `UniqueDomains` | 300 → **750** |
+| 11 | Certutil after nslookup | `NslookupCount` | 5 → **10** |
+| 12 | NXDOMAIN flood | `NxdomainCount` | 200 → **500** |
+| 13 | NULL/ANY queries | `NullAnyCount` | 5 → **15** |
+| 14 | MX Record Payload Staging | `MxQueryCount` / `NumericPrefixed` | 10/3 → **25/5** |
+| 15 | Subdomain Enum Burst | `SubdomainCount` | 30 → **75** |
+| 17 | ADIDNS Wildcard | `FlippedDomains` | 5 → **10** |
+
+### Detection logic fixes (Jul 2026)
+
+Beyond threshold tuning, these correctness/false-positive fixes were applied to both the rule YAMLs and `azuredeploy.json`:
+
+| # | Rule | Fix |
+|---|---|---|
+| 03 | ClickFix nslookup | `queryFrequency`/`queryPeriod` aligned to `PT1H` (was 15m/1d → re-alerted ~96×/day on the same event) |
+| 04 | DGA High-Entropy | added `DnsResponseCode == 0` so it scores **resolved** domains only (matches its stated intent; stops overlap with rule 12) |
+| 06 | DNS Amplification | removed `TXT` from the record-type set (common SPF/DKIM traffic → FP; covered by rules 01/13) |
+| 09 | WPAD Abuse | now requires **NOERROR** (an active WPAD responder) instead of firing on every benign `wpad`/`isatap` lookup |
+| 15 | Subdomain Enum | added `NxdomainRate > 40` gate (enumeration produces mostly NXDOMAIN; excludes CDN/analytics fan-out) |
+| 16 | DNSAdmins DLL | restart correlation changed to `leftouter` + null-safe — fires on `dnscmd /serverlevelplugindll` alone (EventID 7036 is not in `SecurityEvent`) |
+
+### New detections (Jul 2026)
+
+| # | Rule | What it catches |
+|---|---|---|
+| 18 | DoH Resolver Bypass | clients resolving public DNS-over-HTTPS endpoints to bypass the corporate resolver/filtering |
+| 19 | Threat-Intel Domain Match | deterministic IOC hit: DNS query to a domain in `ThreatIntelIndicators` |
+| 20 | Dynamic DNS Provider Abuse | DuckDNS/No-IP/ngrok/trycloudflare and similar C2-staging providers |
+| 21 | Suspicious TLD Volume | high volume of unique domains under abuse-heavy TLDs (.zip .mov .top .cfd …) |
+
+Hunting-query fixes: Q04 (invalid entropy function + broken consonant/`dcount` logic), Q13 (rebinding — counted the wrong column, now uses the answer IP), Q26 (meaningless `max(DnsResponseCode)` → `DnsAnswerCount`). New hunts Q36–Q40: DoH endpoints, TI domain match, dynamic-DNS providers, punycode/IDN homoglyphs, and PowerShell `Resolve-DnsName` (ClickFix variant).
+
+### Staged deployment
+
+```powershell
+# Stage 1 - deploy disabled for review
+New-AzResourceGroupDeployment `
+  -ResourceGroupName "your-rg" `
+  -TemplateFile ".\Analytic-Rules\azuredeploy.json" `
+  -workspaceName "your-workspace-name" `
+  -enableAnalyticRules $false
+
+# Stage 2 - enable after watchlist sync + rule review
+New-AzResourceGroupDeployment `
+  -ResourceGroupName "your-rg" `
+  -TemplateFile ".\Analytic-Rules\azuredeploy.json" `
+  -workspaceName "your-workspace-name" `
+  -enableAnalyticRules $true
+```
+
+### Convenience script
+
 ```powershell
 # Deploy all rules and hunting queries
 .\Analytic-Rules\deploy-dns-rules.ps1 `
@@ -350,4 +439,19 @@ New-AzResourceGroupDeployment `
     -workspaceName "your-workspace-name"
 ```
 
+---
 
+## References
+
+| Source | Topic |
+|---|---|
+| Octoberfest7/DNS_Tunneling | MX record tunneling, nslookup payload staging via PowerShell |
+| BleepingComputer — ClickFix DNS | nslookup DNS payload delivery (ModeloRAT, Feb 2026) |
+| GitHub Security Lab — DNS Rebinding | Browser-based SSRF via DNS TTL rebinding attacks |
+| PopLabSec/DNS-Penetration-Testing | Zone transfer, enumeration, DNS attack taxonomy |
+| SANS — DNS Tunneling | Detection methodologies for DNS C2 channels |
+| OilRig / APT34 TTPs | DNS-based C2 and data exfiltration via TXT records |
+| Cobalt Strike DNS beacon | Periodic low-TTL beaconing, MX/TXT staging |
+| Emotet/QakBot DGA | High-entropy domain generation, NXDOMAIN flood |
+| Microsoft ASIM | ASimDnsActivityLogs normalized schema documentation |
+| Azure Monitor DCR | XPath filter syntax for cost-optimized ingestion |
