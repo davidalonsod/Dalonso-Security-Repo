@@ -39,8 +39,6 @@ Microsoft Sentinel
   └── Hunting Queries (40 queries)
 ```
 
----
-
 ## Data Connector — Windows DNS Events via AMA
 
 **Connector name:** `Windows DNS Events via AMA`  
@@ -70,6 +68,72 @@ Set-DnsServerDiagnostics -All $true -LogFilePath "C:\dns.log"
 > **This is the single most important cost-control lever for Windows DNS ingestion.**
 > Raw DNS query logs can generate **hundreds of GB per day** in busy environments.
 > Use Data Collection Rules (DCR) XPath filters to drop noise at the agent level — data that is never sent is never billed.
+
+Step-by-step guide for using data collection filters on the Windows DNS Events via AMA connector to cut ingestion cost. This connector writes to ASimDnsActivityLogs (and DnsAuditEvents), and DNS is one of the highest-volume, noisiest sources — so filtering pays off fast.
+Step 0 — Measure first (know what to cut)
+Before filtering, find your biggest cost drivers so you filter noise, not signal. Run these in Logs:
+
+// Top noisy domains (last 24h)
+ASimDnsActivityLogs
+| where TimeGenerated > ago(24h)
+| summarize Events = count() by DnsQuery
+| top 30 by Events desc
+
+// Volume by query type (PTR/reverse lookups are usually pure noise)
+ASimDnsActivityLogs
+| where TimeGenerated > ago(24h)
+| summarize Events = count() by DnsQueryTypeName
+| order by Events desc
+
+// Estimate ingestion volume (GB) for this table over 30 days
+ASimDnsActivityLogs
+| where TimeGenerated > ago(30d)
+| summarize GB = sum(_BilledSize) / 1024 / 1024 / 1024
+
+Good candidates to exclude: PTR/reverse-lookup queries, successful internal domains (your own AD/corp domains), chatty telemetry domains (e.g., *.microsoft.com, CDN/OS-update domains), and health-probe clients.
+Exclude high-volume benign domains from your Step 0 top-30 list
+
+Step 1 — Open the connector filter UI
+Microsoft Sentinel → Configuration → Data connectors.
+Open Windows DNS Events via AMA → Open connector page (the panel in your screenshot).
+Under Configuration → 2. Define data collection filters to exclude events, click + Add data collection filters.
+
+Step 2 — Add an exclusion filter
+For each filter you add:
+
+Give it a filter name (e.g., Exclude-PTR-Queries).
+Choose the filter type / field to match on (the connector exposes DNS fields such as query type, query name/domain, client IP, event type).
+Enter the value(s) to exclude (this connector's filters are exclusion rules — matching events are dropped before ingestion).
+Click Add.
+Repeat to stack multiple filters. Recommended starter set:
+
+Exclude PTR / reverse lookups (query type = PTR)
+Exclude known-good internal domains (your AD domain suffixes)
+
+Step 3 — Apply
+Click Apply changes. This updates the underlying Data Collection Rule (DCR) for the connector. New agents/events honor it within a few minutes; existing agents pick it up on their next config refresh.
+
+Step 4 — Validate the drop
+After ~30–60 min, confirm volume fell and you didn't lose needed data:
+ASimDnsActivityLogs
+| where TimeGenerated > ago(2h)
+| summarize Events = count() by bin(TimeGenerated, 15m)
+| render timechart
+
+Re-run the "top domains" and "query type" queries — the excluded categories should be gone.
+
+Step 5 — Stack additional cost levers (from the same connector page)
+The Table management section in your screenshot (both tables at Analytics tier, 90-day retention) gives you two more big levers:
+
+Step 6 — (Optional) Go granular with a workspace transformation DCR
+Portal filters are field-level exclusions. For surgical control (e.g., "keep NXDOMAIN and external domains, drop only successful internal lookups"), use an ingestion-time transformation (transformKql) on the DCR:
+source
+| where not(DnsQueryTypeName == "PTR")
+| where not(DnsResponseCodeName == "NOERROR" and DnsQuery endswith ".corp.contoso.com")
+
+This runs before billing, so filtered rows are never charged. You can also use it to project away unused columns to shrink row size.
+
+
 
 ### What is a DCR XPath Filter?
 
