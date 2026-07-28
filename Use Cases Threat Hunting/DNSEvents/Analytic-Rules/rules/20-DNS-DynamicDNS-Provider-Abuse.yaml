@@ -1,0 +1,69 @@
+id: a1b2c3d4-0020-4a5b-8c9d-dns020dyndns
+name: Dynamic DNS / Tunneling Provider Domain Abuse
+description: |
+  Detects internal clients resolving domains hosted on free dynamic-DNS and
+  ephemeral-tunnel providers (DuckDNS, No-IP, FreeDNS/afraid.org, ngrok,
+  trycloudflare, localtunnel, etc.). These services are heavily abused for
+  malware C2, phishing, and data exfiltration because they give attackers a
+  free, quickly-rotatable hostname without domain registration.
+  Legitimate corporate use is rare; where it exists (e.g. a sanctioned ngrok
+  tunnel) allowlist the specific base domain or source host.
+  MITRE T1071.004 (DNS), T1568 (Dynamic Resolution)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: WindowsDnsAma
+    dataTypes:
+      - ASimDnsActivityLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - CommandAndControl
+relevantTechniques:
+  - T1071.004
+  - T1568
+tags:
+  - Dynamic DNS
+  - DuckDNS
+  - No-IP
+  - ngrok
+  - trycloudflare
+  - C2 Staging
+query: |
+  let DynDnsProviders = dynamic([
+      "duckdns.org", "no-ip.org", "no-ip.com", "noip.com", "hopto.org", "zapto.org",
+      "ddns.net", "myftp.biz", "myftp.org", "serveftp.com", "servegame.com", "sytes.net",
+      "ngrok.io", "ngrok-free.app", "ngrok.app", "trycloudflare.com", "loca.lt",
+      "portmap.io", "dnsalias.com", "dyndns.org", "afraid.org", "chickenkiller.com",
+      "mooo.com", "us.to", "3utilities.com", "bounceme.net", "redirectme.net"]);
+  ASimDnsActivityLogs
+  | where TimeGenerated > ago(1h)
+  | extend BaseDomain = strcat(tostring(split(DnsQuery, ".")[-2]), ".", tostring(split(DnsQuery, ".")[-1]))
+  | where BaseDomain in~ (DynDnsProviders) or DnsQuery has_any (DynDnsProviders)
+  | summarize
+      Requests      = count(),
+      UniqueDomains = dcount(DnsQuery),
+      Providers     = make_set(BaseDomain, 10),
+      SampleDomains = make_set(DnsQuery, 15),
+      FirstSeen     = min(TimeGenerated),
+      LastSeen      = max(TimeGenerated)
+    by SrcIpAddr, SrcHostname
+  | where Requests > 5
+entityMappings:
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: SrcHostname
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SrcIpAddr
+alertDetailsOverride:
+  alertDisplayNameFormat: "Dynamic DNS Abuse — {{SrcHostname}} queried {{Requests}} dynamic-DNS domains"
+  alertDescriptionFormat: "Host {{SrcHostname}} ({{SrcIpAddr}}) resolved {{Requests}} queries across {{UniqueDomains}} domains on free dynamic-DNS/tunnel providers ({{Providers}}). Sample: {{SampleDomains}}. These providers are commonly abused for malware C2 and exfiltration."
+customDetails:
+  Requests: Requests
+  Providers: Providers
+  SampleDomains: SampleDomains

@@ -1,0 +1,55 @@
+id: a1b2c3d4-0009-4a5b-8c9d-dns009wpad
+name: WPAD Auto-Discovery DNS Lookup Abuse
+description: |
+  Detects high-volume queries for 'wpad' (Web Proxy Auto-Discovery) from
+  multiple internal clients. WPAD abuses NetBIOS Name Service or DNS to direct
+  proxy configuration requests to an attacker-controlled host.
+  Tools like Responder and Inveigh intercept these broadcasts/queries and
+  respond with a fake WPAD server to capture NTLM credentials or serve
+  malicious PAC files redirecting all HTTP(S) traffic through the attacker.
+  Note: WPAD lookups without a corporate WPAD server indicate vulnerability.
+  MITRE T1557.001 — LLMNR/NBT-NS Poisoning and SMB Relay
+severity: Medium
+requiredDataConnectors:
+  - connectorId: WindowsDnsAma
+    dataTypes:
+      - ASimDnsActivityLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - CredentialAccess
+  - Collection
+relevantTechniques:
+  - T1557.001
+tags:
+  - WPAD
+  - Responder
+  - Inveigh
+  - NTLM relay
+  - NetBIOS
+query: |
+  ASimDnsActivityLogs
+  | where TimeGenerated > ago(1h)
+  | where DnsQuery has "wpad" or DnsQuery has "isatap"
+  | where DnsResponseCodeName =~ "NOERROR" or DnsResponseCode == 0
+  | summarize
+      LookupCount  = count(),
+      UniqueHosts  = dcount(SrcIpAddr),
+      Hosts        = make_set(SrcHostname, 20),
+      ResponseCode = make_set(DnsResponseCodeName)
+    by DnsQuery
+  | where UniqueHosts > 5
+entityMappings:
+  - entityType: DNS
+    fieldMappings:
+      - identifier: DomainName
+        columnName: DnsQuery
+alertDetailsOverride:
+  alertDisplayNameFormat: "WPAD Lookup Abuse — {{UniqueHosts}} hosts querying {{DnsQuery}}"
+  alertDescriptionFormat: "{{UniqueHosts}} internal hosts are querying '{{DnsQuery}}'. If no corporate WPAD server exists, clients are vulnerable to Responder/Inveigh NTLM credential capture. Hosts: {{Hosts}}"
+customDetails:
+  UniqueHosts: UniqueHosts
+  ResponseCodes: ResponseCode

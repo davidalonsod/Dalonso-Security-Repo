@@ -1,0 +1,64 @@
+id: a1b2c3d4-0021-4a5b-8c9d-dns021susptld
+name: High-Volume Queries to Abused / Suspicious TLDs
+description: |
+  Detects a client resolving many distinct domains under top-level domains
+  with a disproportionately high abuse rate (e.g. .zip, .mov, .top, .xyz, .cfd,
+  .sbs, .lol, .quest, and free ccTLDs .tk/.ml/.ga/.cf/.gq). While each of these
+  TLDs has some legitimate use, a single host resolving 10+ unique domains under
+  them in an hour is a strong signal of DGA, malware C2 rotation, or phishing
+  redirect chains. Tune the SuspiciousTlds list and threshold to your baseline.
+  MITRE T1071.004 (DNS), T1568.002 (Domain Generation Algorithms)
+severity: Medium
+requiredDataConnectors:
+  - connectorId: WindowsDnsAma
+    dataTypes:
+      - ASimDnsActivityLogs
+queryFrequency: 1h
+queryPeriod: 1h
+triggerOperator: gt
+triggerThreshold: 0
+status: Available
+tactics:
+  - CommandAndControl
+relevantTechniques:
+  - T1071.004
+  - T1568.002
+tags:
+  - Suspicious TLD
+  - Abused TLD
+  - Phishing
+  - DGA
+query: |
+  let SuspiciousTlds = dynamic([
+      "zip", "mov", "xyz", "top", "gq", "tk", "ml", "cf", "ga", "work", "click",
+      "country", "kim", "science", "party", "review", "loan", "download", "stream",
+      "racing", "fit", "cam", "rest", "mom", "cfd", "sbs", "lol", "quest", "cyou", "buzz"]);
+  ASimDnsActivityLogs
+  | where TimeGenerated > ago(1h)
+  | extend Tld = tostring(split(tolower(DnsQuery), ".")[-1])
+  | where Tld in (SuspiciousTlds)
+  | summarize
+      Requests      = count(),
+      UniqueDomains = dcount(DnsQuery),
+      Tlds          = make_set(Tld, 15),
+      SampleDomains = make_set(DnsQuery, 15),
+      FirstSeen     = min(TimeGenerated),
+      LastSeen      = max(TimeGenerated)
+    by SrcIpAddr, SrcHostname
+  | where UniqueDomains > 10
+entityMappings:
+  - entityType: Host
+    fieldMappings:
+      - identifier: HostName
+        columnName: SrcHostname
+  - entityType: IP
+    fieldMappings:
+      - identifier: Address
+        columnName: SrcIpAddr
+alertDetailsOverride:
+  alertDisplayNameFormat: "Suspicious TLD Volume — {{SrcHostname}} queried {{UniqueDomains}} domains on abused TLDs"
+  alertDescriptionFormat: "Host {{SrcHostname}} ({{SrcIpAddr}}) resolved {{UniqueDomains}} unique domains ({{Requests}} queries) under abused TLDs ({{Tlds}}) in 1 hour. Sample: {{SampleDomains}}. High volume here suggests DGA, C2 rotation, or phishing."
+customDetails:
+  UniqueDomains: UniqueDomains
+  Tlds: Tlds
+  SampleDomains: SampleDomains
