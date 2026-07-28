@@ -1,5 +1,7 @@
 # Microsoft Defender for Office 365 — Threat Hunting Pack
 
+The Email and Collaboration Security Gap: Threat Hunting with Defender for Office https://youtu.be/1Sj-L_GGEj4
+
 **Advanced Hunting** queries for Microsoft Defender for Office 365 (MDO) and
 the wider Microsoft 365 collaboration surface (Exchange Online, Microsoft Teams, SharePoint,
 OneDrive). Each use case is a standalone hunting query (`queries/MDO-XX-*.yaml`) in the
