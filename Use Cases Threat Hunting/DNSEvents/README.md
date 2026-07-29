@@ -2,7 +2,7 @@
 
 Detection and hunting content for **Windows DNS Server** logs ingested via the **Azure Monitor Agent (AMA)** and the **Windows DNS Events via AMA** data connector.
 
----
+Demo Stop DNS Attacks:  Hunting Threats, Advanced Monitoring and Filtering Logs https://youtu.be/XNf1iu3W-C8
 
 ## Table of Contents
 
