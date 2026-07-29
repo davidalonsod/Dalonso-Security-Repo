@@ -19,3 +19,5 @@ Stop Active Directory Attacks: Advanced Monitoring with Microsoft Sentinel https
 Boost SOC Visibility: Defender for Office Workbook with Sentinel & Advanced Hunting https://youtu.be/zXUjATEWxJs
 
 Stop Azure Attacks: Advanced Monitoring with Microsoft Sentinel  https://youtu.be/32TfrYzizUY
+
+Stop DNS Attacks:  Hunting Threats, Advanced Monitoring and Filtering Logs https://youtu.be/XNf1iu3W-C8
