@@ -10,4 +10,6 @@ The Email and Collaboration Security Gap: Threat Hunting with Defender for Offic
 
 Stop Azure Attacks: Advanced Monitoring with Microsoft Sentinel https://youtu.be/32TfrYzizUY
 
+Stop DNS Attacks:  Hunting Threats, Advanced Monitoring and Filtering Logs https://youtu.be/XNf1iu3W-C8
+
 
