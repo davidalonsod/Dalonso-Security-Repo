@@ -2,6 +2,9 @@
 
 Monitoring AI Agents https://youtu.be/5Axu9dJ2lfw
 
+Microsoft Defender Now Protects AI Agents in Real Time | Copilot Studio Demo https://youtu.be/HasTeaGYvFw
+
+
 Microsoft Sentinel detection content for monitoring **AI agents** across
 the three runtimes most organisations are putting into production today:
 
