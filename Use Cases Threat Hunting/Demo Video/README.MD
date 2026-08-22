@@ -14,4 +14,8 @@ Stop DNS Attacks:  Hunting Threats, Advanced Monitoring and Filtering Logs https
 
 Real-Time Protection for AI Agents: Microsoft Defender & Copilot Studio https://youtu.be/HasTeaGYvFw
 
+Master ADFS Security: Advanced Monitoring and Threat Hunting with Microsoft Sentinel
+https://youtu.be/Ea6_optTTj4
+
+
 
