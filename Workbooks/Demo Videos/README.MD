@@ -25,3 +25,5 @@ Stop DNS Attacks:  Hunting Threats, Advanced Monitoring and Filtering Logs https
 Master ADFS Security: Advanced Monitoring and Threat Hunting with Microsoft Sentinel
 https://youtu.be/Ea6_optTTj4
 
+Are Your Firewall Logs Too Noisy? Stop Attacks with Sentinel https://youtu.be/_q_tG7GscZA
+
