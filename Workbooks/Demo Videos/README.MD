@@ -20,6 +20,8 @@ Boost SOC Visibility: Defender for Office Workbook with Sentinel & Advanced Hunt
 
 Stop Azure Attacks: Advanced Monitoring with Microsoft Sentinel  https://youtu.be/32TfrYzizUY
 
+Is NTLM Still Running in Your Network? Here’s How to Find It https://youtu.be/32miUuQ88uE
+
 Stop DNS Attacks:  Hunting Threats, Advanced Monitoring and Filtering Logs https://youtu.be/XNf1iu3W-C8
 
 Master ADFS Security: Advanced Monitoring and Threat Hunting with Microsoft Sentinel
