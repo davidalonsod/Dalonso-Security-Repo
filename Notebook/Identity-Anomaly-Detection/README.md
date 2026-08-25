@@ -1,6 +1,8 @@
 # 🛡️ Identity Anomaly Detection — UEBA Scoring Notebook
 
-> Unsupervised, explainable **User & Entity Behavior Analytics (UEBA)** for Microsoft Sentinel — a lake-first batch scoring engine that turns raw `SigninLogs` into a ranked, analyst-ready risk queue. 
+> Unsupervised, explainable **User & Entity Behavior Analytics (UEBA)** for Microsoft Sentinel — a lake-first batch scoring engine that turns raw `SigninLogs` into a ranked, analyst-ready risk queue.
+>
+> Find Hidden Identity Risks with Sentinel Anomaly Analysis https://youtu.be/UO6LzDvTNXw
 
 
 ## ✨ Why this exists
