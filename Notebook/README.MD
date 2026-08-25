@@ -4,7 +4,7 @@ A comprehensive Jupyter Notebook that queries the **Microsoft Sentinel Data Lake
 
 **Designed for:** SOC analysts · Threat hunters · CISO-level reporting
 
----
+Are You Missing Old Threats? How to do Retrohunting with Sentinel Jupiter Notebook https://youtu.be/ziOzuF9SOpE
 
 ## 📋 Table of Contents
 
