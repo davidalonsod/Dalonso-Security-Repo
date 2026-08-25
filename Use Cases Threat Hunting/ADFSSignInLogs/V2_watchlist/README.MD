@@ -5,7 +5,7 @@ KQL threat hunting queries for Microsoft Sentinel targeting **Active Directory F
 > This is a **hunting-only** pack. Queries are designed to be run interactively in  
 > **Microsoft Sentinel → Logs** or the **Hunting** blade.
 
----
+Master ADFS Security: Advanced Monitoring and Threat Hunting with Microsoft Sentinel https://youtu.be/Ea6_optTTj4
 
 ## Table: ADFSSignInLogs
 
