@@ -1,0 +1,3055 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# 🤖 Monitoring AI Agents — Threat Hunting & Telemetry (Microsoft Sentinel)\r\n\r\nUnified visibility over your **agentic AI estate** — Microsoft 365 Copilot, Copilot Studio agents, Azure AI Foundry agents, and the OpenAI connector — from one workbook. Each tab reads the *real runtime telemetry* those platforms export to the Sentinel workspace and surfaces the same signals the detection packs alert on.\r\n\r\n## What this workbook covers (by tab)\r\n| Tab | Source | Tables & keys |\r\n|---|---|---|\r\n| 📊 **Overview** | All sources | Cross-source volume, active-source status, activity trend |\r\n| 🟦 **M365 Copilot** | Microsoft Copilot connector | `CopilotActivity` · `RecordType`, `LLMEventData` (Messages[].JailbreakDetected, AccessedResources[].XPIADetected, RagSources) |\r\n| 🟨 **Copilot Studio** | Agent App Insights | `AppEvents` (BotMessageReceived/Send, `Properties.text/conversationId/channelId`) + `AppDependencies` (DependencyType=Connector, `Target`, `Success`, `DurationMs`) |\r\n| 🟪 **Foundry Agents** | Foundry → App Insights | `AppDependencies` spans · `Properties['gen_ai.*']` (agent.name, conversation.id, tool.name/type, usage.*, request.model) + `microsoft.foundry.content_filter.results` |\r\n| 🟩 **OpenAI Connector** | OpenAI CCF | `ASimAgentEventLogs` / `OpenAIChatCompletions` (ModelName, InputTokensUsed, OutputTokensUsed, ToolName, AdditionalFields.input_user) + `OpenAIAuditLogs` |\r\n| 🔬 **Advanced Hunting** | Defender XDR | `BehaviorInfo` (Prompt Shield / AI-agent behaviors), `BehaviorEntities`, `AgentsInfo` (agent inventory, MCP, model, channels) — runnable directly in Advanced hunting |\r\n| 🗄️ **Data Lake** | Agent Observability (lake) | `UnifiedAgentObservability` (AISpanOutput spans, Src/Target agents), `EntraAgentIdentities` / `Blueprints` / `BlueprintPrincipals` / `AgentUsers` — usage-based billing |\r\n\r\n## Persona pages (aggregate across all sources)\r\n| Tab | Purpose |\r\n|---|---|\r\n| 🧭 **Executive Overview** | 15 unified KPIs + AI Risk Score + requests by platform / business unit + top identities |\r\n| 📒 **Agent Inventory** | every agent (type, auth, knowledge, tools, MCP, owners) + ownerless / inactive / growth |\r\n| 📈 **Usage Analytics** | requests by day / model / user / department + averages (tokens, latency, cost) |\r\n| ⏱️ **Activity Timeline** | one chronological cross-source event feed |\r\n| 🚨 **Security Monitoring** | detection categories + alerts + severity + MITRE |\r\n| 🛡️ **Content Safety** | harm categories, jailbreak / Prompt Shield, trend, worst agents / models |\r\n| 🧠 **Model Observability** | per-model tokens / latency / cost / failures |\r\n| ⚙️ **Agent Operations** | failures, result codes, success %, exceptions |\r\n| 📋 **Governance** | ownerless / weak-auth / external-data / shadow-AI |\r\n| 🔎 **Investigation** | entity-pivot timeline + related alerts + sign-ins |\r\n| 🎯 **AI Risk Score** | weighted composite 0-100 + component sub-scores |\r\n\r\n## Persona pages (aggregate across all sources)\r\n| Tab | Purpose |\r\n|---|---|\r\n| 🧭 **Executive Overview** | 15 unified KPIs + AI Risk Score + requests by platform / business unit + top identities |\r\n| 📒 **Agent Inventory** | every agent (type, auth, knowledge, tools, MCP, owners) + ownerless / inactive / growth |\r\n| 📈 **Usage Analytics** | requests by day / model / user / department + averages (tokens, latency, cost) |\r\n| ⏱️ **Activity Timeline** | one chronological cross-source event feed |\r\n| 🚨 **Security Monitoring** | detection categories + alerts + severity + MITRE |\r\n| 🛡️ **Content Safety** | harm categories, jailbreak / Prompt Shield, trend, worst agents / models |\r\n| 🧠 **Model Observability** | per-model tokens / latency / cost / failures |\r\n| ⚙️ **Agent Operations** | failures, result codes, success %, exceptions |\r\n| 📋 **Governance** | ownerless / weak-auth / external-data / shadow-AI |\r\n| 🔎 **Investigation** | entity-pivot timeline + related alerts + sign-ins |\r\n| 🎯 **AI Risk Score** | weighted composite 0-100 + component sub-scores |\r\n| 📡 **Telemetry Health** | All sources | Per-table volume/cost, `AppDependencies` gen_ai-vs-other split, content-recording coverage, `CopilotActivity` RecordType tiering |\r\n| 🛡️ **Detections & Coverage** | All sources | Detection-pack reference + firing `SecurityAlert` / `SecurityIncident` |\r\n\r\n## Filters\r\n**Workspace** (portable) · **Time range** (applies to every tile) · **Agent / bot / model / actor contains** (free-text filter on the per-source grids).\r\n\r\n## Prerequisites (per source — tiles stay empty until met)\r\n- **M365 Copilot** → Microsoft Copilot data connector populating `CopilotActivity`; set the table plan to **Analytics** for rules.\r\n- **Copilot Studio** → agent's **workspace-based** Application Insights pointed at this workspace (Settings → Advanced → Application Insights); enable **Log sensitive properties** for the `Properties.text` (content) tiles.\r\n- **Foundry** → project connected to workspace-based App Insights so spans land in `AppDependencies`; set `AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED=true` for the text-content tiles (not retroactive).\r\n- **OpenAI** → OpenAI codeless connector + parsers so `ASimAgentEventLogs` / `OpenAIAuditLogs` resolve; callers should set the `user` request param for per-user tiles.\r\n\r\nEvery query uses `union isfuzzy=true`, so a tab for a source you haven't onboarded renders empty instead of erroring."
+      },
+      "name": "title"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "p-ws",
+            "version": "KqlParameterItem/1.0",
+            "name": "Workspace",
+            "label": "Workspace",
+            "type": 5,
+            "isRequired": true,
+            "multiSelect": false,
+            "quote": "",
+            "delimiter": ",",
+            "typeSettings": {
+              "resourceTypeFilter": {
+                "microsoft.operationalinsights/workspaces": true
+              },
+              "additionalResourceOptions": [],
+              "showDefault": false
+            },
+            "timeContext": {
+              "durationMs": 86400000
+            },
+            "defaultValue": "value::1"
+          },
+          {
+            "id": "p-timerange",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 172800000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 1209600000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            },
+            "value": {
+              "durationMs": 604800000
+            }
+          },
+          {
+            "id": "p-agentsearch",
+            "version": "KqlParameterItem/1.0",
+            "name": "AgentSearch",
+            "label": "Agent / bot / model / actor contains",
+            "description": "Free-text filter applied to the per-source grids (agent name, bot UserId, model, actor). Empty = show all.",
+            "type": 1,
+            "isRequired": false,
+            "value": ""
+          },
+          {
+            "id": "p-dept",
+            "version": "KqlParameterItem/1.0",
+            "name": "DepartmentSearch",
+            "label": "Department contains",
+            "description": "Filters usage / business-unit tiles by resolved department (IdentityInfo join on actor UPN).",
+            "type": 1,
+            "isRequired": false,
+            "value": ""
+          },
+          {
+            "id": "p-pin",
+            "version": "KqlParameterItem/1.0",
+            "name": "PriceInput",
+            "label": "Price / 1K input tokens (USD)",
+            "description": "Used for token cost estimation tiles.",
+            "type": 1,
+            "isRequired": true,
+            "value": "0.005"
+          },
+          {
+            "id": "p-pout",
+            "version": "KqlParameterItem/1.0",
+            "name": "PriceOutput",
+            "label": "Price / 1K output tokens (USD)",
+            "description": "Used for token cost estimation tiles.",
+            "type": 1,
+            "isRequired": true,
+            "value": "0.015"
+          },
+          {
+            "id": "p-tab",
+            "version": "KqlParameterItem/1.0",
+            "name": "selectedTab",
+            "label": "selectedTab",
+            "type": 1,
+            "isRequired": false,
+            "value": "exec",
+            "isHiddenWhenLocked": true
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "Pick a **Workspace** and **Time range** above, then use the tabs. Type in **Agent / bot / model / actor contains** to focus the grids on one agent. Content-based tiles (prompt/response text) require the per-source content-recording setting noted in the Prerequisites above."
+      },
+      "name": "FiltersHelp"
+    },
+    {
+      "type": 11,
+      "content": {
+        "version": "LinkItem/1.0",
+        "style": "tabs",
+        "links": [
+          {
+            "id": "t-exec",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🧭 Executive Overview",
+            "subTarget": "exec",
+            "style": "link"
+          },
+          {
+            "id": "t-cp",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🟦 M365 Copilot",
+            "subTarget": "copilot",
+            "style": "link"
+          },
+          {
+            "id": "t-st",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🟨 Copilot Studio",
+            "subTarget": "studio",
+            "style": "link"
+          },
+          {
+            "id": "t-fo",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🟪 Foundry Agents",
+            "subTarget": "foundry",
+            "style": "link"
+          },
+          {
+            "id": "t-oa",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🟩 OpenAI Connector",
+            "subTarget": "openai",
+            "style": "link"
+          },
+          {
+            "id": "t-ah",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🔬 Advanced Hunting",
+            "subTarget": "advhunt",
+            "style": "link"
+          },
+          {
+            "id": "t-dl",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🗄️ Data Lake",
+            "subTarget": "datalake",
+            "style": "link"
+          },
+          {
+            "id": "t-tel",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "📡 Telemetry Health",
+            "subTarget": "telemetry",
+            "style": "link"
+          },
+          {
+            "id": "t-det",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🛡️ Detections & Coverage",
+            "subTarget": "detections",
+            "style": "link"
+          },
+          {
+            "id": "t-use",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "📈 Usage Analytics",
+            "subTarget": "usage",
+            "style": "link"
+          },
+          {
+            "id": "t-tl",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "⏱️ Activity Timeline",
+            "subTarget": "timeline",
+            "style": "link"
+          },
+          {
+            "id": "t-soc",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🚨 Security Monitoring",
+            "subTarget": "soc",
+            "style": "link"
+          },
+          {
+            "id": "t-cs",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🛡️ Content Safety",
+            "subTarget": "safety",
+            "style": "link"
+          },
+          {
+            "id": "t-mo",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🧠 Model Observability",
+            "subTarget": "models",
+            "style": "link"
+          },
+          {
+            "id": "t-ops",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "⚙️ Agent Operations",
+            "subTarget": "ops",
+            "style": "link"
+          },
+          {
+            "id": "t-gov",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "📋 Governance",
+            "subTarget": "gov",
+            "style": "link"
+          },
+          {
+            "id": "t-invx",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🔎 Investigation",
+            "subTarget": "invest",
+            "style": "link"
+          },
+          {
+            "id": "t-risk",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🎯 AI Risk Score",
+            "subTarget": "risk",
+            "style": "link"
+          }
+        ]
+      },
+      "name": "tabs"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "copilot"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🟦 Microsoft 365 Copilot — CopilotActivity\n\nReads the **CopilotActivity** table (Microsoft Copilot connector). LLMEventData carries prompts, responses, accessed resources, RAG sources, and per-message jailbreak / XPIA flags.",
+              "style": "info"
+            },
+            "name": "cp-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | summarize Value = count() | extend Metric = 'Interactions', Order = 1),\r\n(CopilotActivity | summarize Value = dcount(AgentId) | extend Metric = 'Distinct agents', Order = 2),\r\n(CopilotActivity | summarize Value = dcount(ActorName) | extend Metric = 'Distinct actors', Order = 3),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | mv-expand m = LLMEventData.Messages | where tobool(m.JailbreakDetected) == true | summarize Value = count() | extend Metric = 'Jailbreak-flagged', Order = 4),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | mv-expand r = LLMEventData.AccessedResources | where tobool(r.XPIADetected) == true | summarize Value = count() | extend Metric = 'XPIA (indirect inj.)', Order = 5),\r\n(CopilotActivity | where RecordType != 'CopilotInteraction' | summarize Value = count() | extend Metric = 'Plugin/config events', Order = 6)\r\n| project Order, Metric, Value\r\n| sort by Order asc",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "M365 Copilot metrics",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "cp-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "CopilotActivity\r\n| summarize Events = count() by bin(TimeGenerated, 1h), RecordType",
+              "size": 0,
+              "visualization": "timechart",
+              "title": "Interactions vs config events over time (RecordType)",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "cp-time"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "CopilotActivity\r\n| where RecordType == 'CopilotInteraction'\r\n| where '{AgentSearch}' == '' or AgentName has '{AgentSearch}' or ActorName has '{AgentSearch}'\r\n| summarize Interactions = count(), Actors = dcount(ActorName), LastSeen = max(TimeGenerated) by AgentName, AgentId\r\n| top 25 by Interactions desc",
+              "size": 0,
+              "title": "Top agents by interactions",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Interactions",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "cp-agents"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🚨 Jailbreak & indirect prompt injection (XPIA)"
+            },
+            "name": "cp-h2"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "CopilotActivity\r\n| where RecordType == 'CopilotInteraction'\r\n| mv-expand m = LLMEventData.Messages\r\n| where tobool(m.JailbreakDetected) == true\r\n| project TimeGenerated, ThreatLevel = '🔴 Jailbreak', AgentName, ActorName, ConversationId = tostring(LLMEventData.ConversationId), MessageId = tostring(m.Id)\r\n| order by TimeGenerated desc\r\n| take 100",
+              "size": 0,
+              "title": "Jailbreak-flagged messages",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "ThreatLevel",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "cp-jb"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "CopilotActivity\r\n| where RecordType == 'CopilotInteraction'\r\n| mv-expand r = LLMEventData.AccessedResources\r\n| where tobool(r.XPIADetected) == true\r\n| project TimeGenerated, ThreatLevel = '🔴 XPIA', AgentName, ActorName, SiteUrl = tostring(r.SiteUrl), Action = tostring(r.Action), Type = tostring(r.Type)\r\n| order by TimeGenerated desc\r\n| take 100",
+              "size": 0,
+              "title": "XPIA — indirect injection on accessed resources",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "ThreatLevel",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "cp-xpia"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🔌 Plugins / config & grounding sources"
+            },
+            "name": "cp-h3"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "CopilotActivity\r\n| where RecordType != 'CopilotInteraction'\r\n| summarize Events = count(), Agents = make_set(AgentName, 5), LastSeen = max(TimeGenerated) by RecordType, ActorName\r\n| order by Events desc",
+              "size": 0,
+              "title": "Plugin / prompt-book / settings events (non-interaction RecordTypes)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Events",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "orange"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "cp-config"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "CopilotActivity\r\n| where RecordType == 'CopilotInteraction'\r\n| mv-expand r = LLMEventData.AccessedResources\r\n| extend SiteUrl = tostring(r.SiteUrl)\r\n| where isnotempty(SiteUrl)\r\n| summarize Accesses = count(), Agents = dcount(AgentName), Actors = dcount(ActorName) by SiteUrl\r\n| top 25 by Accesses desc",
+              "size": 0,
+              "title": "Top accessed resources / RAG grounding sites",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Accesses",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "cp-rag"
+          }
+        ]
+      },
+      "name": "group-copilot"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "studio"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🟨 Copilot Studio — AppEvents + AppDependencies\n\n**AppEvents** carries bot turns (BotMessageReceived / BotMessageSend; UserId = pva-studio<botid>); **AppDependencies** carries connector calls (AppRoleName == 'Microsoft Copilot Studio'). Message **text** tiles need **Log sensitive properties** enabled on the agent.",
+              "style": "info"
+            },
+            "name": "st-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true\r\n(AppEvents | where Name == 'BotMessageReceived' | summarize Value = count() | extend Metric = 'User messages', Order = 1),\r\n(AppEvents | where Name == 'BotMessageSend' | summarize Value = count() | extend Metric = 'Bot responses', Order = 2),\r\n(AppEvents | where Name startswith 'BotMessage' | summarize Value = dcount(tostring(Properties['conversationId'])) | extend Metric = 'Conversations', Order = 3),\r\n(AppEvents | where Name startswith 'BotMessage' | summarize Value = dcount(UserId) | extend Metric = 'Distinct bots', Order = 4),\r\n(AppEvents | where Name startswith 'BotMessage' | summarize Value = dcount(tostring(Properties['channelId'])) | extend Metric = 'Channels', Order = 5),\r\n(AppDependencies | where AppRoleName == 'Microsoft Copilot Studio' | summarize Value = count() | extend Metric = 'Connector calls', Order = 6),\r\n(AppDependencies | where AppRoleName == 'Microsoft Copilot Studio' and Success == false | summarize Value = count() | extend Metric = 'Connector failures', Order = 7)\r\n| project Order, Metric, Value\r\n| sort by Order asc",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "Copilot Studio metrics",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "st-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppEvents\r\n| where Name startswith 'BotMessage'\r\n| summarize Events = count() by bin(TimeGenerated, 1h), Name",
+              "size": 0,
+              "visualization": "timechart",
+              "title": "Bot turns over time (received vs sent)",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "st-time"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppEvents\r\n| where Name startswith 'BotMessage'\r\n| where '{AgentSearch}' == '' or UserId has '{AgentSearch}'\r\n| summarize Messages = count(), Conversations = dcount(tostring(Properties['conversationId'])), Channels = dcount(tostring(Properties['channelId'])), LastSeen = max(TimeGenerated) by BotId = UserId\r\n| top 25 by Messages desc",
+              "size": 0,
+              "title": "Top bots by message volume",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Messages",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "st-bots"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppEvents\r\n| where Name startswith 'BotMessage'\r\n| extend Channel = tostring(Properties['channelId'])\r\n| summarize Messages = count(), Bots = dcount(UserId) by Channel\r\n| top 20 by Messages desc",
+              "size": 1,
+              "visualization": "piechart",
+              "title": "Channel distribution",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "st-channels"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🔌 Connector calls & error storms"
+            },
+            "name": "st-h2"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| where AppRoleName == 'Microsoft Copilot Studio'\r\n| extend TargetPrefix = tolower(tostring(split(Target, '/')[0]))\r\n| summarize Calls = count(), Failures = countif(Success == false), AvgMs = round(avg(DurationMs), 0), LastSeen = max(TimeGenerated) by ConnectorName = Name, TargetPrefix\r\n| extend FailPct = round(100.0 * Failures / Calls, 1)\r\n| top 25 by Calls desc",
+              "size": 0,
+              "title": "Connector targets — volume, failure %, latency",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Calls",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  },
+                  {
+                    "columnMatch": "FailPct",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "st-conn"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| where AppRoleName == 'Microsoft Copilot Studio' and Success == false\r\n| extend Conversation = tostring(Properties['conversationId'])\r\n| summarize Failures = count(), Connectors = make_set(Name, 10), LastSeen = max(TimeGenerated) by Conversation\r\n| where Failures >= 10\r\n| order by Failures desc",
+              "size": 0,
+              "title": "Connector error storm (>=10 failures per conversation)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Failures",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "st-err"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🚨 Prompt injection & sensitive content (requires text logging)"
+            },
+            "name": "st-h3"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppEvents\r\n| where Name == 'BotMessageReceived'\r\n| extend msg = tostring(Properties['text'])\r\n| where isnotempty(msg)\r\n| where msg matches regex @'(?i)(ignore (all|previous|above)|disregard .*instruction|system prompt|developer mode|jailbreak|do anything now|reveal your (instructions|prompt))'\r\n| project TimeGenerated, ThreatLevel = '🟠 Injection marker', BotId = UserId, Channel = tostring(Properties['channelId']), Conversation = tostring(Properties['conversationId']), Snippet = substring(msg, 0, 200)\r\n| order by TimeGenerated desc\r\n| take 100",
+              "size": 0,
+              "title": "Prompt-injection markers in user messages",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "ThreatLevel",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "st-inj"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppEvents\r\n| where Name == 'BotMessageSend'\r\n| extend msg = tostring(Properties['text'])\r\n| where isnotempty(msg)\r\n| where msg matches regex @'(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})'\r\n| project TimeGenerated, ThreatLevel = '🔴 Secret in response', BotId = UserId, Conversation = tostring(Properties['conversationId']), Snippet = substring(msg, 0, 200)\r\n| order by TimeGenerated desc\r\n| take 100",
+              "size": 0,
+              "title": "Secrets in bot responses",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "ThreatLevel",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "st-sens"
+          }
+        ]
+      },
+      "name": "group-studio"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "foundry"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🟪 Azure AI Foundry Agents — AppDependencies (gen_ai.*)\n\nReads Foundry OpenTelemetry spans in **AppDependencies** where Properties['gen_ai.*'] is present. Text-content tiles require AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED=true.",
+              "style": "info"
+            },
+            "name": "fo-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | summarize Value = count() | extend Metric = 'Agent spans', Order = 1),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | summarize Value = dcount(tostring(Properties['gen_ai.agent.name'])) | extend Metric = 'Distinct agents', Order = 2),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.conversation.id'])) | summarize Value = dcount(tostring(Properties['gen_ai.conversation.id'])) | extend Metric = 'Conversations', Order = 3),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.tool.name'])) | summarize Value = count() | extend Metric = 'Tool calls', Order = 4),\r\n(AppDependencies | summarize Value = sum(tolong(Properties['gen_ai.usage.input_tokens'])) | extend Metric = 'Input tokens', Order = 5),\r\n(AppDependencies | summarize Value = sum(tolong(Properties['gen_ai.usage.output_tokens'])) | extend Metric = 'Output tokens', Order = 6),\r\n(AppDependencies | where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results'])) | summarize Value = count() | extend Metric = 'Content-filter hits', Order = 7)\r\n| project Order, Metric, Value\r\n| sort by Order asc",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "Foundry agent metrics",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "fo-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| where isnotempty(tostring(Properties['gen_ai.agent.name']))\r\n| summarize Spans = count() by bin(TimeGenerated, 1h)",
+              "size": 0,
+              "visualization": "timechart",
+              "title": "Agent spans over time",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "fo-time"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| where isnotempty(tostring(Properties['gen_ai.agent.name']))\r\n| extend Agent = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model'])\r\n| where '{AgentSearch}' == '' or Agent has '{AgentSearch}' or Model has '{AgentSearch}'\r\n| summarize Spans = count(), Conversations = dcount(tostring(Properties['gen_ai.conversation.id'])), InputTokens = sum(tolong(Properties['gen_ai.usage.input_tokens'])), OutputTokens = sum(tolong(Properties['gen_ai.usage.output_tokens'])), LastSeen = max(TimeGenerated) by Agent\r\n| top 25 by Spans desc",
+              "size": 0,
+              "title": "Top agents — spans, conversations, tokens",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Spans",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  },
+                  {
+                    "columnMatch": "InputTokens",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "purple"
+                    }
+                  },
+                  {
+                    "columnMatch": "OutputTokens",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "purple"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "fo-agents"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🛠️ Tool usage & token cost"
+            },
+            "name": "fo-h2"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| where isnotempty(tostring(Properties['gen_ai.tool.name']))\r\n| extend Tool = tostring(Properties['gen_ai.tool.name']), ToolType = tostring(Properties['gen_ai.tool.type']), Agent = tostring(Properties['gen_ai.agent.name'])\r\n| summarize Calls = count(), Agents = dcount(Agent), Conversations = dcount(tostring(Properties['gen_ai.conversation.id'])) by Tool, ToolType\r\n| top 25 by Calls desc",
+              "size": 0,
+              "title": "Tool usage (gen_ai.tool.name / type)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Calls",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "fo-tools"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| where isnotempty(tostring(Properties['gen_ai.agent.name']))\r\n| extend Model = tostring(Properties['gen_ai.request.model'])\r\n| summarize InputTokens = sum(tolong(Properties['gen_ai.usage.input_tokens'])), OutputTokens = sum(tolong(Properties['gen_ai.usage.output_tokens'])) by bin(TimeGenerated, 1h), Model",
+              "size": 0,
+              "visualization": "barchart",
+              "title": "Token usage over time by model (denial-of-wallet)",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "fo-tokens"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🚨 Guardrail verdicts & prompt injection"
+            },
+            "name": "fo-h3"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results']))\r\n| extend cf = tostring(Properties['microsoft.foundry.content_filter.results'])\r\n| extend Jailbreak = cf has 'jailbreak', PromptShield = cf has 'prompt_shield', Indirect = cf has 'indirect_attack', Blocklist = cf has 'custom_blocklists'\r\n| extend Verdict = case(Jailbreak, '🔴 Jailbreak', Indirect, '🟠 Indirect injection', PromptShield, '🟠 Prompt shield', Blocklist, '🟡 Blocklist', '🟡 Content-safety')\r\n| project TimeGenerated, Verdict, Agent = tostring(Properties['gen_ai.agent.name']), Conversation = tostring(Properties['gen_ai.conversation.id'])\r\n| order by TimeGenerated desc\r\n| take 100",
+              "size": 0,
+              "title": "Content-filter / Prompt Shield verdicts",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Verdict",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "fo-guard"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| where isnotempty(tostring(Properties['gen_ai.input.messages']))\r\n| extend msg = tostring(Properties['gen_ai.input.messages'])\r\n| where msg matches regex @'(?i)(ignore (all|previous|above)|disregard .*instruction|system prompt|developer mode|jailbreak|do anything now)'\r\n| project TimeGenerated, ThreatLevel = '🟠 Injection marker', Agent = tostring(Properties['gen_ai.agent.name']), Conversation = tostring(Properties['gen_ai.conversation.id']), Snippet = substring(msg, 0, 200)\r\n| order by TimeGenerated desc\r\n| take 100",
+              "size": 0,
+              "title": "Prompt-injection markers in agent input",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "ThreatLevel",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "fo-inj"
+          }
+        ]
+      },
+      "name": "group-foundry"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "openai"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🟩 OpenAI Connector — ASimAgentEventLogs + OpenAIAuditLogs\n\nRuntime completions in **ASimAgentEventLogs** / OpenAIChatCompletions (ModelName, tokens, ToolName, AdditionalFields.input_user); org audit in **OpenAIAuditLogs**.",
+              "style": "info"
+            },
+            "name": "oa-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true\r\n(ASimAgentEventLogs | summarize Value = count() | extend Metric = 'Completions / events', Order = 1),\r\n(ASimAgentEventLogs | summarize Value = dcount(ModelName) | extend Metric = 'Distinct models', Order = 2),\r\n(ASimAgentEventLogs | summarize Value = sum(tolong(InputTokensUsed)) | extend Metric = 'Input tokens', Order = 3),\r\n(ASimAgentEventLogs | summarize Value = sum(tolong(OutputTokensUsed)) | extend Metric = 'Output tokens', Order = 4),\r\n(ASimAgentEventLogs | where isnotempty(ToolName) | summarize Value = count() | extend Metric = 'Tool calls', Order = 5),\r\n(OpenAIAuditLogs | summarize Value = count() | extend Metric = 'Audit events', Order = 6)\r\n| project Order, Metric, Value\r\n| sort by Order asc",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "OpenAI metrics",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "oa-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "ASimAgentEventLogs\r\n| summarize Events = count() by bin(TimeGenerated, 1h), ModelName",
+              "size": 0,
+              "visualization": "timechart",
+              "title": "Completions over time by model",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "oa-time"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "ASimAgentEventLogs\r\n| extend User = tostring(todynamic(AdditionalFields).input_user)\r\n| where '{AgentSearch}' == '' or User has '{AgentSearch}' or ModelName has '{AgentSearch}'\r\n| summarize Requests = count(), InputTokens = sum(tolong(InputTokensUsed)), OutputTokens = sum(tolong(OutputTokensUsed)), Models = make_set(ModelName, 5), LastSeen = max(TimeGenerated) by User\r\n| top 25 by Requests desc",
+              "size": 0,
+              "title": "Top callers (input_user) — requests & tokens",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Requests",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  },
+                  {
+                    "columnMatch": "InputTokens",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "purple"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "oa-users"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🛠️ Tools, token cost & org audit"
+            },
+            "name": "oa-h2"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "ASimAgentEventLogs\r\n| where isnotempty(ToolName)\r\n| summarize Calls = count(), Users = dcount(tostring(todynamic(AdditionalFields).input_user)), LastSeen = max(TimeGenerated) by ToolName\r\n| top 25 by Calls desc",
+              "size": 0,
+              "title": "Tool usage (ToolName)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Calls",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "oa-tools"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "ASimAgentEventLogs\r\n| summarize InputTokens = sum(tolong(InputTokensUsed)), OutputTokens = sum(tolong(OutputTokensUsed)) by bin(TimeGenerated, 1h), ModelName",
+              "size": 0,
+              "visualization": "barchart",
+              "title": "Token usage over time by model",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "oa-tokens"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "OpenAIAuditLogs\r\n| extend EventKind = tostring(column_ifexists('EventType', column_ifexists('OperationName', column_ifexists('Type', '(event)'))))\r\n| summarize Events = count(), LastSeen = max(TimeGenerated) by EventKind\r\n| order by Events desc",
+              "size": 0,
+              "title": "Org audit events (OpenAIAuditLogs)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Events",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "orange"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "oa-audit"
+          }
+        ]
+      },
+      "name": "group-openai"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "advhunt"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🔬 Advanced Hunting (Defender XDR) — AI agent behaviors & inventory\n\nReads **BehaviorInfo** (AI-agent interaction behaviors incl. Microsoft **Prompt Shield** jailbreak detections), **BehaviorEntities**, **AgentsInfo** (agent inventory: platform, model, channels, MCP servers, connected agents), and **AADAgentRiskEvents** (Microsoft Entra **Agent ID risk** detections: risk level, state, and evidence per agent identity). These Defender XDR Advanced Hunting tables populate this workspace when the Defender XDR connector streams them.",
+              "style": "info"
+            },
+            "name": "ah-h"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "▶️ **Run directly in Advanced Hunting** — open [security.microsoft.com › Advanced hunting](https://security.microsoft.com/v2/advanced-hunting) and paste any of these (the same tables this tab reads):\r\n\r\n```kql\r\nBehaviorInfo\r\n| where ActionType contains 'PromptShield' or ActionType contains 'Jailbreak'\r\n| extend AgentName = tostring(todynamic(AdditionalFields).AgentName)\r\n| project Timestamp, ActionType, Description, AgentName, AccountUpn, DetectionSource\r\n\r\nAgentsInfo\r\n| summarize arg_max(TimeGenerated, *) by AgentId\r\n| project Name, Platform, Model, PublishedStatus, Channels, McpServers, Owners\r\n\r\nAADAgentRiskEvents\r\n| summarize arg_max(TimeGenerated, *) by Id\r\n| project DetectedDateTime, AgentDisplayName, AgentId, RiskLevel, RiskState, RiskEventType, RiskEvidence\r\n```"
+            },
+            "name": "ah-run"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"union isfuzzy=true\\r\\n(BehaviorInfo | where isnotempty(tostring(todynamic(AdditionalFields).AgentName)) or ActionType contains 'Agent' or ActionType contains 'PromptShield' | summarize Value = count() | extend Metric = 'AI agent behaviors', Order = 1),\\r\\n(BehaviorInfo | where ActionType contains 'PromptShield' or ActionType contains 'Jailbreak' | summarize Value = count() | extend Metric = 'Prompt Shield / jailbreak', Order = 2),\\r\\n(AgentsInfo | summarize Value = dcount(AgentId) | extend Metric = 'Agents (inventory)', Order = 3),\\r\\n(AgentsInfo | where PublishedStatus =~ 'Published' | summarize Value = dcount(AgentId) | extend Metric = 'Published agents', Order = 4),\\r\\n(AgentsInfo | summarize Value = dcount(Platform) | extend Metric = 'Agent platforms', Order = 5),\\r\\n(AgentsInfo | where isnotempty(tostring(McpServers)) and tostring(McpServers) !in ('', '[]') | summarize Value = dcount(AgentId) | extend Metric = 'Agents with MCP', Order = 6),\\r\\n(AADAgentRiskEvents | summarize Value = dcount(Id) | extend Metric = 'Agent risk events', Order = 7),\\r\\n(AADAgentRiskEvents | where RiskLevel =~ 'high' or RiskState in~ ('confirmedCompromised', 'atRisk') | summarize Value = dcount(AgentId) | extend Metric = 'High-risk / compromised agents', Order = 8)\\r\\n| project Order, Metric, Value\\r\\n| sort by Order asc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "Advanced Hunting metrics",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ah-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"BehaviorInfo\\r\\n| where isnotempty(tostring(todynamic(AdditionalFields).AgentName)) or ActionType contains 'Agent' or ActionType contains 'PromptShield'\\r\\n| summarize Events = count() by bin(TimeGenerated, 1h), ActionType\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 0,
+              "visualization": "timechart",
+              "title": "AI agent behaviors over time (ActionType)",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ah-time"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"BehaviorInfo\\r\\n| where ActionType contains 'PromptShield' or ActionType contains 'Jailbreak' or Description contains 'AI agent'\\r\\n| extend AgentName = tostring(todynamic(AdditionalFields).AgentName), HostingPlatform = tostring(todynamic(AdditionalFields).HostingPlatformType)\\r\\n| where '{AgentSearch}' == '' or AgentName has '{AgentSearch}' or AccountUpn has '{AgentSearch}'\\r\\n| project TimeGenerated, ThreatLevel = strcat('🔴 ', ActionType), Description, AgentName, HostingPlatform, AccountUpn, DetectionSource\\r\\n| order by TimeGenerated desc\\r\\n| take 100\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 0,
+              "title": "🚨 Prompt Shield / jailbreak detections (BehaviorInfo)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "ThreatLevel",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ah-ps"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🤖 Agent inventory & governance (AgentsInfo)"
+            },
+            "name": "ah-h2"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let A = AgentsInfo | summarize arg_max(TimeGenerated, *) by AgentId;\\r\\nunion isfuzzy=true\\r\\n(A | summarize Value = count() | extend Metric = 'Total agents', Order = 1),\\r\\n(A | where PublishedStatus =~ 'Published' | summarize Value = count() | extend Metric = 'Published', Order = 2),\\r\\n(A | where PublishedStatus !~ 'Published' | summarize Value = count() | extend Metric = 'Unpublished', Order = 3),\\r\\n(A | where isempty(tostring(Owners)) or tostring(Owners) in ('', '[]') | summarize Value = count() | extend Metric = 'Ownerless', Order = 4),\\r\\n(A | where LastUpdatedDateTime < ago(30d) | summarize Value = count() | extend Metric = 'Inactive (>30d)', Order = 5),\\r\\n(A | where isnotempty(tostring(McpServers)) and tostring(McpServers) !in ('', '[]') | summarize Value = count() | extend Metric = 'With MCP servers', Order = 6),\\r\\n(A | summarize Value = dcount(Platform) | extend Metric = 'Platforms', Order = 7)\\r\\n| project Order, Metric, Value\\r\\n| sort by Order asc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "Inventory metrics",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "in-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\r\\n| summarize arg_max(TimeGenerated, *) by AgentId\\r\\n| summarize Agents = count() by Platform\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 1,
+              "visualization": "piechart",
+              "title": "Agents by platform",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ah-plat"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\r\\n| summarize arg_max(TimeGenerated, *) by AgentId\\r\\n| where '{AgentSearch}' == '' or Name has '{AgentSearch}' or tostring(Model) has '{AgentSearch}' or Platform has '{AgentSearch}'\\r\\n| extend AgentType = case(\\r\\n    isnotempty(tostring(ConnectedAgents)) and tostring(ConnectedAgents) !in ('', '[]'), 'Multi-agent',\\r\\n    isnotempty(tostring(column_ifexists('Triggers', ''))) and tostring(column_ifexists('Triggers', '')) !in ('', '[]'), 'Workflow',\\r\\n    tostring(column_ifexists('Capabilities', '')) has 'autonom', 'Autonomous',\\r\\n    'Assistant')\\r\\n| project Name, Platform, AgentType, Model = tostring(Model), Version, Status = PublishedStatus, Lifecycle = LifecycleStatus,\\r\\n          Auth = tostring(ToolsAuthenticationType), Knowledge = tostring(column_ifexists('DeclaredDataSources', '')), Tools = tostring(column_ifexists('DeclaredTools', '')),\\r\\n          MCP = tostring(McpServers), ConnectedAgents = tostring(ConnectedAgents), Owners = tostring(Owners),\\r\\n          Created = CreatedDateTime, Modified = LastUpdatedDateTime\\r\\n| order by Modified desc\\r\\n| take 200\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 0,
+              "title": "Agent inventory (type, auth, knowledge, tools, MCP, owners)",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "in-grid"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\r\\n| summarize arg_max(TimeGenerated, *) by AgentId\\r\\n| where CreatedDateTime > ago(7d)\\r\\n| project CreatedDateTime, Name, Platform, Model = tostring(Model), PublishedStatus, Owners = tostring(Owners)\\r\\n| order by CreatedDateTime desc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 1,
+              "title": "New agents (created in last 7 days)",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ah-new"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\r\\n| summarize arg_max(TimeGenerated, *) by AgentId\\r\\n| where isnotempty(CreatedDateTime)\\r\\n| summarize NewAgents = count() by Week = bin(todatetime(CreatedDateTime), 7d), Platform\\r\\n| order by Week asc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "Agent growth (new agents / week)",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "in-growth"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\r\\n| summarize arg_max(TimeGenerated, *) by AgentId\\r\\n| where (isnotempty(tostring(McpServers)) and tostring(McpServers) !in ('', '[]')) or (isnotempty(tostring(ConnectedAgents)) and tostring(ConnectedAgents) !in ('', '[]'))\\r\\n| project Name, Platform, McpServers = tostring(McpServers), DeclaredTools = tostring(DeclaredTools), ConnectedAgents = tostring(ConnectedAgents), ToolsAuthType = tostring(ToolsAuthenticationType)\\r\\n| take 100\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 1,
+              "title": "Agents exposing MCP servers / connected agents (supply-chain surface)",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ah-mcp"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\r\\n| summarize arg_max(TimeGenerated, *) by AgentId\\r\\n| mv-expand o = todynamic(Owners)\\r\\n| extend Owner = tostring(o)\\r\\n| where isnotempty(Owner)\\r\\n| summarize Agents = dcount(AgentId), AgentNames = make_set(Name, 10) by Owner\\r\\n| top 20 by Agents desc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 1,
+              "title": "Top agent owners",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Agents",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              },
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "in-owners"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\r\\n| summarize arg_max(TimeGenerated, *) by AgentId\\r\\n| where isempty(tostring(Owners)) or tostring(Owners) in ('', '[]')\\r\\n| project Name, Platform, Status = PublishedStatus, Model = tostring(Model), Created = CreatedDateTime, Modified = LastUpdatedDateTime\\r\\n| order by Modified desc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 0,
+              "title": "⚠️ Ownerless agents",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "in-ownerless"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\r\\n| summarize arg_max(TimeGenerated, *) by AgentId\\r\\n| where LastUpdatedDateTime < ago(30d)\\r\\n| project Name, Platform, Status = PublishedStatus, Owners = tostring(Owners), LastModified = LastUpdatedDateTime\\r\\n| order by LastModified asc\\r\\n| take 100\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 0,
+              "title": "Inactive agents (>30 days)",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "in-inactive"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🛑 Entra Agent ID risk (AADAgentRiskEvents)"
+            },
+            "name": "ah-h3"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AADAgentRiskEvents\\r\\n| where '{AgentSearch}' == '' or AgentDisplayName has '{AgentSearch}' or AgentId has '{AgentSearch}'\\r\\n| summarize arg_max(TimeGenerated, *) by Id\\r\\n| extend RiskLevel = case(RiskLevel =~ 'high', strcat('🔴 ', RiskLevel), RiskLevel =~ 'medium', strcat('🟠 ', RiskLevel), RiskLevel =~ 'low', strcat('🟡 ', RiskLevel), RiskLevel)\\r\\n| project DetectedDateTime, AgentDisplayName, AgentId, RiskLevel, RiskState, RiskEventType, RiskDetail, RiskEvidence, DetectionTimingType, IdentityType, LastModifiedDateTime\\r\\n| order by DetectedDateTime desc\\r\\n| take 100\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 0,
+              "title": "Agent risk events (latest state per event)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "RiskLevel",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ah-risk"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AADAgentRiskEvents\\r\\n| summarize arg_max(TimeGenerated, *) by Id\\r\\n| summarize Events = count() by RiskState, RiskLevel\\r\\n| order by Events desc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "Agent risk by state / level",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ah-riskstate"
+          }
+        ]
+      },
+      "name": "group-advhunt"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "datalake"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🗄️ Data Lake — Agent Observability (usage-based billing)\r\n\r\n> ⚠️ **Lake tier.** These tiles query **data-lake** tables — *querying the lake (or copying to the Analytics tier) incurs usage-based charges*. Widen the time range carefully.\r\n\r\nReads **UnifiedAgentObservability** (agent **AISpanOutput** spans: `SrcAgentName`, `TargetAgent*`, `EventOriginalResultDetails`, `AdditionalFields.ConversationId` / `ChannelName`) plus the **Entra Agent Identity** governance tables (`EntraAgentIdentities`, `EntraAgentIdentityBlueprints`, `EntraAgentIdentityBlueprintPrincipals`, `EntraAgentUsers`). The same queries run in the **Sentinel data lake** KQL editor or **Defender Advanced hunting**.",
+              "style": "warning"
+            },
+            "name": "dl-note"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"union isfuzzy=true\\r\\n(UnifiedAgentObservability | summarize Value = sum(EventCount) | extend Metric = 'Agent spans', Order = 1),\\r\\n(UnifiedAgentObservability | summarize Value = dcount(SrcAgentName) | extend Metric = 'Distinct agents', Order = 2),\\r\\n(UnifiedAgentObservability | summarize Value = dcount(tostring(todynamic(AdditionalFields).ConversationId)) | extend Metric = 'Conversations', Order = 3),\\r\\n(UnifiedAgentObservability | where EventOriginalType == 'AISpanOutput' | summarize Value = count() | extend Metric = 'Output spans', Order = 4),\\r\\n(UnifiedAgentObservability | extend Reply = tostring(parse_json(EventOriginalResultDetails)[0].parts[0].content) | where Reply has_any ('Declined', 'Blocked') or Reply contains 'unable to' | summarize Value = count() | extend Metric = 'Guardrail blocks', Order = 5),\\r\\n(EntraAgentIdentities | summarize Value = count() | extend Metric = 'Entra agent identities', Order = 6)\\r\\n| project Order, Metric, Value\\r\\n| sort by Order asc\"}",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "Agent Observability metrics (lake)",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| summarize Spans = sum(EventCount) by bin(TimeGenerated, 1h), EventProduct\"}",
+              "size": 0,
+              "visualization": "timechart",
+              "title": "Agent spans over time (by product)",
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-time"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| where '{AgentSearch}' == '' or SrcAgentName has '{AgentSearch}'\\r\\n| summarize Spans = sum(EventCount), Conversations = dcount(tostring(todynamic(AdditionalFields).ConversationId)), LastSeen = max(TimeGenerated) by SrcAgentName, SrcAgentId\\r\\n| top 25 by Spans desc\"}",
+              "size": 0,
+              "title": "Top agents by spans",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Spans",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              },
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-agents"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| where '{AgentSearch}' == '' or SrcAgentName has '{AgentSearch}'\\r\\n| extend Reply = tostring(parse_json(EventOriginalResultDetails)[0].parts[0].content)\\r\\n| where Reply has_any ('Declined', 'Blocked') or Reply contains 'unable to'\\r\\n| extend Verdict = extract(@'\\\\*\\\\*([^*]*(?:Declined|Blocked|Detected)[^*]*)\\\\*\\\\*', 1, Reply)\\r\\n| extend Technique = extract(@'(?i)\\\\*\\\\*([^*]*(?:injection|jailbreak|exfiltration|homoglyph|leetspeak|base64|obfuscat|phishing|credential)[^*]*)\\\\*\\\\*', 1, Reply)\\r\\n| project TimeGenerated, SrcAgentName, EventProduct,\\r\\n          Verdict = iff(isempty(Verdict), 'Refused (polite)', Verdict), Technique,\\r\\n          Reply = substring(Reply, 0, 400)\\r\\n| sort by TimeGenerated desc\\r\\n| take 200\"}",
+              "size": 0,
+              "title": "🛡️ Blocked / refused content (agent guardrail decisions)",
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-blocks"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| where '{AgentSearch}' == '' or SrcAgentName has '{AgentSearch}'\\r\\n| extend Reply = tostring(parse_json(EventOriginalResultDetails)[0].parts[0].content)\\r\\n| where Reply has_any ('Declined', 'Blocked') or Reply contains 'unable to'\\r\\n| extend Verdict = case(\\r\\n    Reply contains 'Detected and Blocked', 'Detected & Blocked',\\r\\n    Reply contains 'Declined', 'Declined',\\r\\n    Reply contains 'Blocked', 'Blocked',\\r\\n    'Refused (polite)')\\r\\n| summarize Blocks = count() by Verdict, bin(TimeGenerated, 1d)\\r\\n| sort by TimeGenerated asc\"}",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "Blocks over time by verdict",
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-blocks-trend"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| extend Target = tostring(column_ifexists('TargetAgentName', ''))\\r\\n| where isnotempty(Target)\\r\\n| summarize Calls = sum(EventCount), Conversations = dcount(tostring(todynamic(AdditionalFields).ConversationId)), LastSeen = max(TimeGenerated) by SrcAgentName, Target\\r\\n| order by Calls desc\\r\\n| take 100\"}",
+              "size": 0,
+              "title": "🔗 Agent-to-agent invocations (Src → Target)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Calls",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "orange"
+                    }
+                  }
+                ]
+              },
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-cross"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| where EventOriginalType == 'AISpanOutput'\\r\\n| extend detail = tostring(EventOriginalResultDetails)\\r\\n| where detail matches regex @'(?i)(malicious instruction|will not comply|jailbreak|ignore (all|previous|above)|system prompt|prompt injection)'\\r\\n| project TimeGenerated, SrcAgentName, Conversation = tostring(todynamic(AdditionalFields).ConversationId), Channel = tostring(todynamic(AdditionalFields).ChannelName), Snippet = substring(detail, 0, 240)\\r\\n| order by TimeGenerated desc\\r\\n| take 100\"}",
+              "size": 0,
+              "title": "🚨 Refusals / injection markers in agent output",
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-content"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🎯 Agent 365 use-case hunts\n\nMapped to the Agent 365 connector use cases — sensitive-data exposure, access drift, lateral movement, prompt injection, investigation, governance & proactive hunting. Filter any of these with **Agent contains** above."
+            },
+            "name": "dl-h3"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| where '{AgentSearch}' == '' or SrcAgentName has '{AgentSearch}'\\r\\n| extend Tool = tostring(column_ifexists('ToolName', ''))\\r\\n| where isnotempty(Tool)\\r\\n| summarize Calls = sum(EventCount), Agents = dcount(SrcAgentName), LastUsed = max(TimeGenerated) by Tool\\r\\n| top 25 by Calls desc\"}",
+              "size": 0,
+              "title": "🔧 Tool usage — tools invoked by agents (sensitive actions)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Calls",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              },
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-tools"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| where '{AgentSearch}' == '' or SrcAgentName has '{AgentSearch}'\\r\\n| extend Prompt = tostring(column_ifexists('EventOriginalRequestDetails', ''))\\r\\n| where Prompt matches regex @'(?i)(ignore (all|previous|above)|disregard.{0,20}instruction|system prompt|jailbreak|do anything now|DAN mode|developer mode|reveal.{0,20}prompt|exfiltrat)'\\r\\n| project TimeGenerated, SrcAgentName, EventProduct, Actor = tostring(column_ifexists('ActorUsername', '')), Snippet = substring(Prompt, 0, 300)\\r\\n| sort by TimeGenerated desc\\r\\n| take 200\"}",
+              "size": 0,
+              "title": "🧨 Prompt-injection attempts (inbound prompts)",
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-injection"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| where '{AgentSearch}' == '' or SrcAgentName has '{AgentSearch}'\\r\\n| extend Blob = strcat(tostring(column_ifexists('EventOriginalRequestDetails', '')), ' ', tostring(EventOriginalResultDetails))\\r\\n| where Blob matches regex @'(AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY|eyJ[A-Za-z0-9_-]{10,}\\\\.[A-Za-z0-9_-]{10,}|(?i)(password|secret|connectionstring|connstring)\\\\s*[:=]|\\\\b\\\\d{3}-\\\\d{2}-\\\\d{4}\\\\b)'\\r\\n| project TimeGenerated, SrcAgentName, EventProduct, Tool = tostring(column_ifexists('ToolName', '')), Actor = tostring(column_ifexists('ActorUsername', '')), Snippet = substring(Blob, 0, 200)\\r\\n| sort by TimeGenerated desc\\r\\n| take 100\"}",
+              "size": 0,
+              "title": "🔐 Possible sensitive-data exposure (secrets / PII in prompt or output)",
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-sensitive"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| extend Tool = tostring(column_ifexists('ToolName', ''))\\r\\n| where isnotempty(Tool)\\r\\n| where '{AgentSearch}' == '' or SrcAgentName has '{AgentSearch}'\\r\\n| summarize FirstUsed = min(TimeGenerated), Calls = sum(EventCount) by SrcAgentName, Tool\\r\\n| where FirstUsed > ago(7d)\\r\\n| project SrcAgentName, Tool, FirstUsed, Calls\\r\\n| sort by FirstUsed desc\\r\\n| take 100\"}",
+              "size": 0,
+              "title": "📈 Access drift — tools newly used by an agent (last 7 days)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Calls",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "orange"
+                    }
+                  }
+                ]
+              },
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-drift"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"let edges = UnifiedAgentObservability\\r\\n    | extend Target = tostring(column_ifexists('TargetAgentName', ''))\\r\\n    | where isnotempty(Target) and isnotempty(SrcAgentName)\\r\\n    | summarize Calls = sum(EventCount) by SrcAgentName, Target;\\r\\nlet outbound = edges | summarize CallsOut = sum(Calls) by Agent = SrcAgentName;\\r\\nlet inbound = edges | summarize CallsIn = sum(Calls) by Agent = Target;\\r\\noutbound\\r\\n| join kind=inner inbound on Agent\\r\\n| extend Total = CallsIn + CallsOut\\r\\n| project Agent, CallsIn, CallsOut, Total\\r\\n| sort by Total desc\\r\\n| take 50\"}",
+              "size": 0,
+              "title": "🕸️ Lateral movement — delegation intermediaries (calls in & out)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Total",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-lateral"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| where '{AgentSearch}' == '' or SrcAgentName has '{AgentSearch}'\\r\\n| where isempty(tostring(column_ifexists('ActorUsername', ''))) and isempty(tostring(column_ifexists('ActorUserId', '')))\\r\\n| summarize Spans = sum(EventCount), Tools = dcount(tostring(column_ifexists('ToolName', ''))), LastSeen = max(TimeGenerated) by SrcAgentName, EventProduct\\r\\n| top 30 by Spans desc\"}",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "🤖 Activity without human context (autonomous / unattended)",
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-nohuman"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"UnifiedAgentObservability\\r\\n| where '{AgentSearch}' == '' or SrcAgentName has '{AgentSearch}'\\r\\n| extend hh = datetime_part('Hour', TimeGenerated), dw = dayofweek(TimeGenerated)\\r\\n| where hh < 7 or hh >= 19 or dw == 0d or dw == 6d\\r\\n| summarize OffHoursSpans = sum(EventCount), LastSeen = max(TimeGenerated) by SrcAgentName, EventProduct\\r\\n| top 30 by OffHoursSpans desc\"}",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "🌙 Off-hours agent activity (nights / weekends)",
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-offhours"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🪪 Entra Agent Identity governance"
+            },
+            "name": "dl-h2"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"union isfuzzy=true\\r\\n(EntraAgentIdentities | summarize Value = count() | extend Metric = 'Agent identities', Order = 1),\\r\\n(EntraAgentIdentityBlueprints | summarize Value = count() | extend Metric = 'Blueprints', Order = 2),\\r\\n(EntraAgentIdentityBlueprintPrincipals | summarize Value = count() | extend Metric = 'Blueprint principals', Order = 3),\\r\\n(EntraAgentUsers | summarize Value = count() | extend Metric = 'Agent users', Order = 4)\\r\\n| project Order, Metric, Value\\r\\n| sort by Order asc\"}",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "Entra agent identity inventory",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-entra-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"workspaces\":[],\"query\":\"EntraAgentIdentities\\r\\n| take 100\"}",
+              "size": 0,
+              "title": "Entra agent identities (sample)",
+              "queryType": "sentinelDataLake",
+              "crossComponentResources": [],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "dl-entra"
+          }
+        ]
+      },
+      "name": "group-datalake"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "telemetry"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 📡 Telemetry Health & Cost\n\nIs each AI-agent source flowing, and what does it cost? Watch content-recording coverage (drives the text detections) and the AppDependencies split (Foundry spans vs filterable dependency noise).",
+              "style": "info"
+            },
+            "name": "tel-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true\r\n(CopilotActivity | summarize Events = count(), GB = round(sum(_BilledSize) / 1073741824.0, 3), Last = max(TimeGenerated) | extend Table = 'CopilotActivity'),\r\n(AppEvents | summarize Events = count(), GB = round(sum(_BilledSize) / 1073741824.0, 3), Last = max(TimeGenerated) | extend Table = 'AppEvents'),\r\n(AppDependencies | summarize Events = count(), GB = round(sum(_BilledSize) / 1073741824.0, 3), Last = max(TimeGenerated) | extend Table = 'AppDependencies'),\r\n(ASimAgentEventLogs | summarize Events = count(), GB = round(sum(_BilledSize) / 1073741824.0, 3), Last = max(TimeGenerated) | extend Table = 'ASimAgentEventLogs'),\r\n(OpenAIAuditLogs | summarize Events = count(), GB = round(sum(_BilledSize) / 1073741824.0, 3), Last = max(TimeGenerated) | extend Table = 'OpenAIAuditLogs')\r\n| extend Status = iff(Events > 0, '🟢 Active', '⚪ No data')\r\n| project Table, Status, Events, GB, Last\r\n| order by Events desc",
+              "size": 0,
+              "title": "Per-table volume, cost & freshness",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Status",
+                    "formatter": 0
+                  },
+                  {
+                    "columnMatch": "Events",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  },
+                  {
+                    "columnMatch": "GB",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "tel-tables"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| extend IsAgentSpan = isnotempty(tostring(Properties['gen_ai.system'])) or isnotempty(tostring(Properties['gen_ai.agent.name']))\r\n| summarize Rows = count(), GB = round(sum(_BilledSize) / 1073741824.0, 3) by SpanType = iff(IsAgentSpan, '🟢 gen_ai agent spans (keep)', '⚪ other dependency telemetry (filterable to cut cost)')",
+              "size": 1,
+              "visualization": "piechart",
+              "title": "AppDependencies — agent spans vs other telemetry (cost lever)",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "tel-split"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | summarize Total = count(), WithText = countif(isnotempty(tostring(LLMEventData.Prompt)) or isnotempty(tostring(LLMEventData.Response))) | extend Source = 'M365 Copilot (LLMEventData.Prompt/Response)'),\r\n(AppEvents | where Name startswith 'BotMessage' | summarize Total = count(), WithText = countif(isnotempty(tostring(Properties['text']))) | extend Source = 'Copilot Studio (Properties.text — Log sensitive properties)'),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | summarize Total = count(), WithText = countif(isnotempty(tostring(Properties['gen_ai.input.messages'])) or isnotempty(tostring(Properties['gen_ai.output.messages']))) | extend Source = 'Foundry (gen_ai.*.messages — content recording)')\r\n| extend TextCoveragePct = round(100.0 * WithText / Total, 1)\r\n| project Source, Total, WithText, TextCoveragePct",
+              "size": 0,
+              "title": "Content-recording coverage (drives text detections)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "TextCoveragePct",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "green"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "tel-content"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "CopilotActivity\r\n| summarize Events = count(), GB = round(sum(_BilledSize) / 1073741824.0, 3) by RecordType\r\n| extend Tier = iff(RecordType == 'CopilotInteraction', 'bulk → Auxiliary/lake candidate', 'admin/config → keep on Analytics')\r\n| order by Events desc",
+              "size": 0,
+              "title": "CopilotActivity RecordType mix (tiering guidance)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Events",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  },
+                  {
+                    "columnMatch": "GB",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "tel-rectype"
+          }
+        ]
+      },
+      "name": "group-telemetry"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "detections"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🛡️ Detections & Coverage\n\nReference of the AI-agent detection packs (M365 Copilot, Copilot Studio, Foundry, OpenAI) and which alerts / incidents are currently firing in this workspace.",
+              "style": "info"
+            },
+            "name": "det-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "datatable(Bundle:string, Detection:string, Severity:string, Signal:string)\r\n[\r\n 'M365 Copilot',   'CopilotJailbreakAttemptDetection',   'High',   'LLMEventData.Messages[].JailbreakDetected',\r\n 'M365 Copilot',   'CopilotIndirectPromptInjection',     'High',   'LLMEventData.AccessedResources[].XPIADetected',\r\n 'M365 Copilot',   'CopilotSensitiveDataExposure',       'High',   'Sensitivity labels / classifiers',\r\n 'M365 Copilot',   'CopilotExfiltrationPattern',         'High',   'DLP + grounding-site diversity',\r\n 'M365 Copilot',   'CopilotTokenCostSpike',              'Medium', 'TotalTokens vs 7-day median',\r\n 'M365 Copilot',   'CopilotSystemPromptOverride',        'High',   'UpdateCopilotSettings / prompt edits',\r\n 'Copilot Studio', 'CopilotStudioPromptInjectionPatterns','Medium','AppEvents BotMessageReceived.text',\r\n 'Copilot Studio', 'CopilotStudioSensitiveDataInResponse','High',  'AppEvents BotMessageSend.text',\r\n 'Copilot Studio', 'CopilotStudioConnectorErrorStorm',   'Medium', 'AppDependencies Success == false',\r\n 'Copilot Studio', 'CopilotStudioNewConnectorFirstSeen', 'Medium', 'AppDependencies Target vs 14d baseline',\r\n 'Copilot Studio', 'CopilotStudioConversationFloodingDoW','Medium','AppEvents inbound volume per session',\r\n 'Foundry',        'FoundryGuardrailJailbreakDetected',  'High',   'content_filter.results.jailbreak',\r\n 'Foundry',        'FoundrySensitiveDataInOutput',       'High',   'gen_ai.output.messages',\r\n 'Foundry',        'FoundryUntrustedToolSource',         'Medium', 'gen_ai.tool.call.* + watchlist',\r\n 'Foundry',        'FoundryTokenCostSpike',              'Medium', 'gen_ai.usage.* vs 7-day median',\r\n 'Foundry',        'FoundryExcessiveToolChaining',       'Medium', 'gen_ai.tool.name / conversation.id',\r\n 'Foundry',        'FoundryMcpToolDescriptionChange',    'High',   'gen_ai.tool.description SHA change',\r\n 'OpenAI',         'OpenAITokenCostSpike',               'Medium', 'Input/OutputTokensUsed vs 7-day median',\r\n 'OpenAI',         'OpenAIOrgConfigOverride',            'High',   'OpenAIAuditLogs org/settings changes',\r\n 'OpenAI',         'OpenAIToolUsageDrift',               'Medium', 'ToolName first use vs 14d baseline',\r\n 'OpenAI',         'OpenAISensitiveToolInvocation',      'High',   'ToolName in AzureAI_SensitiveTools watchlist'\r\n]\r\n| order by Bundle asc, Severity asc",
+              "size": 0,
+              "title": "Detection-pack reference (by bundle)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Severity",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "det-ref"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true (SecurityAlert)\r\n| where TimeGenerated > ago(30d)\r\n| where AlertName has_any ('Copilot','Foundry','OpenAI','Agent','GenAI','Prompt','Jailbreak','LLM')\r\n| summarize Count = count(), LastSeen = max(TimeGenerated), Severities = make_set(AlertSeverity, 3) by AlertName\r\n| order by LastSeen desc",
+              "size": 0,
+              "title": "AI-agent SecurityAlerts firing (30d)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Count",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "det-alerts"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true (SecurityIncident)\r\n| summarize arg_max(TimeGenerated, *) by IncidentNumber\r\n| where Title has_any ('Copilot','Foundry','OpenAI','Agent','GenAI','Prompt','Jailbreak','LLM')\r\n| extend ThreatLevel = case(Severity =~ 'High', '🔴 High', Severity =~ 'Medium', '🟠 Medium', Severity =~ 'Low', '🟡 Low', '🟢 Info')\r\n| project ThreatLevel, TimeGenerated, IncidentNumber, Title, Severity, Status\r\n| order by TimeGenerated desc\r\n| take 50",
+              "size": 0,
+              "title": "AI-agent SecurityIncidents",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "ThreatLevel",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "det-inc"
+          }
+        ]
+      },
+      "name": "group-detections"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "exec"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🧭 Executive Overview — AI estate at a glance\n\nUnified KPIs across all AI platforms (AIRequests = M365 Copilot + Copilot Studio + Foundry + OpenAI), plus the composite **AI Risk Score**, requests by platform / business unit, and top identities. Business unit is resolved via an `IdentityInfo` join on the actor UPN.",
+              "style": "info"
+            },
+            "name": "ex-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;let A = AgentsInfo | summarize arg_max(TimeGenerated, *) by AgentId;\r\nlet totReq   = toscalar(AIRequests | summarize count());\r\nlet totAg    = toscalar(A | summarize count());\r\nlet active24 = toscalar(AIRequests | where TimeGenerated > ago(24h) | summarize dcount(AgentName));\r\nlet newAg    = toscalar(A | where CreatedDateTime > ago(7d) | summarize count());\r\nlet disAg    = toscalar(A | where PublishedStatus !~ 'Published' or tostring(LifecycleStatus) has 'Disabled' | summarize count());\r\nlet inj      = toscalar(union isfuzzy=true (AppDependencies | where tostring(Properties['gen_ai.input.messages']) matches regex @'(?i)(ignore (all|previous)|jailbreak|system prompt)'), (CopilotActivity | mv-expand m = LLMEventData.Messages | where tobool(m.JailbreakDetected) == true) | summarize count());\r\nlet safe     = toscalar(AppDependencies | where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results'])) | summarize count());\r\nlet sens     = toscalar(union isfuzzy=true (CopilotActivity | mv-expand r = LLMEventData.AccessedResources | where tobool(r.XPIADetected) == true), (AppEvents | where Name == 'BotMessageSend' and tostring(Properties['text']) matches regex @'(AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY)') | summarize count());\r\nlet plug     = toscalar(CopilotActivity | where RecordType has 'Plugin' | summarize count());\r\nlet tool     = toscalar(union isfuzzy=true (AppDependencies | where isnotempty(tostring(Properties['gen_ai.tool.name']))), (ASimAgentEventLogs | where isnotempty(ToolName)) | summarize count());\r\nlet ftool    = toscalar(AppDependencies | where Success == false and (AppRoleName == 'Microsoft Copilot Studio' or isnotempty(tostring(Properties['gen_ai.tool.name']))) | summarize count());\r\nlet hrs      = toscalar(union isfuzzy=true (AppDependencies | where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results'])) | extend cid = tostring(Properties['gen_ai.conversation.id'])), (CopilotActivity | mv-expand m = LLMEventData.Messages | where tobool(m.JailbreakDetected) == true | extend cid = tostring(LLMEventData.ConversationId)) | summarize dcount(cid));\r\nlet third    = toscalar(union isfuzzy=true (datatable(Application:string)[]), (CloudAppEvents | where Application has_any ('OpenAI','ChatGPT','Claude','Anthropic','Gemini','Perplexity','Mistral') | project Application) | summarize dcount(Application));\r\nlet cost     = toscalar(AIRequests | summarize InTok = sum(InTok), OutTok = sum(OutTok) | extend c = round((todouble(coalesce(InTok, 0.0)) / 1000.0) * toreal('{PriceInput}') + (todouble(coalesce(OutTok, 0.0)) / 1000.0) * toreal('{PriceOutput}'), 2) | project c);\r\nlet lat      = toscalar(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) and DurationMs > 0 | summarize round(avg(DurationMs), 0));\r\nunion\r\n(print Order = 1,  Metric = 'Total AI requests',            Value = todouble(totReq)),\r\n(print Order = 2,  Metric = 'Total AI agents',              Value = todouble(totAg)),\r\n(print Order = 3,  Metric = 'Active agents (24h)',          Value = todouble(active24)),\r\n(print Order = 4,  Metric = 'New agents (7d)',              Value = todouble(newAg)),\r\n(print Order = 5,  Metric = 'Disabled / unpublished',       Value = todouble(disAg)),\r\n(print Order = 6,  Metric = 'Prompt injection / jailbreak', Value = todouble(inj)),\r\n(print Order = 7,  Metric = 'Content-safety blocks',        Value = todouble(safe)),\r\n(print Order = 8,  Metric = 'Sensitive-data events',        Value = todouble(sens)),\r\n(print Order = 9,  Metric = 'Plugin executions',            Value = todouble(plug)),\r\n(print Order = 10, Metric = 'Tool executions',              Value = todouble(tool)),\r\n(print Order = 11, Metric = 'Failed tool executions',       Value = todouble(ftool)),\r\n(print Order = 12, Metric = 'High-risk sessions',           Value = todouble(hrs)),\r\n(print Order = 13, Metric = 'Third-party AI apps',          Value = todouble(third)),\r\n(print Order = 14, Metric = 'Est. token cost (USD)',        Value = todouble(cost)),\r\n(print Order = 15, Metric = 'Avg latency (ms)',             Value = todouble(lat))\r\n| project Order, Metric, Value\r\n| sort by Order asc",
+              "size": 4,
+              "visualization": "tiles",
+              "title": "Executive KPIs",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ex-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;let inj = toscalar(union isfuzzy=true (AppDependencies | where tostring(Properties['gen_ai.input.messages']) matches regex @'(?i)(ignore (all|previous)|jailbreak|system prompt)'), (CopilotActivity | mv-expand m = LLMEventData.Messages | where tobool(m.JailbreakDetected) == true) | summarize count());\r\nlet safety = toscalar(AppDependencies | where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results'])) | summarize count());\r\nlet sens = toscalar(union isfuzzy=true (CopilotActivity | mv-expand r = LLMEventData.AccessedResources | where tobool(r.XPIADetected) == true), (AppEvents | where Name == 'BotMessageSend' and tostring(Properties['text']) matches regex @'(AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY)') | summarize count());\r\nlet tool = toscalar(union isfuzzy=true (AppDependencies | where isnotempty(tostring(Properties['gen_ai.tool.name']))), (ASimAgentEventLogs | where isnotempty(ToolName)) | summarize count());\r\nlet alerts = toscalar(union isfuzzy=true (SecurityAlert | where TimeGenerated > ago(7d) and AlertName has_any ('Copilot','Foundry','OpenAI','Agent','Prompt','Jailbreak','AI')) | summarize count());\r\nlet ext = toscalar(union isfuzzy=true (CloudAppEvents | where Application has_any ('OpenAI','ChatGPT','Claude','Anthropic','Gemini','Perplexity','Mistral')) | summarize count());\r\nlet gov = toscalar(AgentsInfo | summarize arg_max(TimeGenerated, *) by AgentId | where isempty(tostring(Owners)) or tostring(Owners) in ('', '[]') | summarize count());\r\nlet sc = (v:long, cap:real) { min_of(100.0, todouble(v) / cap * 100.0) };\r\nlet s_inj = sc(inj, 50.0); let s_safe = sc(safety, 50.0); let s_sens = sc(sens, 20.0); let s_tool = sc(tool, 500.0); let s_alert = sc(alerts, 10.0); let s_ext = sc(ext, 20.0); let s_gov = sc(gov, 10.0);\r\nlet overall = round(0.22 * s_inj + 0.18 * s_safe + 0.18 * s_sens + 0.10 * s_tool + 0.14 * s_alert + 0.09 * s_ext + 0.09 * s_gov, 0);\r\nunion\r\n(print Metric = 'AI Risk Score', Value = overall, Order = 1),\r\n(print Metric = 'Prompt injection', Value = round(s_inj, 0), Order = 2),\r\n(print Metric = 'Content safety', Value = round(s_safe, 0), Order = 3),\r\n(print Metric = 'Sensitive data', Value = round(s_sens, 0), Order = 4),\r\n(print Metric = 'Tool / plugin risk', Value = round(s_tool, 0), Order = 5),\r\n(print Metric = 'Detection alerts', Value = round(s_alert, 0), Order = 6),\r\n(print Metric = 'Third-party AI', Value = round(s_ext, 0), Order = 7),\r\n(print Metric = 'Governance', Value = round(s_gov, 0), Order = 8)\r\n| project Order, Metric, Value\r\n| sort by Order asc",
+              "size": 2,
+              "visualization": "tiles",
+              "title": "🎯 AI Risk Score (0-100, weighted composite)",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "red"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ex-risk"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;AIRequests | summarize Requests = count() by bin(TimeGenerated, 1h), Platform",
+              "size": 0,
+              "visualization": "timechart",
+              "title": "AI activity timeline (by platform)",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ex-time"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;AIRequests | summarize Requests = count() by Platform | order by Requests desc",
+              "size": 1,
+              "visualization": "piechart",
+              "title": "Requests by platform",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ex-plat"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;let dept = IdentityInfo | summarize arg_max(TimeGenerated, *) by AccountUPN | project Identity = tostring(AccountUPN), Department = tostring(Department);\r\nAIRequests\r\n| where isnotempty(Identity)\r\n| join kind=leftouter (dept) on Identity\r\n| extend Department = iff(isempty(Department), '(unmapped)', Department)\r\n| where '{DepartmentSearch}' == '' or Department has '{DepartmentSearch}'\r\n| summarize Requests = count(), Identities = dcount(Identity) by Department\r\n| top 15 by Requests desc",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "Requests by business unit (IdentityInfo)",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ex-bu"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;AIRequests\r\n| where isnotempty(Identity)\r\n| summarize Requests = count(), Platforms = make_set(Platform, 5), Agents = dcount(AgentName), LastSeen = max(TimeGenerated) by Identity\r\n| top 20 by Requests desc",
+              "size": 0,
+              "title": "Top AI identities",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Requests",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "ex-ids"
+          }
+        ]
+      },
+      "name": "group-exec"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "usage"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 📈 AI Usage Analytics\n\nAdoption across platforms. Set the **Price / 1K tokens** params for cost, and **Department contains** to focus by business unit.",
+              "style": "info"
+            },
+            "name": "us-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;let tools = AppDependencies | where isnotempty(tostring(Properties['gen_ai.conversation.id'])) and isnotempty(tostring(Properties['gen_ai.tool.name'])) | summarize ToolCalls = count() by cid = tostring(Properties['gen_ai.conversation.id']);\r\nunion isfuzzy=true\r\n(AIRequests | summarize Value = round(avg(InTok + OutTok), 0) | extend Metric = 'Avg tokens / request', Order = 1),\r\n(AIRequests | where LatencyMs > 0 | summarize Value = round(avg(LatencyMs), 0) | extend Metric = 'Avg latency (ms)', Order = 2),\r\n(AIRequests | where isnotempty(ConversationId) | summarize Msgs = count() by ConversationId | summarize Value = round(avg(Msgs), 1) | extend Metric = 'Avg messages / conversation', Order = 3),\r\n(tools | summarize Value = round(avg(ToolCalls), 1) | extend Metric = 'Avg tool calls / conversation', Order = 4),\r\n(AIRequests | summarize InTok = sum(InTok), OutTok = sum(OutTok), Reqs = count() | extend Value = round(((InTok / 1000.0) * toreal('{PriceInput}') + (OutTok / 1000.0) * toreal('{PriceOutput}')) / Reqs, 4), Metric = 'Avg cost / request (USD)', Order = 5 | project Value, Metric, Order)\r\n| project Order, Metric, Value\r\n| sort by Order asc",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "Usage averages",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "us-avg"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;AIRequests | summarize Requests = count() by bin(TimeGenerated, 1d), Platform",
+              "size": 0,
+              "visualization": "barchart",
+              "title": "Requests by day (platform)",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "us-day"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;AIRequests | where isnotempty(Model) | summarize Requests = count(), Tokens = sum(InTok + OutTok) by Model | top 15 by Requests desc",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "Requests by model",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "us-model"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;AIRequests | where isnotempty(Identity) | summarize Requests = count(), Agents = dcount(AgentName) by Identity | top 20 by Requests desc",
+              "size": 1,
+              "title": "Top users",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Requests",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "us-users"
+          }
+        ]
+      },
+      "name": "group-usage"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "timeline"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## ⏱️ Agent Activity Timeline\n\nOne chronological feed of every AI event across sources — prompts/responses, config changes, tool calls, content-safety, Prompt Shield, alerts. Type an agent / identity in **Agent contains** to focus.",
+              "style": "info"
+            },
+            "name": "tl-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let Events = union isfuzzy=true\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend EventType = 'Prompt/Response', Platform = 'M365 Copilot', Agent = tostring(AgentName), Identity = tostring(ActorName), Detail = substring(tostring(LLMEventData.Prompt), 0, 160)),\r\n(CopilotActivity | where RecordType != 'CopilotInteraction' | extend EventType = tostring(RecordType), Platform = 'M365 Copilot', Agent = tostring(AgentName), Identity = tostring(ActorName), Detail = tostring(RecordType)),\r\n(AppEvents | where Name startswith 'BotMessage' | extend EventType = tostring(Name), Platform = 'Copilot Studio', Agent = tostring(UserId), Identity = tostring(UserId), Detail = substring(tostring(Properties['text']), 0, 160)),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.tool.name'])) | extend EventType = 'Tool call', Platform = 'Foundry', Agent = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Detail = tostring(Properties['gen_ai.tool.name'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results'])) | extend EventType = 'Content-safety', Platform = 'Foundry', Agent = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Detail = tostring(Properties['microsoft.foundry.content_filter.results'])),\r\n(BehaviorInfo | where ActionType contains 'PromptShield' or ActionType contains 'Jailbreak' | extend EventType = 'Prompt Shield', Platform = 'Defender XDR', Agent = tostring(todynamic(AdditionalFields).AgentName), Identity = tostring(AccountUpn), Detail = tostring(Description)),\r\n(SecurityAlert | where AlertName has_any ('Copilot','Foundry','OpenAI','Agent','Prompt','Jailbreak','AI') | extend EventType = 'Alert', Platform = 'Sentinel', Agent = tostring(AlertName), Identity = '', Detail = tostring(AlertName))\r\n| project TimeGenerated, EventType, Platform, Agent, Identity, Detail;\r\nEvents\r\n| where '{AgentSearch}' == '' or Agent has '{AgentSearch}' or Identity has '{AgentSearch}'\r\n| order by TimeGenerated desc\r\n| take 200",
+              "size": 0,
+              "title": "Unified AI event timeline",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "tl-feed"
+          }
+        ]
+      },
+      "name": "group-timeline"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "soc"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🚨 AI Security Monitoring (SOC)\n\nDetection categories across AI + identity + M365 + cloud-app telemetry, plus firing alerts, severity, and MITRE mapping. Category tiles light up only where the underlying connector is present.",
+              "style": "info"
+            },
+            "name": "so-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true\r\n(AppDependencies | where tostring(Properties['gen_ai.input.messages']) matches regex @'(?i)(ignore (all|previous|above)|disregard .*instruction|system prompt|jailbreak|do anything now)' | summarize Count = count() | extend Category = 'Prompt injection', Severity = '🔴 High'),\r\n(CopilotActivity | mv-expand r = LLMEventData.AccessedResources | where tobool(r.XPIADetected) == true | summarize Count = count() | extend Category = 'Indirect prompt injection (XPIA)', Severity = '🔴 High'),\r\n(BehaviorInfo | where ActionType contains 'Jailbreak' or ActionType contains 'PromptShield' | summarize Count = count() | extend Category = 'Jailbreak / Prompt Shield', Severity = '🔴 High'),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.conversation.id'])) and isnotempty(tostring(Properties['gen_ai.tool.name'])) | summarize tc = count() by cid = tostring(Properties['gen_ai.conversation.id']) | where tc >= 15 | summarize Count = count() | extend Category = 'Excessive tool calls', Severity = '🟠 Medium'),\r\n(AppEvents | where Name == 'BotMessageSend' and tostring(Properties['text']) matches regex @'(AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})' | summarize Count = count() | extend Category = 'Credential / secret exposure', Severity = '🔴 High'),\r\n(OfficeActivity | where Operation in~ ('FileDownloaded', 'FileSyncDownloadedFull') | summarize c = count() by UserId | where c >= 100 | summarize Count = count() | extend Category = 'Massive file reads', Severity = '🟠 Medium'),\r\n(SigninLogs | where ResultType != 0 | summarize Count = count() | extend Category = 'Failed auth', Severity = '🟡 Low'),\r\n(AADUserRiskEvents | where RiskEventType has_any ('unfamiliarFeatures', 'anonymizedIPAddress', 'maliciousIPAddress', 'impossibleTravel') | summarize Count = count() | extend Category = 'Risky sign-ins (impossible travel / anon IP / TOR)', Severity = '🟠 Medium'),\r\n(CloudAppEvents | where Application has_any ('OpenAI', 'ChatGPT', 'Claude', 'Anthropic', 'Gemini', 'Perplexity', 'Mistral') | summarize Count = count() | extend Category = 'Third-party / shadow AI usage', Severity = '🟠 Medium')\r\n| project Category, Severity, Count\r\n| where Count > 0\r\n| order by Count desc",
+              "size": 0,
+              "title": "Detection categories (selected range)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Severity",
+                    "formatter": 0
+                  },
+                  {
+                    "columnMatch": "Count",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "so-cat"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true (SecurityAlert)\r\n| where AlertName has_any ('Copilot','Foundry','OpenAI','Agent','Prompt','Jailbreak','LLM','AI')\r\n| summarize Alerts = count() by bin(TimeGenerated, 1d), AlertSeverity",
+              "size": 0,
+              "visualization": "barchart",
+              "title": "AI alerts over time (by severity)",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "so-alerts"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true (SecurityAlert)\r\n| where AlertName has_any ('Copilot','Foundry','OpenAI','Agent','Prompt','Jailbreak','LLM','AI')\r\n| summarize Alerts = count() by AlertSeverity",
+              "size": 1,
+              "visualization": "piechart",
+              "title": "Alerts by severity",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "so-sev"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true (SecurityAlert)\r\n| where AlertName has_any ('Copilot','Foundry','OpenAI','Agent','Prompt','Jailbreak','LLM','AI')\r\n| mv-expand t = todynamic(Techniques)\r\n| where isnotempty(tostring(t))\r\n| summarize Alerts = count() by Technique = tostring(t)\r\n| top 20 by Alerts desc",
+              "size": 1,
+              "title": "MITRE ATT&CK techniques (from alerts)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Alerts",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "orange"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "so-mitre"
+          }
+        ]
+      },
+      "name": "group-soc"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "safety"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🛡️ Content Safety Dashboard\n\nGuardrail verdicts from Foundry content_filter.results (and Azure OpenAI AOAIOperationalLogs where present): harm categories, jailbreak / Prompt Shield, protected material, trend, and worst agents / models.",
+              "style": "info"
+            },
+            "name": "cs-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let CF = AppDependencies | where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results'])) | extend cf = tostring(Properties['microsoft.foundry.content_filter.results']);\r\nunion isfuzzy=true\r\n(CF | where cf has 'jailbreak' | summarize Value = count() | extend Metric = 'Jailbreak', Order = 1),\r\n(CF | where cf has 'prompt_shield' | summarize Value = count() | extend Metric = 'Prompt Shield', Order = 2),\r\n(CF | where cf has 'indirect_attack' | summarize Value = count() | extend Metric = 'Indirect injection', Order = 3),\r\n(CF | where cf has 'hate' | summarize Value = count() | extend Metric = 'Hate', Order = 4),\r\n(CF | where cf has 'sexual' | summarize Value = count() | extend Metric = 'Sexual', Order = 5),\r\n(CF | where cf has 'violence' | summarize Value = count() | extend Metric = 'Violence', Order = 6),\r\n(CF | where cf has 'self_harm' | summarize Value = count() | extend Metric = 'Self-harm', Order = 7),\r\n(CF | where cf has_any ('protected_material', 'custom_blocklists') | summarize Value = count() | extend Metric = 'Protected / blocklist', Order = 8)\r\n| project Order, Metric, Value\r\n| sort by Order asc",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "Safety category counts",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "cs-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results']))\r\n| summarize Hits = count() by bin(TimeGenerated, 1h)",
+              "size": 0,
+              "visualization": "timechart",
+              "title": "Content-safety hits over time",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "cs-trend"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results']))\r\n| summarize Hits = count() by Agent = tostring(Properties['gen_ai.agent.name'])\r\n| top 15 by Hits desc",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "Top agents by safety hits",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "cs-agents"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results']))\r\n| summarize Hits = count() by Model = tostring(Properties['gen_ai.request.model'])\r\n| top 15 by Hits desc",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "Models with most safety hits",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "cs-models"
+          }
+        ]
+      },
+      "name": "group-safety"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "models"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🧠 Model Observability\n\nPer-model tokens, latency, cost, and failures across Foundry + OpenAI (+ AOAIOperationalLogs). Cost uses the token-price params.",
+              "style": "info"
+            },
+            "name": "mo-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;AIRequests\r\n| where isnotempty(Model)\r\n| summarize Requests = count(), InputTokens = sum(InTok), OutputTokens = sum(OutTok), AvgLatencyMs = round(avg(LatencyMs), 0) by Model\r\n| extend EstCostUSD = round((InputTokens / 1000.0) * toreal('{PriceInput}') + (OutputTokens / 1000.0) * toreal('{PriceOutput}'), 2)\r\n| order by Requests desc",
+              "size": 0,
+              "title": "Per-model summary (requests, tokens, latency, cost)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Requests",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  },
+                  {
+                    "columnMatch": "EstCostUSD",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "mo-grid"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;AIRequests | where isnotempty(Model) and LatencyMs > 0 | summarize AvgLatencyMs = avg(LatencyMs) by bin(TimeGenerated, 1h), Model",
+              "size": 0,
+              "visualization": "timechart",
+              "title": "Avg latency over time by model",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "mo-lat"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;AIRequests | where isnotempty(Model) | summarize Tokens = sum(InTok + OutTok) by bin(TimeGenerated, 1d), Model",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "Token volume by day / model",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "mo-cost"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.request.model'])) and Success == false | extend Model = tostring(Properties['gen_ai.request.model']) | summarize Failures = count() by Model),\r\n(AOAIOperationalLogs | extend Model = tostring(column_ifexists('properties_modelDeploymentName', column_ifexists('ModelDeploymentName', ''))) | where toint(column_ifexists('ResultSignature', column_ifexists('resultSignature', 200))) >= 400 | summarize Failures = count() by Model)\r\n| summarize Failures = sum(Failures) by Model\r\n| where isnotempty(Model)\r\n| order by Failures desc",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "Failures by model",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Failures",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "mo-err"
+          }
+        ]
+      },
+      "name": "group-models"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "ops"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## ⚙️ Agent Operations\n\nOperational health from AppDependencies / AppRequests / AppExceptions: failure breakdown, HTTP result codes (429/500/timeouts), success %, and top exceptions.",
+              "style": "info"
+            },
+            "name": "op-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true\r\n(AppDependencies | where Success == false | extend Kind = case(AppRoleName == 'Microsoft Copilot Studio', 'Connector', isnotempty(tostring(Properties['gen_ai.tool.name'])), 'Agent tool', tostring(DependencyType)) | summarize Failures = count() by Kind),\r\n(AppExceptions | summarize Failures = count() by Kind = tostring(ExceptionType))\r\n| summarize Failures = sum(Failures) by Kind\r\n| order by Failures desc\r\n| take 20",
+              "size": 1,
+              "visualization": "barchart",
+              "title": "Failures by kind (tool / connector / exception)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Failures",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "op-fail"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true\r\n(AppDependencies | summarize Count = count() by ResultCode = tostring(ResultCode)),\r\n(AppRequests | summarize Count = count() by ResultCode = tostring(ResultCode))\r\n| summarize Count = sum(Count) by ResultCode\r\n| order by Count desc\r\n| take 25",
+              "size": 1,
+              "title": "Result codes (429 / 500 / timeouts)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Count",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "orange"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "op-codes"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AppDependencies\r\n| summarize Total = count(), Fail = countif(Success == false) by bin(TimeGenerated, 1h)\r\n| extend SuccessPct = round(100.0 * (Total - Fail) / Total, 1)\r\n| project TimeGenerated, SuccessPct",
+              "size": 0,
+              "visualization": "timechart",
+              "title": "Success % over time",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "op-succ"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true (AppExceptions)\r\n| summarize Count = count(), Last = max(TimeGenerated) by Problem = tostring(ExceptionType)\r\n| top 25 by Count desc",
+              "size": 0,
+              "title": "Top exceptions",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Count",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "op-exc"
+          }
+        ]
+      },
+      "name": "group-ops"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "gov"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 📋 Governance & Compliance\n\nOwnerless / unapproved agents, external-data & MCP usage, weak auth, inactivity, and **shadow AI** (third-party AI SaaS from CloudAppEvents).",
+              "style": "info"
+            },
+            "name": "gv-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let A = AgentsInfo | summarize arg_max(TimeGenerated, *) by AgentId;\r\nunion isfuzzy=true\r\n(A | where isempty(tostring(Owners)) or tostring(Owners) in ('', '[]') | summarize Value = count() | extend Metric = 'Ownerless agents', Order = 1),\r\n(A | where PublishedStatus !~ 'Published' | summarize Value = count() | extend Metric = 'Unpublished / unapproved', Order = 2),\r\n(A | where isnotempty(tostring(column_ifexists('DeclaredDataSources', ''))) and tostring(column_ifexists('DeclaredDataSources', '')) !in ('', '[]') | summarize Value = count() | extend Metric = 'Using external / knowledge data', Order = 3),\r\n(A | where isnotempty(tostring(McpServers)) and tostring(McpServers) !in ('', '[]') | summarize Value = count() | extend Metric = 'Using MCP servers', Order = 4),\r\n(A | where tostring(ToolsAuthenticationType) has_any ('None', 'Anonymous', 'ApiKey', 'key') | summarize Value = count() | extend Metric = 'Weak / no tool auth', Order = 5),\r\n(A | where LastUpdatedDateTime < ago(30d) | summarize Value = count() | extend Metric = 'Inactive (>30d)', Order = 6),\r\n(union isfuzzy=true (CloudAppEvents | where Application has_any ('OpenAI','ChatGPT','Claude','Anthropic','Gemini','Perplexity','Mistral')) | summarize Value = dcount(Application) | extend Metric = 'Shadow AI apps', Order = 7)\r\n| project Order, Metric, Value\r\n| sort by Order asc",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "Governance metrics",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "gv-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true (CloudAppEvents)\r\n| where Application has_any ('OpenAI', 'ChatGPT', 'Claude', 'Anthropic', 'Gemini', 'Perplexity', 'Mistral', 'DeepSeek', 'Copilot')\r\n| summarize Events = count(), Users = dcount(AccountObjectId), LastSeen = max(TimeGenerated) by Application\r\n| top 25 by Events desc",
+              "size": 0,
+              "title": "Shadow / third-party AI usage (CloudAppEvents)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Events",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "orange"
+                    }
+                  }
+                ]
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "gv-shadow"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "AgentsInfo\r\n| summarize arg_max(TimeGenerated, *) by AgentId\r\n| where isnotempty(tostring(column_ifexists('DeclaredDataSources', ''))) and tostring(column_ifexists('DeclaredDataSources', '')) !in ('', '[]')\r\n| project Name, Platform, DeclaredDataSources = tostring(column_ifexists('DeclaredDataSources', '')), McpServers = tostring(McpServers), Auth = tostring(ToolsAuthenticationType)\r\n| take 100",
+              "size": 0,
+              "title": "Agents using external / knowledge data sources",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "gv-ext"
+          }
+        ]
+      },
+      "name": "group-gov"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "invest"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🔎 Investigation\n\nEntity-pivot investigation. Type a **client agent / bot / identity / UPN** in **Agent contains** above to focus the timeline, related alerts, and (for a human UPN) sign-ins.",
+              "style": "info"
+            },
+            "name": "iv-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let Events = union isfuzzy=true\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend EventType = 'Prompt/Response', Platform = 'M365 Copilot', Agent = tostring(AgentName), Identity = tostring(ActorName), Detail = substring(tostring(LLMEventData.Prompt), 0, 160)),\r\n(CopilotActivity | where RecordType != 'CopilotInteraction' | extend EventType = tostring(RecordType), Platform = 'M365 Copilot', Agent = tostring(AgentName), Identity = tostring(ActorName), Detail = tostring(RecordType)),\r\n(AppEvents | where Name startswith 'BotMessage' | extend EventType = tostring(Name), Platform = 'Copilot Studio', Agent = tostring(UserId), Identity = tostring(UserId), Detail = substring(tostring(Properties['text']), 0, 160)),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.tool.name'])) | extend EventType = 'Tool call', Platform = 'Foundry', Agent = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Detail = tostring(Properties['gen_ai.tool.name'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results'])) | extend EventType = 'Content-safety', Platform = 'Foundry', Agent = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Detail = tostring(Properties['microsoft.foundry.content_filter.results'])),\r\n(BehaviorInfo | where ActionType contains 'PromptShield' or ActionType contains 'Jailbreak' | extend EventType = 'Prompt Shield', Platform = 'Defender XDR', Agent = tostring(todynamic(AdditionalFields).AgentName), Identity = tostring(AccountUpn), Detail = tostring(Description)),\r\n(SecurityAlert | where AlertName has_any ('Copilot','Foundry','OpenAI','Agent','Prompt','Jailbreak','AI') | extend EventType = 'Alert', Platform = 'Sentinel', Agent = tostring(AlertName), Identity = '', Detail = tostring(AlertName))\r\n| project TimeGenerated, EventType, Platform, Agent, Identity, Detail;\r\nEvents\r\n| where '{AgentSearch}' == '' or Agent has '{AgentSearch}' or Identity has '{AgentSearch}'\r\n| order by TimeGenerated desc\r\n| take 200",
+              "size": 0,
+              "title": "Event timeline for the selected entity",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "iv-feed"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true (SecurityAlert)\r\n| where '{AgentSearch}' == '' or tostring(Entities) has '{AgentSearch}' or AlertName has '{AgentSearch}'\r\n| project TimeGenerated, AlertName, AlertSeverity, Description\r\n| order by TimeGenerated desc\r\n| take 50",
+              "size": 0,
+              "title": "Related security alerts",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "iv-alerts"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true (SigninLogs)\r\n| where '{AgentSearch}' != '' and UserPrincipalName has '{AgentSearch}'\r\n| project TimeGenerated, UserPrincipalName, AppDisplayName, ResultType, IPAddress, Location = tostring(LocationDetails.countryOrRegion)\r\n| order by TimeGenerated desc\r\n| take 50",
+              "size": 0,
+              "title": "Related sign-ins (if a user UPN)",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "iv-signin"
+          }
+        ]
+      },
+      "name": "group-invest"
+    },
+    {
+      "type": 12,
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "risk"
+      },
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🎯 AI Risk Score\n\nComposite 0-100 score, weighted across prompt injection (22%), content safety (18%), sensitive data (18%), detection alerts (14%), tool/plugin risk (10%), third-party AI (9%), governance (9%). Tune caps / weights in the generator.",
+              "style": "info"
+            },
+            "name": "rk-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let AIRequests = union isfuzzy=true\r\n(datatable(TimeGenerated:datetime, Platform:string, AgentName:string, Identity:string, Model:string, InTok:real, OutTok:real, LatencyMs:real, ConversationId:string)[]),\r\n(CopilotActivity | where RecordType == 'CopilotInteraction' | extend Platform = 'M365 Copilot', AgentName = tostring(AgentName), Identity = tostring(ActorName), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(LLMEventData.ConversationId)),\r\n(AppEvents | where Name == 'BotMessageReceived' | extend Platform = 'Copilot Studio', AgentName = tostring(UserId), Identity = tostring(UserId), Model = '', InTok = toreal(0), OutTok = toreal(0), LatencyMs = toreal(0), ConversationId = tostring(Properties['conversationId'])),\r\n(AppDependencies | where isnotempty(tostring(Properties['gen_ai.agent.name'])) | extend Platform = 'Azure AI Foundry', AgentName = tostring(Properties['gen_ai.agent.name']), Identity = tostring(Properties['gen_ai.agent.name']), Model = tostring(Properties['gen_ai.request.model']), InTok = toreal(tolong(Properties['gen_ai.usage.input_tokens'])), OutTok = toreal(tolong(Properties['gen_ai.usage.output_tokens'])), LatencyMs = toreal(DurationMs), ConversationId = tostring(Properties['gen_ai.conversation.id'])),\r\n(ASimAgentEventLogs | extend Platform = 'OpenAI', AgentName = coalesce(tostring(TargetAgentName), tostring(SrcAgentName), tostring(ModelName)), Identity = coalesce(tostring(ActorUsername), tostring(ActorUserId)), Model = tostring(ModelName), InTok = toreal(tolong(InputTokensUsed)), OutTok = toreal(tolong(OutputTokensUsed)), LatencyMs = iff(isnotempty(EventStartTime) and isnotempty(EventEndTime), toreal(datetime_diff('millisecond', EventEndTime, EventStartTime)), toreal(0)), ConversationId = tostring(EventSessionId))\r\n| project TimeGenerated, Platform, AgentName, Identity, Model, InTok, OutTok, LatencyMs, ConversationId;let inj = toscalar(union isfuzzy=true (AppDependencies | where tostring(Properties['gen_ai.input.messages']) matches regex @'(?i)(ignore (all|previous)|jailbreak|system prompt)'), (CopilotActivity | mv-expand m = LLMEventData.Messages | where tobool(m.JailbreakDetected) == true) | summarize count());\r\nlet safety = toscalar(AppDependencies | where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results'])) | summarize count());\r\nlet sens = toscalar(union isfuzzy=true (CopilotActivity | mv-expand r = LLMEventData.AccessedResources | where tobool(r.XPIADetected) == true), (AppEvents | where Name == 'BotMessageSend' and tostring(Properties['text']) matches regex @'(AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY)') | summarize count());\r\nlet tool = toscalar(union isfuzzy=true (AppDependencies | where isnotempty(tostring(Properties['gen_ai.tool.name']))), (ASimAgentEventLogs | where isnotempty(ToolName)) | summarize count());\r\nlet alerts = toscalar(union isfuzzy=true (SecurityAlert | where TimeGenerated > ago(7d) and AlertName has_any ('Copilot','Foundry','OpenAI','Agent','Prompt','Jailbreak','AI')) | summarize count());\r\nlet ext = toscalar(union isfuzzy=true (CloudAppEvents | where Application has_any ('OpenAI','ChatGPT','Claude','Anthropic','Gemini','Perplexity','Mistral')) | summarize count());\r\nlet gov = toscalar(AgentsInfo | summarize arg_max(TimeGenerated, *) by AgentId | where isempty(tostring(Owners)) or tostring(Owners) in ('', '[]') | summarize count());\r\nlet sc = (v:long, cap:real) { min_of(100.0, todouble(v) / cap * 100.0) };\r\nlet s_inj = sc(inj, 50.0); let s_safe = sc(safety, 50.0); let s_sens = sc(sens, 20.0); let s_tool = sc(tool, 500.0); let s_alert = sc(alerts, 10.0); let s_ext = sc(ext, 20.0); let s_gov = sc(gov, 10.0);\r\nlet overall = round(0.22 * s_inj + 0.18 * s_safe + 0.18 * s_sens + 0.10 * s_tool + 0.14 * s_alert + 0.09 * s_ext + 0.09 * s_gov, 0);\r\nunion\r\n(print Metric = 'AI Risk Score', Value = overall, Order = 1),\r\n(print Metric = 'Prompt injection', Value = round(s_inj, 0), Order = 2),\r\n(print Metric = 'Content safety', Value = round(s_safe, 0), Order = 3),\r\n(print Metric = 'Sensitive data', Value = round(s_sens, 0), Order = 4),\r\n(print Metric = 'Tool / plugin risk', Value = round(s_tool, 0), Order = 5),\r\n(print Metric = 'Detection alerts', Value = round(s_alert, 0), Order = 6),\r\n(print Metric = 'Third-party AI', Value = round(s_ext, 0), Order = 7),\r\n(print Metric = 'Governance', Value = round(s_gov, 0), Order = 8)\r\n| project Order, Metric, Value\r\n| sort by Order asc",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "AI Risk Score & component sub-scores",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "red"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "rk-score"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "union isfuzzy=true\r\n(AppDependencies | where isnotempty(tostring(Properties['microsoft.foundry.content_filter.results'])) | extend Cat = 'Content safety'),\r\n(AppDependencies | where tostring(Properties['gen_ai.input.messages']) matches regex @'(?i)(ignore (all|previous)|jailbreak|system prompt)' | extend Cat = 'Prompt injection'),\r\n(CopilotActivity | mv-expand m = LLMEventData.Messages | where tobool(m.JailbreakDetected) == true | extend Cat = 'Jailbreak')\r\n| summarize Events = count() by bin(TimeGenerated, 1h), Cat",
+              "size": 0,
+              "visualization": "timechart",
+              "title": "Risk-contributing events over time",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "rk-trend"
+          }
+        ]
+      },
+      "name": "group-risk"
+    }
+  ],
+  "styleSettings": {},
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
