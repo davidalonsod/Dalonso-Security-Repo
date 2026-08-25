@@ -2,7 +2,7 @@
 
 A curated collection of **31 KQL threat-hunting queries** and **37 Scheduled Analytic Rules** targeting the `CommonSecurityLog` (CEF) table in Microsoft Sentinel. Coverage spans three data sources: **Fortinet FortiGate**, **Palo Alto Networks**, and **Zscaler ZIA/ZPA**.
 
----
+Are Your Firewall Logs Too Noisy? Stop Attacks with Sentinel https://youtu.be/_q_tG7GscZA
 
 ## Table of Contents
 
