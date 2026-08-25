@@ -1,5 +1,7 @@
 # 🛡️ ADFSSignInLogs Threat Hunting Workbook
 
+Master ADFS Security: Advanced Monitoring and Threat Hunting with Microsoft Sentinel https://youtu.be/Ea6_optTTj4
+
 An Azure Monitor / Microsoft Sentinel **workbook** for hunting across federated
 **Active Directory Federation Services (ADFS)** authentication events in the
 `ADFSSignInLogs` table — and **cross-correlating with `SignInLogs`,
@@ -9,13 +11,6 @@ tamper with the ADFS log stream itself.
 - **File:** `ADFSSignInLogs-ThreatHunting-Workbook.json`
 - **Tabs:** 10 · **Query tiles:** 51 · **Parameters:** 13
 - **Type:** Azure Monitor Workbook (deploy via the Sentinel/Monitor Workbooks gallery)
-
-> This workbook is the **interactive/visual** companion to the query pack in this
-> repo. The scheduled detections live in [`Analytic-Rules/`](./Analytic-Rules),
-> the interactive hunts in [`HuntingQueries/`](./HuntingQueries), and the
-> standalone KQL pack is documented in the sibling [`README.md`](./README.md).
-> Every tile honours the **same exclusion filters** as the analytic rules so what
-> you hunt is exactly what the rules alert on.
 
 ---
 
