@@ -8,7 +8,7 @@
 [![Rules](https://img.shields.io/badge/analytic_rules-16-orange)]()
 [![Hunts](https://img.shields.io/badge/hunts-22-orange)]()
 
----
+Are Your Firewall Logs Too Noisy? Stop Attacks with Sentinel https://youtu.be/_q_tG7GscZA
 
 ## Table of Contents
 
