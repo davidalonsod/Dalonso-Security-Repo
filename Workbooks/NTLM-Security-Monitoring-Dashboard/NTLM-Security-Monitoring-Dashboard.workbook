@@ -1,0 +1,2455 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "## NTLM Security Monitoring Dashboard\n---\n\nComprehensive monitoring of NTLM authentication activity, brute-force attacks, and security posture across your environment. This dashboard provides real-time detection of credential attacks, lateral movement, and tracks NTLM deprecation progress.\n\n**Last Updated:** February 11, 2026  \n**Data Sources:** SecurityEvent, Event (System Log), IdentityLogonEvents, DeviceLogonEvents\n\n⚠️ **NTLM is a legacy protocol vulnerable to Pass-the-Hash attacks. Use this dashboard to monitor deprecation progress and detect active attacks.**\n\n### 📡 Supported NTLM Monitoring Events\n| Event ID | Source | Type | Description | Key Fields |\n|----------|--------|------|-------------|------------|\n| **4624/4625** | Security | Auth | Logon Success/Failure | Account, IP, LogonType |\n| **4769** | Security | Kerberos | TGS Request | ServiceName (SPN) |\n| **8001** | System | NTLM | Outbound Client NTLM | ClientProcessName |\n| **8003** | System | NTLM | Inbound Server NTLM | ProcessName |\n| **4020** | System | NTLM | Client Outbound (24H2+) | TargetResource, Reason |\n| **4022** | System | NTLM | Server Inbound (2025+) | ProcessName, ClientMachine |"
+      },
+      "name": "text - header"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 📋 Requirements & Prerequisites\n\n### **Required Data Sources**\n\n| Data Source | Purpose | Collection Method |\n|-------------|---------|-------------------|\n| **SecurityEvent** | Windows Security logs (Event IDs 4624, 4625) | Azure Monitor Agent (AMA) or Log Analytics Agent |\n| **IdentityLogonEvents** | Active Directory authentication activity | Microsoft Defender for Identity (MDI) sensors |\n| **DeviceLogonEvents** | Endpoint logon events | Microsoft Defender for Endpoint (MDE) |\n\n### **Required Event IDs**\n\n| Event ID | Description | Log Source | Criticality |\n|----------|-------------|------------|-------------|\n| **4624** | Successful logon | Windows Security | ✅ Required |\n| **4625** | Failed logon | Windows Security | ✅ Required |\n| **4769** | Kerberos TGS Request (SPN capture) | Windows Security | ✅ Required |\n| **8001** | Outbound Client NTLM (Process Name) | System | 🟠 Recommended |\n| **8003** | Inbound Server NTLM (Process Name) | System | 🟠 Recommended |\n| **4020** | Client Outbound NTLM (24H2+) | System | 🟠 Recommended |\n| **4022** | Server Inbound NTLM (Win2025+) | System | 🟠 Recommended |\n| **8002/8004** | NTLM auditing (legacy) | System | 🟡 Optional |\n\n---\n\n### **📡 XPath Queries for Data Collection Rules (DCR)**\n\nConfigure these XPath queries in your Azure Monitor Agent Data Collection Rules to collect the required logs:\n\n**Security Log - NTLM/Kerberos Authentication Events:**\n```\nSecurity!*[System[(EventID=4624 or EventID=4625 or EventID=4648 or EventID=4769 or EventID=4776)]]\n```\n\n**System Log - NTLM Auditing Events (Enhanced Monitoring):**\n```\nSystem!*[System[(EventID=8001 or EventID=8002 or EventID=8003 or EventID=8004 or EventID=4020 or EventID=4022)]]\n```\n\n**Note:** Events 4020 and 4022 require Windows 11 24H2+ or Windows Server 2025+\n\n**DCR Configuration Steps:**\n1. Navigate to **Azure Portal** → **Monitor** → **Data Collection Rules**\n2. Create or edit a DCR associated with your Windows servers\n3. Add **Windows Event Logs** as a data source\n4. Select **Custom** and paste the XPath queries above\n5. Set destination to your Log Analytics workspace\n6. Deploy DCR to target VMs via Azure Policy or direct assignment\n\n---\n\n### **Prerequisites**\n\n**1. Windows Systems (Domain Controllers & Member Servers):**\n- ✅ Azure Monitor Agent or Log Analytics Agent installed\n- ✅ Connected to Log Analytics workspace\n- ✅ Advanced Audit Policy enabled:\n  - `Audit Logon` (Success, Failure)\n  - `Audit Account Logon` (Success, Failure)\n  - `Audit Credential Validation` (Success, Failure)\n\n**2. Microsoft Defender for Identity (for IdentityLogonEvents):**\n- ✅ MDI sensors installed on all Domain Controllers\n- ✅ MDI workspace connected to Microsoft Sentinel\n- ✅ IdentityLogonEvents table populated (may take 24-48 hours after deployment)\n\n**3. Microsoft Defender for Endpoint (for DeviceLogonEvents):**\n- ✅ MDE agents deployed to Windows endpoints\n- ✅ MDE workspace connected to Microsoft Sentinel\n- ✅ Advanced hunting data available\n\n**4. Optional: Enhanced NTLM Auditing:**\n- Registry: `HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0`\n  - `AuditReceivingNTLMTraffic` = 2 (Dword)\n- Registry: `HKLM\\SYSTEM\\CurrentControlSet\\Services\\Netlogon\\Parameters`\n  - `AuditNTLMInDomain` = 7 (Dword)\n\n### **Verification Steps**\n\n**Test SecurityEvent collection:**\n```kql\nSecurityEvent\n| where TimeGenerated > ago(1h)\n| where EventID in (4624, 4625)\n| where AuthenticationPackageName has \\\"NTLM\\\"\n| take 10\n```\n\n**Test IdentityLogonEvents collection:**\n```kql\nIdentityLogonEvents\n| where TimeGenerated > ago(1h)\n| where Protocol has \\\"NTLM\\\"\n| take 10\n```\n\n**Test DeviceLogonEvents collection:**\n```kql\nDeviceLogonEvents\n| where TimeGenerated > ago(1h)\n| where Protocol has \\\"NTLM\\\"\n| take 10\n```\n\n⚠️ **Note:** If queries return 0 results, verify agents are installed, audit policies are enabled, and data is flowing to Sentinel. Allow 15-30 minutes for initial data ingestion.\n\n---"
+      },
+      "name": "text - requirements"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "2f84ed9a-e3ed-498d-8b1e-e0a7e6c89f72",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time Range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 2592000000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                },
+                {
+                  "durationMs": 7776000000
+                }
+              ],
+              "allowCustom": true
+            },
+            "timeContext": {
+              "durationMs": 86400000
+            }
+          },
+          {
+            "id": "c4f7c4d9-2e1a-4f9c-8d7e-1a2b3c4d5e7f",
+            "version": "KqlParameterItem/1.0",
+            "name": "Workspace",
+            "type": 5,
+            "isRequired": true,
+            "query": "where type =~ 'microsoft.operationalinsights/workspaces'\n| project id",
+            "crossComponentResources": [
+              "value::selected"
+            ],
+            "typeSettings": {
+              "resourceTypeFilter": {
+                "microsoft.operationalinsights/workspaces": true
+              },
+              "additionalResourceOptions": [
+                "value::1"
+              ],
+              "showDefault": false
+            },
+            "timeContext": {
+              "durationMs": 86400000
+            },
+            "defaultValue": "value::1",
+            "queryType": 1,
+            "resourceType": "microsoft.resourcegraph/resources"
+          }
+        ],
+        "style": "pills",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources"
+      },
+      "name": "parameters - time range"
+    },
+    {
+      "type": 11,
+      "content": {
+        "version": "LinkItem/1.0",
+        "style": "tabs",
+        "links": [
+          {
+            "id": "b1b2c3d4-e5f6-7890-abcd-ef1234567891",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "Overview",
+            "subTarget": "Overview",
+            "style": "link"
+          },
+          {
+            "id": "c2c3d4e5-f678-90ab-cdef-123456789abc",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "Attack Detection",
+            "subTarget": "AttackDetection",
+            "style": "link"
+          },
+          {
+            "id": "d3d4e5f6-7890-abcd-ef12-3456789abcde",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "Identity & Device Analysis",
+            "subTarget": "IdentityAnalysis",
+            "style": "link"
+          },
+          {
+            "id": "e4e5f678-90ab-cdef-1234-56789abcdef1",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "Threat Intelligence",
+            "subTarget": "ThreatIntel",
+            "style": "link"
+          },
+          {
+            "id": "f5f6a789-01bc-def2-3456-789abcdef012",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "NTLM Authentication Analysis",
+            "subTarget": "NTLMAnalysis",
+            "style": "link"
+          },
+          {
+            "id": "g6g7b890-12cd-ef34-5678-90abcdef1234",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "Advanced NTLM Traffic",
+            "subTarget": "AdvancedNTLM",
+            "style": "link"
+          },
+          {
+            "id": "h7h8c901-23de-f456-7890-12bcdef34567",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "Best Practices & Compliance",
+            "subTarget": "BestPractices",
+            "style": "link"
+          }
+        ]
+      },
+      "name": "links - tabs"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "### 📊 NTLM Usage Overview\n\nMonitor overall NTLM authentication activity, success/failure rates, and legitimate usage patterns."
+            },
+            "name": "text - overview header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Total NTLM Events\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID in (4624, 4625)\n| where AuthenticationPackageName has \"NTLM\"\n| summarize \n    TotalEvents = count(),\n    SuccessCount = countif(EventID == 4624),\n    FailureCount = countif(EventID == 4625)\n| extend FailureRate = round((todouble(FailureCount) / TotalEvents) * 100, 2)\n| extend Status = case(\n    FailureRate > 90, \"🔴 Critical - Under Attack\",\n    FailureRate > 50, \"🟠 High Risk\",\n    FailureRate > 20, \"🟡 Medium Risk\",\n    \"🟢 Normal\"\n)\n| project Metric = \"Total NTLM Events\", TotalEvents, SuccessCount, FailureCount, FailureRate, Status",
+              "size": 4,
+              "title": "NTLM Event Summary",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "TotalEvents",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "auto"
+                  },
+                  "numberFormat": {
+                    "unit": 17,
+                    "options": {
+                      "style": "decimal",
+                      "maximumFractionDigits": 0
+                    }
+                  }
+                },
+                "secondaryContent": {
+                  "columnMatch": "Status",
+                  "formatter": 1
+                },
+                "showBorder": true
+              }
+            },
+            "customWidth": "33",
+            "name": "query - total events"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Attack Sources (Unique IPs)\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4625\n| where AuthenticationPackageName has \"NTLM\"\n| summarize \n    FailedAttempts = count(),\n    UniqueIPs = dcount(IpAddress),\n    UniqueAccounts = dcount(Account)\n| extend ThreatLevel = case(\n    UniqueIPs > 100, \"🔴 Distributed Attack\",\n    UniqueIPs > 50, \"🟠 Multiple Sources\",\n    UniqueIPs > 10, \"🟡 Targeted Attack\",\n    \"🟢 Low Activity\"\n)\n| project Metric = \"Attack Sources\", UniqueIPs, FailedAttempts, UniqueAccounts, ThreatLevel",
+              "size": 4,
+              "title": "Attack Sources & Attempts",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "UniqueIPs",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "redBright"
+                  },
+                  "numberFormat": {
+                    "unit": 17,
+                    "options": {
+                      "style": "decimal"
+                    }
+                  }
+                },
+                "secondaryContent": {
+                  "columnMatch": "ThreatLevel",
+                  "formatter": 1
+                },
+                "showBorder": true
+              }
+            },
+            "customWidth": "33",
+            "name": "query - attack sources"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Legitimate NTLM Usage\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| where LogonType == 3  // Network logon\n| summarize \n    LegitimateLogons = count(),\n    UniqueAccounts = dcount(Account),\n    UniqueDevices = dcount(Computer)\n| extend DeprecationStatus = case(\n    LegitimateLogons > 1000, \"🔴 High Usage - Action Required\",\n    LegitimateLogons > 100, \"🟡 Medium Usage - Plan Migration\",\n    LegitimateLogons > 10, \"🟢 Low Usage - Good Progress\",\n    \"✅ Minimal Usage\"\n)\n| project Metric = \"Legitimate NTLM Logons\", LegitimateLogons, UniqueAccounts, UniqueDevices, DeprecationStatus",
+              "size": 4,
+              "title": "Legitimate NTLM Usage",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "LegitimateLogons",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  },
+                  "numberFormat": {
+                    "unit": 17,
+                    "options": {
+                      "style": "decimal"
+                    }
+                  }
+                },
+                "secondaryContent": {
+                  "columnMatch": "DeprecationStatus",
+                  "formatter": 1
+                },
+                "showBorder": true
+              }
+            },
+            "customWidth": "33",
+            "name": "query - legitimate usage"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Authentication Trend Over Time\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID in (4624, 4625)\n| where AuthenticationPackageName has \"NTLM\"\n| extend EventType = case(\n    EventID == 4624, \"Successful\",\n    EventID == 4625, \"Failed\",\n    \"Other\"\n)\n| summarize Count = count() by bin(TimeGenerated, 1h), EventType\n| render timechart with (title=\"NTLM Authentication Timeline\")",
+              "size": 0,
+              "title": "NTLM Activity Trend (Success vs Failure)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "timechart"
+            },
+            "customWidth": "50",
+            "name": "query - ntlm timeline"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM by Logon Type\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID in (4624, 4625)\n| where AuthenticationPackageName has \"NTLM\"\n| extend LogonTypeDesc = case(\n    LogonType == 2, \"Interactive\",\n    LogonType == 3, \"Network\",\n    LogonType == 4, \"Batch\",\n    LogonType == 5, \"Service\",\n    LogonType == 7, \"Unlock\",\n    LogonType == 8, \"NetworkCleartext\",\n    LogonType == 9, \"NewCredentials\",\n    LogonType == 10, \"RemoteInteractive\",\n    LogonType == 11, \"CachedInteractive\",\n    \"Other\"\n)\n| summarize Count = count() by LogonTypeDesc\n| order by Count desc\n| render piechart with (title=\"NTLM Usage by Logon Type\")",
+              "size": 0,
+              "title": "NTLM Logon Type Distribution",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "piechart"
+            },
+            "customWidth": "50",
+            "name": "query - logon types"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Top Devices Using NTLM (Legitimate)\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| summarize \n    NTLMLogons = count(),\n    UniqueAccounts = dcount(Account),\n    UniqueSourceIPs = dcount(IpAddress),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    SampleAccounts = make_set(Account, 3)\n    by Computer\n| order by NTLMLogons desc\n| take 10\n| project Computer, NTLMLogons, UniqueAccounts, UniqueSourceIPs, SampleAccounts, FirstSeen, LastSeen",
+              "size": 0,
+              "title": "Top Devices Using NTLM (Successful Logons)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "NTLMLogons",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "name": "query - top devices"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 📈 7-Day Baseline Comparison\n\nCompare current NTLM activity against the previous 7-day baseline to identify anomalies and trends."
+            },
+            "name": "text - baseline header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// 7-Day Baseline Deviation Analysis\nlet CurrentWeek = SecurityEvent\n| where TimeGenerated >= ago(7d)\n| where EventID in (4624, 4625)\n| where AuthenticationPackageName has \"NTLM\"\n| summarize \n    CurrentTotal = count(),\n    CurrentSuccess = countif(EventID == 4624),\n    CurrentFailed = countif(EventID == 4625)\n    by bin(TimeGenerated, 1d);\nlet PreviousWeek = SecurityEvent\n| where TimeGenerated between (ago(14d) .. ago(7d))\n| where EventID in (4624, 4625)\n| where AuthenticationPackageName has \"NTLM\"\n| summarize \n    BaselineTotal = count(),\n    BaselineSuccess = countif(EventID == 4624),\n    BaselineFailed = countif(EventID == 4625);\nlet BaselineAvgTotal = toscalar(PreviousWeek | project BaselineTotal) / 7;\nlet BaselineAvgSuccess = toscalar(PreviousWeek | project BaselineSuccess) / 7;\nlet BaselineAvgFailed = toscalar(PreviousWeek | project BaselineFailed) / 7;\nCurrentWeek\n| summarize \n    CurrentDailyAvg = avg(CurrentTotal),\n    CurrentSuccessAvg = avg(CurrentSuccess),\n    CurrentFailedAvg = avg(CurrentFailed)\n| extend \n    BaselineDailyAvg = BaselineAvgTotal,\n    BaselineSuccessAvg = BaselineAvgSuccess,\n    BaselineFailedAvg = BaselineAvgFailed\n| extend \n    TotalDeviation = round((CurrentDailyAvg - BaselineDailyAvg) / BaselineDailyAvg * 100, 2),\n    SuccessDeviation = round((CurrentSuccessAvg - BaselineSuccessAvg) / BaselineSuccessAvg * 100, 2),\n    FailedDeviation = round((CurrentFailedAvg - BaselineFailedAvg) / BaselineFailedAvg * 100, 2)\n| extend \n    TotalStatus = case(\n        TotalDeviation > 50, \"🔴 Critical Spike\",\n        TotalDeviation > 20, \"🟠 Significant Increase\",\n        TotalDeviation < -20, \"🟢 Significant Decrease\",\n        \"🟡 Within Normal Range\"\n    ),\n    FailedStatus = case(\n        FailedDeviation > 100, \"🔴 Attack Detected\",\n        FailedDeviation > 50, \"🟠 Elevated Failures\",\n        FailedDeviation < -20, \"🟢 Improved Security\",\n        \"🟡 Normal\"\n    )\n| project \n    ['Current Daily Avg'] = round(CurrentDailyAvg, 0),\n    ['Baseline Daily Avg'] = round(BaselineDailyAvg, 0),\n    ['Total Deviation %'] = TotalDeviation,\n    ['Total Status'] = TotalStatus,\n    ['Failed Deviation %'] = FailedDeviation,\n    ['Failed Status'] = FailedStatus",
+              "size": 4,
+              "title": "📊 NTLM Activity - 7-Day Baseline Deviation",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "titleContent": {
+                  "columnMatch": "Total Status",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "Total Deviation %",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "greenRed"
+                  },
+                  "numberFormat": {
+                    "unit": 1,
+                    "options": {
+                      "style": "decimal",
+                      "maximumFractionDigits": 2
+                    }
+                  }
+                },
+                "secondaryContent": {
+                  "columnMatch": "Failed Status",
+                  "formatter": 1
+                },
+                "showBorder": true
+              }
+            },
+            "customWidth": "50",
+            "name": "query - baseline deviation tile"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// 7-Day Baseline Trend Comparison\nSecurityEvent\n| where TimeGenerated >= ago(14d)\n| where EventID in (4624, 4625)\n| where AuthenticationPackageName has 'NTLM'\n| extend Period = iff(TimeGenerated >= ago(7d), 'Current Week', 'Baseline Week')\n| extend DayOffset = iff(TimeGenerated >= ago(7d), datetime_diff('day', now(), TimeGenerated), datetime_diff('day', ago(7d), TimeGenerated))\n| summarize EventCount = count() by Period, DayOffset\n| extend Day = 7 - DayOffset\n| project Day, EventCount, Period\n| order by Period, Day asc",
+              "size": 0,
+              "title": "📈 Current vs Baseline NTLM Activity (7-Day Comparison)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "linechart",
+              "chartSettings": {
+                "xAxis": "Day",
+                "yAxis": ["EventCount"],
+                "group": "Period",
+                "createOtherGroup": false
+              }
+            },
+            "customWidth": "50",
+            "name": "query - baseline trend chart"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Overview"
+      },
+      "name": "group - overview"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🚨 Attack Detection & Threat Analysis\n\nIdentify brute-force attacks, credential stuffing campaigns, and malicious source IPs targeting your environment."
+            },
+            "name": "text - attack header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Top Attacked Accounts (Failed Logons)\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4625\n| where AuthenticationPackageName has \"NTLM\"\n| summarize \n    FailedAttempts = count(),\n    UniqueSourceIPs = dcount(IpAddress),\n    SourceIPs = make_set(IpAddress, 5),\n    FirstFailed = min(TimeGenerated),\n    LastFailed = max(TimeGenerated)\n    by Account\n| where FailedAttempts > 10\n| order by FailedAttempts desc\n| take 20\n| extend ThreatLevel = case(\n    FailedAttempts > 10000, \"🔴 Critical\",\n    FailedAttempts > 1000, \"🟠 High\",\n    FailedAttempts > 100, \"🟡 Medium\",\n    \"🟢 Low\"\n)\n| project Account, FailedAttempts, UniqueSourceIPs, ThreatLevel, SourceIPs, FirstFailed, LastFailed",
+              "size": 0,
+              "title": "Most Targeted Accounts (Failed Logons)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "FailedAttempts",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  },
+                  {
+                    "columnMatch": "ThreatLevel",
+                    "formatter": 18,
+                    "formatOptions": {
+                      "thresholdsOptions": "colors",
+                      "thresholdsGrid": [
+                        {
+                          "operator": "contains",
+                          "thresholdValue": "Critical",
+                          "representation": "redBright",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "contains",
+                          "thresholdValue": "High",
+                          "representation": "orange",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "contains",
+                          "thresholdValue": "Medium",
+                          "representation": "yellow",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "Default",
+                          "thresholdValue": null,
+                          "representation": "gray",
+                          "text": "{0}{1}"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "columnMatch": "FirstFailed",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastFailed",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "name": "query - targeted accounts"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Top Attack Source IPs\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4625\n| where AuthenticationPackageName has \"NTLM\"\n| summarize \n    FailedAttempts = count(),\n    UniqueTargetAccounts = dcount(Account),\n    UniqueDestinations = dcount(Computer),\n    TargetedAccounts = make_set(Account, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by IpAddress\n| where FailedAttempts > 100\n| order by FailedAttempts desc\n| take 30\n| extend RiskAssessment = case(\n    FailedAttempts > 100000, \"🔴 Critical - Persistent Attacker\",\n    FailedAttempts > 10000, \"🔴 Critical - Mass Attack\",\n    FailedAttempts > 1000, \"🟠 High - Active Threat\",\n    \"🟡 Medium - Monitoring Required\"\n)\n| project IpAddress, FailedAttempts, UniqueTargetAccounts, UniqueDestinations, RiskAssessment, TargetedAccounts, FirstSeen, LastSeen",
+              "size": 0,
+              "title": "Top Attacking Source IPs",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "FailedAttempts",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "redBright"
+                    }
+                  },
+                  {
+                    "columnMatch": "RiskAssessment",
+                    "formatter": 1
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ],
+                "rowLimit": 30
+              }
+            },
+            "name": "query - attack sources"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// High-Frequency Attack Windows\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4625\n| where AuthenticationPackageName has \"NTLM\"\n| summarize \n    AttemptsPerHour = count(),\n    UniqueSourceIPs = dcount(IpAddress),\n    SourceIPs = make_set(IpAddress, 3)\n    by Account, bin(TimeGenerated, 1h)\n| where AttemptsPerHour > 100\n| order by AttemptsPerHour desc\n| take 20\n| extend AttackType = case(\n    AttemptsPerHour > 2000, \"🔴 Automated/Botnet\",\n    AttemptsPerHour > 500, \"🟠 High-Volume Attack\",\n    AttemptsPerHour > 100, \"🟡 Sustained Attack\",\n    \"🟢 Low Activity\"\n)\n| project TimeGenerated, Account, AttemptsPerHour, UniqueSourceIPs, AttackType, SourceIPs",
+              "size": 0,
+              "title": "High-Frequency Attack Windows (>100 attempts/hour)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "TimeGenerated",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "AttemptsPerHour",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - high frequency"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Successful NTLM After Multiple Failures (Potential Breach)\nlet FailedLogons = SecurityEvent\n    | where TimeGenerated {TimeRange}\n    | where EventID == 4625\n    | where AuthenticationPackageName has \"NTLM\"\n    | summarize FailureCount = count() by IpAddress, Account, Computer;\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| join kind=inner (FailedLogons) on IpAddress, Account, Computer\n| where FailureCount > 5\n| project TimeGenerated, Account, Computer, IpAddress, FailureCount, LogonType\n| extend ThreatLevel = \"🔴 Critical - Potential Breach\"\n| order by FailureCount desc\n| take 20",
+              "size": 0,
+              "title": "🚨 Successful Logons After Failed Attempts (Credential Stuffing Success)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "TimeGenerated",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "FailureCount",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "redBright"
+                    }
+                  },
+                  {
+                    "columnMatch": "ThreatLevel",
+                    "formatter": 1
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - breach indicators"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM from Privileged Accounts\nlet PrivilegedAccounts = dynamic([\"Administrator\", \"admin\", \"svcadmin\", \"domain admins\", \"enterprise admins\", \"schema admins\", \"backup operators\"]);\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| where Account has_any (PrivilegedAccounts) or Account contains \"admin\"\n| summarize \n    LogonCount = count(),\n    UniqueSourceIPs = dcount(IpAddress),\n    SourceIPs = make_set(IpAddress, 5),\n    UniqueComputers = dcount(Computer),\n    Computers = make_set(Computer, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by Account, LogonType\n| extend RiskLevel = \"🔴 High - Privileged Account Using NTLM\"\n| project Account, LogonCount, UniqueSourceIPs, UniqueComputers, RiskLevel, SourceIPs, Computers, FirstSeen, LastSeen\n| order by LogonCount desc",
+              "size": 0,
+              "title": "⚠️ Privileged Accounts Using NTLM",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "LogonCount",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "orange"
+                    }
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "name": "query - privileged accounts"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "AttackDetection"
+      },
+      "name": "group - attack detection"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "### 👤 Identity & Device Analysis\n\nAnalyze NTLM usage patterns across Active Directory, endpoints, and detect lateral movement indicators."
+            },
+            "name": "text - identity header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// IdentityLogonEvents - NTLM Usage in Active Directory\nIdentityLogonEvents\n| where TimeGenerated {TimeRange}\n| where Protocol has \"NTLM\"\n| extend NTLMVersion = case(\n    Protocol =~ \"NTLMv1\", \"NTLMv1\",\n    Protocol =~ \"NTLMv2\", \"NTLMv2\",\n    Protocol has \"NTLM\", \"NTLM\",\n    \"Other\"\n)\n| summarize \n    TotalEvents = count(),\n    SuccessCount = countif(ActionType == \"LogonSuccess\"),\n    FailedCount = countif(ActionType == \"LogonFailed\"),\n    UniqueAccounts = dcount(AccountName),\n    UniqueSourceDevices = dcount(DeviceName),\n    UniqueDestinations = dcount(DestinationDeviceName)\n    by NTLMVersion, LogonType\n| order by TotalEvents desc\n| extend SecurityStatus = case(\n    NTLMVersion == \"NTLMv1\", \"🔴 Critical - NTLMv1 Detected\",\n    TotalEvents > 1000, \"🟡 High Usage\",\n    \"🟢 Acceptable\"\n)",
+              "size": 0,
+              "title": "Active Directory NTLM Usage (IdentityLogonEvents)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "TotalEvents",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - identity events"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// DeviceLogonEvents - Endpoint NTLM Activity\nDeviceLogonEvents\n| where TimeGenerated {TimeRange}\n| where Protocol has \"NTLM\"\n| extend NTLMVersion = case(\n    Protocol =~ \"NTLMv1\", \"NTLMv1\",\n    Protocol =~ \"NTLMv2\", \"NTLMv2\",\n    Protocol has \"NTLM\", \"NTLM\",\n    \"Other\"\n)\n| summarize \n    TotalEvents = count(),\n    SuccessfulLogons = countif(ActionType == \"LogonSuccess\"),\n    FailedLogons = countif(ActionType == \"LogonFailed\"),\n    UniqueAccounts = dcount(AccountName),\n    UniqueDevices = dcount(DeviceName),\n    UniqueRemoteIPs = dcount(RemoteIP)\n    by NTLMVersion, LogonType\n| extend FailureRate = round((todouble(FailedLogons) / TotalEvents) * 100, 2)\n| order by TotalEvents desc",
+              "size": 0,
+              "title": "Endpoint NTLM Activity (DeviceLogonEvents)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "TotalEvents",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "purple"
+                    }
+                  },
+                  {
+                    "columnMatch": "FailureRate",
+                    "formatter": 18,
+                    "formatOptions": {
+                      "thresholdsOptions": "colors",
+                      "thresholdsGrid": [
+                        {
+                          "operator": ">",
+                          "thresholdValue": "90",
+                          "representation": "redBright",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": ">",
+                          "thresholdValue": "50",
+                          "representation": "orange",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "Default",
+                          "thresholdValue": null,
+                          "representation": "yellow",
+                          "text": "{0}{1}"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - device events"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Lateral Movement Detection via NTLM\nDeviceLogonEvents\n| where TimeGenerated {TimeRange}\n| where Protocol has \"NTLM\"\n| where ActionType == \"LogonSuccess\"\n| where LogonType == \"Network\"\n| summarize \n    DeviceCount = dcount(DeviceName),\n    Devices = make_set(DeviceName, 10),\n    RemoteIPs = make_set(RemoteIP, 5),\n    LogonCount = count(),\n    FirstLogon = min(TimeGenerated),\n    LastLogon = max(TimeGenerated),\n    TimeSpan = datetime_diff('minute', max(TimeGenerated), min(TimeGenerated))\n    by AccountName\n| where DeviceCount >= 3 or (DeviceCount >= 2 and TimeSpan <= 30)\n| extend SuspicionLevel = case(\n    DeviceCount >= 5, \"🔴 High - Likely Lateral Movement\",\n    DeviceCount >= 3 and TimeSpan <= 15, \"🟠 High - Rapid Spread\",\n    DeviceCount >= 3, \"🟡 Medium - Monitor\",\n    \"🟢 Low\"\n)\n| project AccountName, DeviceCount, LogonCount, TimeSpan, SuspicionLevel, Devices, RemoteIPs, FirstLogon, LastLogon\n| order by DeviceCount desc",
+              "size": 0,
+              "title": "🔍 Lateral Movement Detection (Multiple Devices, Short Timeframe)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "DeviceCount",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  },
+                  {
+                    "columnMatch": "SuspicionLevel",
+                    "formatter": 1
+                  },
+                  {
+                    "columnMatch": "FirstLogon",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastLogon",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "name": "query - lateral movement"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// After-Hours NTLM Activity\nlet BusinessHoursStart = 7;\nlet BusinessHoursEnd = 19;\nDeviceLogonEvents\n| where TimeGenerated {TimeRange}\n| where Protocol has \"NTLM\"\n| where ActionType == \"LogonSuccess\"\n| extend Hour = datetime_part(\"Hour\", TimeGenerated)\n| extend DayOfWeek = dayofweek(TimeGenerated)\n| extend IsAfterHours = case(\n    DayOfWeek >= 5d, \"Weekend\",\n    Hour < BusinessHoursStart or Hour > BusinessHoursEnd, \"After Hours\",\n    \"Business Hours\"\n)\n| where IsAfterHours != \"Business Hours\"\n| summarize \n    LogonCount = count(),\n    UniqueDevices = dcount(DeviceName),\n    Devices = make_set(DeviceName, 5),\n    RemoteIPList = make_set(RemoteIP, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by AccountName, IsAfterHours, LogonType\n| extend RiskLevel = case(\n    LogonCount > 100, \"🟠 High - Investigate\",\n    LogonCount > 20, \"🟡 Medium - Review\",\n    \"🟢 Low\"\n)\n| project AccountName, LogonCount, IsAfterHours, UniqueDevices, RiskLevel, Devices, RemoteIPList, FirstSeen, LastSeen\n| order by LogonCount desc",
+              "size": 0,
+              "title": "After-Hours NTLM Activity (Potential Insider Threat or Compromise)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "LogonCount",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "yellow"
+                    }
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - after hours"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Service Accounts Using NTLM\nlet ServiceAccountKeywords = dynamic([\"svc\", \"service\", \"_sa\", \"-sa\", \"app\", \"sql\"]);\nIdentityLogonEvents\n| where TimeGenerated {TimeRange}\n| where Protocol has \"NTLM\"\n| where AccountName has_any (ServiceAccountKeywords)\n| summarize \n    LogonCount = count(),\n    SuccessCount = countif(ActionType == \"LogonSuccess\"),\n    FailedCount = countif(ActionType == \"LogonFailed\"),\n    UniqueDestinations = dcount(DestinationDeviceName),\n    Destinations = make_set(DestinationDeviceName, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by AccountName, AccountDomain, Protocol\n| extend ServiceAccountRisk = case(\n    LogonCount > 1000, \"🔴 High - Heavy usage, migrate to gMSA\",\n    LogonCount > 100, \"🟡 Medium - Regular usage, plan migration\",\n    \"🟢 Low - Occasional usage\"\n)\n| project AccountName, AccountDomain, Protocol, LogonCount, SuccessCount, FailedCount, ServiceAccountRisk, Destinations, FirstSeen, LastSeen\n| order by LogonCount desc",
+              "size": 0,
+              "title": "Service Accounts Using NTLM (Migration Candidates)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "LogonCount",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - service accounts"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "IdentityAnalysis"
+      },
+      "name": "group - identity analysis"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🎯 Threat Intelligence & MITRE ATT&CK Correlation\n\nCorrelate NTLM activity with known attack patterns, MITRE ATT&CK techniques, and Pass-the-Hash indicators."
+            },
+            "name": "text - threat intel header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// MITRE ATT&CK Technique Detection\nlet BruteForce = SecurityEvent\n    | where TimeGenerated {TimeRange}\n    | where EventID == 4625\n    | where AuthenticationPackageName has \"NTLM\"\n    | summarize FailedAttempts = count() by IpAddress\n    | where FailedAttempts > 100\n    | summarize TotalIPs = dcount(IpAddress), TotalAttempts = sum(FailedAttempts)\n    | extend Technique = \"T1110.003 - Password Spraying\", Severity = \"Critical\", Evidence = strcat(TotalIPs, \" attacking IPs, \", TotalAttempts, \" failed attempts\");\nlet CredentialStuffing = SecurityEvent\n    | where TimeGenerated {TimeRange}\n    | where EventID == 4625\n    | where AuthenticationPackageName has \"NTLM\"\n    | summarize FailedAttempts = count(), UniqueAccounts = dcount(Account) by IpAddress\n    | where FailedAttempts > 1000\n    | summarize HighVolumeIPs = dcount(IpAddress), TotalAttempts = sum(FailedAttempts)\n    | extend Technique = \"T1110.004 - Credential Stuffing\", Severity = \"Critical\", Evidence = strcat(HighVolumeIPs, \" high-volume attackers, \", TotalAttempts, \" attempts\");\nlet PassTheHash = SecurityEvent\n    | where TimeGenerated {TimeRange}\n    | where EventID == 4624\n    | where AuthenticationPackageName has \"NTLM\"\n    | where LogonType == 3\n    | summarize NetworkLogons = count()\n    | extend Technique = \"T1550.002 - Pass-the-Hash (Potential)\", Severity = \"Medium\", Evidence = strcat(NetworkLogons, \" NTLM network logons detected\");\nunion BruteForce, CredentialStuffing, PassTheHash\n| project Technique, Severity, Evidence",
+              "size": 0,
+              "title": "MITRE ATT&CK Techniques Detected",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Severity",
+                    "formatter": 18,
+                    "formatOptions": {
+                      "thresholdsOptions": "colors",
+                      "thresholdsGrid": [
+                        {
+                          "operator": "==",
+                          "thresholdValue": "Critical",
+                          "representation": "redBright",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "==",
+                          "thresholdValue": "High",
+                          "representation": "orange",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "==",
+                          "thresholdValue": "Medium",
+                          "representation": "yellow",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "Default",
+                          "thresholdValue": null,
+                          "representation": "gray",
+                          "text": "{0}{1}"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            "name": "query - mitre attack"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🎭 Threat Actors Exploiting NTLM Vulnerabilities\n\n**Known APT Groups Using NTLM Attacks:**\n\n| Threat Actor | Aliases | Primary Techniques | Target Sectors |\n|--------------|---------|-------------------|----------------|\n| **APT28** | Fancy Bear, Sofacy | Pass-the-Hash, NTLM Relay, Credential Harvesting | Government, Defense, Media |\n| **APT29** | Cozy Bear, The Dukes | NTLM Relay, Token Impersonation, Lateral Movement | Government, Think Tanks |\n| **Lazarus Group** | Hidden Cobra, Zinc | Pass-the-Hash, SMB Relay, Credential Theft | Financial, Cryptocurrency |\n| **FIN7** | Carbanak, Navigator | NTLM Coercion, Responder Attacks | Retail, Hospitality, Finance |\n| **Wizard Spider** | UNC1878, Grim Spider | Pass-the-Hash, NTLM Relay (Ryuk/Conti) | Healthcare, Manufacturing |\n| **TA505** | Evil Corp | NTLM Theft, SMBExec | Financial, Retail |\n\n**Common NTLM Attack Tools:**\n- 🔧 **Mimikatz** - Credential extraction, Pass-the-Hash\n- 🔧 **Responder** - LLMNR/NBT-NS poisoning, NTLM capture\n- 🔧 **Impacket** - NTLM relay, SMB attacks (ntlmrelayx, secretsdump)\n- 🔧 **CrackMapExec** - NTLM spraying, lateral movement\n- 🔧 **PetitPotam** - NTLM coercion via MS-EFSRPC\n- 🔧 **PrinterBug/SpoolSample** - Forced NTLM authentication\n\n**Detection Focus:**\n- Monitor for NTLM relay patterns (same hash, different targets)\n- Watch for unusual NTLM traffic to non-standard ports\n- Alert on PetitPotam/PrinterBug coercion attempts\n- Track Pass-the-Hash indicators (LogonType 9, NewCredentials)"
+            },
+            "name": "text - threat actors info"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Threat Actor TTP Detection in Environment\nlet PassTheHashIndicators = SecurityEvent\n    | where TimeGenerated {TimeRange}\n    | where EventID == 4624\n    | where AuthenticationPackageName has \"NTLM\"\n    | where LogonType == 9  // NewCredentials - common in PtH\n    | summarize PtHCount = count(), Accounts = make_set(Account, 5) by Computer\n    | where PtHCount > 0\n    | extend ThreatActor = \"Multiple (APT28, APT29, Lazarus)\", TTP = \"T1550.002 - Pass-the-Hash\", Severity = \"Critical\";\nlet NTLMRelayIndicators = SecurityEvent\n    | where TimeGenerated {TimeRange}\n    | where EventID == 4624\n    | where AuthenticationPackageName has \"NTLM\"\n    | where LogonType == 3\n    | summarize \n        TargetCount = dcount(Computer),\n        Targets = make_set(Computer, 5)\n        by Account, IpAddress\n    | where TargetCount >= 3\n    | extend ThreatActor = \"FIN7, Wizard Spider\", TTP = \"T1557.001 - NTLM Relay\", Severity = \"High\";\nlet CoercionIndicators = SecurityEvent\n    | where TimeGenerated {TimeRange}\n    | where EventID == 4624\n    | where AuthenticationPackageName has \"NTLM\"\n    | where Account endswith \"$\"  // Machine accounts\n    | where LogonType == 3\n    | summarize MachineAuthCount = count() by Account, IpAddress\n    | where MachineAuthCount > 10\n    | extend ThreatActor = \"PetitPotam/PrinterBug\", TTP = \"T1187 - Forced Authentication\", Severity = \"High\";\nunion \n    (PassTheHashIndicators | project Computer, ThreatActor, TTP, Severity, Evidence = strcat(PtHCount, \" NewCredentials logons\")),\n    (NTLMRelayIndicators | project Computer = IpAddress, ThreatActor, TTP, Severity, Evidence = strcat(TargetCount, \" targets from same source\")),\n    (CoercionIndicators | project Computer = Account, ThreatActor, TTP, Severity, Evidence = strcat(MachineAuthCount, \" machine account auths\"))\n| order by Severity desc",
+              "size": 0,
+              "title": "🎯 Threat Actor TTP Detection in Your Environment",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Severity",
+                    "formatter": 18,
+                    "formatOptions": {
+                      "thresholdsOptions": "colors",
+                      "thresholdsGrid": [
+                        {
+                          "operator": "==",
+                          "thresholdValue": "Critical",
+                          "representation": "redBright",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "==",
+                          "thresholdValue": "High",
+                          "representation": "orange",
+                          "text": "{0}{1}"
+                        },
+                        {
+                          "operator": "Default",
+                          "thresholdValue": null,
+                          "representation": "yellow",
+                          "text": "{0}{1}"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            "name": "query - threat actor detection"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Daily Trend (Success vs Failure)\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID in (4624, 4625)\n| where AuthenticationPackageName has \"NTLM\"\n| extend Day = bin(TimeGenerated, 1d)\n| summarize \n    TotalEvents = count(),\n    SuccessfulLogons = countif(EventID == 4624),\n    FailedLogons = countif(EventID == 4625),\n    UniqueAccounts = dcount(Account),\n    UniqueSourceIPs = dcount(IpAddress)\n    by Day\n| extend FailureRate = round((todouble(FailedLogons) / TotalEvents) * 100, 2)\n| order by Day asc\n| project Day, TotalEvents, SuccessfulLogons, FailedLogons, FailureRate, UniqueAccounts, UniqueSourceIPs",
+              "size": 0,
+              "title": "NTLM Authentication Daily Trend",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "linechart"
+            },
+            "name": "query - daily trend"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Cross-Table NTLM Correlation\nlet SecurityEventNTLM = SecurityEvent\n    | where TimeGenerated {TimeRange}\n    | where AuthenticationPackageName has \"NTLM\"\n    | where EventID in (4624, 4625)\n    | summarize SECount = count() by Account, Computer\n    | extend Source = \"SecurityEvent\";\nlet DeviceNTLM = DeviceLogonEvents\n    | where TimeGenerated {TimeRange}\n    | where Protocol has \"NTLM\"\n    | summarize DeviceCount = count() by AccountName, DeviceName\n    | extend Source = \"DeviceLogonEvents\";\nlet IdentityNTLM = IdentityLogonEvents\n    | where TimeGenerated {TimeRange}\n    | where Protocol has \"NTLM\"\n    | summarize IdentityCount = count() by AccountName, DeviceName\n    | extend Source = \"IdentityLogonEvents\";\nunion \n    (SecurityEventNTLM | project Account, Computer, EventCount = SECount, Source),\n    (DeviceNTLM | project Account = AccountName, Computer = DeviceName, EventCount = DeviceCount, Source),\n    (IdentityNTLM | project Account = AccountName, Computer = DeviceName, EventCount = IdentityCount, Source)\n| summarize \n    TotalNTLMEvents = sum(EventCount),\n    DataSources = make_set(Source),\n    SourceCount = dcount(Source)\n    by Account, Computer\n| where SourceCount > 1\n| order by TotalNTLMEvents desc\n| take 20",
+              "size": 0,
+              "title": "Cross-Table NTLM Correlation (Accounts in Multiple Data Sources)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "TotalNTLMEvents",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "purple"
+                    }
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - correlation"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Deprecation Progress Tracking\n// Compare last 30 days to previous 30 days\nlet CurrentCount = toscalar(SecurityEvent\n    | where TimeGenerated > ago(30d)\n    | where EventID in (4624, 4625)\n    | where AuthenticationPackageName has 'NTLM'\n    | summarize count());\nlet PreviousCount = toscalar(SecurityEvent\n    | where TimeGenerated between (ago(60d) .. ago(30d))\n    | where EventID in (4624, 4625)\n    | where AuthenticationPackageName has 'NTLM'\n    | summarize count());\nlet PercentChange = round((todouble(CurrentCount - PreviousCount) / PreviousCount) * 100, 2);\nprint Metric = 'NTLM Deprecation Progress (Last 30d vs Previous 30d)', CurrentCount = CurrentCount, PreviousCount = PreviousCount, PercentChange = PercentChange\n| extend Trend = case(\n    PercentChange < -20, 'Significant Reduction',\n    PercentChange < 0, 'Decreasing',\n    PercentChange == 0, 'No Change',\n    PercentChange > 20, 'Significant Increase',\n    'Increasing')",
+              "size": 4,
+              "title": "NTLM Deprecation Progress (Compared to Previous Period)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "PercentChange",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "greenRed"
+                  },
+                  "numberFormat": {
+                    "unit": 0,
+                    "options": {
+                      "style": "decimal",
+                      "useGrouping": false
+                    }
+                  }
+                },
+                "secondaryContent": {
+                  "columnMatch": "Trend",
+                  "formatter": 1
+                },
+                "showBorder": true
+              }
+            },
+            "customWidth": "50",
+            "name": "query - deprecation progress"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "ThreatIntel"
+      },
+      "name": "group - threat intel"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🔒 NTLM Authentication Analysis\n\nDeep-dive analysis of NTLM protocol versions, authentication patterns, and security posture."
+            },
+            "name": "text - ntlm analysis header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Version Analysis\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID in (4624, 4625)\n| where AuthenticationPackageName has_any (\"NTLM\", \"Negotiate\")\n| extend NTLMVersion = case(\n    AuthenticationPackageName =~ \"NTLM V1.0\", \"NTLMv1 (Vulnerable)\",\n    AuthenticationPackageName =~ \"NTLM V2.0\", \"NTLMv2\",\n    AuthenticationPackageName contains \"NTLM\", \"NTLM (Version Unknown)\",\n    \"Negotiate (Likely Kerberos)\"\n)\n| summarize \n    TotalEvents = count(),\n    SuccessCount = countif(EventID == 4624),\n    FailureCount = countif(EventID == 4625),\n    UniqueAccounts = dcount(Account),\n    UniqueSourceIPs = dcount(IpAddress),\n    UniqueDestinations = dcount(Computer)\n    by NTLMVersion\n| extend FailureRate = round(todouble(FailureCount) / TotalEvents * 100, 2)\n| extend SecurityRisk = case(\n    NTLMVersion has \"V1\", \"🔴 Critical - Disable Immediately\",\n    NTLMVersion has \"V2\", \"🟠 Medium - Plan Deprecation\",\n    \"🟢 Low - Kerberos Preferred\"\n)\n| order by TotalEvents desc",
+              "size": 0,
+              "title": "NTLM Version Security Analysis",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "query - ntlm version analysis"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Kerberos vs NTLM Protocol Distribution\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has_any (\"NTLM\", \"Kerberos\", \"Negotiate\")\n| extend Protocol = case(\n    AuthenticationPackageName has \"NTLM\", \"NTLM\",\n    AuthenticationPackageName has \"Kerberos\", \"Kerberos\",\n    \"Negotiate\"\n)\n| summarize Count = count() by Protocol\n| order by Count desc",
+              "size": 2,
+              "title": "Authentication Protocol Distribution",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "piechart"
+            },
+            "customWidth": "50",
+            "name": "query - protocol distribution"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Failure Reasons Analysis\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4625\n| where AuthenticationPackageName has \"NTLM\"\n| extend FailureReasonCode = Status\n| extend FailureReasonDesc = case(\n    Status == \"0xC000006D\", \"Bad username or password\",\n    Status == \"0xC000006A\", \"Incorrect password\",\n    Status == \"0xC0000064\", \"User does not exist\",\n    Status == \"0xC000006F\", \"Logon outside authorized hours\",\n    Status == \"0xC0000070\", \"Unauthorized workstation\",\n    Status == \"0xC0000071\", \"Expired password\",\n    Status == \"0xC0000072\", \"Account disabled\",\n    Status == \"0xC0000234\", \"Account locked out\",\n    Status == \"0xC0000193\", \"Account expired\",\n    \"Other/Unknown\"\n)\n| summarize Count = count() by FailureReasonDesc\n| order by Count desc",
+              "size": 2,
+              "title": "NTLM Failure Reasons",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "piechart"
+            },
+            "customWidth": "50",
+            "name": "query - failure reasons"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🗺️ Geolocation Analysis"
+            },
+            "name": "text - geo header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Failed Authentications Geolocation Map\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4625\n| where AuthenticationPackageName has \"NTLM\"\n| where isnotempty(IpAddress) and IpAddress != \"-\" and IpAddress != \"::1\" and IpAddress != \"127.0.0.1\"\n| where not(ipv4_is_private(IpAddress))\n| extend GeoInfo = geo_info_from_ip_address(IpAddress)\n| extend Latitude = toreal(GeoInfo.latitude)\n| extend Longitude = toreal(GeoInfo.longitude)\n| extend Country = tostring(GeoInfo.country)\n| extend City = tostring(GeoInfo.city)\n| extend State = tostring(GeoInfo.state)\n| where isnotempty(Latitude) and isnotempty(Longitude)\n| summarize \n    FailedAttempts = count(),\n    UniqueIPs = dcount(IpAddress),\n    UniqueAccounts = dcount(Account),\n    SampleIPs = make_set(IpAddress, 5),\n    TargetedAccounts = make_set(Account, 10)\n    by Longitude, Latitude, Country, City, State\n| extend LocationLabel = strcat(City, \", \", Country, \" - \", FailedAttempts, \" failed attempts\")",
+              "size": 0,
+              "title": "🗺️ NTLM Attack Sources - Failed Authentications",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "map",
+              "mapSettings": {
+                "locInfo": "LatLong",
+                "latitude": "Latitude",
+                "longitude": "Longitude",
+                "sizeSettings": "FailedAttempts",
+                "sizeAggregation": "Sum",
+                "labelSettings": "LocationLabel",
+                "legendMetric": "FailedAttempts",
+                "legendAggregation": "Sum",
+                "itemColorSettings": {
+                  "nodeColorField": "FailedAttempts",
+                  "colorAggregation": "Sum",
+                  "type": "heatmap",
+                  "heatmapPalette": "greenRed"
+                }
+              }
+            },
+            "name": "query - ntlm failed auth map"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Successful Authentications Geolocation Map\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| where isnotempty(IpAddress) and IpAddress != \"-\" and IpAddress != \"::1\" and IpAddress != \"127.0.0.1\"\n| where not(ipv4_is_private(IpAddress))\n| extend GeoInfo = geo_info_from_ip_address(IpAddress)\n| extend Latitude = toreal(GeoInfo.latitude)\n| extend Longitude = toreal(GeoInfo.longitude)\n| extend Country = tostring(GeoInfo.country)\n| extend City = tostring(GeoInfo.city)\n| where isnotempty(Latitude) and isnotempty(Longitude)\n| summarize \n    SuccessfulLogons = count(),\n    UniqueIPs = dcount(IpAddress),\n    UniqueAccounts = dcount(Account),\n    AccountList = make_set(Account, 10)\n    by Longitude, Latitude, Country, City\n| extend LocationLabel = strcat(City, \", \", Country, \" - \", SuccessfulLogons, \" successful logons\")",
+              "size": 0,
+              "title": "🗺️ NTLM Authentication Sources - Successful Logons",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "map",
+              "mapSettings": {
+                "locInfo": "LatLong",
+                "latitude": "Latitude",
+                "longitude": "Longitude",
+                "sizeSettings": "SuccessfulLogons",
+                "sizeAggregation": "Sum",
+                "labelSettings": "LocationLabel",
+                "legendMetric": "SuccessfulLogons",
+                "legendAggregation": "Sum",
+                "itemColorSettings": {
+                  "nodeColorField": "SuccessfulLogons",
+                  "colorAggregation": "Sum",
+                  "type": "heatmap",
+                  "heatmapPalette": "greenRed"
+                }
+              }
+            },
+            "name": "query - ntlm success auth map"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "### 🌐 External IP NTLM Authentication Analysis\n\nMonitor NTLM authentication attempts from external (non-private) IP addresses. External NTLM traffic is unusual and may indicate attacks or misconfigurations."
+            },
+            "name": "text - external ip header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Success from External IPs\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| where isnotempty(IpAddress) and IpAddress != \"-\" and IpAddress != \"::1\" and IpAddress != \"127.0.0.1\"\n| where not(ipv4_is_private(IpAddress))\n| extend GeoInfo = geo_info_from_ip_address(IpAddress)\n| extend Country = tostring(GeoInfo.country)\n| extend City = tostring(GeoInfo.city)\n| summarize \n    SuccessfulLogons = count(),\n    UniqueAccounts = dcount(Account),\n    Accounts = make_set(Account, 5),\n    UniqueComputers = dcount(Computer),\n    Computers = make_set(Computer, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by IpAddress, Country, City\n| extend RiskLevel = case(\n    SuccessfulLogons > 100, \"🔴 Critical - High Volume External Success\",\n    SuccessfulLogons > 10, \"🟠 High - Multiple External Logons\",\n    SuccessfulLogons > 1, \"🟡 Medium - External NTLM Detected\",\n    \"⚠️ Warning - Unusual External NTLM\"\n)\n| project IpAddress, Country, City, SuccessfulLogons, UniqueAccounts, Accounts, UniqueComputers, RiskLevel, FirstSeen, LastSeen\n| order by SuccessfulLogons desc\n| take 20",
+              "size": 0,
+              "title": "✅ NTLM Successful Logons from External IPs",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "SuccessfulLogons",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "greenRed"
+                    }
+                  },
+                  {
+                    "columnMatch": "RiskLevel",
+                    "formatter": 1
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - external ip success"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Failures from External IPs\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4625\n| where AuthenticationPackageName has \"NTLM\"\n| where isnotempty(IpAddress) and IpAddress != \"-\" and IpAddress != \"::1\" and IpAddress != \"127.0.0.1\"\n| where not(ipv4_is_private(IpAddress))\n| extend GeoInfo = geo_info_from_ip_address(IpAddress)\n| extend Country = tostring(GeoInfo.country)\n| extend City = tostring(GeoInfo.city)\n| summarize \n    FailedAttempts = count(),\n    UniqueAccounts = dcount(Account),\n    TargetedAccounts = make_set(Account, 10),\n    UniqueComputers = dcount(Computer),\n    Computers = make_set(Computer, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by IpAddress, Country, City\n| extend ThreatLevel = case(\n    FailedAttempts > 1000, \"🔴 Critical - Brute Force Attack\",\n    FailedAttempts > 100, \"🟠 High - Active Attack\",\n    FailedAttempts > 10, \"🟡 Medium - Suspicious Activity\",\n    \"⚠️ Low - Monitor\"\n)\n| project IpAddress, Country, City, FailedAttempts, UniqueAccounts, TargetedAccounts, UniqueComputers, ThreatLevel, FirstSeen, LastSeen\n| order by FailedAttempts desc\n| take 20",
+              "size": 0,
+              "title": "❌ NTLM Failed Attempts from External IPs",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "FailedAttempts",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "redBright"
+                    }
+                  },
+                  {
+                    "columnMatch": "ThreatLevel",
+                    "formatter": 1
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - external ip failures"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// External IP NTLM Summary Statistics\nlet ExternalSuccess = SecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| where isnotempty(IpAddress) and IpAddress != \"-\" and IpAddress != \"::1\" and IpAddress != \"127.0.0.1\"\n| where not(ipv4_is_private(IpAddress))\n| summarize SuccessCount = count(), SuccessIPs = dcount(IpAddress), SuccessAccounts = dcount(Account);\nlet ExternalFailed = SecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4625\n| where AuthenticationPackageName has \"NTLM\"\n| where isnotempty(IpAddress) and IpAddress != \"-\" and IpAddress != \"::1\" and IpAddress != \"127.0.0.1\"\n| where not(ipv4_is_private(IpAddress))\n| summarize FailedCount = count(), FailedIPs = dcount(IpAddress), FailedAccounts = dcount(Account);\nExternalSuccess\n| extend FailedCount = toscalar(ExternalFailed | project FailedCount)\n| extend FailedIPs = toscalar(ExternalFailed | project FailedIPs)\n| extend FailedAccounts = toscalar(ExternalFailed | project FailedAccounts)\n| extend TotalExternal = SuccessCount + FailedCount\n| extend SuccessRate = round(todouble(SuccessCount) / TotalExternal * 100, 2)\n| extend OverallRisk = case(\n    SuccessCount > 100, \"🔴 Critical - Many External Successes\",\n    FailedCount > 10000, \"🔴 Critical - Mass Attack\",\n    SuccessCount > 0 and FailedCount > 1000, \"🟠 High - Mixed Activity\",\n    FailedCount > 100, \"🟡 Medium - External Probing\",\n    \"🟢 Low - Minimal External Activity\"\n)\n| project \n    ['Total External Events'] = TotalExternal,\n    ['Successful Logons'] = SuccessCount,\n    ['Failed Attempts'] = FailedCount,\n    ['Success Rate %'] = SuccessRate,\n    ['Unique Attacking IPs'] = FailedIPs,\n    ['Compromised Accounts Risk'] = SuccessAccounts,\n    ['Overall Risk'] = OverallRisk",
+              "size": 4,
+              "title": "📊 External IP NTLM Summary",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "titleContent": {
+                  "columnMatch": "Overall Risk",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "Total External Events",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "auto"
+                  },
+                  "numberFormat": {
+                    "unit": 17,
+                    "options": {
+                      "style": "decimal",
+                      "maximumFractionDigits": 0
+                    }
+                  }
+                },
+                "secondaryContent": {
+                  "columnMatch": "Successful Logons",
+                  "formatter": 1
+                },
+                "showBorder": true
+              }
+            },
+            "name": "query - external ip summary"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Geographic Distribution of NTLM Attacks - Table\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4625\n| where AuthenticationPackageName has \"NTLM\"\n| where isnotempty(IpAddress) and IpAddress != \"-\" and IpAddress != \"::1\" and IpAddress != \"127.0.0.1\"\n| extend GeoInfo = geo_info_from_ip_address(IpAddress)\n| extend Country = tostring(GeoInfo.country)\n| extend City = tostring(GeoInfo.city)\n| where isnotempty(Country)\n| summarize \n    FailedAttempts = count(),\n    UniqueIPs = dcount(IpAddress),\n    UniqueAccounts = dcount(Account),\n    IPList = make_set(IpAddress, 5)\n    by Country\n| extend ThreatLevel = case(\n    FailedAttempts > 10000, \"🔴 Critical\",\n    FailedAttempts > 1000, \"🟠 High\",\n    FailedAttempts > 100, \"🟡 Medium\",\n    \"🟢 Low\"\n)\n| order by FailedAttempts desc\n| take 15",
+              "size": 0,
+              "title": "NTLM Attack Sources by Country",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "customWidth": "50",
+            "name": "query - geographic distribution"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Attack Sources by City\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4625\n| where AuthenticationPackageName has \"NTLM\"\n| where isnotempty(IpAddress) and IpAddress != \"-\" and IpAddress != \"::1\" and IpAddress != \"127.0.0.1\"\n| where not(ipv4_is_private(IpAddress))\n| extend GeoInfo = geo_info_from_ip_address(IpAddress)\n| extend Country = tostring(GeoInfo.country)\n| extend City = tostring(GeoInfo.city)\n| where isnotempty(City)\n| summarize \n    FailedAttempts = count(),\n    UniqueIPs = dcount(IpAddress),\n    UniqueAccounts = dcount(Account)\n    by City, Country\n| extend Location = strcat(City, \", \", Country)\n| project Location, FailedAttempts, UniqueIPs, UniqueAccounts\n| order by FailedAttempts desc\n| take 15",
+              "size": 0,
+              "title": "NTLM Attack Sources by City",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "customWidth": "50",
+            "name": "query - city distribution"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Anomalous Geographic Patterns (Potential Compromise)\nlet BaselineCountries = SecurityEvent\n| where TimeGenerated between (ago(30d) .. ago(7d))\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| where isnotempty(IpAddress) and IpAddress != \"-\"\n| where not(ipv4_is_private(IpAddress))\n| extend GeoInfo = geo_info_from_ip_address(IpAddress)\n| extend Country = tostring(GeoInfo.country)\n| where isnotempty(Country)\n| summarize by Account, Country;\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| where isnotempty(IpAddress) and IpAddress != \"-\"\n| where not(ipv4_is_private(IpAddress))\n| extend GeoInfo = geo_info_from_ip_address(IpAddress)\n| extend Country = tostring(GeoInfo.country)\n| extend City = tostring(GeoInfo.city)\n| where isnotempty(Country)\n| join kind=leftanti (BaselineCountries) on Account, Country\n| summarize \n    NewGeoLogons = count(),\n    Cities = make_set(City, 5),\n    IPs = make_set(IpAddress, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by Account, Country\n| extend RiskLevel = \"🔴 New Geographic Location\"\n| order by NewGeoLogons desc",
+              "size": 0,
+              "title": "⚠️ NTLM Logons from New Geographic Locations",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "query - new geo locations"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Usage by Logon Type with Security Context\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID in (4624, 4625)\n| where AuthenticationPackageName has \"NTLM\"\n| extend LogonTypeDesc = case(\n    LogonType == 2, \"Interactive (Local)\",\n    LogonType == 3, \"Network (SMB/RPC)\",\n    LogonType == 4, \"Batch (Scheduled)\",\n    LogonType == 5, \"Service\",\n    LogonType == 7, \"Unlock\",\n    LogonType == 8, \"NetworkCleartext\",\n    LogonType == 9, \"NewCredentials\",\n    LogonType == 10, \"RemoteInteractive (RDP)\",\n    LogonType == 11, \"CachedInteractive\",\n    \"Other\"\n)\n| extend SecurityRisk = case(\n    LogonType == 3, \"🔴 High - Pass-the-Hash vulnerable\",\n    LogonType == 10, \"🟠 Medium - Remote access\",\n    LogonType == 2, \"🟡 Low - Local logon\",\n    \"🟢 Normal\"\n)\n| summarize \n    TotalEvents = count(),\n    SuccessCount = countif(EventID == 4624),\n    FailureCount = countif(EventID == 4625),\n    UniqueAccounts = dcount(Account)\n    by LogonTypeDesc, SecurityRisk\n| extend FailureRate = round(todouble(FailureCount) / TotalEvents * 100, 2)\n| order by TotalEvents desc",
+              "size": 0,
+              "title": "NTLM Usage by Logon Type (Security Context)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "query - logon type security"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Authentication Hourly Heatmap\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4625\n| where AuthenticationPackageName has \"NTLM\"\n| extend Hour = datetime_part(\"Hour\", TimeGenerated)\n| extend DayOfWeek = dayofweek(TimeGenerated) / 1d\n| extend DayName = case(\n    DayOfWeek == 0, \"Sunday\",\n    DayOfWeek == 1, \"Monday\",\n    DayOfWeek == 2, \"Tuesday\",\n    DayOfWeek == 3, \"Wednesday\",\n    DayOfWeek == 4, \"Thursday\",\n    DayOfWeek == 5, \"Friday\",\n    DayOfWeek == 6, \"Saturday\",\n    \"Unknown\"\n)\n| summarize FailedAttempts = count() by DayName, Hour\n| order by DayName asc, Hour asc",
+              "size": 0,
+              "title": "NTLM Failed Authentication Heatmap (Day/Hour)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "query - heatmap"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM vs Kerberos Trend Over Time\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has_any (\"NTLM\", \"Kerberos\")\n| extend Protocol = case(\n    AuthenticationPackageName has \"NTLM\", \"NTLM\",\n    \"Kerberos\"\n)\n| summarize Count = count() by bin(TimeGenerated, 1d), Protocol\n| render timechart",
+              "size": 0,
+              "title": "NTLM vs Kerberos Usage Trend",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "timechart"
+            },
+            "name": "query - ntlm vs kerberos trend"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Usage by Computer (Deprecation Candidates)\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| summarize \n    NTLMLogons = count(),\n    UniqueAccounts = dcount(Account),\n    UniqueSourceIPs = dcount(IpAddress),\n    LogonTypes = make_set(LogonType),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by Computer\n| extend DeprecationPriority = case(\n    NTLMLogons > 1000, \"🔴 High Volume - Investigate\",\n    NTLMLogons > 100, \"🟠 Medium Volume\",\n    NTLMLogons > 10, \"🟡 Low Volume\",\n    \"🟢 Minimal - Easy to migrate\"\n)\n| order by NTLMLogons desc\n| take 20",
+              "size": 0,
+              "title": "Systems for NTLM Deprecation (Priority Order)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "query - deprecation candidates"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "NTLMAnalysis"
+      },
+      "name": "group - ntlm analysis"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🔬 Advanced NTLM Traffic Monitoring\n\nDetailed analysis of NTLM traffic using enhanced auditing events. Monitor client/server NTLM usage, identify applications, and understand why NTLM was selected over Kerberos.\n\n### 📋 Event Coverage\n| Event ID | Type | Description | Key Fields |\n|----------|------|-------------|------------|\n| **4769** | Kerberos | TGS Request - Capture SPN usage | ServiceName, ServiceSid |\n| **8001** | NTLM Client | Outbound client NTLM authentication | ClientProcessName |\n| **8003** | NTLM Server | Inbound server NTLM authentication | ProcessName |\n| **4020** | NTLM Client (24H2+) | Client outbound with reason | TargetResource, TargetMachine, Reason |\n| **4022** | NTLM Server (2025+) | Server inbound with client info | ProcessName, ClientMachine, UserName |\n\n⚠️ **Note:** Events 4020/4022 require Windows 11 24H2+ or Windows Server 2025+"
+            },
+            "name": "text - advanced ntlm header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Event 4769 - Kerberos TGS Requests (SPN Analysis)\n// Capture Service Principal Names (SPNs) for application identification\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4769\n| extend ServiceName = extract(@\"Service Name:\\s+([^\\r\\n]+)\", 1, EventData)\n| extend ServiceSid = extract(@\"Service Sid:\\s+([^\\r\\n]+)\", 1, EventData)\n| extend TargetAccount = extract(@\"Account Name:\\s+([^\\r\\n]+)\", 1, EventData)\n| extend TicketOptions = extract(@\"Ticket Options:\\s+([^\\r\\n]+)\", 1, EventData)\n| extend TicketEncryption = extract(@\"Ticket Encryption Type:\\s+([^\\r\\n]+)\", 1, EventData)\n| extend FailureCode = extract(@\"Failure Code:\\s+([^\\r\\n]+)\", 1, EventData)\n| where isnotempty(ServiceName)\n| summarize \n    RequestCount = count(),\n    UniqueAccounts = dcount(TargetAccount),\n    UniqueComputers = dcount(Computer),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated),\n    SampleAccounts = make_set(TargetAccount, 5)\n    by ServiceName\n| extend SPNType = case(\n    ServiceName startswith \"HTTP/\", \"🌐 Web Application\",\n    ServiceName startswith \"MSSQLSvc/\", \"🗄️ SQL Server\",\n    ServiceName startswith \"LDAP/\", \"📁 LDAP/Directory\",\n    ServiceName startswith \"HOST/\", \"💻 Host Service\",\n    ServiceName startswith \"CIFS/\", \"📂 File Share\",\n    ServiceName startswith \"RPC/\", \"🔌 RPC Service\",\n    ServiceName startswith \"TERMSRV/\", \"🖥️ RDP/Terminal\",\n    ServiceName startswith \"WSMAN/\", \"⚡ WinRM/PowerShell\",\n    \"📋 Other Service\"\n)\n| order by RequestCount desc\n| take 25\n| project SPNType, ServiceName, RequestCount, UniqueAccounts, UniqueComputers, FirstSeen, LastSeen, SampleAccounts",
+              "size": 0,
+              "title": "🎫 Event 4769: Kerberos TGS Requests by SPN",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "RequestCount",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "name": "query - kerberos spn"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Event 4769 - Failed Kerberos TGS Requests (Potential Issues)\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4769\n| extend ServiceName = extract(@\"Service Name:\\s+([^\\r\\n]+)\", 1, EventData)\n| extend FailureCode = extract(@\"Failure Code:\\s+([^\\r\\n]+)\", 1, EventData)\n| extend TargetAccount = extract(@\"Account Name:\\s+([^\\r\\n]+)\", 1, EventData)\n| where FailureCode != \"0x0\" and isnotempty(FailureCode)\n| extend FailureReason = case(\n    FailureCode == \"0x6\", \"🔴 Client not found in Kerberos DB\",\n    FailureCode == \"0x7\", \"🔴 Server not found in Kerberos DB\",\n    FailureCode == \"0x17\", \"🟠 Password has expired\",\n    FailureCode == \"0x18\", \"🟠 Pre-authentication failure\",\n    FailureCode == \"0x1f\", \"🟠 Integrity check failed\",\n    FailureCode == \"0x20\", \"🟡 Ticket expired\",\n    FailureCode == \"0x25\", \"🟡 Clock skew too great\",\n    strcat(\"❓ Code: \", FailureCode)\n)\n| summarize \n    FailureCount = count(),\n    UniqueAccounts = dcount(TargetAccount),\n    Accounts = make_set(TargetAccount, 5)\n    by ServiceName, FailureCode, FailureReason\n| order by FailureCount desc\n| take 20",
+              "size": 0,
+              "title": "❌ Event 4769: Failed Kerberos TGS Requests",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "FailureCount",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "redBright"
+                    }
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - kerberos failures"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Event 4769 - SPN Type Distribution\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4769\n| extend ServiceName = extract(@\"Service Name:\\s+([^\\r\\n]+)\", 1, EventData)\n| where isnotempty(ServiceName)\n| extend SPNType = case(\n    ServiceName startswith \"HTTP/\", \"Web (HTTP)\",\n    ServiceName startswith \"MSSQLSvc/\", \"SQL Server\",\n    ServiceName startswith \"LDAP/\", \"LDAP\",\n    ServiceName startswith \"HOST/\", \"Host\",\n    ServiceName startswith \"CIFS/\", \"File Share\",\n    ServiceName startswith \"RPC/\", \"RPC\",\n    ServiceName startswith \"TERMSRV/\", \"RDP\",\n    ServiceName startswith \"WSMAN/\", \"WinRM\",\n    ServiceName startswith \"DNS/\", \"DNS\",\n    \"Other\"\n)\n| summarize Count = count() by SPNType\n| order by Count desc",
+              "size": 0,
+              "title": "📊 Kerberos SPN Type Distribution",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "piechart"
+            },
+            "customWidth": "50",
+            "name": "query - spn distribution"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "---\n## 📤 Event 8001: Outbound Client NTLM Authentication\n\nCaptures NTLM authentication initiated by client processes. The **Client Process Name** field identifies which application is requesting NTLM."
+            },
+            "name": "text - 8001 header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Event 8001 - Outbound Client NTLM by Process\nEvent\n| where TimeGenerated {TimeRange}\n| where EventLog == \"System\" or EventLog == \"Microsoft-Windows-NTLM/Operational\"\n| where EventID == 8001\n| extend ClientProcessName = extract(@\"Client Process Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend TargetServer = extract(@\"Target Server:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend TargetDomain = extract(@\"Target Domain:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend UserName = extract(@\"User Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| where isnotempty(ClientProcessName)\n| summarize \n    NTLMRequests = count(),\n    UniqueServers = dcount(TargetServer),\n    UniqueUsers = dcount(UserName),\n    TargetServers = make_set(TargetServer, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by ClientProcessName, Computer\n| extend ProcessCategory = case(\n    ClientProcessName has_any (\"powershell\", \"pwsh\"), \"⚡ PowerShell\",\n    ClientProcessName has_any (\"cmd\", \"conhost\"), \"💻 Command Line\",\n    ClientProcessName has_any (\"explorer\"), \"📁 Explorer\",\n    ClientProcessName has_any (\"mstsc\", \"rdp\"), \"🖥️ RDP Client\",\n    ClientProcessName has_any (\"svchost\"), \"🔧 System Service\",\n    ClientProcessName has_any (\"lsass\"), \"🔐 LSASS\",\n    ClientProcessName has_any (\"outlook\", \"teams\", \"office\"), \"📧 Office Apps\",\n    \"📋 Other Application\"\n)\n| extend DeprecationPriority = case(\n    NTLMRequests > 1000, \"🔴 High - Investigate\",\n    NTLMRequests > 100, \"🟠 Medium - Plan Migration\",\n    NTLMRequests > 10, \"🟡 Low - Monitor\",\n    \"🟢 Minimal\"\n)\n| order by NTLMRequests desc\n| take 25\n| project ProcessCategory, ClientProcessName, Computer, NTLMRequests, UniqueServers, UniqueUsers, DeprecationPriority, TargetServers, FirstSeen, LastSeen",
+              "size": 0,
+              "title": "📤 Event 8001: Outbound NTLM by Client Process",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "NTLMRequests",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "orange"
+                    }
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "name": "query - 8001 outbound"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "---\n## 📥 Event 8003: Inbound Server NTLM Authentication\n\nCaptures NTLM authentication received by server processes. The **Process Name** field identifies which server application is accepting NTLM."
+            },
+            "name": "text - 8003 header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Event 8003 - Inbound Server NTLM by Process\nEvent\n| where TimeGenerated {TimeRange}\n| where EventLog == \"System\" or EventLog == \"Microsoft-Windows-NTLM/Operational\"\n| where EventID == 8003\n| extend ProcessName = extract(@\"Process Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend ClientMachine = extract(@\"Client Machine:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend ClientDomain = extract(@\"Client Domain:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend UserName = extract(@\"User Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| where isnotempty(ProcessName)\n| summarize \n    NTLMConnections = count(),\n    UniqueClients = dcount(ClientMachine),\n    UniqueUsers = dcount(UserName),\n    ClientMachines = make_set(ClientMachine, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by ProcessName, Computer\n| extend ServerAppType = case(\n    ProcessName has_any (\"w3wp\", \"iis\"), \"🌐 IIS Web Server\",\n    ProcessName has_any (\"sqlservr\"), \"🗄️ SQL Server\",\n    ProcessName has_any (\"svchost\"), \"🔧 Windows Service\",\n    ProcessName has_any (\"lsass\"), \"🔐 LSASS\",\n    ProcessName has_any (\"smbd\", \"srv\"), \"📂 File Server\",\n    ProcessName has_any (\"httpd\", \"apache\"), \"🌐 Apache\",\n    ProcessName has_any (\"nginx\"), \"🌐 Nginx\",\n    \"📋 Other Server\"\n)\n| extend DeprecationPriority = case(\n    NTLMConnections > 1000, \"🔴 High - Critical Server\",\n    NTLMConnections > 100, \"🟠 Medium - Important Server\",\n    NTLMConnections > 10, \"🟡 Low - Minor Usage\",\n    \"🟢 Minimal\"\n)\n| order by NTLMConnections desc\n| take 25\n| project ServerAppType, ProcessName, Computer, NTLMConnections, UniqueClients, UniqueUsers, DeprecationPriority, ClientMachines, FirstSeen, LastSeen",
+              "size": 0,
+              "title": "📥 Event 8003: Inbound NTLM by Server Process",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "NTLMConnections",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "purple"
+                    }
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "name": "query - 8003 inbound"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "---\n## 🆕 Event 4020: Client Outbound NTLM (Windows 11 24H2+)\n\nNew event in Windows 11 24H2+ that provides detailed information about outbound NTLM requests including:\n- **Target Resource** - The resource being accessed\n- **Target Machine** - The server receiving the NTLM request\n- **Reason** - Why NTLM was selected instead of Kerberos\n\n⚠️ Requires Windows 11 24H2 or later"
+            },
+            "name": "text - 4020 header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Event 4020 - Client Outbound NTLM (Windows 11 24H2+)\nEvent\n| where TimeGenerated {TimeRange}\n| where EventLog == \"System\" or EventLog == \"Microsoft-Windows-Security-Netlogon/Operational\"\n| where EventID == 4020\n| extend TargetResource = extract(@\"Target Resource:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend TargetMachine = extract(@\"Target Machine:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend Reason = extract(@\"Reason:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend ClientProcess = extract(@\"Client Process:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend UserName = extract(@\"User Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| summarize \n    NTLMRequests = count(),\n    UniqueTargets = dcount(TargetMachine),\n    UniqueUsers = dcount(UserName),\n    TargetMachines = make_set(TargetMachine, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by Reason, TargetResource, Computer\n| extend ReasonCategory = case(\n    Reason has \"SPN\", \"🔴 SPN Not Found - Configure SPN\",\n    Reason has \"trust\", \"🟠 Trust Issue\",\n    Reason has \"delegation\", \"🟠 Delegation Problem\",\n    Reason has \"fallback\", \"🟡 Kerberos Fallback\",\n    Reason has \"explicit\", \"🟡 Explicitly Requested\",\n    Reason has \"compatibility\", \"🟡 Compatibility Mode\",\n    isnotempty(Reason), strcat(\"❓ \", Reason),\n    \"❓ Unknown Reason\"\n)\n| order by NTLMRequests desc\n| take 25\n| project ReasonCategory, Reason, TargetResource, Computer, NTLMRequests, UniqueTargets, UniqueUsers, TargetMachines, FirstSeen, LastSeen",
+              "size": 0,
+              "title": "🆕 Event 4020: Client NTLM with Reason (24H2+)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "NTLMRequests",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "greenDark"
+                    }
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "name": "query - 4020 client"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Event 4020 - NTLM Reason Distribution\nEvent\n| where TimeGenerated {TimeRange}\n| where EventLog == \"System\" or EventLog == \"Microsoft-Windows-Security-Netlogon/Operational\"\n| where EventID == 4020\n| extend Reason = extract(@\"Reason:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| where isnotempty(Reason)\n| summarize Count = count() by Reason\n| extend ReasonCategory = case(\n    Reason has \"SPN\", \"SPN Not Found\",\n    Reason has \"trust\", \"Trust Issue\",\n    Reason has \"delegation\", \"Delegation Problem\",\n    Reason has \"fallback\", \"Kerberos Fallback\",\n    Reason has \"explicit\", \"Explicitly Requested\",\n    Reason\n)\n| order by Count desc",
+              "size": 0,
+              "title": "📊 NTLM Selection Reason Distribution (4020)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "piechart"
+            },
+            "customWidth": "50",
+            "name": "query - 4020 reasons"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Event 4020 - Target Resources Requiring NTLM\nEvent\n| where TimeGenerated {TimeRange}\n| where EventLog == \"System\" or EventLog == \"Microsoft-Windows-Security-Netlogon/Operational\"\n| where EventID == 4020\n| extend TargetResource = extract(@\"Target Resource:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend TargetMachine = extract(@\"Target Machine:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend Reason = extract(@\"Reason:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| where isnotempty(TargetResource)\n| summarize \n    NTLMCount = count(),\n    Reasons = make_set(Reason, 3),\n    SourceComputers = make_set(Computer, 5)\n    by TargetResource, TargetMachine\n| extend MigrationPriority = case(\n    NTLMCount > 500, \"🔴 Critical\",\n    NTLMCount > 100, \"🟠 High\",\n    NTLMCount > 10, \"🟡 Medium\",\n    \"🟢 Low\"\n)\n| order by NTLMCount desc\n| take 20",
+              "size": 0,
+              "title": "🎯 Target Resources Requiring NTLM (4020)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "customWidth": "50",
+            "name": "query - 4020 targets"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "---\n## 🆕 Event 4022: Server Inbound NTLM (Windows Server 2025+)\n\nNew event in Windows Server 2025 that provides detailed information about inbound NTLM requests including:\n- **Process Name** - The server process accepting NTLM\n- **Client Machine Name** - The machine initiating NTLM\n- **User Name** - The authenticating user\n\n⚠️ Requires Windows Server 2025 or later"
+            },
+            "name": "text - 4022 header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Event 4022 - Server Inbound NTLM (Windows Server 2025+)\nEvent\n| where TimeGenerated {TimeRange}\n| where EventLog == \"System\" or EventLog == \"Microsoft-Windows-Security-Netlogon/Operational\"\n| where EventID == 4022\n| extend ProcessName = extract(@\"Process Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend ClientMachineName = extract(@\"Client Machine Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend UserName = extract(@\"User Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend ClientDomain = extract(@\"Client Domain:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| summarize \n    NTLMConnections = count(),\n    UniqueClients = dcount(ClientMachineName),\n    UniqueUsers = dcount(UserName),\n    ClientMachines = make_set(ClientMachineName, 5),\n    Users = make_set(UserName, 5),\n    FirstSeen = min(TimeGenerated),\n    LastSeen = max(TimeGenerated)\n    by ProcessName, Computer\n| extend ServerAppType = case(\n    ProcessName has_any (\"w3wp\", \"iis\"), \"🌐 IIS Web Server\",\n    ProcessName has_any (\"sqlservr\"), \"🗄️ SQL Server\",\n    ProcessName has_any (\"svchost\"), \"🔧 Windows Service\",\n    ProcessName has_any (\"lsass\"), \"🔐 LSASS\",\n    ProcessName has_any (\"smbd\", \"srv\"), \"📂 File Server\",\n    ProcessName has_any (\"httpd\", \"apache\"), \"🌐 Apache\",\n    \"📋 Other Server\"\n)\n| extend DeprecationPriority = case(\n    NTLMConnections > 1000, \"🔴 Critical - High Volume\",\n    NTLMConnections > 100, \"🟠 High - Significant Usage\",\n    NTLMConnections > 10, \"🟡 Medium - Moderate Usage\",\n    \"🟢 Low - Minimal Usage\"\n)\n| order by NTLMConnections desc\n| take 25\n| project ServerAppType, ProcessName, Computer, NTLMConnections, UniqueClients, UniqueUsers, DeprecationPriority, ClientMachines, Users, FirstSeen, LastSeen",
+              "size": 0,
+              "title": "🆕 Event 4022: Server NTLM with Client Info (2025+)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "NTLMConnections",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "magenta"
+                    }
+                  },
+                  {
+                    "columnMatch": "FirstSeen",
+                    "formatter": 6
+                  },
+                  {
+                    "columnMatch": "LastSeen",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "name": "query - 4022 server"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Event 4022 - Client Machines Using NTLM to Servers\nEvent\n| where TimeGenerated {TimeRange}\n| where EventLog == \"System\" or EventLog == \"Microsoft-Windows-Security-Netlogon/Operational\"\n| where EventID == 4022\n| extend ProcessName = extract(@\"Process Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend ClientMachineName = extract(@\"Client Machine Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend UserName = extract(@\"User Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| where isnotempty(ClientMachineName)\n| summarize \n    NTLMRequests = count(),\n    UniqueServers = dcount(Computer),\n    UniqueUsers = dcount(UserName),\n    ServerProcesses = make_set(ProcessName, 5),\n    Servers = make_set(Computer, 5)\n    by ClientMachineName\n| extend ClientPriority = case(\n    NTLMRequests > 500, \"🔴 High NTLM Usage\",\n    NTLMRequests > 100, \"🟠 Moderate NTLM Usage\",\n    NTLMRequests > 10, \"🟡 Low NTLM Usage\",\n    \"🟢 Minimal\"\n)\n| order by NTLMRequests desc\n| take 20\n| project ClientMachineName, ClientPriority, NTLMRequests, UniqueServers, UniqueUsers, ServerProcesses, Servers",
+              "size": 0,
+              "title": "💻 Client Machines Using NTLM (from 4022)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "customWidth": "50",
+            "name": "query - 4022 clients"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Event 4022 - Users Authenticating via NTLM\nEvent\n| where TimeGenerated {TimeRange}\n| where EventLog == \"System\" or EventLog == \"Microsoft-Windows-Security-Netlogon/Operational\"\n| where EventID == 4022\n| extend ProcessName = extract(@\"Process Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend ClientMachineName = extract(@\"Client Machine Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| extend UserName = extract(@\"User Name:\\s*([^\\r\\n]+)\", 1, RenderedDescription)\n| where isnotempty(UserName)\n| summarize \n    NTLMAuthCount = count(),\n    UniqueClients = dcount(ClientMachineName),\n    UniqueServers = dcount(Computer),\n    ClientMachines = make_set(ClientMachineName, 5),\n    ServerProcesses = make_set(ProcessName, 5)\n    by UserName\n| extend UserPriority = case(\n    UserName has_any (\"admin\", \"svc\", \"service\"), \"🔴 Privileged Account\",\n    NTLMAuthCount > 500, \"🟠 High NTLM User\",\n    NTLMAuthCount > 100, \"🟡 Moderate NTLM User\",\n    \"🟢 Normal\"\n)\n| order by NTLMAuthCount desc\n| take 20\n| project UserName, UserPriority, NTLMAuthCount, UniqueClients, UniqueServers, ClientMachines, ServerProcesses",
+              "size": 0,
+              "title": "👤 Users Authenticating via NTLM (from 4022)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "customWidth": "50",
+            "name": "query - 4022 users"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "---\n## 📊 NTLM Traffic Summary\n\nConsolidated view of all NTLM events across event sources."
+            },
+            "name": "text - summary header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Combined NTLM Event Summary\nlet Event8001 = Event | where TimeGenerated {TimeRange} | where EventID == 8001 | summarize Count8001 = count();\nlet Event8003 = Event | where TimeGenerated {TimeRange} | where EventID == 8003 | summarize Count8003 = count();\nlet Event4020 = Event | where TimeGenerated {TimeRange} | where EventID == 4020 | summarize Count4020 = count();\nlet Event4022 = Event | where TimeGenerated {TimeRange} | where EventID == 4022 | summarize Count4022 = count();\nlet Event4769 = SecurityEvent | where TimeGenerated {TimeRange} | where EventID == 4769 | summarize Count4769 = count();\nlet Event4624NTLM = SecurityEvent | where TimeGenerated {TimeRange} | where EventID == 4624 | where AuthenticationPackageName has \"NTLM\" | summarize Count4624 = count();\nlet Event4625NTLM = SecurityEvent | where TimeGenerated {TimeRange} | where EventID == 4625 | where AuthenticationPackageName has \"NTLM\" | summarize Count4625 = count();\nprint \n    EventType = dynamic([\"📤 8001 (Client NTLM)\", \"📥 8003 (Server NTLM)\", \"🆕 4020 (24H2 Client)\", \"🆕 4022 (2025 Server)\", \"🎫 4769 (Kerberos TGS)\", \"✅ 4624 (NTLM Success)\", \"❌ 4625 (NTLM Failed)\"]),\n    Count = pack_array(\n        toscalar(Event8001),\n        toscalar(Event8003),\n        toscalar(Event4020),\n        toscalar(Event4022),\n        toscalar(Event4769),\n        toscalar(Event4624NTLM),\n        toscalar(Event4625NTLM)\n    )\n| mv-expand EventType to typeof(string), Count to typeof(long)",
+              "size": 4,
+              "title": "📊 NTLM Event Type Summary",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "titleContent": {
+                  "columnMatch": "EventType",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "Count",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "auto"
+                  },
+                  "numberFormat": {
+                    "unit": 17,
+                    "options": {
+                      "style": "decimal",
+                      "maximumFractionDigits": 0
+                    }
+                  }
+                },
+                "showBorder": true
+              }
+            },
+            "name": "query - ntlm summary tiles"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Events Over Time (All Sources)\nlet Event8001 = Event | where TimeGenerated {TimeRange} | where EventID == 8001 | summarize Count = count() by bin(TimeGenerated, 1h) | extend EventType = \"8001-Client\";\nlet Event8003 = Event | where TimeGenerated {TimeRange} | where EventID == 8003 | summarize Count = count() by bin(TimeGenerated, 1h) | extend EventType = \"8003-Server\";\nlet Event4020 = Event | where TimeGenerated {TimeRange} | where EventID == 4020 | summarize Count = count() by bin(TimeGenerated, 1h) | extend EventType = \"4020-24H2\";\nlet Event4022 = Event | where TimeGenerated {TimeRange} | where EventID == 4022 | summarize Count = count() by bin(TimeGenerated, 1h) | extend EventType = \"4022-2025\";\nunion Event8001, Event8003, Event4020, Event4022\n| order by TimeGenerated asc",
+              "size": 0,
+              "title": "📈 NTLM Event Trend (8001/8003/4020/4022)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "timechart",
+              "chartSettings": {
+                "group": "EventType",
+                "createOtherGroup": false
+              }
+            },
+            "name": "query - ntlm trend"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "AdvancedNTLM"
+      },
+      "name": "group - advanced ntlm"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🛡️ NTLM Security Best Practices & Compliance\n\nThis section provides comprehensive guidance for securing your environment against NTLM-related attacks and compliance verification queries to ensure proper configuration.\n\n---\n\n### 📋 NTLM Hardening Checklist\n\n| Priority | Configuration | Description | Risk if Not Applied |\n|----------|---------------|-------------|---------------------|\n| 🔴 **Critical** | Disable NTLM v1 | Block legacy NTLMv1 protocol | Pass-the-Hash attacks |\n| 🔴 **Critical** | Enable EPA | Extended Protection for Authentication | Relay attacks |\n| 🔴 **Critical** | Enable Credential Guard | Protect LSASS memory | Credential theft |\n| 🟠 **High** | Restrict NTLM | Limit NTLM to specific servers | Lateral movement |\n| 🟠 **High** | Audit NTLM Traffic | Enable comprehensive auditing | Blind spots |\n| 🟡 **Medium** | SMB Signing | Require signing on all connections | Man-in-the-middle |\n| 🟡 **Medium** | LDAP Signing | Require LDAP channel binding | LDAP relay attacks |\n| 🟢 **Recommended** | gMSA Migration | Use Group Managed Service Accounts | Password management |"
+            },
+            "name": "text - best practices header"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "---\n\n## 🔧 Required Group Policy Settings\n\n### **1. NTLM Authentication Level**\n**Path:** `Computer Configuration → Windows Settings → Security Settings → Local Policies → Security Options`\n\n| Policy | Recommended Value | Description |\n|--------|-------------------|-------------|\n| **Network security: LAN Manager authentication level** | `Send NTLMv2 response only. Refuse LM & NTLM` | Prevents legacy NTLM |\n| **Network security: Minimum session security for NTLM SSP** | `Require NTLMv2 and 128-bit encryption` | Both client and server |\n| **Network security: Restrict NTLM: Audit NTLM authentication** | `Enable all` | Enable auditing first |\n| **Network security: Restrict NTLM: NTLM authentication in this domain** | `Deny all accounts` | After testing |\n\n### **2. Credential Protection**\n**Path:** `Computer Configuration → Administrative Templates → System → Device Guard`\n\n| Policy | Value | Impact |\n|--------|-------|--------|\n| **Turn On Virtualization Based Security** | `Enabled with UEFI Lock` | Enables VBS |\n| **Credential Guard Configuration** | `Enabled with UEFI lock` | Protects LSASS |\n| **Secure Launch Configuration** | `Enabled` | Hardware root of trust |\n\n### **3. SMB & LDAP Security**\n**Path:** `Computer Configuration → Windows Settings → Security Settings → Local Policies → Security Options`\n\n| Policy | Value | Description |\n|--------|-------|-------------|\n| **Microsoft network client: Digitally sign communications (always)** | `Enabled` | SMB Client signing |\n| **Microsoft network server: Digitally sign communications (always)** | `Enabled` | SMB Server signing |\n| **Domain controller: LDAP server signing requirements** | `Require signing` | LDAP signing |\n| **Domain controller: LDAP server channel binding token requirements** | `Always` | Channel binding |"
+            },
+            "name": "text - gpo settings"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "---\n\n## 🔑 Required Registry Settings\n\n### **NTLM Auditing (Enable on all DCs and servers)**\n```\nHKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0\n    AuditReceivingNTLMTraffic = 2 (REG_DWORD)\n\nHKLM\\SYSTEM\\CurrentControlSet\\Services\\Netlogon\\Parameters\n    AuditNTLMInDomain = 7 (REG_DWORD)\n```\n\n### **Restrict NTLM Authentication**\n```\nHKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0\n    RestrictReceivingNTLMTraffic = 2 (REG_DWORD)  ; Deny all\n    RestrictSendingNTLMTraffic = 2 (REG_DWORD)    ; Deny all\n```\n\n### **LAN Manager Authentication Level**\n```\nHKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\n    LmCompatibilityLevel = 5 (REG_DWORD)  ; Send NTLMv2 only, refuse LM & NTLM\n```\n\n### **Credential Guard**\n```\nHKLM\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\n    EnableVirtualizationBasedSecurity = 1 (REG_DWORD)\n    LsaCfgFlags = 1 (REG_DWORD)  ; Enabled with UEFI lock\n```\n\n### **SMB Signing**\n```\nHKLM\\SYSTEM\\CurrentControlSet\\Services\\LanmanServer\\Parameters\n    RequireSecuritySignature = 1 (REG_DWORD)\n    EnableSecuritySignature = 1 (REG_DWORD)\n\nHKLM\\SYSTEM\\CurrentControlSet\\Services\\LanmanWorkstation\\Parameters\n    RequireSecuritySignature = 1 (REG_DWORD)\n    EnableSecuritySignature = 1 (REG_DWORD)\n```"
+            },
+            "name": "text - registry settings"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "---\n\n## ✅ Compliance Verification Queries\n\nRun these queries to verify your environment is properly configured for NTLM security."
+            },
+            "name": "text - compliance header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// COMPLIANCE CHECK 1: NTLMv1 Usage Detection (Should be ZERO)\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| where LmPackageName has \"NTLM V1\"\n| summarize \n    NTLMv1Logins = count(),\n    UniqueAccounts = dcount(TargetUserName),\n    UniqueComputers = dcount(Computer),\n    Accounts = make_set(TargetUserName, 10),\n    SourceIPs = make_set(IpAddress, 10)\n    by Computer\n| extend ComplianceStatus = case(\n    NTLMv1Logins > 0, \"❌ NON-COMPLIANT - NTLMv1 Detected\",\n    \"✅ COMPLIANT\"\n)\n| order by NTLMv1Logins desc",
+              "size": 0,
+              "title": "🔴 COMPLIANCE: NTLMv1 Usage (Must be Zero)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "NTLMv1Logins",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "redDark"
+                    }
+                  },
+                  {
+                    "columnMatch": "ComplianceStatus",
+                    "formatter": 1
+                  }
+                ]
+              }
+            },
+            "name": "query - compliance ntlmv1"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// COMPLIANCE CHECK 2: NTLM Auditing Enabled\n// Checks if NTLM audit events are being generated (events 8001-8004)\nlet EventsDetected = Event\n| where TimeGenerated {TimeRange}\n| where EventID in (8001, 8002, 8003, 8004, 4020, 4022)\n| summarize EventCount = count() by Computer, EventID\n| summarize \n    TotalEvents = sum(EventCount),\n    EventTypes = make_set(EventID)\n    by Computer;\nlet AllComputers = SecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID in (4624, 4625)\n| distinct Computer;\nAllComputers\n| join kind=leftouter EventsDetected on Computer\n| extend AuditStatus = case(\n    TotalEvents > 0 and array_length(EventTypes) >= 2, \"✅ Auditing Enabled\",\n    TotalEvents > 0, \"🟡 Partial Auditing\",\n    \"❌ Auditing NOT Configured\"\n)\n| project Computer, AuditStatus, TotalEvents = coalesce(TotalEvents, 0), EventTypes\n| order by TotalEvents asc",
+              "size": 0,
+              "title": "🟠 COMPLIANCE: NTLM Auditing Configuration",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "TotalEvents",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "greenRed"
+                    }
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - compliance auditing"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// COMPLIANCE CHECK 3: Credential Guard Status\n// Checks for VBS and Credential Guard events\nEvent\n| where TimeGenerated {TimeRange}\n| where EventLog == \"Microsoft-Windows-DeviceGuard/Operational\" or EventLog == \"System\"\n| where EventID in (13, 14, 15) or (Source == \"Microsoft-Windows-DeviceGuard\" and EventID in (1, 2, 3, 4, 5))\n| summarize EventCount = count() by Computer, EventID\n| extend FeatureStatus = case(\n    EventID == 13, \"VBS Enabled\",\n    EventID == 14, \"VBS Disabled\",\n    EventID == 15, \"Credential Guard Active\",\n    \"Other Status\"\n)\n| project Computer, FeatureStatus, EventCount\n| order by Computer",
+              "size": 0,
+              "title": "🟠 COMPLIANCE: Credential Guard Status",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "customWidth": "50",
+            "name": "query - compliance credential guard"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// COMPLIANCE CHECK 4: SMB Signing Enforcement\n// Checks for unsigned SMB connections (Event 3000 series)\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 5140 or EventID == 5145\n| extend ShareAccess = extract(@\"Share Name:\\s+([^\\r\\n]+)\", 1, EventData)\n| summarize \n    AccessCount = count(),\n    UniqueShares = dcount(ShareAccess),\n    Shares = make_set(ShareAccess, 10)\n    by Computer, IpAddress\n| extend SMBStatus = case(\n    AccessCount > 100, \"🟡 High SMB Activity - Verify Signing\",\n    \"✅ Normal SMB Activity\"\n)\n| order by AccessCount desc\n| take 20",
+              "size": 0,
+              "title": "🟡 COMPLIANCE: SMB Share Access (Verify Signing)",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "customWidth": "50",
+            "name": "query - compliance smb"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// COMPLIANCE CHECK 5: Privileged Accounts Using NTLM\n// High-value accounts should NOT use NTLM\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| where TargetUserName has_any (\"admin\", \"svc\", \"service\", \"root\", \"backup\", \"domain\") or\n        TargetUserName matches regex @\"^[A-Z]{2,4}-.*admin$\" or\n        TargetUserName in (\"Administrator\", \"krbtgt\", \"SYSTEM\")\n| summarize \n    NTLMLogins = count(),\n    SourceIPs = make_set(IpAddress, 5),\n    Computers = make_set(Computer, 5),\n    LastLogin = max(TimeGenerated)\n    by TargetUserName, TargetDomainName\n| extend ComplianceStatus = \"❌ NON-COMPLIANT - Privileged Account Using NTLM\"\n| extend RiskLevel = case(\n    TargetUserName in (\"Administrator\", \"krbtgt\"), \"🔴 Critical\",\n    TargetUserName has \"admin\", \"🟠 High\",\n    \"🟡 Medium\"\n)\n| order by NTLMLogins desc",
+              "size": 0,
+              "title": "🔴 COMPLIANCE: Privileged Accounts Using NTLM",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "NTLMLogins",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "redDark"
+                    }
+                  },
+                  {
+                    "columnMatch": "LastLogin",
+                    "formatter": 6
+                  }
+                ]
+              }
+            },
+            "customWidth": "50",
+            "name": "query - compliance privileged"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// COMPLIANCE CHECK 6: Service Accounts Using NTLM\n// Service accounts should use Kerberos or gMSA\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| where LogonType in (5, 10) or TargetUserName startswith \"svc\" or TargetUserName has \"service\"\n| summarize \n    NTLMLogins = count(),\n    UniqueComputers = dcount(Computer),\n    Computers = make_set(Computer, 5),\n    LogonTypes = make_set(LogonType)\n    by TargetUserName, TargetDomainName\n| extend AccountType = case(\n    TargetUserName startswith \"svc\", \"Service Account\",\n    TargetUserName has \"service\", \"Service Account\",\n    \"System/Scheduled Task\"\n)\n| extend Recommendation = \"Migrate to gMSA or configure Kerberos SPN\"\n| order by NTLMLogins desc\n| take 20",
+              "size": 0,
+              "title": "🟠 COMPLIANCE: Service Accounts Using NTLM",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "NTLMLogins",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "orange"
+                    }
+                  }
+                ]
+              }
+            },
+            "name": "query - compliance service accounts"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "---\n\n## 📊 Compliance Summary Dashboard"
+            },
+            "name": "text - summary header"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Overall Compliance Score Summary\nlet NTLMv1Count = SecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624 and AuthenticationPackageName has \"NTLM\" and LmPackageName has \"NTLM V1\"\n| count;\nlet PrivilegedNTLMCount = SecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624 and AuthenticationPackageName has \"NTLM\"\n| where TargetUserName has_any (\"admin\", \"Administrator\", \"svc\", \"service\")\n| count;\nlet ServiceAccountNTLM = SecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624 and AuthenticationPackageName has \"NTLM\"\n| where LogonType in (5, 10) or TargetUserName startswith \"svc\"\n| count;\nlet AuditingEnabled = Event\n| where TimeGenerated {TimeRange}\n| where EventID in (8001, 8002, 8003, 8004, 4020, 4022)\n| summarize EventCount = count();\nlet TotalNTLM = SecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624 and AuthenticationPackageName has \"NTLM\"\n| count;\nprint \n    CheckName = dynamic([\"NTLMv1 Usage\", \"Privileged NTLM\", \"Service Account NTLM\", \"NTLM Auditing\", \"Total NTLM Logins\"]),\n    Count = pack_array(\n        toscalar(NTLMv1Count),\n        toscalar(PrivilegedNTLMCount),\n        toscalar(ServiceAccountNTLM),\n        toscalar(AuditingEnabled),\n        toscalar(TotalNTLM)\n    ),\n    Target = dynamic([0, 0, 0, 100, 0]),\n    Status = dynamic([\"Should be Zero\", \"Should be Zero\", \"Migrate to gMSA\", \"Events Expected\", \"Track Deprecation\"])\n| mv-expand CheckName to typeof(string), Count to typeof(long), Target to typeof(long), Status to typeof(string)\n| extend Compliance = case(\n    CheckName == \"NTLMv1 Usage\" and Count == 0, \"✅ PASS\",\n    CheckName == \"NTLMv1 Usage\" and Count > 0, \"❌ FAIL\",\n    CheckName == \"Privileged NTLM\" and Count == 0, \"✅ PASS\",\n    CheckName == \"Privileged NTLM\" and Count > 0, \"❌ FAIL\",\n    CheckName == \"Service Account NTLM\" and Count == 0, \"✅ PASS\",\n    CheckName == \"Service Account NTLM\" and Count > 0, \"🟡 REVIEW\",\n    CheckName == \"NTLM Auditing\" and Count > 100, \"✅ PASS\",\n    CheckName == \"NTLM Auditing\" and Count > 0, \"🟡 PARTIAL\",\n    CheckName == \"NTLM Auditing\" and Count == 0, \"❌ FAIL\",\n    \"📊 INFO\"\n)\n| project CheckName, Count, Target, Status, Compliance",
+              "size": 0,
+              "title": "📊 NTLM Security Compliance Summary",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Count",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "magenta"
+                    }
+                  }
+                ]
+              }
+            },
+            "name": "query - compliance summary"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// Compliance Trend Over Time\nlet NTLMv1Trend = SecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624 and AuthenticationPackageName has \"NTLM\" and LmPackageName has \"NTLM V1\"\n| summarize Count = count() by bin(TimeGenerated, 1d)\n| extend Category = \"NTLMv1 Usage\";\nlet PrivilegedTrend = SecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624 and AuthenticationPackageName has \"NTLM\"\n| where TargetUserName has_any (\"admin\", \"Administrator\", \"svc\")\n| summarize Count = count() by bin(TimeGenerated, 1d)\n| extend Category = \"Privileged NTLM\";\nlet TotalNTLMTrend = SecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624 and AuthenticationPackageName has \"NTLM\"\n| summarize Count = count() by bin(TimeGenerated, 1d)\n| extend Category = \"Total NTLM\";\nunion NTLMv1Trend, PrivilegedTrend, TotalNTLMTrend\n| order by TimeGenerated asc",
+              "size": 0,
+              "title": "📈 Compliance Trend Over Time",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "linechart",
+              "chartSettings": {
+                "group": "Category",
+                "createOtherGroup": false
+              }
+            },
+            "name": "query - compliance trend"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "---\n\n## 🚨 Attack Scenario Protection Matrix\n\n| Attack Scenario | Required Configuration | Detection Events | Mitigation |\n|-----------------|------------------------|------------------|------------|\n| **Pass-the-Hash** | Credential Guard, Disable NTLMv1 | 4624 (NTLM), 4625, 4648 | Block hash reuse |\n| **NTLM Relay** | SMB/LDAP Signing, EPA | 4624, 8001, 8003 | Prevent credential forwarding |\n| **Brute Force** | Account Lockout, Smart Lockout | 4625 (high volume) | Rate limiting |\n| **Kerberoasting** | Strong SPN passwords, AES only | 4769 (TGS requests) | Monitor SPN usage |\n| **Password Spray** | Smart Lockout, Conditional Access | 4625 (distributed) | Block after threshold |\n| **Credential Theft** | Credential Guard, LAPS | 4624 (admin accounts) | Protect LSASS |\n| **Lateral Movement** | NTLM Restriction, Network Segmentation | 4624 (Type 3/10) | Limit NTLM scope |\n\n---\n\n## 🔐 NTLM Deprecation Roadmap\n\n### Phase 1: Discovery & Auditing (Weeks 1-4)\n1. Enable NTLM auditing on all DCs (`AuditReceivingNTLMTraffic = 2`)\n2. Deploy this workbook to monitor usage\n3. Identify all applications/services using NTLM\n4. Document exceptions and dependencies\n\n### Phase 2: Hardening (Weeks 5-8)\n1. Disable NTLMv1 (`LmCompatibilityLevel = 5`)\n2. Enable SMB signing on all servers\n3. Enable LDAP signing and channel binding\n4. Deploy Credential Guard on Windows 10+ endpoints\n\n### Phase 3: Restriction (Weeks 9-12)\n1. Create NTLM exception lists for legacy applications\n2. Enable `Restrict NTLM: Audit incoming NTLM traffic`\n3. Migrate service accounts to gMSA\n4. Configure SPNs for Kerberos authentication\n\n### Phase 4: Enforcement (Weeks 13-16)\n1. Enable `Restrict NTLM: Deny all` with exceptions\n2. Monitor for authentication failures\n3. Address remaining NTLM dependencies\n4. Remove exception list entries as applications are migrated\n\n### Phase 5: Maintenance (Ongoing)\n1. Monthly review of NTLM usage reports\n2. Block newly discovered NTLM sources\n3. Update exception lists as needed\n4. Track progress toward zero NTLM goal"
+            },
+            "name": "text - attack matrix and roadmap"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// NTLM Exception List Candidates\n// Applications/Services that may need exceptions during deprecation\nSecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID == 4624\n| where AuthenticationPackageName has \"NTLM\"\n| extend ProcessName = coalesce(ProcessName, \"Unknown\")\n| summarize \n    NTLMLogins = count(),\n    UniqueUsers = dcount(TargetUserName),\n    UniqueComputers = dcount(Computer),\n    Users = make_set(TargetUserName, 5),\n    SourceIPs = make_set(IpAddress, 5)\n    by WorkstationName, ProcessName\n| where NTLMLogins > 50\n| extend ExceptionRecommendation = case(\n    ProcessName has_any (\"sqlservr\", \"sql\"), \"Consider SQL Kerberos delegation\",\n    ProcessName has_any (\"w3wp\", \"iis\"), \"Enable IIS Windows Auth with Negotiate\",\n    ProcessName has_any (\"svchost\"), \"Review scheduled tasks and services\",\n    WorkstationName has_any (\"linux\", \"mac\"), \"Legacy client - may require exception\",\n    \"Investigate for Kerberos migration\"\n)\n| order by NTLMLogins desc\n| take 20\n| project WorkstationName, ProcessName, NTLMLogins, UniqueUsers, UniqueComputers, ExceptionRecommendation, Users, SourceIPs",
+              "size": 0,
+              "title": "📋 NTLM Exception List Candidates",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "NTLMLogins",
+                    "formatter": 8,
+                    "formatOptions": {
+                      "palette": "blue"
+                    }
+                  }
+                ]
+              }
+            },
+            "name": "query - exception candidates"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "// COMPLIANCE: Devices Missing Modern Windows (24H2+/2025+)\n// Check for devices that cannot generate new NTLM audit events\nlet ModernEvents = Event\n| where TimeGenerated {TimeRange}\n| where EventID in (4020, 4022)\n| distinct Computer;\nlet AllDevices = SecurityEvent\n| where TimeGenerated {TimeRange}\n| where EventID in (4624, 4625)\n| distinct Computer;\nAllDevices\n| join kind=leftanti ModernEvents on Computer\n| summarize DevicesWithoutModernAudit = make_set(Computer, 100)\n| extend TotalCount = array_length(DevicesWithoutModernAudit)\n| extend Recommendation = \"Upgrade to Windows 11 24H2+ or Windows Server 2025+ for enhanced NTLM auditing (Events 4020/4022)\"",
+              "size": 0,
+              "title": "🖥️ Devices Needing Upgrade for Modern NTLM Auditing",
+              "timeContext": {
+                "durationMs": 2592000000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "query - devices upgrade needed"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "BestPractices"
+      },
+      "name": "group - best practices"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "---\n\n### 📋 Recommended Actions\n\n**🔴 Critical Actions:**\n1. Block top attacking IPs identified in \"Attack Detection\" tab\n2. Investigate any successful logons after failed attempts (potential breach)\n3. Review privileged accounts using NTLM - migrate to Kerberos immediately\n\n**🟡 Short-Term Actions:**\n1. Enable account lockout policies (5 failed attempts, 30-minute duration)\n2. Rename default Administrator accounts\n3. Implement NTLM auditing on Domain Controllers\n4. Migrate service accounts to gMSA\n\n**🟢 Long-Term Actions:**\n1. Migrate all service accounts to gMSA\n2. Enable Windows Defender Credential Guard on all endpoints\n3. Complete NTLM deprecation roadmap\n4. Implement Zero Trust for all workload identities\n\n**Monitoring:**\n- Set up alerts for high-volume NTLM failures (>100/hour from single IP)\n- Alert on privileged account NTLM usage\n- Track deprecation progress monthly\n\n**References:**\n- [NTLM Assessment Report](NTLM-Assessment-Report.md)\n- [Microsoft: Eliminating NTLM Authentication](https://docs.microsoft.com/windows-server/security/kerberos/ntlm-overview)"
+      },
+      "name": "text - recommendations"
+    }
+  ],
+  "fallbackResourceIds": [
+    "Azure Monitor"
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
