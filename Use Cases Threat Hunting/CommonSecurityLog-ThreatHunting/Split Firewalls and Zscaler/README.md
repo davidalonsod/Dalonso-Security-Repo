@@ -4,7 +4,7 @@
 
 Content previously stored flat under `Analytic-Rules/` has been split into two vendor-specific folders. The original `Analytic-Rules/` folder is kept as-is for backward compatibility.
 
----
+Are Your Firewall Logs Too Noisy? Stop Attacks with Sentinel https://youtu.be/_q_tG7GscZA
 
 ## New Folder: `Firewall/`
 
