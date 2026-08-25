@@ -1,5 +1,7 @@
 # 🔥 Firewall Monitoring Workbook (CommonSecurityLog / CEF SOC)
 
+Are Your Firewall Logs Too Noisy? Stop Attacks with Sentinel https://youtu.be/_q_tG7GscZA
+
 A vendor-neutral Microsoft Sentinel **workbook** for monitoring **CEF firewalls in the
 `CommonSecurityLog` table** — Fortinet, Palo Alto, Check Point, Cisco, and others. It
 answers three operational questions across the perimeter: **what is happening on the
@@ -96,7 +98,7 @@ tiles don't break when a connector omits a field.
 
 ## Data sources & prerequisites
 
-Are Your Firewall Logs Too Noisy? Stop Attacks with Sentinel https://youtu.be/_q_tG7GscZA
+
 
 | Source | Used by |
 |---|---|
