@@ -58,6 +58,39 @@ without writing KQL.
 
 ---
 
+## 💻 Local AI agents on endpoints (Preview)
+
+The 🔬 **Advanced Hunting** tab includes a dedicated **Local AI agents on endpoints
+(Preview)** subsection for the agents **Microsoft Defender for Endpoint discovers on
+devices** — coding agents & IDE extensions, desktop AI assistants, local AI runtimes,
+and agent platforms. It reads `AgentsInfo` filtered to `Platform == "LocalAgents"`
+(local posture nested in `RawAgentInfo.localAgentMetadata` — vendor, host process,
+trust & `autoApprove`, device, account, **local MCP servers**) joined with the
+`ExposureGraphNodes` / `ExposureGraphEdges` attack-surface graph (what each agent
+*runs on*, is *used by*, and can *reach*).
+
+<!-- Screenshot placeholder — replace with a capture of the "Local AI agents on endpoints (Preview)"
+     subsection of the Advanced Hunting tab. Save it as media/local-ai-agents-on-endpoints.png,
+     then uncomment the image line below. -->
+<!-- ![Local AI agents on endpoints (Preview)](media/local-ai-agents-on-endpoints.png) -->
+> _Screenshot: add `media/local-ai-agents-on-endpoints.png` — the Local AI agents subsection of the 🔬 Advanced Hunting tab._
+
+| Tile | Answers |
+|---|---|
+| **Inventory & deployment footprint** | Each local agent's vendor, host process, versions, devices, and how widely it's deployed |
+| **Remote MCP, local MCP & declared tools** | The MCP servers (remote and **local**) and declared tools each agent uses — and where they run |
+| **Risky: auto-approval / untrusted process** | Agents that act without approval, or run in an untrusted host process |
+| **Risky agents on critical devices** | Risky agents running on business-critical devices (exposure-graph criticality) |
+| **User blast radius** | Users whose local agents can reach **critical / sensitive assets** |
+| **Lifecycle: new & removed (7d)** | Local agent profiles added or removed in the last 7 days |
+
+Every tile is `queryType: advancedHunting`, so the same queries paste straight into the
+Defender portal → **Advanced hunting**. Requires **Defender for Endpoint Plan 2**; risk
+levels & recommendations need **Microsoft 365 E7** or **Microsoft Agent 365**. Docs:
+[Discover local AI agents with Microsoft Defender for Endpoint](https://learn.microsoft.com/defender-endpoint/discover-local-ai-agents).
+
+---
+
 ## Key capabilities
 
 - **Cross-source AI visibility** — one workbook over M365 Copilot, Copilot Studio,
