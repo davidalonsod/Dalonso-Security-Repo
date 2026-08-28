@@ -1160,7 +1160,7 @@
           {
             "type": 1,
             "content": {
-              "json": "## 🔬 Advanced Hunting (Defender XDR) — AI agent behaviors, local discovery & risk\n\nReads **BehaviorInfo** (AI-agent interaction behaviors incl. Microsoft **Prompt Shield** jailbreak detections), **BehaviorEntities**, **AgentsInfo** (cloud and local agent inventory, configuration, MCP servers and tools), **ExposureGraphNodes / ExposureGraphEdges** (critical-device and identity blast radius), and **AADAgentRiskEvents** (Microsoft Entra **Agent ID risk** detections). Local agent discovery and `AgentsInfo` require Defender for Endpoint Plan 2; inventory risk indicators and recommendations require Microsoft 365 E7 or Microsoft Agent 365 with Defender for Endpoint Plan 2. Local discovery is currently Preview.",
+              "json": "## 🔬 Advanced Hunting (Defender XDR) — AI agent behaviors & inventory\n\nReads **BehaviorInfo** (AI-agent interaction behaviors incl. Microsoft **Prompt Shield** jailbreak detections), **BehaviorEntities**, **AgentsInfo** (agent inventory: platform, model, channels, MCP servers, connected agents), and **AADAgentRiskEvents** (Microsoft Entra **Agent ID risk** detections: risk level, state, and evidence per agent identity). These Defender XDR Advanced Hunting tables populate this workspace when the Defender XDR connector streams them.",
               "style": "info"
             },
             "name": "ah-h"
@@ -1414,103 +1414,6 @@
           {
             "type": 1,
             "content": {
-              "json": "### Local AI agents on endpoints (Preview)\n\nUses `AgentsInfo` with `Platform == \"LocalAgents\"` plus `ExposureGraphNodes` and `ExposureGraphEdges`. One `AgentId` is one agent/device/account profile. Current inventory excludes `Deleted` and `Uninstalled` lifecycle records. `autoApprove` and `trustedProcess` are strings, so the hunts compare them to `\"true\"` and `\"false\"`. [Microsoft Learn: Discover local AI agents](https://learn.microsoft.com/en-us/defender-endpoint/discover-local-ai-agents#query-local-ai-agents-using-advanced-hunting)"
-            },
-            "name": "ah-local-h"
-          },
-          {
-            "type": 3,
-            "content": {
-              "version": "KqlItem/1.0",
-              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\r\\n| where Platform == 'LocalAgents'\\r\\n| summarize arg_max(Timestamp, Name, Version, LifecycleStatus, RawAgentInfo) by AgentId\\r\\n| where LifecycleStatus !in~ ('Deleted', 'Uninstalled')\\r\\n| extend AgentMetadata = RawAgentInfo.localAgentMetadata\\r\\n| extend Vendor = tostring(AgentMetadata.vendor), Process = tostring(AgentMetadata.relatedProcess), Device = tostring(AgentMetadata.deviceName), Account = tostring(AgentMetadata.accountName)\\r\\n| where '{AgentSearch}' == '' or Name has '{AgentSearch}' or Vendor has '{AgentSearch}' or Device has '{AgentSearch}' or Account has '{AgentSearch}'\\r\\n| summarize Installations = count(), DeviceCount = dcount(Device), Devices = make_set(Device, 100), Versions = make_set(Version, 20), Accounts = make_set_if(Account, isnotempty(Account), 50) by Agent = Name, Vendor, Process\\r\\n| sort by DeviceCount desc, Installations desc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
-              "size": 0,
-              "title": "Local AI agent inventory and deployment footprint",
-              "queryType": "advancedHunting",
-              "crossComponentResources": [
-                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
-              ],
-              "timeContextFromParameter": "TimeRange"
-            },
-            "name": "ah-local-inventory"
-          },
-          {
-            "type": 3,
-            "content": {
-              "version": "KqlItem/1.0",
-              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let localAgentProfiles = AgentsInfo | where Platform == 'LocalAgents' | extend AgentMetadata = RawAgentInfo.localAgentMetadata | project Timestamp, Agent = Name, Device = tostring(AgentMetadata.deviceName), Account = tostring(AgentMetadata.accountName), McpServers, DeclaredTools, LocalServers = AgentMetadata.localMcps;\\r\\nlet remoteMcpServers = localAgentProfiles | mv-expand Server = McpServers | project Timestamp, Agent, Device, Account, McpServer = tostring(Server.name), Origin = 'Remote MCP server', Transport = tostring(Server.type), Location = tostring(Server.endpoint);\\r\\nlet agentDeclaredTools = localAgentProfiles | mv-expand Tool = DeclaredTools | project Timestamp, Agent, Device, Account, McpServer = tostring(Tool.name), Origin = 'Declared tool', Transport = tostring(Tool.type), Location = tostring(Tool.endpoint);\\r\\nlet localMcpServers = localAgentProfiles | mv-expand Server = LocalServers | project Timestamp, Agent, Device, Account, McpServer = tostring(Server.name), Origin = 'Local MCP server', Transport = tostring(Server.transportType), Location = tostring(Server.commandName);\\r\\nremoteMcpServers\\r\\n| union agentDeclaredTools, localMcpServers\\r\\n| where isnotempty(McpServer)\\r\\n| where '{AgentSearch}' == '' or Agent has '{AgentSearch}' or Device has '{AgentSearch}' or Account has '{AgentSearch}' or McpServer has '{AgentSearch}'\\r\\n| summarize LastSeen = max(Timestamp), Agents = make_set(Agent, 20), Devices = make_set(Device, 20), Accounts = make_set_if(Account, isnotempty(Account), 20) by McpServer, Origin, Transport, Location\\r\\n| sort by McpServer asc, Origin asc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
-              "size": 0,
-              "title": "Local agents: remote MCP, local MCP, and declared tools",
-              "queryType": "advancedHunting",
-              "crossComponentResources": [
-                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
-              ],
-              "timeContextFromParameter": "TimeRange"
-            },
-            "name": "ah-local-mcp"
-          },
-          {
-            "type": 3,
-            "content": {
-              "version": "KqlItem/1.0",
-              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\r\\n| where Platform == 'LocalAgents'\\r\\n| summarize arg_max(Timestamp, Name, Version, LifecycleStatus, RawAgentInfo) by AgentId\\r\\n| where LifecycleStatus !in~ ('Deleted', 'Uninstalled')\\r\\n| extend AgentMetadata = RawAgentInfo.localAgentMetadata\\r\\n| extend AutoApprove = tostring(AgentMetadata.autoApprove), TrustedProcess = tostring(AgentMetadata.trustedProcess), Vendor = tostring(AgentMetadata.vendor), Process = tostring(AgentMetadata.relatedProcess), Device = tostring(AgentMetadata.deviceName), Account = tostring(AgentMetadata.accountName)\\r\\n| where AutoApprove =~ 'true' or TrustedProcess =~ 'false'\\r\\n| where '{AgentSearch}' == '' or Name has '{AgentSearch}' or Device has '{AgentSearch}' or Account has '{AgentSearch}'\\r\\n| extend RiskReason = case(AutoApprove =~ 'true' and TrustedProcess =~ 'false', 'Acts without approval, and host process is not trusted', AutoApprove =~ 'true', 'Acts without approval', 'Host process is not trusted')\\r\\n| project Agent = Name, Vendor, Version, Process, Device, Account, AutoApprove, TrustedProcess, RiskReason, LastSeen = Timestamp\\r\\n| sort by Device asc, Agent asc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
-              "size": 0,
-              "title": "Risky local agents: auto-approval or untrusted host process",
-              "queryType": "advancedHunting",
-              "crossComponentResources": [
-                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
-              ],
-              "timeContextFromParameter": "TimeRange"
-            },
-            "name": "ah-local-risky-config"
-          },
-          {
-            "type": 3,
-            "content": {
-              "version": "KqlItem/1.0",
-              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let deviceLabels = dynamic(['device', 'ec2.instance', 'microsoft.compute/virtualmachines']);\\r\\nlet riskyAgentProfiles = AgentsInfo | where Platform == 'LocalAgents' | summarize arg_max(Timestamp, Name, Version, LifecycleStatus, RawAgentInfo) by AgentId | where LifecycleStatus !in~ ('Deleted', 'Uninstalled') | extend AgentMetadata = RawAgentInfo.localAgentMetadata | extend AutoApprove = tostring(AgentMetadata.autoApprove), TrustedProcess = tostring(AgentMetadata.trustedProcess) | where AutoApprove =~ 'true' or TrustedProcess =~ 'false' | project AgentId = tostring(AgentId), Agent = Name, Version, Vendor = tostring(AgentMetadata.vendor), Account = tostring(AgentMetadata.accountName), AutoApprove, TrustedProcess;\\r\\nlet localAgentNodes = ExposureGraphNodes | where NodeLabel == 'ai-agent' | where tostring(NodeProperties.rawData.aiAgentMetadata.platform) == 'LocalAgents' | project AgentNodeId = NodeId, AgentId = tostring(NodeProperties.rawData.aiAgentMetadata.id);\\r\\nlet agentDeviceEdges = ExposureGraphEdges | where SourceNodeLabel == 'ai-agent' and EdgeLabel =~ 'runs on' and TargetNodeLabel in (deviceLabels) | project AgentNodeId = SourceNodeId, DeviceId = TargetNodeId, Device = TargetNodeName, DeviceType = TargetNodeLabel;\\r\\nlet criticalDevices = ExposureGraphNodes | where NodeLabel in (deviceLabels) and NodeProperties has 'criticalityLevel' | extend CriticalityLevel = toint(NodeProperties.rawData.criticalityLevel.criticalityLevel) | where CriticalityLevel between (0 .. 3) | extend Criticality = case(CriticalityLevel == 0, 'Very high', CriticalityLevel == 1, 'High', CriticalityLevel == 2, 'Medium', 'Low') | project DeviceId = NodeId, CriticalityLevel, Criticality, CriticalityReason = tostring(NodeProperties.rawData.criticalityLevel.ruleNames);\\r\\nriskyAgentProfiles\\r\\n| join kind=inner localAgentNodes on AgentId\\r\\n| join kind=inner agentDeviceEdges on AgentNodeId\\r\\n| join kind=inner criticalDevices on DeviceId\\r\\n| where '{AgentSearch}' == '' or Agent has '{AgentSearch}' or Device has '{AgentSearch}' or Account has '{AgentSearch}'\\r\\n| project Device, DeviceType, Criticality, CriticalityReason, Agent, Vendor, Version, Account, AutoApprove, TrustedProcess, CriticalityLevel\\r\\n| sort by CriticalityLevel asc, Device asc, Agent asc\\r\\n| project-away CriticalityLevel\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
-              "size": 0,
-              "title": "Risky local agents running on critical devices",
-              "queryType": "advancedHunting",
-              "crossComponentResources": [
-                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
-              ],
-              "timeContextFromParameter": "TimeRange"
-            },
-            "name": "ah-local-critical-devices"
-          },
-          {
-            "type": 3,
-            "content": {
-              "version": "KqlItem/1.0",
-              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let deviceLabels = dynamic(['device', 'ec2.instance', 'microsoft.compute/virtualmachines']);\\r\\nlet localAgents = ExposureGraphNodes | where NodeLabel == 'ai-agent' | where tostring(NodeProperties.rawData.aiAgentMetadata.platform) == 'LocalAgents' | project AgentNodeId = NodeId, AIAgent = NodeName;\\r\\nlet agentDeviceEdges = ExposureGraphEdges | where SourceNodeLabel == 'ai-agent' and EdgeLabel =~ 'runs on' and TargetNodeLabel in (deviceLabels) | project AgentNodeId = SourceNodeId, Device = TargetNodeName;\\r\\nlet agentUserEdges = ExposureGraphEdges | where SourceNodeLabel == 'ai-agent' and EdgeLabel =~ 'used by' | project AgentNodeId = SourceNodeId, UserId = TargetNodeId, User = TargetNodeName;\\r\\nlet userReach = ExposureGraphEdges | where EdgeLabel in~ ('has permissions to', 'has role on') | project UserId = SourceNodeId, AssetId = TargetNodeId | union (ExposureGraphNodes | where NodeLabel == 'user' | project UserId = NodeId, AssetId = NodeId);\\r\\nlet sensitiveAssets = ExposureGraphNodes | where NodeProperties has 'criticalityLevel' or NodeProperties has 'containsSensitiveData' | extend CriticalityLevel = toint(NodeProperties.rawData.criticalityLevel.criticalityLevel), SensitiveDataRaw = tostring(NodeProperties.rawData.containsSensitiveData) | extend HasSensitiveData = iff(isnotempty(SensitiveDataRaw) and SensitiveDataRaw !~ 'false', 'Yes', 'No') | where CriticalityLevel between (0 .. 3) or HasSensitiveData == 'Yes' | extend CriticalityRank = iff(CriticalityLevel between (0 .. 3), CriticalityLevel, 4) | project AssetId = NodeId, AssetName = NodeName, CriticalityRank, HasSensitiveData;\\r\\nlet agentUsers = localAgents | join kind=inner agentDeviceEdges on AgentNodeId | join kind=inner agentUserEdges on AgentNodeId | project AIAgent, Device, UserId, User;\\r\\nagentUsers\\r\\n| join kind=inner userReach on UserId\\r\\n| join kind=inner sensitiveAssets on AssetId\\r\\n| summarize AIAgents = make_set(AIAgent, 20), Devices = make_set(Device, 20), ReachableAssets = dcountif(AssetId, AssetId != UserId), SensitiveAssets = dcountif(AssetId, AssetId != UserId and HasSensitiveData == 'Yes'), Assets = make_set_if(AssetName, AssetId != UserId, 50), UserRank = minif(CriticalityRank, AssetId == UserId), AssetRank = minif(CriticalityRank, AssetId != UserId) by User\\r\\n| extend UserCriticality = case(UserRank == 0, 'Very high', UserRank == 1, 'High', UserRank == 2, 'Medium', UserRank == 3, 'Low', 'Not classified'), HighestAssetCriticality = case(AssetRank == 0, 'Very high', AssetRank == 1, 'High', AssetRank == 2, 'Medium', AssetRank == 3, 'Low', AssetRank == 4, 'Sensitive data', 'None')\\r\\n| where '{AgentSearch}' == '' or User has '{AgentSearch}' or tostring(AIAgents) has '{AgentSearch}' or tostring(Devices) has '{AgentSearch}'\\r\\n| extend SortRank = coalesce(AssetRank, 99)\\r\\n| project User, UserCriticality, ReachableAssets, SensitiveAssets, HighestAssetCriticality, AIAgents, Devices, Assets, SortRank\\r\\n| sort by SortRank asc, ReachableAssets desc\\r\\n| project-away SortRank\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
-              "size": 0,
-              "title": "Users whose local agents can reach critical or sensitive assets",
-              "queryType": "advancedHunting",
-              "crossComponentResources": [
-                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
-              ],
-              "timeContextFromParameter": "TimeRange"
-            },
-            "name": "ah-local-user-blast-radius"
-          },
-          {
-            "type": 3,
-            "content": {
-              "version": "KqlItem/1.0",
-              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\r\\n| where Platform == 'LocalAgents'\\r\\n| summarize FirstSeen = min(Timestamp), LastSeen = max(Timestamp), arg_max(Timestamp, Name, Version, LifecycleStatus, RawAgentInfo) by AgentId\\r\\n| extend Metadata = RawAgentInfo.localAgentMetadata, Device = tostring(RawAgentInfo.localAgentMetadata.deviceName), Account = tostring(RawAgentInfo.localAgentMetadata.accountName)\\r\\n| where FirstSeen > ago(7d) or LifecycleStatus in~ ('Deleted', 'Uninstalled')\\r\\n| extend Change = case(LifecycleStatus in~ ('Deleted', 'Uninstalled'), strcat('Removed: ', LifecycleStatus), 'New profile')\\r\\n| where '{AgentSearch}' == '' or Name has '{AgentSearch}' or Device has '{AgentSearch}' or Account has '{AgentSearch}'\\r\\n| project Change, FirstSeen, LastSeen, Agent = Name, Version, LifecycleStatus, Vendor = tostring(Metadata.vendor), Process = tostring(Metadata.relatedProcess), Device, Account, AgentId\\r\\n| sort by LastSeen desc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
-              "size": 0,
-              "title": "Local agent profile changes: new and removed in 7 days",
-              "queryType": "advancedHunting",
-              "crossComponentResources": [
-                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
-              ],
-              "timeContextFromParameter": "TimeRange"
-            },
-            "name": "ah-local-lifecycle"
-          },
-          {
-            "type": 1,
-            "content": {
               "json": "### 🛑 Entra Agent ID risk (AADAgentRiskEvents)"
             },
             "name": "ah-h3"
@@ -1553,6 +1456,168 @@
               "timeContextFromParameter": "TimeRange"
             },
             "name": "ah-riskstate"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "## 💻 Local AI agents on endpoints (Preview)\n\nReads **AgentsInfo** filtered to `Platform == \"LocalAgents\"` — the local-agent profile Microsoft Defender for Endpoint discovers on devices (publisher/vendor, host process, trust & auto-approve, versions, MCP servers, device & account, nested in `RawAgentInfo.localAgentMetadata`) — joined with the **ExposureGraphNodes** / **ExposureGraphEdges** attack-surface graph (what each agent *runs on*, is *used by*, and can *reach*, plus device/user asset criticality and sensitive-data flags). This covers **local AI agent discovery, MCP & tool visibility (incl. local MCP servers), risky-configuration & lifecycle tracking, and exposure/risk prioritization on critical devices and users**.\n\n> Requires **Microsoft Defender for Endpoint Plan 2**; discovery is automatic on onboarded Windows/macOS devices (Defender AV in active mode). Risk levels & recommendations need **Microsoft 365 E7** or **Microsoft Agent 365**. Docs: [Discover local AI agents with Microsoft Defender for Endpoint](https://learn.microsoft.com/defender-endpoint/discover-local-ai-agents)."
+            },
+            "name": "la-h"
+          },
+          {
+            "type": 1,
+            "content": {
+              "json": "▶️ **Run directly in Advanced Hunting** — open [security.microsoft.com › Advanced hunting](https://security.microsoft.com/v2/advanced-hunting) and paste:\n\n```kql\nAgentsInfo\n| where Platform == 'LocalAgents'\n| summarize arg_max(Timestamp, *) by AgentId\n| where LifecycleStatus !in~ ('Deleted', 'Uninstalled')\n| extend M = RawAgentInfo.localAgentMetadata\n| project Name, Version, Vendor = tostring(M.vendor), Process = tostring(M.relatedProcess),\n          Device = tostring(M.deviceName), Account = tostring(M.accountName),\n          AutoApprove = tostring(M.autoApprove), TrustedProcess = tostring(M.trustedProcess), McpServers\n```"
+            },
+            "name": "la-run"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let LA = AgentsInfo\\n| where Platform == 'LocalAgents'\\n| summarize arg_max(Timestamp, Name, LifecycleStatus, RawAgentInfo, McpServers) by AgentId\\n| where LifecycleStatus !in~ ('Deleted', 'Uninstalled')\\n| extend M = RawAgentInfo.localAgentMetadata\\n| extend Device = tostring(M.deviceName), Account = tostring(M.accountName),\\n         Vendor = tostring(M.vendor), AutoApprove = tostring(M.autoApprove), TrustedProcess = tostring(M.trustedProcess),\\n         LocalMcpCount = array_length(todynamic(M.localMcps)), RemoteMcpCount = array_length(todynamic(McpServers));\\nunion isfuzzy=true\\n(LA | summarize Value = dcount(AgentId) | extend Metric = 'Local agents', Order = 1),\\n(LA | summarize Value = dcount(Device) | extend Metric = 'Devices with agents', Order = 2),\\n(LA | summarize Value = dcount(Account) | extend Metric = 'Accounts running agents', Order = 3),\\n(LA | where RemoteMcpCount > 0 | summarize Value = dcount(AgentId) | extend Metric = 'Agents with remote MCP', Order = 4),\\n(LA | where LocalMcpCount > 0 | summarize Value = dcount(AgentId) | extend Metric = 'Agents with local MCP', Order = 5),\\n(LA | where AutoApprove =~ 'true' | summarize Value = dcount(AgentId) | extend Metric = 'Auto-approve agents', Order = 6),\\n(LA | where TrustedProcess =~ 'false' | summarize Value = dcount(AgentId) | extend Metric = 'Untrusted-process agents', Order = 7),\\n(LA | summarize Value = dcount(Vendor) | extend Metric = 'Vendors', Order = 8)\\n| project Order, Metric, Value\\n| sort by Order asc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 3,
+              "visualization": "tiles",
+              "title": "Local AI agents — metrics",
+              "tileSettings": {
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "formatOptions": {
+                    "palette": "blue"
+                  }
+                },
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                }
+              },
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "la-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\n| where Platform == 'LocalAgents'\\n| summarize arg_max(Timestamp, RawAgentInfo, LifecycleStatus) by AgentId\\n| where LifecycleStatus !in~ ('Deleted', 'Uninstalled')\\n| extend Vendor = tostring(RawAgentInfo.localAgentMetadata.vendor)\\n| where isnotempty(Vendor)\\n| summarize Agents = dcount(AgentId) by Vendor\\n| sort by Agents desc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 1,
+              "visualization": "piechart",
+              "title": "Local agents by vendor",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "la-vendor"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\n| where Platform == 'LocalAgents'\\n| summarize arg_max(Timestamp, Name, Version, LifecycleStatus, RawAgentInfo) by AgentId\\n| where LifecycleStatus !in~ ('Deleted', 'Uninstalled')\\n| extend AgentMetadata = RawAgentInfo.localAgentMetadata\\n| extend Vendor = tostring(AgentMetadata.vendor),\\n         Process = tostring(AgentMetadata.relatedProcess),\\n         Device = tostring(AgentMetadata.deviceName),\\n         Account = tostring(AgentMetadata.accountName)\\n| where '{AgentSearch}' == '' or Name has '{AgentSearch}' or Vendor has '{AgentSearch}' or Device has '{AgentSearch}' or Account has '{AgentSearch}'\\n| summarize Installations = count(),\\n            DeviceCount = dcount(Device),\\n            Devices = make_set(Device, 100),\\n            Versions = make_set(Version, 20),\\n            Accounts = make_set_if(Account, isnotempty(Account), 50)\\n    by Agent = Name, Vendor, Process\\n| sort by DeviceCount desc, Installations desc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 0,
+              "title": "Local AI agent inventory (vendor, host process, devices, versions)",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "la-inv"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let localAgentProfiles =\\n    AgentsInfo\\n    | where Platform == 'LocalAgents'\\n    | extend AgentMetadata = RawAgentInfo.localAgentMetadata\\n    | project Timestamp, Agent = Name, Device = tostring(AgentMetadata.deviceName),\\n              Account = tostring(AgentMetadata.accountName), McpServers, DeclaredTools, LocalServers = AgentMetadata.localMcps;\\nlet remoteMcpServers =\\n    localAgentProfiles | mv-expand Server = McpServers\\n    | project Timestamp, Agent, Device, Account, McpServer = tostring(Server.name), Origin = 'Remote MCP server', Transport = tostring(Server.type), Location = tostring(Server.endpoint);\\nlet agentDeclaredTools =\\n    localAgentProfiles | mv-expand Tool = DeclaredTools\\n    | project Timestamp, Agent, Device, Account, McpServer = tostring(Tool.name), Origin = 'Declared tool', Transport = tostring(Tool.type), Location = tostring(Tool.endpoint);\\nlet localMcpServers =\\n    localAgentProfiles | mv-expand Server = LocalServers\\n    | project Timestamp, Agent, Device, Account, McpServer = tostring(Server.name), Origin = 'Local MCP server', Transport = tostring(Server.transportType), Location = tostring(Server.commandName);\\nremoteMcpServers\\n| union agentDeclaredTools, localMcpServers\\n| where isnotempty(McpServer)\\n| summarize LastSeen = max(Timestamp), Agents = make_set(Agent, 20), Devices = make_set(Device, 20), Accounts = make_set_if(Account, isnotempty(Account), 20) by McpServer, Origin, Transport, Location\\n| sort by McpServer asc, Origin asc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 0,
+              "title": "MCP servers & tools used by local agents (remote / local / declared)",
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "la-mcp"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"AgentsInfo\\n| where Platform == 'LocalAgents'\\n| summarize arg_max(Timestamp, Name, Version, LifecycleStatus, RawAgentInfo) by AgentId\\n| where LifecycleStatus !in~ ('Deleted', 'Uninstalled')\\n| extend AgentMetadata = RawAgentInfo.localAgentMetadata\\n| extend AutoApprove = tostring(AgentMetadata.autoApprove),\\n         TrustedProcess = tostring(AgentMetadata.trustedProcess),\\n         Vendor = tostring(AgentMetadata.vendor),\\n         Process = tostring(AgentMetadata.relatedProcess),\\n         Device = tostring(AgentMetadata.deviceName),\\n         Account = tostring(AgentMetadata.accountName)\\n| where AutoApprove =~ 'true' or TrustedProcess =~ 'false'\\n| where '{AgentSearch}' == '' or Name has '{AgentSearch}' or Device has '{AgentSearch}' or Account has '{AgentSearch}'\\n| extend RiskReason = case(\\n    AutoApprove =~ 'true' and TrustedProcess =~ 'false', 'Acts without approval; host process not trusted',\\n    AutoApprove =~ 'true', 'Acts without approval',\\n    'Host process not trusted')\\n| project Agent = Name, Vendor, Version, Process, Device, Account, AutoApprove, TrustedProcess, RiskReason, LastSeen = Timestamp\\n| sort by Device asc, Agent asc\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 0,
+              "title": "⚠️ Local agents with risky configuration (auto-approve / untrusted process)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "RiskReason",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "la-risky"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let deviceLabels = dynamic(['device', 'ec2.instance', 'microsoft.compute/virtualmachines']);\\nlet riskyAgentProfiles =\\n    AgentsInfo\\n    | where Platform == 'LocalAgents'\\n    | summarize arg_max(Timestamp, Name, Version, LifecycleStatus, RawAgentInfo) by AgentId\\n    | where LifecycleStatus !in~ ('Deleted', 'Uninstalled')\\n    | extend AgentMetadata = RawAgentInfo.localAgentMetadata\\n    | extend AutoApprove = tostring(AgentMetadata.autoApprove), TrustedProcess = tostring(AgentMetadata.trustedProcess)\\n    | where AutoApprove =~ 'true' or TrustedProcess =~ 'false'\\n    | project AgentId = tostring(AgentId), Agent = Name, Version,\\n              Vendor = tostring(AgentMetadata.vendor), Account = tostring(AgentMetadata.accountName), AutoApprove, TrustedProcess;\\nlet localAgentNodes =\\n    ExposureGraphNodes\\n    | where NodeLabel == 'ai-agent'\\n    | where tostring(NodeProperties.rawData.aiAgentMetadata.platform) == 'LocalAgents'\\n    | project AgentNodeId = NodeId, AgentId = tostring(NodeProperties.rawData.aiAgentMetadata.id);\\nlet agentDeviceEdges =\\n    ExposureGraphEdges\\n    | where SourceNodeLabel == 'ai-agent'\\n    | where EdgeLabel =~ 'runs on'\\n    | where TargetNodeLabel in (deviceLabels)\\n    | project AgentNodeId = SourceNodeId, DeviceId = TargetNodeId, Device = TargetNodeName, DeviceType = TargetNodeLabel;\\nlet criticalDevices =\\n    ExposureGraphNodes\\n    | where NodeLabel in (deviceLabels)\\n    | where NodeProperties has 'criticalityLevel'\\n    | extend CriticalityLevel = toint(NodeProperties.rawData.criticalityLevel.criticalityLevel)\\n    | where CriticalityLevel between (0 .. 3)\\n    | extend Criticality = case(CriticalityLevel == 0, 'Very high', CriticalityLevel == 1, 'High', CriticalityLevel == 2, 'Medium', 'Low')\\n    | project DeviceId = NodeId, CriticalityLevel, Criticality, CriticalityReason = tostring(NodeProperties.rawData.criticalityLevel.ruleNames);\\nriskyAgentProfiles\\n| join kind=inner localAgentNodes on AgentId\\n| join kind=inner agentDeviceEdges on AgentNodeId\\n| join kind=inner criticalDevices on DeviceId\\n| project Device, DeviceType, Criticality, CriticalityReason, Agent, Vendor, Version, Account, AutoApprove, TrustedProcess, CriticalityLevel\\n| sort by CriticalityLevel asc, Device asc, Agent asc\\n| project-away CriticalityLevel\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 0,
+              "title": "🔴 Risky local agents on business-critical devices (exposure graph)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "Criticality",
+                    "formatter": 0
+                  }
+                ]
+              },
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "la-critdev"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "{\"__advancedHuntingSettings\":true,\"query\":\"let deviceLabels = dynamic(['device', 'ec2.instance', 'microsoft.compute/virtualmachines']);\\nlet localAgents =\\n    ExposureGraphNodes | where NodeLabel == 'ai-agent'\\n    | where tostring(NodeProperties.rawData.aiAgentMetadata.platform) == 'LocalAgents'\\n    | project AgentNodeId = NodeId, AIAgent = NodeName;\\nlet agentDeviceEdges =\\n    ExposureGraphEdges | where SourceNodeLabel == 'ai-agent' | where EdgeLabel =~ 'runs on' | where TargetNodeLabel in (deviceLabels)\\n    | project AgentNodeId = SourceNodeId, DeviceId = TargetNodeId, Device = TargetNodeName;\\nlet agentUserEdges =\\n    ExposureGraphEdges | where SourceNodeLabel == 'ai-agent' | where EdgeLabel =~ 'used by'\\n    | project AgentNodeId = SourceNodeId, UserId = TargetNodeId, User = TargetNodeName;\\nlet userReach =\\n    ExposureGraphEdges | where EdgeLabel in~ ('has permissions to', 'has role on') | project UserId = SourceNodeId, AssetId = TargetNodeId\\n    | union (ExposureGraphNodes | where NodeLabel == 'user' | project UserId = NodeId, AssetId = NodeId);\\nlet sensitiveAssets =\\n    ExposureGraphNodes | where NodeProperties has 'criticalityLevel' or NodeProperties has 'containsSensitiveData'\\n    | extend CriticalityLevel = toint(NodeProperties.rawData.criticalityLevel.criticalityLevel), SensitiveDataRaw = tostring(NodeProperties.rawData.containsSensitiveData)\\n    | extend HasSensitiveData = iff(isnotempty(SensitiveDataRaw) and SensitiveDataRaw !~ 'false', 'Yes', 'No')\\n    | where CriticalityLevel between (0 .. 3) or HasSensitiveData == 'Yes'\\n    | extend CriticalityRank = iff(CriticalityLevel between (0 .. 3), CriticalityLevel, 4)\\n    | project AssetId = NodeId, AssetName = NodeName, CriticalityRank, HasSensitiveData;\\nlet agentUsers = localAgents | join kind=inner agentDeviceEdges on AgentNodeId | join kind=inner agentUserEdges on AgentNodeId | project AIAgent, Device, UserId, User;\\nagentUsers\\n| join kind=inner userReach on UserId\\n| join kind=inner sensitiveAssets on AssetId\\n| summarize AIAgents = make_set(AIAgent, 20), Devices = make_set(Device, 20), ReachableAssets = dcountif(AssetId, AssetId != UserId), SensitiveAssets = dcountif(AssetId, AssetId != UserId and HasSensitiveData == 'Yes'), Assets = make_set_if(AssetName, AssetId != UserId, 50), UserRank = minif(CriticalityRank, AssetId == UserId), AssetRank = minif(CriticalityRank, AssetId != UserId) by User\\n| extend UserCriticality = case(UserRank == 0, 'Very high', UserRank == 1, 'High', UserRank == 2, 'Medium', UserRank == 3, 'Low', 'Not classified'), HighestAssetCriticality = case(AssetRank == 0, 'Very high', AssetRank == 1, 'High', AssetRank == 2, 'Medium', AssetRank == 3, 'Low', AssetRank == 4, 'Sensitive data', 'None')\\n| extend SortRank = coalesce(AssetRank, 99)\\n| project User, UserCriticality, ReachableAssets, SensitiveAssets, HighestAssetCriticality, AIAgents, Devices, Assets, SortRank\\n| sort by SortRank asc, ReachableAssets desc\\n| project-away SortRank\",\"selectedWorkspaceIds\":[\"e34d562e-ef12-4c4e-9bc0-7c6ae357c015\"]}",
+              "size": 0,
+              "title": "🎯 Users whose local agents reach critical / sensitive assets (blast radius)",
+              "gridSettings": {
+                "formatters": [
+                  {
+                    "columnMatch": "ReachableAssets",
+                    "formatter": 4,
+                    "formatOptions": {
+                      "palette": "red"
+                    }
+                  }
+                ]
+              },
+              "queryType": "advancedHunting",
+              "crossComponentResources": [
+                "/subscriptions/99005f96-e572-4035-b476-836fd9d83d64/resourceGroups/cybersoc/providers/Microsoft.OperationalInsights/workspaces/CyberSOC"
+              ],
+              "timeContextFromParameter": "TimeRange"
+            },
+            "name": "la-users"
           }
         ]
       },
