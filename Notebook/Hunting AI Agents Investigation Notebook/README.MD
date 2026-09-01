@@ -1,199 +1,111 @@
-Hunting AI Agents: A Sentinel Data Lake Investigation Notebook
+# Hunting AI Agents Investigation Notebook
 
-# Agent 365 - Sentinel data-lake observability
+This folder contains a Microsoft Sentinel data lake notebook for Agent 365 inventory, governance, reliability, threat hunting, and investigation. The notebook combines Agent 365 and Entra System tables in the lake with selected Analytics-tier tables from a Sentinel workspace.
 
-This bundle is the **data-lake-tier** approach to monitoring Microsoft
-Agent 365 telemetry. It is the companion to the Log-Analytics-tier
-`Copilot/` bundle (which targets `CopilotActivity` for Microsoft 365
-Copilot).
+> **Status:** Working analytical prototype. The notebook contains executable PySpark analysis and visualizations; it is not a finished multi-page Sentinel workbook. Its findings are investigation candidates, not malicious-activity verdicts.
 
-> **Status**: scaffolding only. Microsoft has not yet published the
-> Agent 365 ASIM-aligned table name or schema. Once it does, populate
-> the folders below with the actual content (KQL jobs, hunting queries,
-> tier-up summary rules).
+## Primary notebook
 
----
+[`Agent365-Role-Based-Monitoring.ipynb`](Agent365-Role-Based-Monitoring.ipynb) is organized around four audiences:
 
-## Notebook capabilities - `Hunting_AIAgents_Investigation_Notebook.ipynb`
-
-A PySpark / Livy notebook that runs **inside the Sentinel data lake** and
-correlates the lake `UnifiedAgentObservability` and Entra System tables
-with the Foundry, Copilot Studio, and Microsoft 365 Copilot telemetry
-already ingested into the workspace Analytics tier (`AppEvents`,
-`AppDependencies`, `CopilotActivity`). It is the working, runnable
-front end of this bundle: role-based reporting, threat hunting,
-behavioral anomaly detection, and SOC investigation boards over data
-that returns rows in the tenant today.
-
-**Design guarantees**
-
-- Aggregation happens in Spark; only compact summaries reach
-  pandas / matplotlib, so panels stay fast.
-- Every source is optional - absent tables make a panel skip cleanly
-  rather than error.
-- Prompt and response bodies are **never** plotted or written to
-  findings; text-dependent hunts expose counts and identifiers only.
-- Heuristic results are labelled **candidates** and kept distinct from
-  native service verdicts (Prompt Shield / content-safety).
-- No Defender Advanced Hunting dependency (`AgentsInfo` / `BehaviorInfo`
-  are not in this lake or workspace).
-
-| Section | Capability | Audience |
-| --- | --- | --- |
-| 1-7 | Estate & governance reporting, identity reconciliation, SRE health, transparent SOC heuristics, composite risk score, focused agent timeline, optional compact findings output | CISO, Entra admin, SRE, SOC, investigator |
-| 8 | Closes lake gaps with ingested **Copilot Studio + Foundry** Application Insights (tools/MCP, model + tokens + cost, content-safety, channel, connector reliability) | Detection engineering |
-| 9 | Advanced executive visuals - KPI ribbon, weekday x hour activity heatmap, top-agents-by-risk | CISO, SOC |
-| 10 | Cross-source estate board + **unified conversation-volume anomaly** (rolling mean + 2σ spike candidates) | SOC |
-| 11 | **Foundry** hunting scenarios - guardrail/prompt-shield, injection & secrets markers, model fingerprinting, tool chaining, cross-agent lateral movement, token-cost spike, trace anomalies, dormancy break | SOC |
-| 12 | **Copilot Studio** hunting scenarios - conversation flooding, injection/bulk-exfil/secret markers, indirect injection, connector error storm, new/sensitive connectors, latency, fan-out | SOC |
-| 13 | **SOC investigation boards** - 13a Foundry, 13b Copilot Studio, 13c cross-platform triage queue; each goes signal → ranked entity → scoped evidence → next pivot | SOC |
-| 14 | **Behavioral anomaly gap analysis** - dormant reactivation, operating-hours shift, new A2A / A2T / user-to-agent edges, tool-call rate spikes, repetition loops, operation expansion | SOC |
-| 15 | **Microsoft 365 Copilot** board over `CopilotActivity` - native verdicts, DLP/sensitivity, resources & plugins, pacing | SOC |
-
-**Investigation flow:** `System-table health → schema normalization →
-inventory / governance → activity & SRE → cross-source hunts →
-SOC boards → behavioral anomalies → focused timeline / findings`
-
-**Prerequisites:** Sentinel data lake onboarding with **System tables**
-read access; VS Code Sentinel extension signed in to the tenant; a
-**Microsoft Sentinel** runtime pool (Medium is a practical start - no
-package installs, only runtime PySpark + matplotlib). Set
-`WORKSPACE_NAME` in the controls cell to enable the Analytics-tier
-sections. Foundry text-content tiles additionally require
-`AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED=true`.
-
-**Interpretation boundary:** agent telemetry describes behavior, not
-intent. Every detection output is a triage lead requiring analyst
-validation.
-
----
-
-## Why data-lake-tier
-
-Per the Microsoft Sentinel blog post **"Agent 365 connector: monitor,
-hunt and investigate AI agent activity in Microsoft Sentinel"**
-(May 2026):
-
-> "Agent 365 agent observability data is normalized into an ASIM-aligned
-> schema so it is consistent, queryable, and ready for analytics and
-> detections."
-
-The telemetry lands in the **Sentinel data lake**, not in Log Analytics.
-Consequences:
-
-- **Scheduled analytic rules** (`Microsoft.SecurityInsights/alertRules`)
-  cannot query data-lake-only tables directly.
-- **`savedSearches` hunting queries** (the analytics-tier "Hunting"
-  blade) cannot query them either.
-- Investigation surfaces:
-  - **Defender portal -> Hunting** (advanced hunting against the lake).
-  - **KQL jobs** scheduled against the lake.
-  - **Summary rules** that aggregate lake data into a smaller
-    Log-Analytics-tier table (and *then* analytic rules can run on that
-    summary table).
-
----
-
-## Discovery checklist (do this first in your tenant)
-
-1. Enable the **Agent 365 (`A365Observability`)** data connector on the
-   target Sentinel workspace.
-2. Defender portal -> **Hunting** -> Advanced hunting -> run:
-   ```kusto
-   search "Agent365"
-   | summarize by $table
-   ```
-   Note the actual table name(s) and their tier (lake vs analytics).
-3. Pull the schema of each discovered table:
-   ```kusto
-   <TableName>
-   | take 1
-   | getschema
-   ```
-4. Compare against the ASIM column conventions (`EventVendor`,
-   `EventProduct`, `EventType`, `ActorUsername`, `TargetAppName`, etc.)
-   to confirm which ASIM schema the table aligns with (ASIM
-   AuditEvent, ASIM Authentication, or a new AI-specific schema).
-5. Record findings in `Discovery/findings.md`.
-
----
-
-## Folder layout
-
-| Folder | Contents |
+| Audience | Capabilities |
 | --- | --- |
-| `Discovery/` | Notes / KQL snippets used to identify the real Agent 365 table(s) and schema in your tenant |
-| `KqlJobs/` | Scheduled KQL jobs that run against the data-lake table(s) |
-| `Hunting/` | Defender-portal hunting queries (data-lake-aware) |
-| `SummaryRules/` | Tier-up summary rules that aggregate lake data into a Log-Analytics summary table so analytic rules can fire on it |
-| `Workbooks/` | Sentinel workbooks - `AI-Governance.workbook` (full tabbed AI Governance & Exposure dashboard: estate, agents, models, MCP, shadow AI, risk, exfiltration, lifecycle) and `AI-Agent-Sprawl.workbook` (lighter shadow-AI/sprawl view). Both query Log-Analytics-tier signals and work today. Companion detections in `Hunting/AI-Governance-Detections.kql` |
-| `OpenAI-Connector/` | **Deployable bundle 1** - native OpenAI CCF connector detections (`OpenAIAuditLogs` / `ASimAgentEventLogs`). 6 analytic rules + 3 hunting queries + ARM. See [`OpenAI-Connector/README.md`](../OpenAI-Connector/README.md) |
-| `Foundry-AppInsights/` | **Deployable bundle 2** - Foundry guardrail / content-safety detections that read Application Insights `AppDependencies` (`Properties` / `gen_ai.*`). 10 analytic rules + 6 hunting queries + watchlist + ARM + Simulation harness. See [`Foundry-AppInsights/README.md`](../Foundry-AppInsights/README.md) |
+| CISO / AI governance | Estate, adoption, posture, risk, and activity summaries |
+| AI Agent / Entra administrator | Identity inventory, blueprint reconciliation, lifecycle, and governance exceptions |
+| Observability / SRE | Volume, latency, reliability, error, token, cost, and telemetry-quality views |
+| SOC / investigation | Explainable heuristics, platform hunts, anomaly analysis, ranked investigation boards, and focused timelines |
 
----
+## Data sources
 
-## Two deployable detection bundles
+### Sentinel data lake System tables
 
-The deployable detections are split into two **independent** bundles,
-each with its own ARM template, generator and README. They share no
-resources and can be deployed separately.
+System tables are read without a workspace argument:
 
-### Bundle 1 - `OpenAI-Connector/` (native CCF connector)
+- `UnifiedAgentObservability`
+- `EntraAgentIdentities`
+- `EntraAgentIdentityBlueprints`
+- `EntraAgentIdentityBlueprintPrincipals`
+- `EntraAgentUsers`
 
-Targets the **Analytics-tier** tables the Microsoft Sentinel **OpenAI**
-connector and its parsers expose (`OpenAIAuditLogs`,
-`OpenAIChatCompletions` / `ASimAgentEventLogs`). The OpenAI solution
-ships parsers and a codeless connector but **no analytic rules**; this
-bundle fills that gap by porting the reusable subset of the sibling
-`Copilot/` detections.
+### Sentinel workspace Analytics-tier tables
 
-- 6 scheduled analytic rules + 3 hunting queries.
-- Deploy: `OpenAI-Connector/Deploy/azuredeploy.json`.
-- Full table and prerequisites: [`OpenAI-Connector/README.md`](../OpenAI-Connector/README.md).
+Set `WORKSPACE_NAME` in section 1 to enable workspace-backed analysis. Each source is optional; a missing or empty table causes the relevant panel to skip cleanly.
 
-> **Actor join caveat**: `ASimAgentEventLogs` has no first-class user
-> column. Per-user rules key on `AdditionalFields.input_user` (the
-> OpenAI `user` request parameter). If callers do not set it, baseline
-> on `ModelName` alone or promote the API-key id instead.
+| Area | Tables |
+| --- | --- |
+| Copilot Studio and Foundry | `AppEvents`, `AppDependencies` |
+| Microsoft 365 Copilot | `CopilotActivity` |
+| Identity and sign-ins | `SigninLogs`, `AADServicePrincipalSignInLogs`, `AADManagedIdentitySignInLogs`, `AADRiskyUsers`, `IdentityInfo` |
+| Directory changes | `AuditLogs` |
+| Security operations | `SecurityAlert`, `SecurityIncident` |
+| Data access | `CloudAppEvents` |
 
-### Bundle 2 - `Foundry-AppInsights/` (Application Insights telemetry)
+## Notebook sections
 
-Targets the real **Foundry / Agent Service** trace shape confirmed in
-this tenant: spans land in **`AppDependencies`**, the property bag is
-**`Properties`** (not `customDimensions`), and the keys are
-**`gen_ai.*`** plus **`microsoft.foundry.content_filter.results`**.
-Prompt / response text is in `gen_ai.input.messages` /
-`gen_ai.output.messages` and requires
-`AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED=true`.
+| Section | Capability |
+| --- | --- |
+| 1 | Lookback, focus-agent, privacy, output, pricing, and detection-threshold controls |
+| 2 | Table availability, schema inspection, preview-schema normalization, and event spine |
+| 3 | Agent inventory, identity and blueprint reconciliation, stale assets, and governance exceptions |
+| 4 | Activity, operation mix, errors, correlation quality, latency, and SRE health |
+| 5 | Transparent SOC heuristics for bursts, off-hours use, fan-out/fan-in, suspicious markers, and disabled identities |
+| 6 | Volume anomalies, explainable composite triage score, and focused agent timeline |
+| 7 | Optional compact findings output and operationalization guidance |
+| 8 | Copilot Studio and Foundry dimensions from Application Insights: tools, MCP, models, tokens, cost, guardrails, channels, and connectors |
+| 9 | Executive KPI ribbon, activity heatmap, and agent-risk visuals |
+| 10 | Cross-source estate board and rolling conversation-volume anomaly candidates |
+| 11 | Foundry hunts for guardrails, prompt injection, secrets, model probing, tool chaining, lateral movement, cost spikes, trace anomalies, and dormancy breaks |
+| 12 | Copilot Studio hunts for flooding, injection/exfiltration markers, secrets, channels, connector failures, latency, novelty, and fan-out |
+| 13 | Foundry, Copilot Studio, and cross-platform SOC investigation boards |
+| 14 | Behavioral anomalies: dormant reactivation, operating-hours shifts, new user/agent/tool edges, rate spikes, loops, and operation expansion |
+| 15 | Microsoft 365 Copilot hunts over `CopilotActivity`, including native jailbreak/XPIA signals, DLP metadata, resource drift, plugin novelty, and pacing anomalies |
+| 16 | Cross-source identity, audit, alert, incident, MITRE ATT&CK, and data-access correlation |
 
-- 10 scheduled analytic rules + 6 guardrail / content-safety / behaviour hunting queries.
-- A `FoundryTrustedToolSources` watchlist used by the untrusted-tool-source rule.
-- A `Simulation/` harness that drives test prompts so the rules / hunts light up.
-- Deploy: `Foundry-AppInsights/Deploy/azuredeploy.json` (`enableAnalyticRules` toggles the rules).
-- Full table, prerequisites and testing: [`Foundry-AppInsights/README.md`](../Foundry-AppInsights/README.md).
+Section 16 uses workspace data already available to Sentinel to connect agent actors and service principals with risky or failed sign-ins, privilege and consent changes, agent-targeted alerts and incidents, and cloud data-access activity. Joins use normalized UPNs, object IDs, agent names, application IDs, and blueprint IDs; results remain correlation candidates for analyst review.
 
-Copilot-specific OpenAI detections that depend on prompt / response
-text, grounding sources, or sensitivity labels were **not** ported to
-bundle 1 - the OpenAI connector does not expose that data; the
-equivalent prompt-level visibility now comes from bundle 2 instead.
+## Prerequisites
 
----
+- Microsoft Sentinel data lake onboarding and permission to read System tables.
+- VS Code with the Microsoft Sentinel extension signed in to the correct tenant.
+- A Microsoft Sentinel runtime pool. Medium is a practical starting point.
+- Read access to the configured Sentinel / Log Analytics workspace for the workspace-backed panels in sections 8-16.
+- Agent instrumentation that emits a root `invoke_agent` span and propagates `gen_ai.conversation.id` for complete correlation.
+- Workspace-based Application Insights for Copilot Studio and Foundry analysis.
 
-## Three rebuild strategies
+The notebook uses runtime-provided PySpark and matplotlib; no package installation is required. Foundry text-content hunts additionally require `AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED=true`. Copilot Studio text-content hunts require **Log sensitive properties**. Metadata-only hunts continue to work without those settings.
 
-When you populate this bundle, pick one of the following per detection:
+## Run the notebook
 
-1. **Park and wait** - leave a detection in the `Copilot/` bundle
-   pointing at `CopilotActivity` while you wait for Microsoft to
-   document the Agent 365 schema.
-2. **Tier-up summary rule** - write a summary rule (in
-   `SummaryRules/`) that aggregates lake data into a custom
-   Log-Analytics table, then write a thin scheduled analytic rule
-   against that summary table.
-3. **Native data-lake job** - port the detection to a scheduled KQL job
-   (in `KqlJobs/`) that runs against the data-lake table directly,
-   raising findings via a notification channel rather than a Sentinel
-   incident.
+1. Open [`Agent365-Role-Based-Monitoring.ipynb`](Agent365-Role-Based-Monitoring.ipynb) and select a Microsoft Sentinel runtime pool.
+2. Run section 1 and set `LOOKBACK_DAYS`, `RECENT_HOURS`, `FOCUS_AGENT`, and `WORKSPACE_NAME` for the target tenant.
+3. Leave `SHOW_SENSITIVE_CONTENT=False` and `WRITE_RESULTS=False` during exploration.
+4. Run section 2 to validate System-table availability and normalize the event spine.
+5. Run sections 3-7 in order for lake-native governance, SRE, detections, risk, and timeline analysis.
+6. Run section 8 before sections 10-14; it loads the Foundry and Copilot Studio DataFrames used by those sections.
+7. Run sections 15 and 16 when the corresponding Analytics-tier tables are available.
 
----
+Reduce `LOOKBACK_DAYS` while developing to limit Spark scans. All charts aggregate in Spark before collecting compact summaries to pandas/matplotlib, and displayed row sets are bounded by `DISPLAY_LIMIT`.
 
+## Output and privacy
+
+The default execution is read-only. When `WRITE_RESULTS=True`, section 7 writes compact, high-score findings to the lake-tier table `Agent365RiskFindings_SPRK`. Review the findings and retention requirements before enabling writes.
+
+Raw prompt, response, tool content, and `AdditionalFields` are not persisted to findings. Investigation boards display counts and identifiers rather than prompt or response bodies. Apply appropriate Sentinel access controls, retention, and privacy policies before sharing notebook results.
+
+## Current boundaries
+
+The notebook intentionally does not infer signals that the available telemetry cannot establish. Remaining enrichment and modeling gaps include:
+
+- Authoritative owner, sponsor, business-unit, and lifecycle data.
+- Purview DLP and sensitivity-label correlation outside the metadata present in `CopilotActivity`.
+- Blueprint-principal OAuth scope and application-role decoding.
+- A canonical run/span tree with complete parent-child lineage.
+- Governed allowlists for approved tools, MCP servers, connectors, and plugins.
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| [`Agent365-Role-Based-Monitoring.ipynb`](Agent365-Role-Based-Monitoring.ipynb) | Current 16-section role-based monitoring and investigation notebook |
+| [`Hunting_AIAgents_Investigation_Notebook.ipynb`](Hunting_AIAgents_Investigation_Notebook.ipynb) | Companion AI-agent investigation notebook |
+| [`guion-demo-youtube.md`](guion-demo-youtube.md) | Demo narration and walkthrough notes |
