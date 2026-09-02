@@ -1,5 +1,7 @@
 # AI Agent Threat Detection for Microsoft Sentinel
 
+Monitoring AI Agents: Observability in Foundry & Copilot Studio" https://youtu.be/5Axu9dJ2lfw
+
 Microsoft Sentinel detection content for monitoring **AI agents** across
 the three runtimes most organisations are putting into production today:
 
