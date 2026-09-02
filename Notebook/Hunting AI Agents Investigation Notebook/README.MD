@@ -4,7 +4,7 @@ This folder contains a Microsoft Sentinel data lake notebook for Agent 365 inven
 
 > **Status:** Working analytical prototype. The notebook contains executable PySpark analysis and visualizations; it is not a finished multi-page Sentinel workbook. Its findings are investigation candidates, not malicious-activity verdicts.
 
-Are Your AI Agents Compromised? Hunt Threats Like a Pro with Sentinel Notebookhttps://youtu.be/ASPE6dviQFY
+Are Your AI Agents Compromised? Hunt Threats Like a Pro with Sentinel Notebook https://youtu.be/ASPE6dviQFY
 
 ## Primary notebook
 
