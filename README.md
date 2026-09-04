@@ -4,6 +4,8 @@ More information about me https://www.linkedin.com/in/david-alonso-dominguez/
 
 For Video Demos go to my Youtube channel and subscribe https://youtube.com/@davidalonso1867?si=p4Eu_B5KuqUlWBCA
 
+Substack https://substack.com/@davidalonsodominguez
+
 # Dalonso Security Repo 🛡️
 
 Welcome to the David Alonso Security Repository! This space is dedicated to sharing knowledge, tools, and practical examples related to Microsoft Security technologies.
