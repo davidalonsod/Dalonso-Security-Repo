@@ -7,6 +7,9 @@ More information about me https://www.linkedin.com/in/david-alonso-dominguez/
 
 For Video Demos go to my Youtube channel and subscribe https://youtube.com/@davidalonso1867?si=p4Eu_B5KuqUlWBCA
 
+<img width="610" height="610" alt="image" src="https://github.com/user-attachments/assets/a297c17f-8449-4824-93f3-f01d351c7ffc" />
+
+
 Substack https://substack.com/@davidalonsodominguez
 
 <img width="475" height="473" alt="image" src="https://github.com/user-attachments/assets/a4dbc8a9-c002-46aa-9197-ffee84a2befe" />
