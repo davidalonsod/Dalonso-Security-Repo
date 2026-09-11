@@ -2,6 +2,9 @@
 
 More information about me https://www.linkedin.com/in/david-alonso-dominguez/
 
+<img width="936" height="1201" alt="image" src="https://github.com/user-attachments/assets/be53e34f-f9e8-4e19-acf9-aaa85ca12258" />
+
+
 For Video Demos go to my Youtube channel and subscribe https://youtube.com/@davidalonso1867?si=p4Eu_B5KuqUlWBCA
 
 Substack https://substack.com/@davidalonsodominguez
