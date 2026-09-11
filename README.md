@@ -6,6 +6,9 @@ For Video Demos go to my Youtube channel and subscribe https://youtube.com/@davi
 
 Substack https://substack.com/@davidalonsodominguez
 
+<img width="475" height="473" alt="image" src="https://github.com/user-attachments/assets/a4dbc8a9-c002-46aa-9197-ffee84a2befe" />
+
+
 # Dalonso Security Repo 🛡️
 
 Welcome to the David Alonso Security Repository! This space is dedicated to sharing knowledge, tools, and practical examples related to Microsoft Security technologies.
