@@ -1,0 +1,1745 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# 🛡️ Entra ID Audit Logs — Identity Control-Plane & Attack Paths\r\n\r\n**Purpose:** Hunt *who* changed the identity control plane, *what* they changed, *how consequential* it was, whether it forms part of an *attack path*, and *what to investigate next*. This is a control-plane hub built on `AuditLogs`, complementing (not duplicating) sign-in, non-interactive and workload-identity workbooks.\r\n\r\n| Tab | What it covers |\r\n|-----|----------------|\r\n| � Overview | CISO security KPIs, top risks, break-glass monitor, control-plane change volume |\r\n| 🚨 SOC Queue | Ranked, reason-bearing triage queue of high-impact changes |\r\n| 👑 Privilege & PIM | Role/group assignments, eligibility, self-assignment, outside-PIM, SP-initiated |\r\n| 🧩 Apps & SP | App/SP creation, credential adds, owners, lifecycle paths |\r\n| 🎟️ Permissions | Delegated vs application permissions with a Low→Critical risk catalogue |\r\n| 🔐 Auth & CA | Conditional Access & security-control degradation, federation, domain, tenant drift |\r\n| 👥 Users & Groups | User lifecycle, SSPR vs admin resets, group/owner changes, user→group→privilege |\r\n| 🧭 Attack Paths | Multi-stage chains toward privilege, persistence and control (MITRE ATT&CK) |\r\n| 🔎 Investigation | Entity timeline, old/new values, correlation pivots |\r\n| 📋 Governance | Privileged-identity, application and control governance (IdentityInfo) |\r\n| 🎯 MITRE | Technique-centric ATT&CK coverage + use-case → hunt / rule map |\r\n| ⚙️ Readiness | Data health, operation discovery, enrichment availability |"
+      },
+      "name": "text - header"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "al-workspace",
+            "version": "KqlParameterItem/1.0",
+            "name": "Workspace",
+            "type": 5,
+            "isRequired": true,
+            "multiSelect": false,
+            "quote": "'",
+            "delimiter": ",",
+            "typeSettings": {
+              "resourceTypeFilter": {
+                "microsoft.operationalinsights/workspaces": true
+              },
+              "additionalResourceOptions": [
+                "value::1"
+              ],
+              "showDefault": false
+            },
+            "defaultValue": "value::1"
+          },
+          {
+            "id": "al-timerange",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "type": 4,
+            "isRequired": true,
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 259200000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 1209600000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            },
+            "defaultValue": {
+              "durationMs": 604800000
+            },
+            "label": "Time Range"
+          },
+          {
+            "id": "al-priority",
+            "version": "KqlParameterItem/1.0",
+            "name": "Priority",
+            "label": "Queue Priority",
+            "description": "Minimum severity band for the SOC priority queue.",
+            "type": 2,
+            "isRequired": true,
+            "multiSelect": false,
+            "quote": "",
+            "delimiter": ",",
+            "typeSettings": {
+              "additionalResourceOptions": []
+            },
+            "jsonData": "[{\"value\":\"All\",\"label\":\"All\",\"selected\":true},{\"value\":\"Critical\",\"label\":\"Critical\"},{\"value\":\"High\",\"label\":\"High\"},{\"value\":\"Medium\",\"label\":\"Medium\"},{\"value\":\"Informational\",\"label\":\"Informational\"}]",
+            "value": "All"
+          },
+          {
+            "id": "al-result",
+            "version": "KqlParameterItem/1.0",
+            "name": "Result",
+            "label": "Result",
+            "description": "Filter every tile by audit Result. All = no filter.",
+            "type": 2,
+            "isRequired": true,
+            "multiSelect": false,
+            "quote": "",
+            "delimiter": ",",
+            "typeSettings": {
+              "additionalResourceOptions": []
+            },
+            "jsonData": "[{\"value\":\"All\",\"label\":\"All\",\"selected\":true},{\"value\":\"success\",\"label\":\"Success\"},{\"value\":\"failure\",\"label\":\"Failure\"}]",
+            "value": "All"
+          },
+          {
+            "id": "al-category",
+            "version": "KqlParameterItem/1.0",
+            "name": "Category",
+            "label": "Category (Include)",
+            "description": "AuditLogs Category. Multi-select to scope. Empty = all categories.",
+            "type": 2,
+            "multiSelect": true,
+            "quote": "'",
+            "delimiter": ",",
+            "query": "AuditLogs | where TimeGenerated > ago(30d) | where isnotempty(Category) | distinct Category | order by Category asc | take 200",
+            "queryType": 0,
+            "resourceType": "microsoft.operationalinsights/workspaces",
+            "value": []
+          },
+          {
+            "id": "al-service",
+            "version": "KqlParameterItem/1.0",
+            "name": "LoggedByService",
+            "label": "Logged By Service (Include)",
+            "description": "AuditLogs LoggedByService (e.g. Core Directory, PIM, Conditional Access). Empty = all.",
+            "type": 2,
+            "multiSelect": true,
+            "quote": "'",
+            "delimiter": ",",
+            "query": "AuditLogs | where TimeGenerated > ago(30d) | where isnotempty(LoggedByService) | distinct LoggedByService | order by LoggedByService asc | take 200",
+            "queryType": 0,
+            "resourceType": "microsoft.operationalinsights/workspaces",
+            "value": []
+          },
+          {
+            "id": "al-excluded-actors",
+            "version": "KqlParameterItem/1.0",
+            "name": "ExcludedActors",
+            "label": "Excluded Actors",
+            "description": "Comma-separated actor UPNs / app display names to drop from every tile (e.g. noisy sync or automation accounts). Empty = no exclusion.",
+            "type": 1,
+            "value": ""
+          },
+          {
+            "id": "al-actor",
+            "version": "KqlParameterItem/1.0",
+            "name": "Actor",
+            "label": "Actor / Target (global)",
+            "description": "Global free-text filter: keep only rows whose actor or first target (UPN / app / object name) contains this value. Empty = no filter.",
+            "type": 1,
+            "value": ""
+          },
+          {
+            "id": "al-appfilter",
+            "version": "KqlParameterItem/1.0",
+            "name": "AppFilter",
+            "label": "Application / object (global)",
+            "description": "Global free-text filter on the first target display name (application / service principal / object). Empty = no filter.",
+            "type": 1,
+            "value": ""
+          },
+          {
+            "id": "al-ipfilter",
+            "version": "KqlParameterItem/1.0",
+            "name": "IPFilter",
+            "label": "Actor IP (global)",
+            "description": "Global prefix filter on the initiating actor IP (InitiatedBy.user.ipAddress). Empty = no filter.",
+            "type": 1,
+            "value": ""
+          },
+          {
+            "id": "al-breakglass",
+            "version": "KqlParameterItem/1.0",
+            "name": "BreakGlassAccounts",
+            "label": "Break-glass accounts",
+            "description": "Comma-separated emergency-access UPNs. The Overview Break-glass monitor flags ANY audit action by these accounts (independent of other filters). Empty = monitor idle.",
+            "type": 1,
+            "value": ""
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 🧩 Filters & scope\r\n\r\n---\r\n\r\nTune every tile from the pills above without editing KQL. An audit event records an **administrative action, not intent** — always corroborate with sign-in, risk, Graph and incident evidence (see the **Attack Paths** and **Readiness** tabs).\r\n\r\n| Filter | What it does | Default |\r\n|---|---|---|\r\n| **Time Range** | Window applied to all tiles via `{TimeRange}`. | Last 7 days |\r\n| **Queue Priority** | Minimum severity band shown in the SOC priority queue. | All |\r\n| **Result** | Keep only `success` or `failure` audit records. | All |\r\n| **Category (Include)** | Scope to selected `Category` values (RoleManagement, ApplicationManagement, Policy, …). | *(all)* |\r\n| **Logged By Service (Include)** | Scope to selected `LoggedByService` values (Core Directory, PIM, Conditional Access, …). | *(all)* |\r\n| **Excluded Actors** | Comma-separated actor UPNs / app names removed from every tile. | *(empty)* |\r\n| **Actor / Target (global)** | Free-text: keep rows whose actor or first target contains this value (applies to every tile). | *(empty)* |\r\n| **Application / object (global)** | Free-text on the first target display name (app / SP / object). | *(empty)* |\r\n| **Actor IP (global)** | Prefix match on the initiating actor IP (`InitiatedBy.user.ipAddress`). | *(empty)* |\r\n| **Break-glass accounts** | Comma-separated emergency-access UPNs. The Overview **Break-glass monitor** flags ANY audit action by these accounts. | *(empty)* |",
+        "style": "info"
+      },
+      "name": "FiltersHelp"
+    },
+    {
+      "type": 11,
+      "content": {
+        "version": "LinkItem/1.0",
+        "style": "tabs",
+        "links": [
+          {
+            "id": "al-tab-overview",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "📊 Overview",
+            "subTarget": "Overview",
+            "style": "link"
+          },
+          {
+            "id": "al-tab-queue",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🚨 SOC Queue",
+            "subTarget": "SOCQueue",
+            "style": "link"
+          },
+          {
+            "id": "al-tab-priv",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "👑 Privilege & PIM",
+            "subTarget": "Privilege",
+            "style": "link"
+          },
+          {
+            "id": "al-tab-apps",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🧩 Apps & SP",
+            "subTarget": "Apps",
+            "style": "link"
+          },
+          {
+            "id": "al-tab-perms",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🎟️ Permissions",
+            "subTarget": "Permissions",
+            "style": "link"
+          },
+          {
+            "id": "al-tab-auth",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🔐 Auth & CA",
+            "subTarget": "AuthPolicy",
+            "style": "link"
+          },
+          {
+            "id": "al-tab-users",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "👥 Users & Groups",
+            "subTarget": "UsersDevices",
+            "style": "link"
+          },
+          {
+            "id": "al-tab-paths",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🧭 Attack Paths",
+            "subTarget": "AttackPaths",
+            "style": "link"
+          },
+          {
+            "id": "al-tab-invest",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🔎 Investigation",
+            "subTarget": "Investigation",
+            "style": "link"
+          },
+          {
+            "id": "al-tab-gov",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "📋 Governance",
+            "subTarget": "Governance",
+            "style": "link"
+          },
+          {
+            "id": "al-tab-mitre",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "🎯 MITRE",
+            "subTarget": "Coverage",
+            "style": "link"
+          },
+          {
+            "id": "al-tab-readiness",
+            "cellValue": "selectedTab",
+            "linkTarget": "parameter",
+            "linkLabel": "⚙️ Readiness",
+            "subTarget": "Readiness",
+            "style": "link"
+          }
+        ]
+      },
+      "name": "tabs"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 📊 Identity control-plane overview\r\n---\r\nConsequential change volume and where exposure concentrates. Counts are labelled by change type and are **not** summed into one score. **Top Risks** blends operation, privilege, actor (IdentityInfo), target, timing and self-assignment signals — transparent and for ranking only."
+            },
+            "name": "ov-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _BG = '{BreakGlassAccounts}';\r\nlet _BGList = iif(_BG == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(tolower(_BG), ' ', ''), ',', '\",\"'), '\"]')));\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Actor = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName), Identity))\r\n| where array_length(_BGList) > 0 and Actor in (_BGList)\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| project TimeGenerated, Actor, Activity, Category, Target = tostring(TargetResources[0].displayName), ActorIP = tostring(InitiatedBy.user.ipAddress), Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 200",
+              "size": 0,
+              "title": "🚨 Break-glass account monitor (ANY action = investigate)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "ov-breakglass"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet GARoles = dynamic([\"Global Administrator\",\"Privileged Role Administrator\",\"Security Administrator\",\"Application Administrator\",\"Cloud Application Administrator\",\"Conditional Access Administrator\",\"User Administrator\",\"Authentication Administrator\",\"Hybrid Identity Administrator\",\"Domain Name Administrator\",\"Exchange Administrator\",\"SharePoint Administrator\"]);\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| where Result =~ 'success'\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| extend Role = tostring(TargetResources[0].displayName)\r\n| summarize\r\n    NewPrivRole = countif(Activity in~ ('Add member to role','Add eligible member to role') and Role in~ (GARoles)),\r\n    NewAppCreds = countif(Activity in~ ('Add service principal credentials','Update application - Certificates and secrets management')),\r\n    NewConsent = countif(Activity in~ ('Consent to application')),\r\n    NewGrants = countif(Activity in~ ('Add delegated permission grant','Add app role assignment to service principal')),\r\n    CAChanges = countif(Activity has 'conditional access'),\r\n    SecDefaults = countif(Activity has 'security default'),\r\n    Federation = countif(Activity has_any ('federation','domain authentication'))\r\n| project Metric = pack_array('New privileged-role grants','New app credentials','New consent','New permission grants','CA changes','Security-default changes','Federation/domain changes'),\r\n          Value  = pack_array(NewPrivRole, NewAppCreds, NewConsent, NewGrants, CAChanges, SecDefaults, Federation)\r\n| mv-expand Metric to typeof(string), Value to typeof(long)",
+              "size": 4,
+              "title": "🔐 Security KPIs (new privilege / credentials / consent / control changes)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "numberFormat": {
+                    "unit": 17,
+                    "options": {
+                      "style": "decimal"
+                    }
+                  }
+                }
+              }
+            },
+            "name": "ov-sec-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet Priv = IdentityInfo | where TimeGenerated > ago(7d) | summarize arg_max(TimeGenerated, AssignedRoles, BlastRadius, RiskLevel) by AccountObjectId;\r\nlet CriticalOps = dynamic([\"Set federation settings on domain\",\"Set domain authentication\",\"Update security defaults\",\"Delete conditional access policy\",\"Update conditional access policy\",\"Add conditional access policy\"]);\r\nlet HighOps = dynamic([\"Add member to role\",\"Add eligible member to role\",\"Add app role assignment to service principal\",\"Add delegated permission grant\",\"Add service principal credentials\",\"Update application - Certificates and secrets management\",\"Consent to application\",\"Reset password\",\"Admin registered security info\",\"Add owner to service principal\",\"Add owner to application\"]);\r\nlet GARoles = dynamic([\"Global Administrator\",\"Privileged Role Administrator\",\"Security Administrator\",\"Application Administrator\",\"Cloud Application Administrator\",\"Conditional Access Administrator\",\"User Administrator\",\"Authentication Administrator\",\"Hybrid Identity Administrator\",\"Domain Name Administrator\"]);\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| where Result =~ 'success'\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity in~ (CriticalOps) or Activity in~ (HighOps)\r\n| extend ActorId = tostring(InitiatedBy.user.id), Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName), Identity)\r\n| extend ActorType = case(isnotempty(tostring(InitiatedBy.app.displayName)), 'ServicePrincipal', isnotempty(tostring(InitiatedBy.user.userPrincipalName)), 'User', 'System')\r\n| extend TargetName = tostring(TargetResources[0].displayName), TargetUpn = tostring(TargetResources[0].userPrincipalName), TgtIds = tostring(TargetResources)\r\n| extend Role = tostring(TargetResources[0].displayName), ActorIP = tostring(InitiatedBy.user.ipAddress)\r\n| extend HourUtc = datetime_part('hour', TimeGenerated)\r\n| extend IsOffHours = HourUtc < 6 or HourUtc > 20\r\n| extend IsGATarget = Activity has 'role' and Role in~ (GARoles)\r\n| extend IsExternalTarget = TargetUpn has '#EXT#'\r\n| extend IsSelf = isnotempty(ActorId) and TgtIds has ActorId\r\n| join kind=leftouter Priv on $left.ActorId == $right.AccountObjectId\r\n| extend OpRisk = toint(case(Activity in~ (CriticalOps), 40, Activity in~ (HighOps), 30, 10))\r\n| extend Score = OpRisk + toint(iff(IsGATarget, 30, 0)) + toint(iff(ActorType == 'ServicePrincipal', 20, 0)) + toint(iff(tolower(tostring(RiskLevel)) == 'high', 15, 0)) + toint(iff(IsExternalTarget, 20, 0)) + toint(iff(IsSelf, 25, 0)) + toint(iff(IsOffHours, 10, 0))\r\n| extend Reasons = strcat(Activity, iff(IsGATarget, ' • privileged-role target', ''), iff(IsSelf, ' • self-assignment', ''), iff(IsExternalTarget, ' • external target', ''), iff(ActorType == 'ServicePrincipal', ' • app-initiated', ''), iff(tolower(tostring(RiskLevel)) == 'high', ' • risky actor', ''), iff(IsOffHours, ' • off-hours', ''))\r\n| extend Severity = case(Score >= 90, '🔴 Critical', Score >= 60, '🟠 High', Score >= 30, '🟡 Medium', '⚪ Info')\r\n| project TimeGenerated, Severity, Score, Activity, Actor, ActorType, Target = coalesce(TargetUpn, TargetName), Role, ActorIP, Reasons, CorrelationId\r\n| order by Score desc, TimeGenerated desc\r\n| take 100",
+              "size": 0,
+              "title": "🎯 CISO Top Risks (scored, with reasons)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "ov-top-risks"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet CriticalOps = dynamic([\"Set federation settings on domain\",\"Set domain authentication\",\"Update security defaults\",\"Delete conditional access policy\",\"Update conditional access policy\",\"Add conditional access policy\"]);\r\nlet HighOps = dynamic([\"Add member to role\",\"Add eligible member to role\",\"Add app role assignment to service principal\",\"Add delegated permission grant\",\"Add service principal credentials\",\"Update application - Certificates and secrets management\",\"Consent to application\",\"Reset password\",\"Admin registered security info\",\"Add owner to service principal\",\"Add owner to application\"]);\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| summarize\r\n    HighImpact = countif(Result =~ 'success' and (Activity in~ (CriticalOps) or Activity in~ (HighOps))),\r\n    PrivAssign = countif(Result =~ 'success' and Activity in~ ('Add member to role','Add eligible member to role')),\r\n    Grants = countif(Result =~ 'success' and Activity in~ ('Add delegated permission grant','Add app role assignment to service principal','Consent to application')),\r\n    AppCreds = countif(Result =~ 'success' and Activity in~ ('Add service principal credentials','Update application - Certificates and secrets management')),\r\n    CAorFed = countif(Result =~ 'success' and Activity in~ (CriticalOps)),\r\n    Actors = dcount(tostring(InitiatedBy.user.id)),\r\n    Targets = dcount(tostring(TargetResources[0].id))\r\n| project Metric = pack_array('High-impact changes','Privileged assignments','Sensitive grants/consent','App credential adds','CA/Federation/Defaults','Unique actors','Unique targets'),\r\n          Value  = pack_array(HighImpact, PrivAssign, Grants, AppCreds, CAorFed, Actors, Targets)\r\n| mv-expand Metric to typeof(string), Value to typeof(long)",
+              "size": 4,
+              "title": "📈 Control-plane change summary",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "numberFormat": {
+                    "unit": 17,
+                    "options": {
+                      "style": "decimal"
+                    }
+                  }
+                }
+              }
+            },
+            "name": "ov-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| summarize Success = countif(Result =~ 'success'), Failure = countif(Result !~ 'success') by bin(TimeGenerated, 1h)\r\n| render timechart",
+              "size": 0,
+              "title": "📊 Audit activity trend (success vs failure)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "timechart"
+            },
+            "name": "ov-trend"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| where isnotempty(Category)\r\n| summarize Changes = count() by Category\r\n| order by Changes desc",
+              "size": 0,
+              "title": "🗂️ Changes by category",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "piechart"
+            },
+            "name": "ov-category",
+            "customWidth": "50"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| where isnotempty(LoggedByService)\r\n| summarize Changes = count() by LoggedByService\r\n| order by Changes desc",
+              "size": 0,
+              "title": "🧱 Changes by service",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "piechart"
+            },
+            "name": "ov-service",
+            "customWidth": "50"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| summarize Events = count(), Success = countif(Result =~ 'success') by Activity\r\n| top 15 by Events desc",
+              "size": 0,
+              "title": "🏷️ Top 15 audit operations",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "barchart"
+            },
+            "name": "ov-top-activities"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet CriticalOps = dynamic([\"Set federation settings on domain\",\"Set domain authentication\",\"Update security defaults\",\"Delete conditional access policy\",\"Update conditional access policy\",\"Add conditional access policy\"]);\r\nlet HighOps = dynamic([\"Add member to role\",\"Add eligible member to role\",\"Add app role assignment to service principal\",\"Add delegated permission grant\",\"Add service principal credentials\",\"Update application - Certificates and secrets management\",\"Consent to application\",\"Reset password\",\"Admin registered security info\",\"Add owner to service principal\",\"Add owner to application\"]);\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName), Identity)\r\n| where isnotempty(Actor)\r\n| summarize HighImpact = countif(Activity in~ (CriticalOps) or Activity in~ (HighOps)),\r\n            TotalChanges = count(),\r\n            DistinctOps = dcount(Activity),\r\n            Targets = dcount(tostring(TargetResources[0].id))\r\n        by Actor\r\n| where HighImpact > 0\r\n| top 20 by HighImpact desc",
+              "size": 0,
+              "title": "👤 Top actors by high-impact change",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "ov-top-actors"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Overview"
+      },
+      "name": "group - overview"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🚨 SOC priority queue\r\n---\r\nTransparent, reason-based scoring for **queue ordering only** — not a probability of compromise. Contributing reasons are shown beside each row. Use **Queue Priority** to focus.",
+              "style": "info"
+            },
+            "name": "q-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet CriticalOps = dynamic([\"Set federation settings on domain\",\"Set domain authentication\",\"Update security defaults\",\"Delete conditional access policy\",\"Update conditional access policy\",\"Add conditional access policy\"]);\r\nlet HighOps = dynamic([\"Add member to role\",\"Add eligible member to role\",\"Add app role assignment to service principal\",\"Add delegated permission grant\",\"Add service principal credentials\",\"Update application - Certificates and secrets management\",\"Consent to application\",\"Reset password\",\"Admin registered security info\",\"Add owner to service principal\",\"Add owner to application\"]);\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Result =~ 'success'\r\n| extend Priority = case(Activity in~ (CriticalOps), 'Critical', Activity in~ (HighOps), 'High', Category in~ ('RoleManagement','ApplicationManagement','Policy'), 'Medium', 'Informational')\r\n| where '{Priority}' == 'All' or Priority == '{Priority}'\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName), Identity)\r\n| extend ActorType = case(isnotempty(tostring(InitiatedBy.app.displayName)), 'ServicePrincipal', isnotempty(tostring(InitiatedBy.user.userPrincipalName)), 'User', 'System')\r\n| extend Target = tostring(TargetResources[0].displayName)\r\n| extend Score = toint(case(Priority == 'Critical', 40, Priority == 'High', 30, Priority == 'Medium', 15, 5)) + toint(iff(ActorType == 'ServicePrincipal', 20, 0))\r\n| extend Reasons = strcat(Priority, iff(ActorType == 'ServicePrincipal', ' • app-initiated', ''))\r\n| extend Severity = case(Score >= 50, '🔴 Critical', Score >= 30, '🟠 High', Score >= 15, '🟡 Medium', '⚪ Info')\r\n| project TimeGenerated, Severity, Score, Priority, Activity, Actor, ActorType, Target, Category, LoggedByService, CorrelationId, Reasons\r\n| order by Score desc, TimeGenerated desc\r\n| take 500",
+              "size": 0,
+              "title": "🧮 High-impact change queue (scored)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "q-main"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| where isnotempty(tostring(InitiatedBy.app.displayName))\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Category in~ ('RoleManagement','ApplicationManagement','Policy','UserManagement','GroupManagement')\r\n| extend App = tostring(InitiatedBy.app.displayName), SPId = tostring(InitiatedBy.app.servicePrincipalId), Target = tostring(TargetResources[0].displayName)\r\n| project TimeGenerated, App, SPId, Activity, Category, Target, Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "🤖 App / service-principal initiated admin changes",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "q-app"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet Win = AuditLogs | where TimeGenerated {TimeRange} | extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)) | where isnotempty(Actor) | summarize FirstInWindow = min(TimeGenerated), Changes = count() by Actor;\r\nlet Base = AuditLogs | where TimeGenerated between (ago(30d) .. ago(1d)) | extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)) | where isnotempty(Actor) | summarize by Actor;\r\nWin\r\n| join kind=leftanti Base on Actor\r\n| project Actor, FirstInWindow, Changes\r\n| order by Changes desc",
+              "size": 0,
+              "title": "🆕 New actors (not seen in prior 30 days)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "q-new-actor"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "SOCQueue"
+      },
+      "name": "group - socqueue"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 👑 Privileged access, roles, groups & PIM\r\n---\r\nWho received privilege, through what mechanism, and was it expected? Role/PIM operation names drift between tenants — heuristics are intentionally broad. Reconstruct PIM lifecycle with \roleAssignmentRequestId from AdditionalDetails when correlation IDs differ."
+            },
+            "name": "p-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet GARoles = dynamic([\"Global Administrator\",\"Privileged Role Administrator\",\"Security Administrator\",\"Application Administrator\",\"Cloud Application Administrator\",\"Conditional Access Administrator\",\"User Administrator\",\"Authentication Administrator\",\"Hybrid Identity Administrator\",\"Domain Name Administrator\",\"Exchange Administrator\",\"SharePoint Administrator\"]);\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity in~ ('Add member to role','Add eligible member to role')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend TargetUser = tostring(TargetResources[0].userPrincipalName)\r\n| mv-expand Prop = TargetResources[0].modifiedProperties\r\n| extend PName = tostring(Prop.displayName)\r\n| where PName == 'Role.DisplayName'\r\n| extend Role = trim('\"', tostring(Prop.newValue))\r\n| where Role in~ (GARoles)\r\n| extend Mechanism = iff(Activity has 'eligible', 'Eligible (PIM)', 'Permanent')\r\n| extend IsExternal = iff(TargetUser has '#EXT#', '🌐 external', '')\r\n| project TimeGenerated, Role, Mechanism, IsExternal, TargetUser, Actor, ActorIP = tostring(InitiatedBy.user.ipAddress), Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "⭐ Assignments to named privileged roles (GA / PRA / Security Admin …)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "p-role-target"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity has 'role' and Activity has_any ('Add member','Add eligible','Add permanent')\r\n| extend ActorId = tostring(InitiatedBy.user.id), Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend TgtIds = tostring(TargetResources), Role = tostring(TargetResources[0].displayName)\r\n| where isnotempty(ActorId) and TgtIds has ActorId\r\n| project TimeGenerated, Actor, Role, ActorIP = tostring(InitiatedBy.user.ipAddress), Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 200",
+              "size": 0,
+              "title": "🪞 Self-assignment (actor appears among the change targets)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "p-self"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity has 'role' and Activity has_any ('Add member','Add eligible','Activate','Add permanent','Remove member')\r\n| extend Mechanism = case(Activity has 'eligible', 'Eligible (PIM)', Activity has 'Activate', 'Activated (PIM)', Activity has 'Remove', 'Removed', 'Permanent')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend TargetUser = tostring(TargetResources[0].userPrincipalName), Role = tostring(TargetResources[0].displayName)\r\n| extend OutsidePIM = iff(Mechanism == 'Permanent' and isnotempty(Actor), '⚠️ Outside PIM', '')\r\n| project TimeGenerated, Mechanism, OutsidePIM, Role, TargetUser, Actor, Result, LoggedByService, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 500",
+              "size": 0,
+              "title": "🧷 Role assignments (mechanism & outside-PIM)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "p-roles"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity has 'role' and Activity has_any ('Add member','Add eligible')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| where isnotempty(Actor)\r\n| summarize Assignments = count(), DistinctRoles = dcount(tostring(TargetResources[0].displayName)) by Actor\r\n| top 20 by Assignments desc",
+              "size": 0,
+              "title": "👤 Assignments by actor",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "barchart"
+            },
+            "name": "p-by-actor"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity has_any ('Add member to group','Add owner to group')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend Group = tostring(TargetResources[0].displayName), Member = tostring(TargetResources[1].userPrincipalName)\r\n| project TimeGenerated, Activity, Group, Member, Actor, Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "👥 Privileged group additions",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "p-groups"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity in~ ('Add member to role','Add app role assignment to service principal')\r\n| where isnotempty(tostring(InitiatedBy.app.servicePrincipalId))\r\n| extend App = tostring(InitiatedBy.app.displayName), SPId = tostring(InitiatedBy.app.servicePrincipalId)\r\n| extend Role = tostring(TargetResources[0].displayName), Target = tostring(TargetResources[0].userPrincipalName)\r\n| project TimeGenerated, App, SPId, Activity, Role, Target, Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "🤖 Service-principal-initiated role assignment (AR-002)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "p-sp"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Privilege"
+      },
+      "name": "group - privilege"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🧩 Applications, OAuth, service principals & permissions\r\n---\r\nCorrelate app/SP creation, credentials, consent and privilege (MITRE **T1671**) rather than treating one isolated consent as compromise. Consent is observable; token theft (**T1528**) needs sign-in/Graph/app-governance corroboration."
+            },
+            "name": "a-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet AppEvents = AuditLogs\r\n    | where TimeGenerated {TimeRange}\r\n    | extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n    | where Activity in~ ('Add application','Add service principal','Add service principal credentials','Update application - Certificates and secrets management','Consent to application','Add delegated permission grant','Add app role assignment to service principal','Add owner to application','Add owner to service principal')\r\n    | extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n    | extend ObjectId = tostring(TargetResources[0].id), ObjectName = tostring(TargetResources[0].displayName), Step = Activity;\r\nAppEvents\r\n| summarize FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), Steps = make_set(Step), Actors = make_set(Actor), StepEvents = count() by ObjectId, ObjectName\r\n| extend StepCount = array_length(Steps)\r\n| where StepCount >= 2\r\n| order by StepCount desc, LastSeen desc\r\n| take 300",
+              "size": 0,
+              "title": "🧬 Application lifecycle path (>= 2 steps per object)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "a-lifecycle"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity in~ ('Add service principal credentials','Update application - Certificates and secrets management')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend AppName = tostring(TargetResources[0].displayName), AppId = tostring(TargetResources[0].id)\r\n| mv-expand Prop = TargetResources[0].modifiedProperties\r\n| extend PName = tostring(Prop.displayName)\r\n| where PName has_any ('KeyDescription','KeyIdentifier','Included Updated Properties','credential')\r\n| project TimeGenerated, AppName, AppId, Actor, Property = PName, OldValue = tostring(Prop.oldValue), NewValue = tostring(Prop.newValue), CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "🔑 Credential added to an application (old/new)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "a-cred"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity in~ ('Add delegated permission grant','Add app role assignment to service principal','Consent to application')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend App = tostring(TargetResources[0].displayName)\r\n| mv-expand Prop = TargetResources[0].modifiedProperties\r\n| extend PName = tostring(Prop.displayName)\r\n| where PName has_any ('Permissions','AppRole','DelegatedPermissionGrant','ConsentType','Scope','ConsentAction')\r\n| project TimeGenerated, Activity, Actor, App, Property = PName, NewValue = tostring(Prop.newValue), CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "🎟️ Sensitive permission grants & consent",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "a-grants"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity in~ ('Consent to application','Add delegated permission grant','Add app role assignment to service principal')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| where isnotempty(Actor)\r\n| summarize Grants = count(), Apps = dcount(tostring(TargetResources[0].id)) by Actor\r\n| where Grants >= 3\r\n| top 20 by Grants desc",
+              "size": 0,
+              "title": "💥 Consent / grant bursts by actor (>= 3)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "barchart"
+            },
+            "name": "a-burst"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Apps"
+      },
+      "name": "group - apps"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🎟️ Permission & consent security\r\n---\r\n**Application** permissions act without an interactive user and are usually more dangerous than **Delegated**. Risk is inferred from the granted scope/role via a Low→Critical catalogue — validate the exact value in the row and against Microsoft Graph permission references.",
+              "style": "info"
+            },
+            "name": "pm-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity in~ ('Add delegated permission grant','Add app role assignment to service principal','Consent to application')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend App = tostring(TargetResources[0].displayName)\r\n| extend GrantType = iff(Activity has 'app role', 'Application', iff(Activity has 'delegated', 'Delegated', 'Consent'))\r\n| mv-expand Prop = TargetResources[0].modifiedProperties\r\n| extend PName = tostring(Prop.displayName), NewV = tostring(Prop.newValue)\r\n| where PName has_any ('Scope','AppRole','Permission','Value','ConsentType')\r\n| extend Risk = case(\r\n    NewV has_any ('RoleManagement.ReadWrite','Application.ReadWrite.All','AppRoleAssignment.ReadWrite.All','Directory.ReadWrite.All','PrivilegedAccess','FullControl'), 'Critical',\r\n    NewV has_any ('Mail.ReadWrite','Mail.Send','Files.ReadWrite.All','Directory.Read.All','Group.ReadWrite.All','User.ReadWrite.All','Sites.ReadWrite.All'), 'High',\r\n    NewV has_any ('Mail.Read','Files.Read.All','Sites.Read.All','People.Read.All','Calendars.Read'), 'Medium',\r\n    NewV has_any ('User.Read','openid','profile','offline_access','email'), 'Low',\r\n    'Review')\r\n| extend RiskIcon = case(Risk == 'Critical','🔴 Critical', Risk == 'High','🟠 High', Risk == 'Medium','🟡 Medium', Risk == 'Low','🟢 Low','⚪ Review')\r\n| project TimeGenerated, RiskIcon, GrantType, App, Actor, Permission = substring(NewV, 0, 300), ActorIP = tostring(InitiatedBy.user.ipAddress), CorrelationId\r\n| order by TimeGenerated desc\r\n| take 400",
+              "size": 0,
+              "title": "🎟️ Permission grants & consent (delegated vs application, risk-rated)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "pm-catalogue"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity in~ ('Add delegated permission grant','Add app role assignment to service principal','Consent to application')\r\n| extend App = tostring(TargetResources[0].displayName)\r\n| mv-expand Prop = TargetResources[0].modifiedProperties\r\n| extend NewV = tostring(Prop.newValue)\r\n| extend Risk = case(\r\n    NewV has_any ('RoleManagement.ReadWrite','Application.ReadWrite.All','AppRoleAssignment.ReadWrite.All','Directory.ReadWrite.All','PrivilegedAccess'), 'Critical',\r\n    NewV has_any ('Mail.ReadWrite','Mail.Send','Files.ReadWrite.All','Directory.Read.All','Group.ReadWrite.All','User.ReadWrite.All'), 'High',\r\n    'Other')\r\n| where Risk in ('Critical','High')\r\n| summarize Grants = count(), LastSeen = max(TimeGenerated) by App, Risk\r\n| order by Risk asc, Grants desc\r\n| take 200",
+              "size": 0,
+              "title": "🔴 High-risk / critical permission grants by app",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "pm-highrisk"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "datatable(Permission:string, Type:string, Risk:string)\r\n[\r\n 'User.Read','Delegated','🟢 Low',\r\n 'Mail.Read','Delegated / Application','🟡 Medium',\r\n 'Mail.ReadWrite','Delegated / Application','🟠 High',\r\n 'Mail.Send','Application','🟠 High',\r\n 'Files.Read.All','Application','🟠 High',\r\n 'Files.ReadWrite.All','Application','🔴 Critical',\r\n 'Sites.ReadWrite.All','Application','🔴 Critical',\r\n 'Directory.Read.All','Application','🟠 High',\r\n 'Directory.ReadWrite.All','Application','🔴 Critical',\r\n 'Group.ReadWrite.All','Application','🔴 Critical',\r\n 'User.ReadWrite.All','Application','🔴 Critical',\r\n 'RoleManagement.ReadWrite.Directory','Application','🔴 Critical',\r\n 'Application.ReadWrite.All','Application','🔴 Critical',\r\n 'AppRoleAssignment.ReadWrite.All','Application','🔴 Critical'\r\n]\r\n| order by Risk asc, Permission asc",
+              "size": 0,
+              "title": "📖 High-risk permission reference catalogue",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "pm-ref"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Permissions"
+      },
+      "name": "group - permissions"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🔐 Authentication, Conditional Access, federation & hybrid identity\r\n---\r\nWere authentication protections or trust relationships weakened? CA policy modification maps to MITRE **T1556.009**; federation/domain changes map to **T1484.002** (add **T1606.002** only when token behaviour supports it). The degradation tile interprets raw old/new JSON into human-readable control-weakening flags."
+            },
+            "name": "au-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity has_any ('conditional access','security default','named location')\r\n| mv-expand Target = TargetResources\r\n| mv-expand Prop = Target.modifiedProperties\r\n| extend PName = tostring(Prop.displayName), OldV = tostring(Prop.oldValue), NewV = tostring(Prop.newValue)\r\n| extend Weakened = case(\r\n    Activity has 'security default' and NewV contains 'false', '🔴 Security defaults disabled',\r\n    Activity has 'conditional access' and Activity has 'Delete', '🔴 CA policy deleted',\r\n    OldV contains '\"state\":\"enabled\"' and NewV contains '\"state\":\"disabled\"', '🔴 CA policy disabled',\r\n    OldV contains '\"state\":\"enabled\"' and NewV contains 'enabledForReportingButNotEnforced', '🟠 CA switched to report-only',\r\n    OldV contains '\"mfa\"' and not(NewV contains '\"mfa\"'), '🟠 MFA grant control removed',\r\n    OldV contains '\"excludeUsers\":[]' and NewV contains '\"excludeUsers\":[\"', '🟠 CA user exclusion added',\r\n    OldV contains '\"excludeLocations\":[]' and NewV contains '\"excludeLocations\":[\"', '🟡 CA location exclusion added',\r\n    '')\r\n| where isnotempty(Weakened)\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| project TimeGenerated, Weakened, Policy = tostring(Target.displayName), Actor, ActorIP = tostring(InitiatedBy.user.ipAddress), Property = PName, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 200",
+              "size": 0,
+              "title": "⚠️ Security-control degradation (CA disabled / MFA removed / exclusions / defaults off)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "au-degrade"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| where ActivityDisplayName in~ ('Add conditional access policy','Update conditional access policy','Delete conditional access policy','Add named location','Update named location','Delete named location','Update security defaults')\r\n| mv-expand Target = TargetResources\r\n| mv-expand Property = Target.modifiedProperties\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| project TimeGenerated, ActivityDisplayName, Actor, Policy = tostring(Target.displayName), Property = tostring(Property.displayName), OldValue = tostring(Property.oldValue), NewValue = tostring(Property.newValue), Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 500",
+              "size": 0,
+              "title": "🧾 Conditional Access & security-default changes (old/new)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "au-ca"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity has_any ('federation','domain','DirSync','directory synchronization','Update security defaults','PasswordHashSync','cross-tenant access')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| mv-expand Prop = TargetResources[0].modifiedProperties\r\n| project TimeGenerated, Activity, Actor, Target = tostring(TargetResources[0].displayName), Property = tostring(Prop.displayName), OldValue = tostring(Prop.oldValue), NewValue = tostring(Prop.newValue), Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "🏛️ Federation / domain / cross-tenant changes (control-plane / Tier-0)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "au-fed"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity has_any ('directory setting','company settings','authorization policy','directory feature','external collaboration','cross-tenant access','consent policy','B2B management policy','guest')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| mv-expand Prop = TargetResources[0].modifiedProperties\r\n| project TimeGenerated, Activity, Actor, Setting = tostring(TargetResources[0].displayName), Property = tostring(Prop.displayName), OldValue = tostring(Prop.oldValue), NewValue = tostring(Prop.newValue), ActorIP = tostring(InitiatedBy.user.ipAddress), Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "⚙️ Directory / tenant setting drift (consent, guest, collaboration, authorization)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "au-dirset"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity has_any ('security info','Temporary Access Pass','StrongAuthentication','registered security info')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend TargetUser = tostring(TargetResources[0].userPrincipalName)\r\n| project TimeGenerated, Activity, Actor, TargetUser, Result, LoggedByService, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "📲 MFA / security-info / TAP registrations",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "au-mfa"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Category in~ ('Policy') or Activity has_any ('conditional access','named location','security defaults')\r\n| summarize Changes = count() by bin(TimeGenerated, 1h)\r\n| render timechart",
+              "size": 0,
+              "title": "📉 Policy-change activity over time",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "timechart"
+            },
+            "name": "au-trend"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "AuthPolicy"
+      },
+      "name": "group - auth"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 👥 Users, groups & devices\r\n---\r\nWere identities, groups or devices manipulated to establish access or persistence? The **user → group → privilege** tile links a role-assignable group's role grant with subsequent member additions (effective-privilege gain). Device events need sign-in / endpoint context — AuditLogs alone does not prove PRT replay."
+            },
+            "name": "u-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity has_any ('Reset password','Change user password','Reset user password','Set force change user password') or Activity contains 'self-service' or LoggedByService contains 'Self-service Password'\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend TargetUser = tostring(TargetResources[0].userPrincipalName)\r\n| extend ResetType = iff(LoggedByService contains 'Self-service' or Activity contains 'self-service', '🙋 Self-service', '🛠️ Admin')\r\n| project TimeGenerated, ResetType, Activity, Actor, TargetUser, ActorIP = tostring(InitiatedBy.user.ipAddress), Result, LoggedByService, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "🔁 Password resets & forced changes",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "u-pwd"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity has_any ('Invite external user','Add user','Update user','redeem')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend TargetUser = tostring(TargetResources[0].userPrincipalName)\r\n| where TargetUser has '#EXT#' or Activity has 'external'\r\n| project TimeGenerated, Activity, Actor, TargetUser, Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "🌐 Guest invites & external-user changes",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "u-guests"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity in~ ('Add user','Delete user','Restore user','Update user','Disable account','Enable account','Hard Delete user')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend TargetUser = tostring(TargetResources[0].userPrincipalName)\r\n| project TimeGenerated, Activity, Actor, TargetUser, ActorIP = tostring(InitiatedBy.user.ipAddress), Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "👤 User lifecycle (add / delete / enable / disable / restore)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "u-lifecycle"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity has 'group' and Activity has_any ('Add member','Remove member','Add owner','Remove owner','Add group','Delete group','Update group')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| extend Group = tostring(TargetResources[0].displayName), Member = tostring(TargetResources[1].userPrincipalName)\r\n| project TimeGenerated, Activity, Group, Member, Actor, Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "👥 Group member / owner changes",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "u-groups"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet GroupRole = AuditLogs\r\n    | where TimeGenerated {TimeRange}\r\n    | extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n    | where Activity in~ ('Add member to role','Add eligible member to role')\r\n    | mv-expand T = TargetResources\r\n    | where tostring(T.type) has 'Group'\r\n    | project GroupId = tostring(T.id), GroupName = tostring(T.displayName), Role = tostring(TargetResources[0].displayName)\r\n    | distinct GroupId, GroupName, Role;\r\nlet MemberAdd = AuditLogs\r\n    | where TimeGenerated {TimeRange}\r\n    | extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n    | where Activity =~ 'Add member to group'\r\n    | extend GroupId = tostring(TargetResources[0].id), Member = tostring(TargetResources[1].userPrincipalName), AddTime = TimeGenerated, Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName));\r\nMemberAdd\r\n| join kind=inner GroupRole on GroupId\r\n| project AddTime, Member, GroupName, Role, Actor, CorrelationId\r\n| order by AddTime desc\r\n| take 200",
+              "size": 0,
+              "title": "🔗 User → group → privilege (role-assignable group)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "u-chain"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Category =~ 'Device' or Activity has_any ('device','BitLocker')\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| project TimeGenerated, Activity, Category, Actor, Target = tostring(TargetResources[0].displayName), Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 300",
+              "size": 0,
+              "title": "💻 Device & BitLocker administration",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "u-devices"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n| where isnotempty(Actor)\r\n| summarize Ops = count(), DistinctOps = dcount(coalesce(ActivityDisplayName, OperationName)), Targets = dcount(tostring(TargetResources[0].id)) by Actor, bin(TimeGenerated, 1h)\r\n| where Ops >= 20\r\n| order by Ops desc\r\n| take 200",
+              "size": 0,
+              "title": "📦 Bulk operation bursts (>= 20 / hour / actor)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "u-bulk"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "UsersDevices"
+      },
+      "name": "group - users"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🧭 Identity attack paths & MITRE ATT&CK\r\n\r\n---\r\n\r\nEach row is a **sequence**, not a single event. An audit record proves an administrative action, not adversary intent — corroborate with the enrichment tables on the **Readiness** tab.\r\n\r\n| Attack path | Observable AuditLogs sequence | ATT&CK |\r\n|---|---|---|\r\n| App takeover / OAuth persistence | app/SP create → credential → consent → role/owner | T1671; T1098.001/003 |\r\n| Compromised user → new MFA → privilege | risky sign-in → security-info change → role/group add | T1556.006; T1098.003 |\r\n| Guest foothold → internal admin | invite guest → guest-to-member / group add → role | T1078.004; T1098.003 |\r\n| Policy weakening | CA / named-location / security-default change → anomalous sign-in | T1556.009 |\r\n| Federation persistence | domain / federation change → forged-token evidence | T1484.002 (+T1606.002 if supported) |",
+              "style": "info"
+            },
+            "name": "ap-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet Steps = AuditLogs\r\n    | where TimeGenerated {TimeRange}\r\n    | extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n    | where Activity in~ ('Add application','Add service principal','Add service principal credentials','Update application - Certificates and secrets management','Consent to application','Add delegated permission grant','Add app role assignment to service principal','Add owner to application','Add owner to service principal')\r\n    | extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n    | extend ObjId = tostring(TargetResources[0].id), ObjName = tostring(TargetResources[0].displayName), Step = Activity;\r\nSteps\r\n| summarize FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), Steps = make_set(Step), Actors = make_set(Actor), Events = count() by ObjId, ObjName\r\n| extend StepCount = array_length(Steps)\r\n| extend HasCredOrConsent = Steps has_any ('Add service principal credentials','Consent to application','Add delegated permission grant','Add app role assignment to service principal')\r\n| where StepCount >= 2 and HasCredOrConsent\r\n| project ObjName, ObjId, StepCount, Steps, Actors, FirstSeen, LastSeen, Events, MITRE = 'T1671; T1098.001/003'\r\n| order by StepCount desc, LastSeen desc\r\n| take 200",
+              "size": 0,
+              "title": "🧬 App creation → credential/consent → privilege",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "ap-app"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet Risky = union isfuzzy=true\r\n    (SigninLogs | where TimeGenerated {TimeRange} | where RiskLevelDuringSignIn in~ ('medium','high') | project RiskTime = TimeGenerated, UserPrincipalName, IPAddress),\r\n    (AADUserRiskEvents | where TimeGenerated {TimeRange} | project RiskTime = TimeGenerated, UserPrincipalName, IPAddress = IpAddress);\r\nlet MfaChg = AuditLogs\r\n    | where TimeGenerated {TimeRange}\r\n    | extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n    | where Activity has_any ('security info','StrongAuthentication','Temporary Access Pass')\r\n    | extend TargetUser = tolower(tostring(TargetResources[0].userPrincipalName)), ChangeTime = TimeGenerated, Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName));\r\nMfaChg\r\n| join kind=inner (Risky | extend TargetUser = tolower(UserPrincipalName)) on TargetUser\r\n| where ChangeTime between (RiskTime .. (RiskTime + 4h))\r\n| project ChangeTime, RiskTime, TargetUser, Actor, IPAddress, MinutesAfterRisk = round((ChangeTime - RiskTime) / 1m, 1), MITRE = 'T1556.006; T1098.003'\r\n| order by ChangeTime desc\r\n| take 300",
+              "size": 0,
+              "title": "⚡ Risky sign-in → MFA/security-info change (<= 4h)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "ap-risk-mfa"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet Guests = AuditLogs\r\n    | where TimeGenerated {TimeRange}\r\n    | extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n    | where Activity has_any ('Invite external user','Add user')\r\n    | extend GuestUpn = tolower(tostring(TargetResources[0].userPrincipalName)), InviteTime = TimeGenerated, Inviter = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n    | where GuestUpn has '#ext#';\r\nlet Priv = AuditLogs\r\n    | where TimeGenerated {TimeRange}\r\n    | extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n    | where Activity has 'role' and Activity has_any ('Add member','Add eligible')\r\n    | extend GrantUpn = tolower(tostring(TargetResources[0].userPrincipalName)), GrantTime = TimeGenerated, Role = tostring(TargetResources[0].displayName);\r\nGuests\r\n| join kind=inner Priv on $left.GuestUpn == $right.GrantUpn\r\n| where GrantTime >= InviteTime\r\n| project GuestUpn, InviteTime, Inviter, Role, GrantTime, HoursToPrivilege = round((GrantTime - InviteTime) / 1h, 1), MITRE = 'T1078.004; T1098.003'\r\n| order by GrantTime desc\r\n| take 200",
+              "size": 0,
+              "title": "🌱 Guest onboarding → privilege grant",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "ap-guest"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nlet Stages = AuditLogs\r\n    | where TimeGenerated {TimeRange}\r\n    | extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n    | extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))\r\n    | where isnotempty(Actor)\r\n    | extend Stage = case(\r\n        Activity has_any ('Reset password','security info','StrongAuthentication','Temporary Access Pass'), '1-Auth change',\r\n        Activity has_any ('Add application','Add service principal'), '2-App/SP create',\r\n        Activity has_any ('Consent','delegated permission grant','app role assignment'), '3-Consent/Permission',\r\n        Activity has_any ('credentials','Certificates'), '4-Credential',\r\n        Activity has 'role' and Activity has_any ('Add member','Add eligible'), '5-Privilege',\r\n        Activity has_any ('conditional access','security default','federation','domain authentication'), '6-Control change',\r\n        '')\r\n    | where isnotempty(Stage);\r\nStages\r\n| summarize Stages = make_set(Stage), Steps = count(), Ops = make_set(Activity, 25), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by Actor\r\n| extend StageCount = array_length(Stages)\r\n| where StageCount >= 3\r\n| extend DurationMin = round((LastSeen - FirstSeen) / 1m, 1)\r\n| project Actor, StageCount, Stages, Steps, DurationMin, FirstSeen, LastSeen, Ops\r\n| order by StageCount desc, Steps desc\r\n| take 100",
+              "size": 0,
+              "title": "⛓️ Multi-stage attack chain per actor (>= 3 stages)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "ap-chain"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "AttackPaths"
+      },
+      "name": "group - paths"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🔎 Entity investigation\r\n---\r\nSet **Entity filter** in the pills to an actor or target (UPN / app / object name). What did this entity do before and after the event? Empty = show all (bounded to 500 rows).",
+              "style": "info"
+            },
+            "name": "inv-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName), Identity)\r\n| mv-expand Target = TargetResources to typeof(dynamic)\r\n| extend TargetName = tostring(Target.displayName), TargetUPN = tolower(tostring(Target.userPrincipalName))\r\n| where '{Actor}' == '' or Actor contains '{Actor}' or TargetName contains '{Actor}' or TargetUPN contains '{Actor}'\r\n| extend ActorIP = tostring(InitiatedBy.user.ipAddress), TargetType = tostring(Target.type)\r\n| project TimeGenerated, Activity, Category, LoggedByService, Actor, ActorIP, TargetName, TargetType, Result, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 500",
+              "size": 0,
+              "title": "🕓 Entity activity timeline",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "inv-timeline"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName), Identity)\r\n| mv-expand Target = TargetResources to typeof(dynamic)\r\n| extend TargetName = tostring(Target.displayName), TargetUPN = tolower(tostring(Target.userPrincipalName))\r\n| where '{Actor}' == '' or Actor contains '{Actor}' or TargetName contains '{Actor}' or TargetUPN contains '{Actor}'\r\n| mv-expand Prop = Target.modifiedProperties\r\n| extend Property = tostring(Prop.displayName), OldValue = tostring(Prop.oldValue), NewValue = tostring(Prop.newValue)\r\n| where isnotempty(Property)\r\n| project TimeGenerated, Actor, TargetName, Property, OldValue, NewValue, CorrelationId\r\n| order by TimeGenerated desc\r\n| take 500",
+              "size": 0,
+              "title": "📝 Old / new value changes",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "inv-values"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Actor = coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName), Identity)\r\n| extend Target = tostring(TargetResources[0].displayName)\r\n| where '{Actor}' == '' or Actor contains '{Actor}' or Target contains '{Actor}'\r\n| summarize Events = count(), Operations = dcount(coalesce(ActivityDisplayName, OperationName)), Targets = dcount(tostring(TargetResources[0].id)), Failures = countif(Result !~ 'success'), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by CorrelationId\r\n| order by Events desc\r\n| take 200",
+              "size": 0,
+              "title": "🔗 Correlated operations (by CorrelationId)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "inv-corr"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Investigation"
+      },
+      "name": "group - invest"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 📋 Security posture & governance\r\n---\r\nIs identity governance actually working? Privileged-identity metrics use IdentityInfo (current state); control metrics use AuditLogs (change activity in range). Use alongside PIM, Access Reviews and app governance for authoritative posture."
+            },
+            "name": "gov-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "IdentityInfo\r\n| where TimeGenerated > ago(7d)\r\n| summarize arg_max(TimeGenerated, IsAccountEnabled, AssignedRoles, RiskLevel, AccountUPN) by AccountObjectId\r\n| where IsAccountEnabled\r\n| extend RoleCount = array_length(todynamic(tostring(AssignedRoles)))\r\n| summarize\r\n    Privileged = countif(RoleCount > 0),\r\n    HighRiskPriv = countif(RoleCount > 0 and tolower(tostring(RiskLevel)) == 'high'),\r\n    GuestPriv = countif(RoleCount > 0 and AccountUPN has '#EXT#')\r\n| project Metric = pack_array('Privileged identities','High-risk privileged','Privileged guests'),\r\n          Value  = pack_array(Privileged, HighRiskPriv, GuestPriv)\r\n| mv-expand Metric to typeof(string), Value to typeof(long)",
+              "size": 4,
+              "title": "👑 Privileged identity governance",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "numberFormat": {
+                    "unit": 17,
+                    "options": {
+                      "style": "decimal"
+                    }
+                  }
+                }
+              }
+            },
+            "name": "gov-priv-kpi"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "IdentityInfo\r\n| where TimeGenerated > ago(7d)\r\n| summarize arg_max(TimeGenerated, IsAccountEnabled, AssignedRoles, RiskLevel, BlastRadius, AccountUPN) by AccountObjectId\r\n| where IsAccountEnabled\r\n| mv-expand Role = todynamic(tostring(AssignedRoles))\r\n| extend RoleName = tostring(Role)\r\n| where RoleName has_any ('Global Administrator','Privileged Role Administrator','Security Administrator','Application Administrator','Conditional Access Administrator','User Administrator','Authentication Administrator','Hybrid Identity Administrator','Domain Name Administrator')\r\n| project AccountUPN, RoleName, RiskLevel, BlastRadius\r\n| order by RoleName asc, AccountUPN asc\r\n| take 500",
+              "size": 0,
+              "title": "⭐ Privileged identities (IdentityInfo)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "gov-priv-list"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| where Activity in~ ('Add service principal credentials','Update application - Certificates and secrets management','Add delegated permission grant','Add app role assignment to service principal','Consent to application','Add owner to application','Add owner to service principal')\r\n| extend App = tostring(TargetResources[0].displayName), AppId = tostring(TargetResources[0].id)\r\n| summarize Events = count(), CredAdds = countif(Activity has 'credential' or Activity has 'Certificates'), Grants = countif(Activity has 'permission' or Activity has 'app role' or Activity has 'Consent'), OwnerAdds = countif(Activity has 'owner'), Actors = dcount(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName))), LastSeen = max(TimeGenerated) by App, AppId\r\n| order by Events desc\r\n| take 300",
+              "size": 0,
+              "title": "🧩 Application governance (credentials / grants / owners in range)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "gov-apps"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| summarize\r\n    CAChanges = countif(Activity has 'conditional access'),\r\n    NamedLocation = countif(Activity has 'named location'),\r\n    SecurityDefaults = countif(Activity has 'security default'),\r\n    AuthMethod = countif(Activity has_any ('authentication method','StrongAuthentication','security info')),\r\n    Federation = countif(Activity has_any ('federation','domain authentication'))\r\n| project Metric = pack_array('CA changes','Named-location changes','Security-default changes','Auth-method changes','Federation/domain changes'),\r\n          Value  = pack_array(CAChanges, NamedLocation, SecurityDefaults, AuthMethod, Federation)\r\n| mv-expand Metric to typeof(string), Value to typeof(long)",
+              "size": 4,
+              "title": "🔐 Control governance (change counts)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "numberFormat": {
+                    "unit": 17,
+                    "options": {
+                      "style": "decimal"
+                    }
+                  }
+                }
+              }
+            },
+            "name": "gov-control"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Governance"
+      },
+      "name": "group - governance"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## 🎯 MITRE ATT&CK coverage\r\n---\r\nTechnique-centric coverage for identity control-plane attacks, plus the use-case → hunt / analytic-rule map. Export the technique list to the ATT&CK Navigator to visualise gaps. **Low**-coverage techniques (PRT, SAML forgery, token theft) require Sign-in / Defender XDR corroboration — AuditLogs alone is insufficient."
+            },
+            "name": "cov-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "datatable(Technique:string, Name:string, Tactic:string, DataSource:string, Coverage:string)\r\n[\r\n 'T1087.004','Cloud Account Discovery','Discovery','AuditLogs','🟡 Partial',\r\n 'T1136.003','Create Cloud Account','Persistence','AuditLogs','🟢 High',\r\n 'T1098.001','Additional Cloud Credentials','Persistence','AuditLogs','🟢 High',\r\n 'T1098.003','Additional Cloud Roles','Privilege Escalation','AuditLogs','🟢 High',\r\n 'T1098.005','Device Registration','Persistence','AuditLogs + SigninLogs','🟡 Partial',\r\n 'T1528','Steal Application Access Token','Credential Access','AuditLogs + SigninLogs/XDR','🟡 Partial',\r\n 'T1550.001','Application Access Token (PRT)','Defense Evasion','SigninLogs / XDR','🟠 Low',\r\n 'T1556.006','Multi-Factor Authentication','Credential Access','AuditLogs + SigninLogs','🟢 High',\r\n 'T1556.009','Conditional Access Policies','Credential Access','AuditLogs','🟢 High',\r\n 'T1484.002','Domain Trust / Federation','Privilege Escalation','AuditLogs','🟢 High',\r\n 'T1606.002','SAML Tokens','Credential Access','AuditLogs + XDR','🟠 Low',\r\n 'T1078.004','Cloud Accounts','Persistence','AuditLogs + SigninLogs','🟡 Partial',\r\n 'T1110.003','Password Spraying','Credential Access','SigninLogs + AADNonInteractive','🟢 High',\r\n 'T1671','Cloud Application Integration (OAuth)','Persistence','AuditLogs','🟢 High'\r\n]\r\n| order by Technique asc",
+              "size": 0,
+              "title": "🎯 ATT&CK technique coverage (data source & confidence)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "cov-mitre"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "datatable(UseCase:string, Ref:string, Priority:string, Hunt:string, AnalyticRule:string, MITRE:string)\r\n[\r\n 'Directory enumeration burst','HQ-001','Medium','✅','','T1087',\r\n 'New app -> credential -> consent','HQ-002/AR-001','High','✅','✅','T1098.001; T1671',\r\n 'Multi-app / burst consent','HQ-003/AR-004','High','✅','✅','T1671; T1528(corroborate)',\r\n 'Bulk service-principal creation','HQ-004','Medium','✅','','T1136.003',\r\n 'Privileged role change','HQ-005/HQ-011','High','✅','','T1098.003',\r\n 'Guest / recent user -> privilege','HQ-006','High','✅','','T1078.004; T1098.003',\r\n 'Bulk password / token revocation','HQ-007/AR-006','High','✅','✅','T1531; T1098',\r\n 'Sensitive OAuth / API permission grant','HQ-008','High','✅','','T1098.003; T1671',\r\n 'Credential added to existing app','HQ-009/AR-003','High','✅','✅','T1098.001',\r\n 'Federation / DirSync change','HQ-010/AR-005','Critical','✅','✅','T1484.002; T1606.002(corroborate)',\r\n 'Non-PIM privilege assignment (SP)','AR-002','High','','✅','T1098.003',\r\n 'Risky sign-in -> MFA change','HQ-012','High','✅','','T1556.006',\r\n 'Privileged password reset / TAP','HQ-014','High','✅','','T1098; T1556.006',\r\n 'Conditional Access policy change','—','High','✅','','T1556.009',\r\n 'Device / BitLocker administration','—','Medium','✅','','T1098.005; T1556.006'\r\n]\r\n| order by Priority asc, Ref asc",
+              "size": 0,
+              "title": "🧮 Use-case → hunt / analytic-rule coverage",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "cov-matrix"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Coverage"
+      },
+      "name": "group - coverage"
+    },
+    {
+      "type": 12,
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "items": [
+          {
+            "type": 1,
+            "content": {
+              "json": "## ⚙️ Workbook readiness & scope\r\n---\r\nIs the workbook operating on complete, current telemetry? Audit activity names drift and the published list may not match a tenant exactly — use the operation inventory below instead of assuming names."
+            },
+            "name": "r-h"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| summarize Events = count(), Success = countif(Result =~ 'success'), Failure = countif(Result !~ 'success'), Ops = dcount(coalesce(ActivityDisplayName, OperationName)), Last = max(TimeGenerated)\r\n| extend FailureRatePct = round(100.0 * Failure / Events, 2), MinutesSinceLast = round((now() - Last) / 1m, 0)\r\n| project Metric = pack_array('Audit events','Success','Failure','Failure rate %','Distinct operations','Minutes since last event'),\r\n          Value  = pack_array(Events, Success, Failure, FailureRatePct, Ops, MinutesSinceLast)\r\n| mv-expand Metric to typeof(string), Value to typeof(real)",
+              "size": 4,
+              "title": "❤️ AuditLogs data health",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "tiles",
+              "tileSettings": {
+                "showBorder": true,
+                "titleContent": {
+                  "columnMatch": "Metric",
+                  "formatter": 1
+                },
+                "leftContent": {
+                  "columnMatch": "Value",
+                  "formatter": 12,
+                  "numberFormat": {
+                    "unit": 17,
+                    "options": {
+                      "style": "decimal"
+                    }
+                  }
+                }
+              }
+            },
+            "name": "r-health"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let _ExRaw = '{ExcludedActors}';\r\nlet _Ex = iif(_ExRaw == '', dynamic([]), todynamic(strcat('[\"', replace_string(replace_string(_ExRaw, ' ', ''), ',', '\",\"'), '\"]')));\r\nlet _Cats = dynamic([{Category}]);\r\nlet _Svcs = dynamic([{LoggedByService}]);\r\nlet AuditLogs = AuditLogs\r\n    | where array_length(_Cats) == 0 or Category in~ (_Cats)\r\n    | where array_length(_Svcs) == 0 or LoggedByService in~ (_Svcs)\r\n    | where '{Result}' == 'All' or Result =~ '{Result}'\r\n    | extend _ActorForExcl = tolower(coalesce(tostring(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName)))\r\n    | where array_length(_Ex) == 0 or _ActorForExcl !in~ (_Ex)\r\n    | extend _ActorIP = tostring(InitiatedBy.user.ipAddress), _Target0 = tolower(tostring(TargetResources[0].displayName)), _Target0Upn = tolower(tostring(TargetResources[0].userPrincipalName))\r\n    | where '{Actor}' == '' or _ActorForExcl contains tolower('{Actor}') or _Target0 contains tolower('{Actor}') or _Target0Upn contains tolower('{Actor}')\r\n    | where '{AppFilter}' == '' or _Target0 contains tolower('{AppFilter}')\r\n    | where '{IPFilter}' == '' or _ActorIP startswith '{IPFilter}';\r\nAuditLogs\r\n| where TimeGenerated {TimeRange}\r\n| extend Activity = coalesce(ActivityDisplayName, OperationName)\r\n| summarize Events = count(), Success = countif(Result =~ 'success'), Failure = countif(Result !~ 'success'), Actors = dcount(tostring(InitiatedBy.user.id)), LastSeen = max(TimeGenerated) by Activity, Category, LoggedByService\r\n| order by Events desc\r\n| take 1000",
+              "size": 0,
+              "title": "🧾 Operation inventory (discovery)",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "r-ops"
+          },
+          {
+            "type": 3,
+            "content": {
+              "version": "KqlItem/1.0",
+              "query": "let Expected = datatable(TableName:string, Answers:string)\r\n[\r\n 'SigninLogs','Was the actor sign-in risky / interactive context',\r\n 'AADNonInteractiveUserSignInLogs','Non-interactive / token usage',\r\n 'AADServicePrincipalSignInLogs','Did a new app credential get used',\r\n 'AADManagedIdentitySignInLogs','Was a managed identity involved',\r\n 'AADUserRiskEvents','Identity Protection risk detections',\r\n 'AADRiskyUsers','Current risky-user state',\r\n 'MicrosoftGraphActivityLogs','Which Graph endpoint was called',\r\n 'AzureActivity','Azure RBAC / resource impact',\r\n 'IdentityInfo','Is the identity privileged / high-value',\r\n 'AADProvisioningLogs','Was the object created by provisioning / sync',\r\n 'SecurityAlert','Was malicious behaviour already detected'\r\n];\r\nlet Seen = union isfuzzy=true\r\n (SigninLogs | where TimeGenerated {TimeRange} | summarize c = count() | extend TableName = 'SigninLogs'),\r\n (AADNonInteractiveUserSignInLogs | where TimeGenerated {TimeRange} | summarize c = count() | extend TableName = 'AADNonInteractiveUserSignInLogs'),\r\n (AADServicePrincipalSignInLogs | where TimeGenerated {TimeRange} | summarize c = count() | extend TableName = 'AADServicePrincipalSignInLogs'),\r\n (AADManagedIdentitySignInLogs | where TimeGenerated {TimeRange} | summarize c = count() | extend TableName = 'AADManagedIdentitySignInLogs'),\r\n (AADUserRiskEvents | where TimeGenerated {TimeRange} | summarize c = count() | extend TableName = 'AADUserRiskEvents'),\r\n (AADRiskyUsers | summarize c = count() | extend TableName = 'AADRiskyUsers'),\r\n (MicrosoftGraphActivityLogs | where TimeGenerated {TimeRange} | summarize c = count() | extend TableName = 'MicrosoftGraphActivityLogs'),\r\n (AzureActivity | where TimeGenerated {TimeRange} | summarize c = count() | extend TableName = 'AzureActivity'),\r\n (IdentityInfo | summarize c = count() | extend TableName = 'IdentityInfo'),\r\n (AADProvisioningLogs | where TimeGenerated {TimeRange} | summarize c = count() | extend TableName = 'AADProvisioningLogs'),\r\n (SecurityAlert | where TimeGenerated {TimeRange} | summarize c = count() | extend TableName = 'SecurityAlert')\r\n| summarize Records = sum(c) by TableName;\r\nExpected\r\n| join kind=leftouter Seen on TableName\r\n| extend Records = coalesce(Records, 0), Availability = iff(Records > 0, '✅ Available', '⚠️ Not present')\r\n| project TableName, Availability, Records, Answers\r\n| order by Availability asc, TableName asc",
+              "size": 0,
+              "title": "🧷 Enrichment table availability",
+              "timeContext": {
+                "durationMs": 604800000
+              },
+              "timeContextFromParameter": "TimeRange",
+              "queryType": 0,
+              "resourceType": "microsoft.operationalinsights/workspaces",
+              "crossComponentResources": [
+                "{Workspace}"
+              ],
+              "visualization": "table"
+            },
+            "name": "r-enrich"
+          }
+        ]
+      },
+      "conditionalVisibility": {
+        "parameterName": "selectedTab",
+        "comparison": "isEqualTo",
+        "value": "Readiness"
+      },
+      "name": "group - readiness"
+    }
+  ],
+  "styleSettings": {},
+  "fromTemplateId": "sentinel-EntraAuditLogsControlPlane",
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
