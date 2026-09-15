@@ -221,3 +221,33 @@ Are Your Firewall Logs Too Noisy? Stop Attacks with Sentinel https://youtu.be/_q
 16:15 Analytics Rules , Hunting queries and Automated Alerting
 18:32 GitHub Resources & ARM Template Deployment
 
+Microsoft Security Value & Adoption Workbook | Prove Your Security ROI with Sentinel https://youtu.be/sewPR-ifPrU
+
+00:00 - Introduction to the Microsoft Security Value & Adoption Workbook
+01:18 - General Architecture & Telemetry Sources
+02:05 - Executive Dashboard & Security Outcomes
+02:58 - Workload Adoption & License Maturity
+03:39 - Threat Detection, Prevention & MITRE ATT&CK Mapping
+04:39 - Cross-Domain Correlation in Microsoft Defender XDR
+05:30 - Identity Protection & Users at Risk
+06:14 - Defender for Endpoint Telemetry with Advanced Hunting
+07:48 - Email & Cloud Apps Security Posture
+08:51 - SOC Operations & Efficiency Metrics
+09:34 - Capability Roadmap & Security Gap Analysis
+11:55 - Historical Data Queries with Data Lake
+13:42 - Microsoft Graph API Integration & Secure Score
+15:22 - Summary & Strategic Value of the Workbook
+
+M365 Copilot Security Monitoring with Microsoft Sentinel | Detections, Alerts & Threat Hunting https://youtu.be/1mkXnubckgw
+
+00:00 - Introduction & Overview
+00:46 - GitHub Repository & ARM Deployment
+01:34 - Telemetry & Simulated Alerts in Defender XDR
+03:25 - Configuring the M365 Copilot Sentinel Connector
+04:41 - M365 Copilot Attack Surface & AI Risks
+05:52 - Running Advanced Hunting Queries
+07:16 - Analytics Rules & CopilotActivity Table Schema
+08:54 - Threat Hunting Scenarios (Jailbreaks & Data Exposure....)
+09:57 - AI Agents Security & Monitoring Workbook
+12:28 - Summary & Key Takeaways
+
