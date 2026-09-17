@@ -1,0 +1,53 @@
+id: 1947185a-ad4c-47c8-b0b2-a6c2bbb7e343
+name: APIM AI Gateway - New API operation used by known agent or caller
+description: |
+  Detects a known agent or caller using an API operation absent from its prior
+  30-day history, with at least two calls in the last hour. This can indicate
+  access drift, goal hijacking, or a newly exposed capability. Expected releases
+  and newly onboarded workflows can match; correlate with approved changes.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT1H
+queryPeriod: P30D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [Discovery, Execution]
+relevantTechniques: [T1580, T1059]
+query: |
+  let recentWindow=1h;
+  let baselineWindow=30d;
+  let Baseline=AppRequests
+  | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), APIName=coalesce(tostring(Properties["API Name"]), Name), Operation=coalesce(tostring(Properties["Operation Name"]), Name)
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller)
+  | distinct AgentKey, APIName, Operation;
+  let KnownAgents=Baseline | distinct AgentKey;
+  let Recent=AppRequests
+  | where TimeGenerated > ago(recentWindow)
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), APIName=coalesce(tostring(Properties["API Name"]), Name), Operation=coalesce(tostring(Properties["Operation Name"]), Name)
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller);
+  Recent
+  | join kind=inner KnownAgents on AgentKey
+  | join kind=leftanti Baseline on AgentKey, APIName, Operation
+  | summarize Calls=sum(ItemCount), Failures=sum(iff(Success == false, ItemCount, 0)), ResultCodes=make_set(ResultCode, 10), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), Caller=take_any(Caller), ClientIP=take_any(ClientIP), Country=take_any(ClientCountryOrRegion) by AgentKey, APIName, Operation
+  | where Calls >= 2
+  | extend TimeGenerated=LastSeen, FailureRate=round(100.0 * todouble(Failures) / max_of(todouble(Calls), 1.0), 2), Signal="FIRST-SEEN API OPERATION"
+  | project TimeGenerated, Signal, AgentKey, Caller, ClientIP, Country, APIName, Operation, Calls, Failures, FailureRate, ResultCodes, FirstSeen, LastSeen
+  | order by Calls desc
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: AgentKey}]
+- entityType: IP
+  fieldMappings: [{identifier: Address, columnName: ClientIP}]
+eventGroupingSettings: {aggregationKind: SingleAlert}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: true, lookbackDuration: P1D, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, BehavioralAnalytics, AccessDrift]

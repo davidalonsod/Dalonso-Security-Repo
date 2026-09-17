@@ -1,0 +1,42 @@
+id: 9e32ed99-1e96-450a-b2af-8965f51eebc2
+name: APIM AI Gateway - High API failure rate
+description: |
+  Detects an APIM AI gateway agent, caller, API, and operation with at least 20
+  requests and a failure rate of 50 percent or greater in 30 minutes. This
+  exposes gradual degradation, malformed-request loops, and broad API misuse
+  that may not meet the concentrated 429 or 5xx thresholds in the availability
+  rule. Authentication and policy blocks can overlap with dedicated analytics.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT15M
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [Impact, Discovery]
+relevantTechniques: [T1499, T1046]
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), APIName=coalesce(tostring(Properties["API Name"]), Name), Operation=coalesce(tostring(Properties["Operation Name"]), Name), Failed=Success == false or toint(ResultCode) >= 400
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller)
+  | summarize TotalRequests=sum(ItemCount), FailedRequests=sum(iff(Failed, ItemCount, 0)), ServerErrors=sum(iff(toint(ResultCode) between (500 .. 599), ItemCount, 0)), ResultCodes=make_set(ResultCode, 12), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), Caller=take_any(Caller), ClientIP=take_any(ClientIP), Country=take_any(ClientCountryOrRegion) by bin(TimeGenerated, 30m), AgentKey, APIName, Operation
+  | extend FailureRate=round(100.0 * todouble(FailedRequests) / max_of(todouble(TotalRequests), 1.0), 2)
+  | where TotalRequests >= 20 and FailureRate >= 50.0
+  | extend Signal=case(ServerErrors >= 10, "HIGH FAILURE RATE WITH SERVER IMPACT", "HIGH API FAILURE RATE")
+  | project TimeGenerated, Signal, AgentKey, Caller, ClientIP, Country, APIName, Operation, TotalRequests, FailedRequests, ServerErrors, FailureRate, ResultCodes, FirstSeen, LastSeen
+  | order by FailureRate desc, TotalRequests desc
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: AgentKey}]
+- entityType: IP
+  fieldMappings: [{identifier: Address, columnName: ClientIP}]
+eventGroupingSettings: {aggregationKind: AlertPerResult}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: true, lookbackDuration: PT12H, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, Reliability, APIAbuse]

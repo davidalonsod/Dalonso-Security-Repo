@@ -1,0 +1,55 @@
+id: 64c8a1c4-1932-4cbe-9bb4-b248c9b61be9
+name: APIM AI Gateway - New country for known agent or caller
+description: |
+  Detects a known APIM AI gateway agent or caller generating at least three
+  requests from a country absent from its prior 30-day history. Application
+  Insights derives country from the incoming IP but commonly stores ClientIP as
+  0.0.0.0; country can still be available. VPNs, mobile users, proxies, and
+  global services can produce legitimate changes.
+severity: Low
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT1H
+queryPeriod: P30D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [InitialAccess]
+relevantTechniques: [T1078]
+query: |
+  let recentWindow=1h;
+  let baselineWindow=30d;
+  let Baseline=AppRequests
+  | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), Country=tostring(ClientCountryOrRegion)
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller)
+  | where isnotempty(Country)
+  | distinct AgentKey, Country;
+  let KnownAgents=Baseline | distinct AgentKey;
+  AppRequests
+  | where TimeGenerated > ago(recentWindow)
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), Country=tostring(ClientCountryOrRegion), City=tostring(ClientCity), APIName=coalesce(tostring(Properties["API Name"]), Name)
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller)
+  | where isnotempty(Country)
+  | join kind=inner KnownAgents on AgentKey
+  | join kind=leftanti Baseline on AgentKey, Country
+  | summarize Requests=sum(ItemCount), APIs=make_set(APIName, 10), Operations=make_set(Name, 20), Cities=make_set(City, 10), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), Caller=take_any(Caller), ClientIP=take_any(ClientIP) by AgentKey, Country
+  | where Requests >= 3
+  | extend TimeGenerated=LastSeen, Signal="NEW COUNTRY FOR KNOWN AGENT OR CALLER"
+  | project TimeGenerated, Signal, AgentKey, Caller, ClientIP, Country, Cities, Requests, APIs, Operations, FirstSeen, LastSeen
+  | order by Requests desc
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: AgentKey}]
+- entityType: IP
+  fieldMappings: [{identifier: Address, columnName: ClientIP}]
+eventGroupingSettings: {aggregationKind: SingleAlert}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: false, lookbackDuration: P1D, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, GeographicAnomaly]

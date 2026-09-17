@@ -1,0 +1,58 @@
+id: d7898148-3b4d-40df-b4a9-4d6ce78bd93e
+name: APIM AI Gateway - Abnormal request volume by agent or caller
+description: |
+  Detects an APIM AI gateway agent or caller whose last-hour request volume is
+  at least 50 requests, three times its seven-day hourly median, and 1.5 times
+  its historical p95. Requires at least six populated baseline hours. This can
+  indicate runaway automation, denial-of-wallet activity, or abuse, but planned
+  batch jobs and load tests can produce the same shape.
+
+  AgentKey prefers custom AgentId/ApplicationId dimensions, then APIM role,
+  subscription, authenticated user, user ID, or client IP. Add stable custom
+  dimensions for reliable per-agent baselines.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT1H
+queryPeriod: P7D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [Impact]
+relevantTechniques: [T1496, T1499]
+query: |
+  let recentWindow=1h;
+  let baselineWindow=7d;
+  let Historical=AppRequests
+  | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), APIName=coalesce(tostring(Properties["API Name"]), Name)
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller)
+  | summarize HourRequests=sum(ItemCount) by AgentKey, APIName, bin(TimeGenerated, 1h)
+  | summarize BaselineMedian=percentile(HourRequests, 50), BaselineP95=percentile(HourRequests, 95), BaselineHours=count() by AgentKey, APIName;
+  let Current=AppRequests
+  | where TimeGenerated > ago(recentWindow)
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), APIName=coalesce(tostring(Properties["API Name"]), Name)
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller)
+  | summarize CurrentRequests=sum(ItemCount), Operations=dcount(Name), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), Caller=take_any(Caller), ClientIP=take_any(ClientIP) by AgentKey, APIName;
+  Current
+  | join kind=inner Historical on AgentKey, APIName
+  | extend MedianRatio=round(todouble(CurrentRequests) / max_of(todouble(BaselineMedian), 1.0), 2), P95Ratio=round(todouble(CurrentRequests) / max_of(todouble(BaselineP95), 1.0), 2)
+  | where BaselineHours >= 6 and CurrentRequests >= 50 and MedianRatio >= 3.0 and P95Ratio >= 1.5
+  | extend TimeGenerated=LastSeen, Signal="ABNORMAL API CONSUMPTION"
+  | project TimeGenerated, Signal, AgentKey, Caller, ClientIP, APIName, CurrentRequests, BaselineMedian, BaselineP95, MedianRatio, P95Ratio, BaselineHours, Operations, FirstSeen, LastSeen
+  | order by MedianRatio desc
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: AgentKey}]
+- entityType: IP
+  fieldMappings: [{identifier: Address, columnName: ClientIP}]
+eventGroupingSettings: {aggregationKind: SingleAlert}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: true, lookbackDuration: PT12H, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, BehavioralAnalytics, OWASP-LLM10]

@@ -1,0 +1,42 @@
+id: c965c8d4-6630-4dfa-9af6-6dc1017c7552
+name: APIM AI Gateway - Repeated unauthorized requests
+description: |
+  Detects at least 10 APIM AI gateway authentication or policy denials from one
+  agent or caller in five minutes. Repeated 401 responses can indicate invalid
+  credential use; repeated 403 responses can indicate authorization, IP, quota,
+  or content-policy denial. The status code alone does not identify the control,
+  so review policy traces and response evidence.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT15M
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [CredentialAccess, Discovery]
+relevantTechniques: [T1110, T1046]
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | where ResultCode in ("401", "403")
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), APIName=coalesce(tostring(Properties["API Name"]), Name)
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller)
+  | summarize DeniedRequests=sum(ItemCount), DistinctOperations=dcount(Name), Operations=make_set(Name, 20), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), Caller=take_any(Caller), ClientIP=take_any(ClientIP), Country=take_any(ClientCountryOrRegion) by bin(TimeGenerated, 5m), AgentKey, APIName, ResultCode
+  | where DeniedRequests >= 10
+  | extend Signal=case(ResultCode == "401", "REPEATED AUTHENTICATION FAILURES", "REPEATED POLICY OR AUTHORIZATION DENIALS")
+  | project TimeGenerated, Signal, AgentKey, Caller, ClientIP, Country, APIName, ResultCode, DeniedRequests, DistinctOperations, Operations, FirstSeen, LastSeen
+  | order by DeniedRequests desc
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: AgentKey}]
+- entityType: IP
+  fieldMappings: [{identifier: Address, columnName: ClientIP}]
+eventGroupingSettings: {aggregationKind: AlertPerResult}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: true, lookbackDuration: PT12H, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, Authentication, APIAbuse]
