@@ -5,7 +5,8 @@ queries** for **Foundry / Agent Service** runtime telemetry. Everything
 here reads the real trace shape that Foundry emits to Application
 Insights and exports to the Sentinel workspace:
 
-- Table: **`AppDependencies`** (spans), exported from the project's
+- Tables: **`AppDependencies`** (structural spans) and protected
+  **`AppGenAIContent`** (recorded prompts, responses, and tool payloads), exported from the project's
   workspace-based Application Insights into the Sentinel workspace
   (e.g. `LAWSentinel`).
 - Property bag: **`Properties`** (not `customDimensions`).
@@ -22,10 +23,9 @@ bundle (which reads the OpenAI CCF Analytics-tier tables).
 
 | Folder | Contents |
 | --- | --- |
-| `AnalyticalRules/` | 30 scheduled analytic rules (YAML) |
-| `HuntingQueries/` | 12 guardrail / content-safety / behaviour / cross-table hunting queries (YAML) |
-| `Watchlists/` | `FoundryTrustedToolSources` (approved tool / RAG hosts) and `AgentIdentityMap` (agent name -> Entra identity) used by the untrusted-source and cross-table correlation content |
-| `Simulation/` | Test harness that drives prompts so the rules / hunts light up |
+| `AnalyticalRules/` | 36 scheduled analytic rules (YAML) |
+| `HuntingQueries/` | 21 guardrail, behavior, MCP, and cross-table hunting queries (YAML) |
+| `Watchlists/` | `FoundryTrustedToolSources`, `FoundryMcpApprovedServers`, and `AgentIdentityMap` |
 | `Deploy/` | ARM template + generator (`New-FoundryArmTemplate.ps1`) and `Enable-FoundryTracing.ps1` (turns on server-side tracing across every Foundry project) |
 
 ### Analytic rules
@@ -55,6 +55,12 @@ bundle (which reads the OpenAI CCF Analytics-tier tables).
 | `AnalyticalRules/FoundryHitLConsentBypass.yaml` | High | Consent fatigue (>=5 approvals / 5 min) or compound action (>=3 sensitive tools, >=2 distinct, in 2 min) | `gen_ai.tool.consent.*`, `gen_ai.tool.user_approved`, `gen_ai.tool.{name,type}` |
 | `AnalyticalRules/FoundryMcpToolDescriptionChange.yaml` | High | New SHA-256 of `gen_ai.tool.description` for an established (server, tool) pair (>=10 baseline calls, >=3 days old) | `gen_ai.tool.description`, `mcp.tool.description` |
 | `AnalyticalRules/FoundryMcpCrossServerOverride.yaml` | High | Override-instruction phrasing in tool desc / args / result AND >=2 distinct tool servers in conversation | `gen_ai.tool.{description,call.arguments,call.result}`, `mcp.server.name` |
+| `AnalyticalRules/FoundryMcpUnapprovedServerExecution.yaml` | Medium | Observed MCP server execution outside the approved-server watchlist | MCP server URL/label/`Target` + `FoundryMcpApprovedServers` |
+| `AnalyticalRules/FoundryMcpCommandToolExecution.yaml` | High | Successful command-capable MCP tool execution | `gen_ai.tool.{name,type,description}` + server metadata |
+| `AnalyticalRules/FoundryMcpExploitIntentExecutionChain.yaml` | High | Exploit or remote-command intent followed by command-capable MCP execution in the same trace | `AppGenAIContent.InputMessages` + `AppDependencies` tool spans |
+| `AnalyticalRules/FoundryInternalNetworkTargetToolCall.yaml` | High | Successful tool span carrying a loopback, link-local, metadata-service, or RFC1918 HTTP/S target | protected/legacy tool arguments and results + `Success` |
+| `AnalyticalRules/FoundryUnsafeActiveContentInOutput.yaml` | Medium | Active HTML, script, event-handler, executable URI, or encoded tag marker in output | protected/legacy output content |
+| `AnalyticalRules/FoundryToolErrorStorm.yaml` | Medium | >=8 failures and >=50% failure ratio for one tool in a conversation | `Success`, `ResultCode`, `gen_ai.tool.name` |
 | `AnalyticalRules/FoundryAgentMemoryPoisoning.yaml` | High | Memory write or recall content matches injection markers; recall sub-signal also requires sensitive tool fire <= 30 min later | `gen_ai.memory.*`, `gen_ai.thread.message.content`, `gen_ai.tool.name` |
 | `AnalyticalRules/FoundryCuaVisualAttack.yaml` | High | Hidden Unicode (Tag block / zero-width / bidi) or prompt-injection markers in computer-use observation / screenshot text | `gen_ai.computer_use.observation`, `gen_ai.computer_use.screenshot.text` |
 | `AnalyticalRules/FoundryGoalDriftBetweenSpans.yaml` | Medium | Benign first input AND no sensitive intent vocabulary, yet >=3 sensitive tool calls in same conversation within 2h | `gen_ai.input.messages` + `gen_ai.tool.{name,type}` |
@@ -65,9 +71,10 @@ bundle (which reads the OpenAI CCF Analytics-tier tables).
 > **Identity note**: Foundry telemetry has no human-user field, so the
 > rules pivot on the **agent** (`gen_ai.agent.name`) and **conversation**
 > (`gen_ai.conversation.id`). Account entities map to the agent name.
-> The text-content rules (prompt injection, sensitive output, untrusted
-> tool args) only fire when
-> `AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED=true`.
+> Text-content rules only fire when content recording is explicitly
+> enabled. Starting September 30, 2026, new content values are read from
+> protected `AppGenAIContent`; structural spans remain in
+> `AppDependencies`.
 
 ### Hunting queries
 
@@ -84,6 +91,9 @@ bundle (which reads the OpenAI CCF Analytics-tier tables).
 | `HuntingQueries/AgentDormancyBreak.yaml` | Agent silent >=7 days then reactivates (dormant-then-active) | `gen_ai.agent.name` |
 | `HuntingQueries/AgentCostAnomalyByDimension.yaml` | Token-cost anomaly per model via `series_decompose_anomalies` | `gen_ai.usage.*` |
 | `HuntingQueries/AgentMemoryOperations.yaml` | Inventory of agent memory write / recall spans (paired with `FoundryAgentMemoryPoisoning`) | `gen_ai.memory.*`, `gen_ai.thread.message.content` |
+| `HuntingQueries/FoundryMcpInventory.yaml` | Observed MCP servers, tools, agents, models, failures, and latency | Tool spans + server URL/label/`Target` variants |
+| `HuntingQueries/FoundryMcpExternalTargets.yaml` | Explicit HTTP/S MCP destinations requiring egress and ownership review | MCP server URL/label/`Target` variants |
+| `HuntingQueries/FoundryMcpTraceChains.yaml` | Agent-to-MCP execution chains correlated by W3C operation ID | `OperationId` + tool spans |
 
 #### Cross-table correlation hunts
 
@@ -126,13 +136,14 @@ az deployment group create `
 
 Full details in [`Deploy/README.md`](./Deploy/README.md).
 
-> **Watchlist**: the `FoundryUntrustedToolSource` rule joins against the
+> **Watchlists**: the `FoundryUntrustedToolSource` rule joins against the
 > `FoundryTrustedToolSources` watchlist (column `SourceUri`). The ARM
-> template deploys it from `Watchlists/FoundryTrustedToolSources/` (toggle
-> with the `enableWatchlist` parameter, default true). Replace the seed
+> template also deploys `FoundryMcpApprovedServers` for the MCP server
+> execution rule. Replace the seed
 > rows with your approved tool / RAG hostnames **before enabling that
-> rule** - while the watchlist only has seed rows the leftanti join treats
-> every other fetched host as untrusted and the rule will be noisy.
+> rule**. `FoundryMcpUnapprovedServerExecution` is intentionally disabled
+> until at least one row has `Approved=true` and exact emitted server
+> identifiers have been reviewed.
 
 ---
 
@@ -149,7 +160,7 @@ Microsoft AI Red Team v2.0 taxonomy update
 | Inter-Agent Trust Escalation | `FoundryInterAgentPermissionMismatch`, hunt `AgentCrossAgentInvocation` |
 | Computer Use Agent (CUA) Visual Attack | `FoundryCuaVisualAttack` |
 | Session Context Contamination | `FoundrySessionContextContamination`, `FoundryRedTeamPacingAnomaly`, `FoundryAsciiSmugglingInjection` |
-| MCP / Plugin Abuse | `FoundryMcpToolDescriptionChange`, `FoundryMcpCrossServerOverride`, `FoundryUntrustedToolSource` |
+| MCP / Plugin Abuse | `FoundryMcpToolDescriptionChange`, `FoundryMcpCrossServerOverride`, `FoundryMcpUnapprovedServerExecution`, `FoundryMcpCommandToolExecution`, `FoundryMcpExploitIntentExecutionChain`, `FoundryUntrustedToolSource`; hunts `FoundryMcpInventory`, `FoundryMcpExternalTargets`, `FoundryMcpTraceChains` |
 | Capability / Architecture Disclosure | `FoundrySystemPromptDisclosure`, `FoundryCapabilityDisclosureExtended`, hunt `AgentModelFingerprinting` |
 | HitL bypass (op. finding - most exploited) | `FoundryHitLConsentBypass` |
 | XPIA (op. finding) | `FoundryPromptInjectionPatterns`, `FoundryUntrustedToolSource`, `FoundrySuspiciousUrlInContent`, `FoundryThreatIntelUrlMatch` |
@@ -171,9 +182,11 @@ evolving; rules will start firing as soon as any namespace is populated.
 - A Foundry project with **Application Insights connected** and
   **workspace-based**, pointing at the Sentinel workspace
   (e.g. `LAWSentinel`), so spans land in `AppDependencies`.
-- Content recording on so prompt / response text is captured:
-  `AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED=true` (generate new
-  conversations afterwards - tracing is not retroactive).
+- Content recording explicitly approved and enabled where text matching
+  is required (`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`,
+  or the language-specific equivalent). Tracing is not retroactive.
+- `AppGenAIContent` protected and access limited. Content investigators
+  need `Privileged Monitoring Data Reader`; rules return metadata only.
 - A content-filter policy on the deployment with **Prompt Shields** on
   and the four harm categories set to annotate / block; a **custom
   blocklist** for the blocklist hunt.
@@ -226,12 +239,11 @@ projects already connected) and only writes when you pass `-Apply`.
 
 ### Capture prompt / response content
 
-Server-side tracing records inputs, outputs and tool calls by default,
-which is what most of this content needs. For your **own** code paths
-(custom agents, the `Simulation/` scripts) force content capture with:
+Tracing records structural spans and tool metadata. Prompt, response,
+tool-argument, and tool-result content is disabled by default for client
+instrumentation and must be explicitly approved. For custom code paths:
 
 ```powershell
-$env:AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED   = "true"
 $env:OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = "true"
 ```
 
@@ -326,48 +338,17 @@ anchor. The bundle's detections only ever need rows where
 `Properties['gen_ai.agent.name']` (or another `gen_ai.*` key) is present,
 so anything without a `gen_ai.*` property is fair game to filter.
 
-### Does anything change in the rules?
+### Content-routing migration
 
-No. The rules and hunts already read `AppDependencies` / `Properties` /
-`gen_ai.*`, which is exactly the shape OpenTelemetry produces. Enabling
-tracing is purely an **environment** action - once spans flow, the
-existing content starts matching with no edit required. The only thing to
-keep current is the two watchlists (`FoundryTrustedToolSources` hosts and
-`AgentIdentityMap` agent->identity rows) so the trusted-source and
-cross-table content resolves real values.
+Application Insights moves newly ingested GenAI content values from
+`AppDependencies` to protected `AppGenAIContent` on September 30, 2026.
+The new exploit-chain rule, the existing MCP content rules, and three
+high-severity secret/disclosure rules in this update use dual-source
+queries and deduplicate by trace/span. Other legacy content-reading YAML
+still requires migration; see `FOUNDRY-MCP-DETECTION-CHANGES.md` for the
+review inventory. Keep all three watchlists current so source, MCP server,
+and cross-table identity correlations resolve real values.
 
 ---
 
 
-## Testing
-
-Use `Simulation/` to generate test data. See
-[`Simulation/README.md`](./Simulation/README.md).
-
-```powershell
-$env:AZURE_OPENAI_API_KEY = '<key>'
-.\Simulation\Invoke-AgentGuardrailSimulation.ps1 `
-    -Endpoint   'https://foundrytest45.openai.azure.com' `
-    -Deployment 'gpt-4.1'
-```
-
-Then verify ingestion with `Simulation/Verify-GuardrailTelemetry.kql` in
-the Sentinel workspace.
-
-To also exercise the volume-based detections
-(`FoundryRedTeamPacingAnomaly`, `FoundryTokenCostSpike`,
-`AgentTraceLevelAnomalies`), run several fast passes:
-
-```powershell
-.\Simulation\Invoke-AgentGuardrailSimulation.ps1 `
-    -Endpoint   'https://foundrytest45.openai.azure.com' `
-    -Deployment 'gpt-4.1' `
-    -Repeat 10 -DelaySeconds 0
-```
-
-> **Key-name caveat**: the exact sub-keys under
-> `microsoft.foundry.content_filter.results` vary by API version. The
-> three hunts parse the common names defensively
-> (`jailbreak` / `prompt_shield` / `indirect_attack` /
-> `custom_blocklists`). Run block 2 of the verification KQL to list your
-> tenant's real keys and adjust the `extend` lines if they differ.
