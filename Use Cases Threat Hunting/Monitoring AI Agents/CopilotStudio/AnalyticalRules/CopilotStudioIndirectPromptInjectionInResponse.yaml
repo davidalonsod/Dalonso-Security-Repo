@@ -1,0 +1,74 @@
+id: 58f13aa5-3cb8-43a4-a8f0-6db8381d1183
+name: Copilot Studio - Indirect prompt injection in agent response
+description: |
+  Detects instruction-override markers in a Copilot Studio response when no
+  inbound message in the same conversation contained those markers. This is
+  evidence consistent with malicious instructions arriving through retrieved
+  content, email, web, RAG, or connector output. It does not identify the
+  originating source or prove the agent followed the instruction. Requires Log
+  sensitive properties so AppEvents Properties.text is populated.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- Execution
+relevantTechniques:
+- T1566
+- T1059
+query: |
+  let injectionMarkers=dynamic(["ignore previous instructions", "ignore all previous", "disregard previous", "you are now", "developer mode", "do anything now", "dan mode", "system prompt", "your instructions", "reveal your prompt", "bypass your rules", "without any restrictions", "from now on you", "new instructions:"]);
+  let inbound=AppEvents
+  | where Name == "BotMessageReceived"
+  | extend ConvId=tostring(Properties["conversationId"]), Text=tolower(tostring(Properties["text"]))
+  | where isnotempty(ConvId)
+  | summarize UserMarkerHits=countif(Text has_any (injectionMarkers)), UserMessages=count() by ConvId;
+  let outbound=AppEvents
+  | where Name == "BotMessageSend"
+  | extend ConvId=tostring(Properties["conversationId"]), Output=tolower(tostring(Properties["text"]))
+  | where isnotempty(ConvId) and isnotempty(Output) and Output has_any (injectionMarkers)
+  | summarize BotMarkerHits=count(), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), AccountName=take_any(UserId), ChannelId=take_any(tostring(Properties["channelId"])), ClientIP=take_any(ClientIP) by ConvId;
+  outbound
+  | join kind=leftouter inbound on ConvId
+  | where coalesce(UserMarkerHits, 0) == 0
+  | extend TimeGenerated=LastSeen, AccountName=iff(isempty(AccountName), "unknown-agent", AccountName), Signal="INDIRECT INJECTION MARKER IN RESPONSE"
+  | project TimeGenerated, Signal, AccountName, ConvId, ChannelId, ClientIP, BotMarkerHits, UserMessages, FirstSeen, LastSeen
+  | order by BotMarkerHits desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- IndirectInjection
+- OWASP-LLM01

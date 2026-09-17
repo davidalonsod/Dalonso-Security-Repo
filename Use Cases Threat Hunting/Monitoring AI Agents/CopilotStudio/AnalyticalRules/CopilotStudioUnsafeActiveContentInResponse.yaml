@@ -1,0 +1,64 @@
+id: 785bed6e-5dc0-4ce5-91f4-d78165dd85ab
+name: Copilot Studio - Unsafe active content in agent response
+description: |
+  Detects active HTML, script, event-handler, executable URI, or encoded tag
+  markers in a Copilot Studio BotMessageSend response. The alert confirms that
+  potentially unsafe output was emitted; it does not prove downstream
+  execution. Tune for coding agents and channels that intentionally display
+  source code. Requires Log sensitive properties.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppEvents
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- DefenseEvasion
+relevantTechniques:
+- T1059
+- T1027
+query: |
+  AppEvents
+  | where Name == "BotMessageSend"
+  | extend ConvId=tostring(Properties["conversationId"]), ChannelId=tostring(Properties["channelId"]), Output=tostring(Properties["text"])
+  | where isnotempty(Output)
+  | extend ActiveContent=extract(@"(?i)(</?script\b|<(?:iframe|embed|object)\b|on(?:click|load|error|mouse\w*|change|input)\s*=|(?:href|src)\s*=\s*[""']?javascript\s*:|data\s*:\s*(?:text/html|application/javascript|image/svg\+xml)|&#(?:60|62|x3[cCeEfF]);)", 0, Output)
+  | where isnotempty(ActiveContent)
+  | extend AccountName=iff(isempty(UserId), "unknown-agent", UserId), Signal="UNSAFE ACTIVE CONTENT EMITTED"
+  | project TimeGenerated, Signal, ActiveContent, AccountName, ConvId, ChannelId, SessionId, ClientIP, AppVersion
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- OWASP-LLM05

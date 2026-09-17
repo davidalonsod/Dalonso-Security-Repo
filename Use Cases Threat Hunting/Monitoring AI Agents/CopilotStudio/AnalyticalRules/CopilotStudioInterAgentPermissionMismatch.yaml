@@ -1,0 +1,83 @@
+id: 10d81516-23fe-4be2-b49f-0c67282605d2
+name: Copilot Studio - Inter-agent permission mismatch
+description: |
+  Detects a delegated sub-agent using tools absent from its 14-day baseline
+  after an agent-to-agent invocation in the same conversation. It fires for at
+  least two new tools or one sensitive tool type. This is confused-deputy and
+  inter-agent trust evidence; stable agent naming and target-agent metadata are
+  required, and a new deployment can produce legitimate first-use matches.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- LateralMovement
+- PrivilegeEscalation
+relevantTechniques:
+- T1210
+- T1098
+query: |
+  let baselineWindow=14d;
+  let recentWindow=1h;
+  let calleeBaseline=AppDependencies
+  | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+  | extend Agent=tolower(tostring(Properties["gen_ai.agent.name"])), ToolName=tolower(tostring(Properties["gen_ai.tool.name"]))
+  | where isnotempty(Agent) and isnotempty(ToolName)
+  | distinct Agent, ToolName;
+  let crossInvocations=AppDependencies
+  | where TimeGenerated > ago(recentWindow)
+  | extend Caller=tolower(tostring(Properties["gen_ai.agent.name"])), ConvId=tostring(Properties["gen_ai.conversation.id"]), ToolName=tolower(tostring(Properties["gen_ai.tool.name"])), ToolType=tolower(tostring(Properties["gen_ai.tool.type"])), Callee=tolower(tostring(coalesce(Properties["gen_ai.tool.target_agent"], Properties["microsoft.agent.target_agent.name"], Properties["gen_ai.tool.name"])))
+  | where ToolType == "agent" or ToolName has "connected_agent" or ToolName has "agent_call"
+  | project Caller, ConvId, Callee, InvocationTime=TimeGenerated;
+  let calleeUsage=AppDependencies
+  | where TimeGenerated > ago(recentWindow)
+  | extend Agent=tolower(tostring(Properties["gen_ai.agent.name"])), ConvId=tostring(Properties["gen_ai.conversation.id"]), ToolName=tolower(tostring(Properties["gen_ai.tool.name"])), ToolType=tolower(tostring(Properties["gen_ai.tool.type"]))
+  | where isnotempty(Agent) and isnotempty(ToolName)
+  | project Agent, ConvId, ToolName, ToolType, ToolTime=TimeGenerated, ClientIP;
+  crossInvocations
+  | join kind=inner calleeUsage on ConvId
+  | where Agent == Callee or Agent has Callee or Callee has Agent
+  | where ToolTime between (InvocationTime .. (InvocationTime + 30m))
+  | join kind=leftanti calleeBaseline on Agent, ToolName
+  | summarize NewToolHits=count(), NewTools=make_set(ToolName, 16), NewToolTypes=make_set(ToolType, 8), FirstSeen=min(ToolTime), LastSeen=max(ToolTime), Caller=take_any(Caller), ClientIP=take_any(ClientIP) by Agent, ConvId
+  | where NewToolHits >= 1 and (array_length(NewTools) >= 2 or NewToolTypes has_any ("code_interpreter", "shell", "exec", "sql", "email", "http", "deploy", "azure_write"))
+  | extend TimeGenerated=LastSeen, AccountName=Agent, Signal="INTER-AGENT PERMISSION MISMATCH"
+  | project TimeGenerated, Signal, AccountName, Caller, Agent, ConvId, NewToolHits, NewTools, NewToolTypes, ClientIP, FirstSeen, LastSeen
+  | order by NewToolHits desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: P1D
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- InterAgent
+- TrustEscalation

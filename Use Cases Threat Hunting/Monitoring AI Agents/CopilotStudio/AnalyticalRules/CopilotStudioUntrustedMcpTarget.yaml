@@ -1,0 +1,101 @@
+id: 7b86880a-8261-4404-b831-2e2abd50f0b3
+name: Copilot Studio - Unapproved MCP server or tool invoked
+description: |
+  Raises an incident when Copilot Studio invokes an MCP connector target or
+  environment-level MCP tool that isn't present in the
+  CopilotStudioTrustedConnectors watchlist. This can indicate unreviewed
+  connector drift, a rogue MCP server, or a tool added outside the approved
+  deployment process.
+
+  Populate the watchlist before enabling this rule. ConnectorTarget can be a
+  lowercase connector prefix, a full legacy Target path, or the exact
+  environment-level gen_ai.tool.name value.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: false
+tactics:
+- Execution
+- Persistence
+- CommandAndControl
+relevantTechniques:
+- T1059
+- T1554
+- T1071
+query: |
+  let trusted =
+      _GetWatchlist('CopilotStudioTrustedConnectors')
+      | project ConnectorTarget = tolower(trim(" ", tostring(column_ifexists('ConnectorTarget', ''))))
+      | where isnotempty(ConnectorTarget);
+  let Legacy = AppDependencies
+  | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector"
+  | extend ResourceKey = tolower(tostring(Target)),
+           ResourcePrefix = tolower(tostring(split(Target, "/")[0]))
+  | project TimeGenerated, OperationId, Success, ResultCode, ClientIP,
+      Agent = "", User = "", ConvId = tostring(Properties["conversationId"]),
+      Tool = Name, ToolType = "MCP - connector telemetry", Target = tostring(Target),
+      ResourceKey, ResourcePrefix, Source = "Agent-level connector";
+  let Modern = AppDependencies
+  | where tostring(Properties["gen_ai.operation.name"]) == "execute_tool"
+  | extend Tool = tostring(Properties["gen_ai.tool.name"]),
+           ToolType = tostring(Properties["gen_ai.tool.type"])
+  | where Tool has "mcp" or ToolType has "mcp"
+  | extend ResourceKey = tolower(iff(Target == "GenAI" or isempty(Target), Tool, tostring(Target))),
+           ResourcePrefix = tolower(tostring(split(iff(Target == "GenAI" or isempty(Target), Tool, tostring(Target)), "/")[0]))
+  | project TimeGenerated, OperationId, Success, ResultCode, ClientIP,
+      Agent = tostring(Properties["gen_ai.agent.name"]),
+      User = coalesce(tostring(Properties["user.email"]), tostring(Properties["user.id"])),
+      ConvId = tostring(Properties["gen_ai.conversation.id"]), Tool, ToolType,
+      Target = tostring(Target), ResourceKey, ResourcePrefix,
+      Source = "Environment ExecuteTool";
+  union Legacy, Modern
+  | extend Trusted = ResourcePrefix in (trusted) or ResourceKey in (trusted)
+  | where not(Trusted)
+  | extend AccountName = coalesce(User, Agent, strcat("tool:", Tool))
+  | summarize Calls = count(), Failures = countif(Success == false),
+      Traces = dcount(OperationId), Conversations = make_set(ConvId, 25),
+      FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated),
+      ClientIP = take_any(ClientIP)
+      by AccountName, Agent, Tool, ToolType, Target, ResourceKey, ResourcePrefix, Source
+  | extend TimeGenerated = LastSeen
+  | project TimeGenerated, FirstSeen, LastSeen, AccountName, ClientIP, Agent,
+      Tool, ToolType, Target, ResourceKey, ResourcePrefix, Source,
+      Calls, Failures, Traces, Conversations
+  | order by LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- MCP
+- Allowlist
+- SupplyChain

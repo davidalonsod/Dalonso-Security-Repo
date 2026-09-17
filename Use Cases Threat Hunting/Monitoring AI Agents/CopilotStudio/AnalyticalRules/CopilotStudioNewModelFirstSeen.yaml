@@ -1,0 +1,76 @@
+id: b4b63155-b4f5-4f3f-9c49-61e214e495e2
+name: Copilot Studio - Agent uses a model never seen before
+description: |
+  Detects a model identifier in Copilot Studio environment telemetry that was
+  not used by the same agent during the preceding 14-day baseline. This can
+  expose shadow-model adoption, an unapproved deployment, or model-routing
+  drift. First-seen use is not proof of model poisoning; verify deployment
+  provenance and approved change records.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- DefenseEvasion
+- Execution
+relevantTechniques:
+- T1562
+- T1059
+query: |
+  let recentWindow=1h;
+  let baselineWindow=14d;
+  let recent=AppDependencies
+  | where TimeGenerated > ago(recentWindow)
+  | extend Agent=tostring(Properties["gen_ai.agent.name"]), Model=tolower(tostring(Properties["gen_ai.request.model"])), ConvId=tostring(Properties["gen_ai.conversation.id"]), AccountName=coalesce(tostring(Properties["user.email"]), tostring(Properties["user.id"]), tostring(Properties["gen_ai.agent.name"]), "unknown-agent")
+  | where isnotempty(Agent) and isnotempty(Model);
+  let baseline=AppDependencies
+  | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+  | extend Agent=tostring(Properties["gen_ai.agent.name"]), Model=tolower(tostring(Properties["gen_ai.request.model"]))
+  | where isnotempty(Agent) and isnotempty(Model)
+  | distinct Agent, Model;
+  recent
+  | join kind=leftanti baseline on Agent, Model
+  | summarize Calls=count(), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), Conversations=make_set(ConvId, 10), AccountName=take_any(AccountName), ClientIP=take_any(ClientIP) by Agent, Model
+  | extend TimeGenerated=LastSeen, Signal="FIRST-SEEN MODEL FOR AGENT"
+  | project TimeGenerated, Signal, AccountName, ClientIP, Agent, Model, Calls, Conversations, FirstSeen, LastSeen
+  | order by LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: ClientIP
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- AI
+- ModelDrift
