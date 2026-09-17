@@ -1,0 +1,44 @@
+id: cfe8cb0a-1121-44d7-8b28-9fc3ab2a86cd
+name: APIM AI Gateway - Unsafe active content returned
+description: |
+  Detects a successful APIM AI gateway response containing active HTML,
+  script, event-handler, or executable URI markers. The alert confirms that
+  potentially unsafe output crossed the gateway; it does not prove that a
+  downstream browser, renderer, or automation executed the content. Tune for
+  coding assistants and applications that intentionally return source code.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [Execution, DefenseEvasion]
+relevantTechniques: [T1059, T1027]
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | where Success == true or toint(ResultCode) between (200 .. 299)
+  | extend RequestBody=tostring(Properties["Request-Body"]), ResponseBody=tostring(Properties["Response-Body"])
+  | where isnotempty(ResponseBody)
+  | extend ActiveContent=extract(@"(?i)(<script(?:\s|>)|javascript\s*:|data\s*:\s*text/html|<iframe(?:\s|>)|<object(?:\s|>)|<embed(?:\s|>)|on(?:error|load|click)\s*=|document\.cookie|window\.location\s*=)", 0, ResponseBody)
+  | where isnotempty(ActiveContent)
+  | extend RequestJson=parse_json(RequestBody)
+  | extend Input=tostring(RequestJson.input), Instructions=tostring(RequestJson.instructions), Model=tostring(RequestJson.model), Tools=tostring(RequestJson.tools), Caller=coalesce(UserAuthenticatedId, UserId, ClientIP, "unknown"), RequestId=tostring(Properties["Request Id"]), APIName=tostring(Properties["API Name"])
+  | project TimeGenerated, Signal="UNSAFE ACTIVE CONTENT RETURNED", ActiveContent, Caller, ResultCode, APIName, Name, Url, Model, Input, Instructions, Tools, RequestBody, ResponseBody, RequestId, OperationId, DurationMs
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: Caller}]
+- entityType: CloudApplication
+  fieldMappings: [{identifier: Name, columnName: Model}]
+- entityType: URL
+  fieldMappings: [{identifier: Url, columnName: Url}]
+eventGroupingSettings: {aggregationKind: SingleAlert}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: true, lookbackDuration: PT12H, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, OWASP-LLM05]

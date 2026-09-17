@@ -1,0 +1,39 @@
+id: 8e4899a5-1b4d-4a7e-9c7a-f541c60abc21
+name: APIM AI Gateway - Availability pressure by caller
+description: |
+  Detects concentrated APIM AI gateway throttling or server failures from one
+  caller in a five-minute window. A 429 can show a working rate or token limit,
+  while repeated 5xx responses show availability impact; investigate request
+  pacing and backend health before attributing malicious intent. Thresholds
+  should be tuned to expected automation volume.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT15M
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [Impact]
+relevantTechniques: [T1499]
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, ClientIP, "unknown"), APIName=tostring(Properties["API Name"]), Code=toint(ResultCode)
+  | summarize TotalRequests=count(), Throttled=countif(Code == 429), ServerErrors=countif(Code between (500 .. 599)), Timeouts=countif(Code in (408, 504)), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), Models=make_set(tostring(Properties["Backend Method"]), 10) by bin(TimeGenerated, 5m), Caller, APIName, Name
+  | extend PressureEvents=Throttled + ServerErrors, FailureRate=round(100.0 * todouble(Throttled + ServerErrors) / todouble(TotalRequests), 2)
+  | where Throttled >= 10 or ServerErrors >= 10 or (TotalRequests >= 20 and FailureRate >= 70.0)
+  | extend Signal=case(ServerErrors >= 10, "BACKEND AVAILABILITY IMPACT", Throttled >= 10, "RATE OR TOKEN LIMIT PRESSURE", "HIGH FAILURE CONCENTRATION")
+  | project TimeGenerated, Signal, Caller, APIName, Name, TotalRequests, Throttled, ServerErrors, Timeouts, FailureRate, Models, FirstSeen, LastSeen
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: Caller}]
+eventGroupingSettings: {aggregationKind: AlertPerResult}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: true, lookbackDuration: PT12H, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, Availability, OWASP-LLM10]

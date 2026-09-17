@@ -1,0 +1,40 @@
+id: 87b28e40-0cc2-44d9-ad14-5b156482ee97
+name: APIM AI Gateway - Sensitive data in request body
+description: |
+  Detects secret, credential, JWT, private-key, card-like, or bulk-email
+  indicators in captured APIM request bodies. Returns full payload evidence.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [CredentialAccess, Collection]
+relevantTechniques: [T1552, T1213]
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend RequestBody=tostring(Properties["Request-Body"]), ResponseBody=tostring(Properties["Response-Body"])
+  | where isnotempty(RequestBody)
+  | extend Input=tostring(parse_json(RequestBody).input), Instructions=tostring(parse_json(RequestBody).instructions), Model=tostring(parse_json(RequestBody).model)
+  | extend HasAwsKey=RequestBody matches regex @"AKIA[0-9A-Z]{16}", HasPrivateKey=RequestBody contains "-----BEGIN" and RequestBody contains "PRIVATE KEY-----", HasJwt=RequestBody matches regex @"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}", HasCredentialAssignment=RequestBody matches regex @"(?i)(password|secret|connectionstring|connstring|api[_ -]?key)\s*[:=]", HasCreditCard=RequestBody matches regex @"\b(?:\d[ \-]?){13,16}\b", EmailCount=array_length(extract_all(@"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", RequestBody))
+  | where HasAwsKey or HasPrivateKey or HasJwt or HasCredentialAssignment or HasCreditCard or EmailCount >= 10
+  | extend Signal=strcat(iff(HasAwsKey,"AWSAccessKey;",""),iff(HasPrivateKey,"PrivateKey;",""),iff(HasJwt,"JWT;",""),iff(HasCredentialAssignment,"CredentialAssignment;",""),iff(HasCreditCard,"CreditCardLike;",""),iff(EmailCount>=10,strcat("BulkEmails(",tostring(EmailCount),");"),"")), Caller=coalesce(UserAuthenticatedId, UserId, ClientIP, "unknown"), RequestId=tostring(Properties["Request Id"]), APIName=tostring(Properties["API Name"])
+  | project TimeGenerated, Signal, Caller, Success, ResultCode, APIName, Name, Url, Model, Input, Instructions, RequestBody, ResponseBody, EmailCount, RequestId, OperationId
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: Caller}]
+- entityType: CloudApplication
+  fieldMappings: [{identifier: Name, columnName: Model}]
+- entityType: URL
+  fieldMappings: [{identifier: Url, columnName: Url}]
+eventGroupingSettings: {aggregationKind: SingleAlert}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: false, lookbackDuration: PT12H, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, OWASP-LLM06]

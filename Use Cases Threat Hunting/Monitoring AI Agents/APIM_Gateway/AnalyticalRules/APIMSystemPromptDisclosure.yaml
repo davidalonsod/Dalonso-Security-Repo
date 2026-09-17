@@ -1,0 +1,48 @@
+id: b802ec2a-45cb-4dc6-a4aa-1d39ee63452e
+name: APIM AI Gateway - System prompt disclosure
+description: |
+  Detects a successful APIM AI gateway exchange where the request asks for
+  system or developer instructions and the captured response contains
+  instruction, guardrail, persona, or tool-architecture markers. This is
+  evidence of possible system-prompt disclosure, not proof that every
+  returned phrase was confidential. Tune for approved testing and assistants
+  that intentionally explain their public behavior.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [Collection, CredentialAccess]
+relevantTechniques: [T1213, T1552]
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | where Success == true or toint(ResultCode) between (200 .. 299)
+  | extend RequestBody=tostring(Properties["Request-Body"]), ResponseBody=tostring(Properties["Response-Body"])
+  | where isnotempty(RequestBody) and isnotempty(ResponseBody)
+  | extend RequestJson=parse_json(RequestBody)
+  | extend Input=tostring(RequestJson.input), Instructions=tostring(RequestJson.instructions), Model=tostring(RequestJson.model), Tools=tostring(RequestJson.tools)
+  | extend RequestSearch=tolower(strcat(Input, " ", RequestBody)), ResponseSearch=tolower(ResponseBody)
+  | extend AskedForPrompt=RequestSearch has_any ("system prompt", "developer message", "hidden instructions", "initial instructions", "reveal your prompt", "repeat the words above", "show me your prompt", "print your system", "everything above this line", "verbatim instructions")
+  | extend LeakMarker=ResponseSearch has_any ("you are an", "your role is", "# system", "system prompt", "you must never", "do not reveal", "your instructions are", "you have access to the following tools", "your available tools", "you should always", "never disclose")
+  | where AskedForPrompt and LeakMarker
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, ClientIP, "unknown"), RequestId=tostring(Properties["Request Id"]), APIName=tostring(Properties["API Name"])
+  | project TimeGenerated, Signal="POSSIBLE SYSTEM PROMPT DISCLOSURE", Caller, ResultCode, APIName, Name, Url, Model, Input, Instructions, Tools, RequestBody, ResponseBody, RequestId, OperationId, DurationMs
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: Caller}]
+- entityType: CloudApplication
+  fieldMappings: [{identifier: Name, columnName: Model}]
+- entityType: URL
+  fieldMappings: [{identifier: Url, columnName: Url}]
+eventGroupingSettings: {aggregationKind: SingleAlert}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: true, lookbackDuration: PT12H, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, OWASP-LLM07]

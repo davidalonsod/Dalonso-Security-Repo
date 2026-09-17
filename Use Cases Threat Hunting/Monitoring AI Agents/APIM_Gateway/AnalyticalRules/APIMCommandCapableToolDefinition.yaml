@@ -1,0 +1,39 @@
+id: 65a3930c-47cf-4e81-99e7-abe2f3770fed
+name: APIM AI Gateway - Command-capable tool exposed
+description: |
+  Detects request tool definitions containing shell, command, code execution,
+  PowerShell, terminal, SSH, reverse-shell, or offensive-tool capability.
+  Returns full request and response bodies for capability review.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [Execution]
+relevantTechniques: [T1059]
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend RequestBody=tostring(Properties["Request-Body"]), ResponseBody=tostring(Properties["Response-Body"]), RequestJson=parse_json(tostring(Properties["Request-Body"]))
+  | extend Input=tostring(RequestJson.input), Instructions=tostring(RequestJson.instructions), Model=tostring(RequestJson.model), Tools=tostring(RequestJson.tools)
+  | where Tools matches regex @"(?i)(run[_ -]?(shell|command|code)|execute[_ -]?(shell|command|code)|powershell|cmd\.exe|terminal|reverse[_ -]?shell|metasploit|kali|ssh[_ -]?exec|remote[_ -]?code[_ -]?execution)"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, ClientIP, "unknown"), RequestId=tostring(Properties["Request Id"]), APIName=tostring(Properties["API Name"])
+  | project TimeGenerated, Signal="COMMAND-CAPABLE TOOL EXPOSED", Caller, Success, ResultCode, APIName, Name, Url, Model, Input, Instructions, Tools, RequestBody, ResponseBody, RequestId, OperationId
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: Caller}]
+- entityType: CloudApplication
+  fieldMappings: [{identifier: Name, columnName: Model}]
+- entityType: URL
+  fieldMappings: [{identifier: Url, columnName: Url}]
+eventGroupingSettings: {aggregationKind: SingleAlert}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: false, lookbackDuration: PT12H, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, OWASP-LLM08]

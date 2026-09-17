@@ -1,0 +1,40 @@
+id: 5a480d29-9eb2-4596-a3b8-3118dc865228
+name: APIM AI Gateway - Content safety blocked request
+description: |
+  Detects APIM requests blocked with HTTP 403 where the captured response body
+  reports a failed content-safety check. Returns the complete captured input,
+  instructions, tools, request body, and response body for investigation.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [DefenseEvasion, Execution]
+relevantTechniques: [T1027, T1059]
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend RequestBody=tostring(Properties["Request-Body"]), ResponseBody=tostring(Properties["Response-Body"])
+  | extend RequestJson=parse_json(RequestBody), ResponseJson=parse_json(ResponseBody)
+  | extend PolicyMessage=coalesce(tostring(ResponseJson.message), ResponseBody), PolicyStatus=tostring(ResponseJson.statusCode)
+  | where ResultCode == "403" and PolicyMessage has "content safety"
+  | extend Input=tostring(RequestJson.input), Instructions=tostring(RequestJson.instructions), Model=tostring(RequestJson.model), Tools=tostring(RequestJson.tools), Caller=coalesce(UserAuthenticatedId, UserId, ClientIP, "unknown"), RequestId=tostring(Properties["Request Id"]), APIName=tostring(Properties["API Name"]), ServiceName=tostring(Properties["Service Name"]), Region=tostring(Properties["Region"])
+  | project TimeGenerated, Signal="CONTENT SAFETY BLOCK", Caller, ResultCode, PolicyStatus, PolicyMessage, APIName, Name, Url, Model, Input, Instructions, Tools, RequestBody, ResponseBody, RequestId, OperationId, DurationMs, ServiceName, Region
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: Caller}]
+- entityType: CloudApplication
+  fieldMappings: [{identifier: Name, columnName: Model}]
+- entityType: URL
+  fieldMappings: [{identifier: Url, columnName: Url}]
+eventGroupingSettings: {aggregationKind: SingleAlert}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: true, lookbackDuration: PT12H, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, ContentSafety]

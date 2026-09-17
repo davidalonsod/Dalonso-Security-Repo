@@ -1,0 +1,43 @@
+id: 13404273-fefb-483c-b4bf-d41a54397539
+name: APIM AI Gateway - Prompt injection pattern allowed
+description: |
+  Detects common instruction-override, role-change, system-prompt, or jailbreak
+  markers in a captured request body when APIM returns success. Returns full
+  payload evidence. Tune for approved red-team tests and quoted security content.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes: [AppRequests]
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics: [DefenseEvasion, Execution]
+relevantTechniques: [T1027, T1059]
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | where Success == true or toint(ResultCode) between (200 .. 299)
+  | extend RequestBody=tostring(Properties["Request-Body"]), ResponseBody=tostring(Properties["Response-Body"])
+  | where isnotempty(RequestBody)
+  | extend RequestJson=parse_json(RequestBody), ResponseJson=parse_json(ResponseBody)
+  | extend Input=tostring(RequestJson.input), Instructions=tostring(RequestJson.instructions), Model=tostring(RequestJson.model), Tools=tostring(RequestJson.tools)
+  | extend Search=strcat(Input, " ", RequestBody)
+  | where Search matches regex @"(?i)(ignore (all|any|the|previous|prior|above).{0,40}instruction|disregard.{0,40}instruction|system prompt|developer mode|jailbreak|do anything now|you are now|act as.{0,30}(admin|administrator|system)|olvida.{0,40}instrucci)"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, ClientIP, "unknown"), PolicyMessage=tostring(ResponseJson.message), RequestId=tostring(Properties["Request Id"]), APIName=tostring(Properties["API Name"])
+  | project TimeGenerated, Signal="ALLOWED PROMPT INJECTION PATTERN", Caller, ResultCode, PolicyMessage, APIName, Name, Url, Model, Input, Instructions, Tools, RequestBody, ResponseBody, RequestId, OperationId, DurationMs
+entityMappings:
+- entityType: Account
+  fieldMappings: [{identifier: Name, columnName: Caller}]
+- entityType: CloudApplication
+  fieldMappings: [{identifier: Name, columnName: Model}]
+- entityType: URL
+  fieldMappings: [{identifier: Url, columnName: Url}]
+eventGroupingSettings: {aggregationKind: SingleAlert}
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration: {enabled: true, reopenClosedIncident: true, lookbackDuration: PT12H, matchingMethod: Selected, groupByEntities: [Account], groupByAlertDetails: [], groupByCustomDetails: []}
+version: 1.0.0
+kind: Scheduled
+tags: [Sentinel-As-Code, Custom, APIM, AI, PromptInjection]
