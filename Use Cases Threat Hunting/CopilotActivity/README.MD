@@ -7,7 +7,7 @@ delivered by the Microsoft Copilot data connector.
 
 ## Contents
 
-### Analytical rules - `AnalyticalRules/` (11 rules)
+### Analytical rules - `AnalyticalRules/` (16 rules)
 
 | File | Severity | Coverage | Tactics | Techniques |
 | --- | --- | --- | --- | --- |
@@ -22,6 +22,11 @@ delivered by the Microsoft Copilot data connector.
 | `CopilotSensitiveDataExposure.yaml` | High | Sensitivity labels / classifiers match Confidential / Restricted / PII / PCI lists | Collection, Exfiltration | T1530, T1213, T1567 |
 | `CopilotSystemPromptOverride.yaml` | High | Admin config changes, model swaps, system-prompt edits, runtime override attempts | DefenseEvasion, Persistence | T1562, T1098 |
 | `CopilotTokenCostSpike.yaml` | Medium | Last-hour token usage > 3x agent's 7-day per-hour median (token abuse, runaway loops, wallet drain) | Impact | T1496, T1499 |
+| `CopilotPromptInjectionPatterns.yaml` | Medium | Direct instruction override, role takeover, tool coercion, or embedded data-URI in prompt | InitialAccess, Execution | T1059, T1204 |
+| `CopilotUnsafeActiveContentInResponse.yaml` | Medium | Active HTML, script, event-handler, executable URI, or encoded tag in response | Execution, DefenseEvasion | T1059, T1027 |
+| `CopilotSystemPromptDisclosure.yaml` | High | Prompt asks for hidden instructions and response contains instruction or architecture markers | Collection, CredentialAccess | T1213, T1552 |
+| `CopilotPluginLifecycleAnomaly.yaml` | Medium | First-seen plugin activation, lifecycle burst, or multi-agent plugin change | Persistence, PrivilegeEscalation | T1098, T1505 |
+| `CopilotTraceLevelAnomaly.yaml` | Medium | Excessive message count, interaction count, or sustained per-thread rate | Impact, Execution | T1499, T1059 |
 
 ### Hunting queries - `HuntingQueries/` (14 queries)
 
@@ -50,7 +55,7 @@ drafts that the deployment pipeline explicitly excludes.
 ## Deploy summary
 
 The current ARM template at [`Deploy/azuredeploy.json`](./Deploy/azuredeploy.json)
-ships **25 resources** (11 analytic + 14 hunting). It is rebuilt by:
+ships **30 resources** (16 analytic + 14 hunting). It is rebuilt by:
 
 ```pwsh
 pwsh -NoProfile -File .\Deploy\New-CopilotArmTemplate.ps1
