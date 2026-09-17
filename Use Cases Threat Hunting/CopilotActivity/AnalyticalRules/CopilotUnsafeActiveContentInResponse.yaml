@@ -1,0 +1,71 @@
+id: 418bd6aa-e5b7-4520-af15-279c27510626
+name: Microsoft 365 Copilot - Unsafe active content in response
+description: |
+  Detects active HTML, script, event-handler, executable URI, or encoded tag
+  markers in a Microsoft 365 Copilot response. The alert confirms potentially
+  unsafe output was emitted; it does not prove a downstream client rendered or
+  executed it. Tune for coding scenarios and markdown that intentionally
+  contains source code. Response text is not returned in the alert.
+severity: Medium
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- DefenseEvasion
+relevantTechniques:
+- T1059
+- T1027
+query: |
+  CopilotActivity
+  | where RecordType == "CopilotInteraction"
+  | extend Response=tostring(LLMEventData.Response), ConversationId=tostring(LLMEventData.ConversationId)
+  | where isnotempty(Response)
+  | extend ActiveContent=extract(@"(?i)(</?script\b|<(?:iframe|embed|object)\b|on(?:click|load|error|mouse\w*|change|input)\s*=|(?:href|src)\s*=\s*[""']?javascript\s*:|data\s*:\s*(?:text/html|application/javascript|image/svg\+xml)|&#(?:60|62|x3[cCeEfF]);)", 0, Response)
+  | where isnotempty(ActiveContent)
+  | extend Signal="UNSAFE ACTIVE CONTENT EMITTED"
+  | project TimeGenerated, Signal, ActiveContent, AgentId, AgentName, ActorName, ActorUserId, ConversationId, SrcIpAddr, TenantId
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI
+- OWASP-LLM05

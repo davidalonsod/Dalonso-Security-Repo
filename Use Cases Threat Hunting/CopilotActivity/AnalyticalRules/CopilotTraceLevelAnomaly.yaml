@@ -1,0 +1,74 @@
+id: d9d9abde-91bf-4f39-b2b6-5ddbdd7f3f90
+name: Microsoft 365 Copilot - Trace-level looping anomaly
+description: |
+  Detects a Microsoft 365 Copilot thread with more than 100 messages, more
+  than 50 interactions in under an hour, or a sustained rate above five
+  messages per minute for at least five minutes. Uses confirmed interaction
+  cardinalities as a trace proxy because per-tool execution spans are not
+  exposed. High-volume legitimate use is possible; pair with pacing, cost,
+  jailbreak, and resource-access evidence.
+severity: Medium
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Impact
+- Execution
+relevantTechniques:
+- T1499
+- T1059
+query: |
+  CopilotActivity
+  | where RecordType == "CopilotInteraction"
+  | extend ThreadId=tostring(LLMEventData.ThreadId), InteractionMessages=array_length(LLMEventData.Messages), InteractionPlugins=array_length(LLMEventData.AISystemPlugin), InteractionResources=array_length(LLMEventData.AccessedResources)
+  | where isnotempty(ThreadId)
+  | summarize Interactions=count(), TotalMessages=sum(InteractionMessages), TotalPlugins=sum(InteractionPlugins), TotalResources=sum(InteractionResources), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), ActorName=take_any(ActorName), SrcIpAddr=take_any(SrcIpAddr), TenantId=take_any(TenantId) by ThreadId, AgentId, AgentName, ActorUserId
+  | extend DurationMin=datetime_diff('minute', LastSeen, FirstSeen)
+  | extend MessagesPerMinute=iff(DurationMin > 0, todouble(TotalMessages) / todouble(DurationMin), todouble(TotalMessages))
+  | where TotalMessages > 100 or (Interactions > 50 and DurationMin < 60) or (MessagesPerMinute > 5 and DurationMin >= 5)
+  | extend TimeGenerated=LastSeen, Signal="TRACE-LEVEL LOOPING ANOMALY"
+  | project TimeGenerated, Signal, AgentId, AgentName, ActorName, ActorUserId, ThreadId, SrcIpAddr, TenantId, Interactions, TotalMessages, TotalPlugins, TotalResources, DurationMin, MessagesPerMinute, FirstSeen, LastSeen
+  | order by TotalMessages desc, MessagesPerMinute desc
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI
+- OWASP-LLM10

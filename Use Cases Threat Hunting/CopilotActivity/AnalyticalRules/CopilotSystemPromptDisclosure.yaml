@@ -1,0 +1,72 @@
+id: 66941d34-6847-41dc-899c-bd6ed2520db9
+name: Microsoft 365 Copilot - System prompt disclosure
+description: |
+  Detects an interaction where the user asks for system or developer
+  instructions and the response contains instruction, guardrail, persona, or
+  tool-architecture markers. This is possible prompt-disclosure evidence, not
+  proof that every returned phrase was confidential. Prompt and response text
+  are used for matching but are not returned in the alert.
+severity: High
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Collection
+- CredentialAccess
+relevantTechniques:
+- T1213
+- T1552
+query: |
+  CopilotActivity
+  | where RecordType == "CopilotInteraction"
+  | extend Prompt=tolower(tostring(LLMEventData.Prompt)), Response=tolower(tostring(LLMEventData.Response)), ConversationId=tostring(LLMEventData.ConversationId)
+  | where isnotempty(Prompt) and isnotempty(Response)
+  | extend AskedForPrompt=Prompt has_any ("system prompt", "developer message", "hidden instructions", "initial instructions", "reveal your prompt", "repeat the words above", "show me your prompt", "print your system", "everything above this line", "verbatim instructions")
+  | extend LeakMarker=Response has_any ("you are an", "your role is", "# system", "system prompt", "you must never", "do not reveal", "your instructions are", "you have access to the following tools", "your available tools", "you should always", "never disclose")
+  | where AskedForPrompt and LeakMarker
+  | extend Signal="POSSIBLE SYSTEM PROMPT DISCLOSURE"
+  | project TimeGenerated, Signal, AgentId, AgentName, ActorName, ActorUserId, ConversationId, SrcIpAddr, TenantId
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI
+- OWASP-LLM07

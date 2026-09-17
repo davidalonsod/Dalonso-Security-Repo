@@ -1,0 +1,69 @@
+id: a50df0b2-0e86-40a2-a7cf-b22bb35961f3
+name: Microsoft 365 Copilot - Plugin lifecycle anomaly
+description: |
+  Detects a first-seen actor creating or enabling a Copilot plugin, a burst of
+  at least three plugin lifecycle changes, or changes across at least three
+  agents in one hour. Uses confirmed CopilotActivity plugin RecordType values.
+  This is supply-chain and configuration-drift evidence; verify ownership,
+  approval, and provenance before declaring compromise.
+severity: Medium
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT1H
+queryPeriod: P14D
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Persistence
+- PrivilegeEscalation
+relevantTechniques:
+- T1098
+- T1505
+query: |
+  let lifecycleTypes=dynamic(["CreateCopilotPlugin", "UpdateCopilotPlugin", "EnableCopilotPlugin", "DisableCopilotPlugin"]);
+  let baseline=CopilotActivity
+  | where TimeGenerated between (ago(14d) .. ago(1h)) and RecordType in (lifecycleTypes)
+  | summarize BaselineChanges=count() by ActorUserId;
+  let recent=CopilotActivity
+  | where TimeGenerated > ago(1h) and RecordType in (lifecycleTypes)
+  | summarize RecentChanges=count(), ActivationEvents=countif(RecordType in ("CreateCopilotPlugin", "EnableCopilotPlugin")), DistinctAgents=dcount(AgentId), RecordTypes=make_set(RecordType, 8), AgentIds=make_set(AgentId, 16), AgentNames=make_set(AgentName, 16), ActorName=take_any(ActorName), SrcIpAddr=take_any(SrcIpAddr), TenantId=take_any(TenantId), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated) by ActorUserId;
+  recent
+  | join kind=leftouter baseline on ActorUserId
+  | extend BaselineChanges=coalesce(BaselineChanges, 0)
+  | where (BaselineChanges == 0 and ActivationEvents >= 1) or RecentChanges >= 3 or DistinctAgents >= 3
+  | extend TimeGenerated=LastSeen, Signal=case(BaselineChanges == 0 and ActivationEvents >= 1, "FIRST-SEEN PLUGIN ACTIVATION", RecentChanges >= 3, "PLUGIN LIFECYCLE BURST", "MULTI-AGENT PLUGIN CHANGE")
+  | project TimeGenerated, Signal, ActorName, ActorUserId, SrcIpAddr, TenantId, RecentChanges, ActivationEvents, BaselineChanges, DistinctAgents, RecordTypes, AgentIds, AgentNames, FirstSeen, LastSeen
+  | order by RecentChanges desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: P1D
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI
+- SupplyChain

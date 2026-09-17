@@ -1,0 +1,72 @@
+id: a9ab0fd0-cf31-44cd-bc6e-df4e913405aa
+name: Microsoft 365 Copilot - Direct prompt injection patterns
+description: |
+  Detects direct instruction override, role takeover, system-prompt probing,
+  tool coercion, and large embedded data-URI markers in Microsoft 365 Copilot
+  prompts. A lexical match shows suspicious input reached Copilot; it does not
+  prove the model followed it or a tool acted. Prompt text is used for matching
+  but is not returned in the alert.
+severity: Medium
+requiredDataConnectors:
+- connectorId: MicrosoftCopilot
+  dataTypes:
+  - CopilotActivity
+queryFrequency: PT15M
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- InitialAccess
+- Execution
+relevantTechniques:
+- T1059
+- T1204
+query: |
+  let injectionPhrases=dynamic(["ignore previous instructions", "ignore prior instructions", "disregard the above", "you are now", "act as system", "system prompt:", "developer mode", "bypass safety", "reveal your prompt", "print your instructions", "exfiltrate", "send to attacker"]);
+  let toolCoercion=dynamic(["regardless of restrictions", "without confirming", "skip approval", "use admin privileges", "elevate to"]);
+  CopilotActivity
+  | where RecordType == "CopilotInteraction"
+  | extend Prompt=tostring(LLMEventData.Prompt), ConversationId=tostring(LLMEventData.ConversationId)
+  | extend PromptSearch=tolower(Prompt)
+  | where PromptSearch has_any (injectionPhrases) or PromptSearch has_any (toolCoercion) or PromptSearch matches regex @"data:[a-z/+.\-]+;base64,[A-Za-z0-9+/=]{200,}"
+  | extend Signal="DIRECT PROMPT INJECTION PATTERN"
+  | project TimeGenerated, Signal, AgentId, AgentName, ActorName, ActorUserId, ConversationId, SrcIpAddr, TenantId
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: AgentName
+  - identifier: AppId
+    columnName: AgentId
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: ActorName
+- entityType: IP
+  fieldMappings:
+  - identifier: Address
+    columnName: SrcIpAddr
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: PT6H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    - CloudApplication
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Copilot
+- AI
+- OWASP-LLM01
