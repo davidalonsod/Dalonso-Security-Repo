@@ -1,0 +1,15 @@
+id: e5b4bbcf-dacb-48c4-8381-e32dbb24b892
+name: APIM AI Gateway - Model and tool inventory from request bodies
+description: Inventories models, tool-choice settings, stream mode, and complete tool definitions seen by APIM.
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend RequestBody=tostring(Properties["Request-Body"])
+  | where isnotempty(RequestBody)
+  | extend RequestJson=parse_json(RequestBody)
+  | extend Model=tostring(RequestJson.model), Tools=tostring(RequestJson.tools), ToolChoice=tostring(RequestJson.tool_choice), Stream=tostring(RequestJson.stream), APIName=tostring(Properties["API Name"])
+  | summarize Requests=count(), Successful=countif(Success==true), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), SampleRequestBody=take_any(RequestBody) by APIName, Model, ToolChoice, Stream, Tools
+  | order by Requests desc
+tactics: [Discovery]
+techniques: [T1580]
+tags: [Sentinel-As-Code, Custom, APIM, AI]

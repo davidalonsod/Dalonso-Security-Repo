@@ -1,0 +1,16 @@
+id: fae252a2-036e-4788-85f2-45b6d21abf00
+name: APIM AI Gateway - Full request and response body investigation
+description: Full APIM payload evidence with parsed input, instructions, model, tools, route, and correlation IDs.
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend RequestBody=tostring(Properties["Request-Body"]), ResponseBody=tostring(Properties["Response-Body"])
+  | where isnotempty(RequestBody) or isnotempty(ResponseBody)
+  | extend RequestJson=parse_json(RequestBody), ResponseJson=parse_json(ResponseBody)
+  | extend Input=tostring(RequestJson.input), Instructions=tostring(RequestJson.instructions), Model=tostring(RequestJson.model), Tools=tostring(RequestJson.tools), ToolChoice=tostring(RequestJson.tool_choice), Stream=tostring(RequestJson.stream), PolicyStatus=tostring(ResponseJson.statusCode), PolicyMessage=tostring(ResponseJson.message), APIName=tostring(Properties["API Name"]), RequestId=tostring(Properties["Request Id"]), Caller=coalesce(UserAuthenticatedId, UserId, ClientIP, "unknown")
+  | project TimeGenerated, Success, ResultCode, PolicyStatus, PolicyMessage, Caller, APIName, Name, Url, Model, Stream, ToolChoice, Input, Instructions, Tools, RequestBody, ResponseBody, RequestId, OperationId, DurationMs
+  | order by TimeGenerated desc
+  | take 500
+tactics: [Discovery, Collection]
+techniques: [T1580, T1213]
+tags: [Sentinel-As-Code, Custom, APIM, AI]

@@ -1,0 +1,14 @@
+id: c60a0291-6b33-494d-8610-1bbefe527242
+name: APIM AI Gateway - Content safety blocks by model
+description: Aggregates confirmed AppRequests content-safety blocks by API, model, caller, and operation.
+query: |
+  AppRequests
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend RequestBody=tostring(Properties["Request-Body"]), ResponseBody=tostring(Properties["Response-Body"]), RequestJson=parse_json(tostring(Properties["Request-Body"])), ResponseJson=parse_json(tostring(Properties["Response-Body"]))
+  | extend PolicyMessage=coalesce(tostring(ResponseJson.message),ResponseBody), Model=tostring(RequestJson.model), Caller=coalesce(UserAuthenticatedId,UserId,ClientIP,"unknown"), APIName=tostring(Properties["API Name"])
+  | where ResultCode == "403" and PolicyMessage has "content safety"
+  | summarize Blocks=count(), Operations=dcount(OperationId), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated) by APIName, Model, Caller, Name
+  | order by Blocks desc
+tactics: [DefenseEvasion]
+techniques: [T1027]
+tags: [Sentinel-As-Code, Custom, APIM, AI, ContentSafety]
