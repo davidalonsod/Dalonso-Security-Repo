@@ -1,0 +1,67 @@
+id: 5278e96c-d3fa-4b43-896c-741a3fdad50d
+name: Foundry - Tool error and retry storm
+description: |
+  Detects at least eight failed calls to the same Foundry tool in one
+  conversation during the last hour, with a failure ratio of 50 percent or
+  greater. This can indicate malformed-argument fuzzing, capability probing,
+  or a runaway retry loop. It is an availability and abuse signal, not proof
+  of malicious intent; tune the threshold for high-volume agents.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Impact
+- Discovery
+relevantTechniques:
+- T1499
+- T1592
+query: |
+  let failThreshold=8;
+  AppDependencies
+  | where isnotempty(Properties["gen_ai.tool.name"])
+  | extend Agent=tostring(Properties["gen_ai.agent.name"]), Model=tostring(Properties["gen_ai.request.model"]), ProjectId=tostring(Properties["microsoft.foundry.project.id"]), ConvId=tostring(Properties["gen_ai.conversation.id"]), ToolName=tolower(tostring(Properties["gen_ai.tool.name"])), Success_=tostring(column_ifexists('Success', '')), ToolResultCode=tostring(column_ifexists('ResultCode', ''))
+  | extend Failed=Success_ =~ "false" or ToolResultCode startswith "4" or ToolResultCode startswith "5"
+  | summarize TotalCalls=count(), FailedCalls=countif(Failed), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), ResultCodes=make_set(ToolResultCode, 10), Agent=take_any(Agent), Model=take_any(Model), ProjectId=take_any(ProjectId) by ConvId, ToolName
+  | extend FailRatio=round(todouble(FailedCalls) / todouble(TotalCalls), 2), DurationMin=datetime_diff('minute', LastSeen, FirstSeen)
+  | where FailedCalls >= failThreshold and FailRatio >= 0.5
+  | extend TimeGenerated=LastSeen, AccountName=iff(isempty(Agent), "unknown-agent", Agent), Signal="TOOL ERROR OR RETRY STORM"
+  | project TimeGenerated, Signal, AccountName, Agent, Model, ProjectId, ConvId, ToolName, FailedCalls, TotalCalls, FailRatio, DurationMin, ResultCodes, FirstSeen, LastSeen
+  | order by FailedCalls desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- Availability
+- OWASP-LLM10

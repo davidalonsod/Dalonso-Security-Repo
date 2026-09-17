@@ -1,0 +1,71 @@
+id: 9f3770b1-b20b-40ae-9c8a-35af4025d842
+name: Foundry - Unsafe active content in agent output
+description: |
+  Detects a Foundry agent response containing active HTML, script,
+  event-handler, executable URI, or encoded tag markers. The alert confirms
+  that potentially unsafe output was emitted; it does not prove that a
+  downstream browser, renderer, or automation executed the content. Tune for
+  coding assistants and applications that intentionally return source code.
+
+  Reads protected AppGenAIContent with legacy AppDependencies fallback and
+  returns metadata only. Approved content recording is required.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+  - AppGenAIContent
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+- DefenseEvasion
+relevantTechniques:
+- T1059
+- T1027
+query: |
+  union isfuzzy=true
+  (AppDependencies
+  | extend ContentKey=strcat(OperationId, ":", Id), Agent=tostring(Properties["gen_ai.agent.name"]), Model=tostring(Properties["gen_ai.request.model"]), ConvId=tostring(Properties["gen_ai.conversation.id"]), ProjectId=tostring(Properties["microsoft.foundry.project.id"]), Output=tostring(Properties["gen_ai.output.messages"])),
+  (AppGenAIContent
+  | extend ContentKey=strcat(TraceId, ":", SpanId), Agent=tostring(AgentName), Model=tostring(ModelName), ConvId=tostring(Attributes["gen_ai.conversation.id"]), ProjectId=tostring(Attributes["microsoft.foundry.project.id"]), Output=tostring(OutputMessages))
+  | where isnotempty(Output)
+  | summarize arg_max(TimeGenerated, *) by ContentKey
+  | extend ActiveContent=extract(@"(?i)(</?script\b|<(?:iframe|embed|object)\b|on(?:click|load|error|mouse\w*|change|input)\s*=|(?:href|src)\s*=\s*[""']?javascript\s*:|data\s*:\s*(?:text/html|application/javascript|image/svg\+xml)|&#(?:60|62|x3[cCeEfF]);)", 0, Output)
+  | where isnotempty(ActiveContent)
+  | extend AccountName=iff(isempty(Agent), "unknown-agent", Agent)
+  | project TimeGenerated, Signal="UNSAFE ACTIVE CONTENT EMITTED", ActiveContent, AccountName, Agent, Model, ProjectId, ConvId, ContentKey
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- OWASP-LLM05

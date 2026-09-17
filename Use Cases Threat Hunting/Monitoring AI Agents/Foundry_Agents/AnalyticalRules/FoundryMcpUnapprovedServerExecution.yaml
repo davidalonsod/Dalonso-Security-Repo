@@ -1,0 +1,107 @@
+id: 18f095da-59ae-4697-9e89-2e56736f1277
+name: Foundry - Unapproved MCP server executed
+description: |
+  Detects a Microsoft Foundry agent invoking an MCP tool whose emitted
+  server URL, label, or dependency target is not in the
+  FoundryMcpApprovedServers watchlist. This is observed execution, not
+  configuration inventory, and can indicate unauthorized server drift,
+  a compromised project connection, or an agent using a server from the
+  wrong environment.
+
+  The rule is intentionally disabled until the watchlist contains at
+  least one row with Approved=true. Populate ServerIdentifier with the
+  exact normalized value emitted in telemetry. Preview SDKs use several
+  property names, so the query coalesces gen_ai.tool.*, mcp.server.*,
+  generic server_* fields, and dependency Target. Rows without server
+  metadata are excluded and should be reviewed with the inventory hunt.
+severity: Medium
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: false
+tactics:
+- Execution
+- DefenseEvasion
+relevantTechniques:
+- T1059
+- T1199
+query: |
+  let approved =
+      _GetWatchlist('FoundryMcpApprovedServers')
+      | where tolower(tostring(column_ifexists('Approved', 'false'))) in ('true', '1', 'yes')
+      | extend ApprovedServer = tolower(trim(' ', tostring(column_ifexists('ServerIdentifier', ''))))
+      | where isnotempty(ApprovedServer)
+      | distinct ApprovedServer;
+  let ApprovedCount = toscalar(approved | count);
+  AppDependencies
+  | where isnotempty(tostring(Properties["gen_ai.tool.name"]))
+  | extend
+      Agent = tostring(Properties["gen_ai.agent.name"]),
+      Model = tostring(Properties["gen_ai.request.model"]),
+      ConvId = tostring(Properties["gen_ai.conversation.id"]),
+      ToolName = tostring(Properties["gen_ai.tool.name"]),
+      ToolType = tostring(Properties["gen_ai.tool.type"]),
+      ToolDescription = tostring(Properties["gen_ai.tool.description"]),
+      ServerLabel = coalesce(tostring(Properties["gen_ai.tool.server_label"]), tostring(Properties["mcp.server.label"]), tostring(Properties["server_label"])),
+      ServerUrl = coalesce(tostring(Properties["gen_ai.tool.server_url"]), tostring(Properties["mcp.server.url"]), tostring(Properties["server_url"])),
+      Operation = tostring(Properties["gen_ai.operation.name"])
+  | extend McpServer = coalesce(ServerUrl, ServerLabel, tostring(Target))
+  | where ToolType has "mcp" or Operation has "mcp" or ToolName has "mcp" or ToolDescription has "mcp" or McpServer has "mcp"
+  | where ApprovedCount > 0 and isnotempty(McpServer)
+  | extend NormalizedServer = tolower(trim(' ', McpServer))
+  | join kind=leftanti approved on $left.NormalizedServer == $right.ApprovedServer
+  | summarize
+      Calls = count(),
+      Failures = countif(Success == false),
+      Tools = make_set(ToolName, 20),
+      Conversations = dcountif(ConvId, isnotempty(ConvId)),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated),
+      Model = take_any(Model)
+      by Agent, McpServer
+  | extend
+      AccountName = iff(isempty(Agent), "unknown-agent", Agent),
+      McpServerUrl = iff(McpServer startswith "http://" or McpServer startswith "https://", McpServer, "")
+  | project LastSeen, AccountName, Agent, Model, McpServer, McpServerUrl,
+      Calls, Failures, Conversations, Tools, FirstSeen
+  | order by Calls desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+- entityType: URL
+  fieldMappings:
+  - identifier: Url
+    columnName: McpServerUrl
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: false
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- MCP
+- OWASP-LLM08

@@ -8,17 +8,18 @@ description: |
   the guardrails, persona or tool list that an attacker then uses to craft
   targeted jailbreaks.
 
-  Reads gen_ai.input.messages and gen_ai.output.messages from the
-  AppDependencies span property bag (Properties). Both message texts only
-  exist when AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED is set, so
-  without content recording this rule will not fire. The phrase lists are
-  deliberately broad - review hits and tune them to your agents'
-  legitimate prompts to manage false positives.
+  Reads protected AppGenAIContent with legacy AppDependencies fallback
+  and deduplicates by trace/span during the migration period. Without
+  approved content recording this rule will not fire. The phrase lists
+  are deliberately broad; review and tune them for legitimate prompts.
+  Input and output text are used for matching but never returned in the
+  alert result.
 severity: High
 requiredDataConnectors:
 - connectorId: ApplicationInsights
   dataTypes:
   - AppDependencies
+  - AppGenAIContent
 queryFrequency: PT1H
 queryPeriod: PT1H
 triggerOperator: gt
@@ -31,15 +32,22 @@ relevantTechniques:
 - T1213
 - T1552
 query: |
-  AppDependencies
-  | where isnotempty(Properties["gen_ai.output.messages"])
-  | extend
-      Agent     = tostring(Properties["gen_ai.agent.name"]),
-      Model     = tostring(Properties["gen_ai.request.model"]),
-      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+  union isfuzzy=true
+  (AppDependencies
+  | extend ContentKey = strcat(OperationId, ":", Id),
+      Agent = tostring(Properties["gen_ai.agent.name"]),
+      Model = tostring(Properties["gen_ai.request.model"]),
+      ConvId = tostring(Properties["gen_ai.conversation.id"]),
       ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
-      Input     = tolower(tostring(Properties["gen_ai.input.messages"])),
-      Output    = tostring(Properties["gen_ai.output.messages"])
+      Input = tolower(tostring(Properties["gen_ai.input.messages"])),
+      Output = tostring(Properties["gen_ai.output.messages"])),
+  (AppGenAIContent
+  | extend ContentKey = strcat(TraceId, ":", SpanId), Agent = tostring(AgentName),
+      Model = tostring(ModelName), ConvId = tostring(Attributes["gen_ai.conversation.id"]),
+      ProjectId = tostring(Attributes["microsoft.foundry.project.id"]),
+      Input = tolower(tostring(InputMessages)), Output = tostring(OutputMessages))
+  | where isnotempty(Output)
+  | summarize arg_max(TimeGenerated, *) by ContentKey
   | extend AskedForPrompt = Input has_any (
         "system prompt", "initial instructions", "your instructions",
         "reveal your prompt", "repeat the words above", "what are your rules",
@@ -55,7 +63,7 @@ query: |
   | extend AccountName = iff(isempty(Agent), "unknown-agent", Agent)
   | project
       TimeGenerated, AccountName, Agent, Model, ProjectId, ConvId,
-      Input, Output
+      AskedForPrompt, LeakMarker
   | order by TimeGenerated desc
 entityMappings:
 - entityType: Account

@@ -8,17 +8,17 @@ description: |
   exposure shape - an agent that has been steered (by injection, RAG
   poisoning or a misconfigured tool) into emitting data it should not.
 
-  Reads gen_ai.output.messages from the AppDependencies span property bag
-  (Properties). The output text only exists when
-  AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED is set, so without
-  content recording this rule will not fire. The regexes are deliberately
-  broad - review hits and tune the patterns / bulk-email threshold to
-  your tenant to manage false positives.
+  Reads protected AppGenAIContent with legacy AppDependencies fallback
+  and deduplicates by trace/span during the migration period. Without
+  approved content recording this rule will not fire. The regexes are
+  deliberately broad; review and tune them for the tenant. Alert output
+  contains metadata only.
 severity: High
 requiredDataConnectors:
 - connectorId: ApplicationInsights
   dataTypes:
   - AppDependencies
+  - AppGenAIContent
 queryFrequency: PT1H
 queryPeriod: PT1H
 triggerOperator: gt
@@ -32,14 +32,21 @@ relevantTechniques:
 - T1530
 - T1567
 query: |
-  AppDependencies
-  | where isnotempty(Properties["gen_ai.output.messages"])
-  | extend
-      Agent     = tostring(Properties["gen_ai.agent.name"]),
-      Model     = tostring(Properties["gen_ai.request.model"]),
-      ConvId    = tostring(Properties["gen_ai.conversation.id"]),
+  union isfuzzy=true
+  (AppDependencies
+  | extend ContentKey = strcat(OperationId, ":", Id),
+      Agent = tostring(Properties["gen_ai.agent.name"]),
+      Model = tostring(Properties["gen_ai.request.model"]),
+      ConvId = tostring(Properties["gen_ai.conversation.id"]),
       ProjectId = tostring(Properties["microsoft.foundry.project.id"]),
-      Output    = tostring(Properties["gen_ai.output.messages"])
+      Output = tostring(Properties["gen_ai.output.messages"])),
+  (AppGenAIContent
+  | extend ContentKey = strcat(TraceId, ":", SpanId), Agent = tostring(AgentName),
+      Model = tostring(ModelName), ConvId = tostring(Attributes["gen_ai.conversation.id"]),
+      ProjectId = tostring(Attributes["microsoft.foundry.project.id"]),
+      Output = tostring(OutputMessages))
+  | where isnotempty(Output)
+  | summarize arg_max(TimeGenerated, *) by ContentKey
   | extend
       HasAwsKey     = Output matches regex @"AKIA[0-9A-Z]{16}",
       HasPrivateKey = Output contains "-----BEGIN" and Output contains "PRIVATE KEY-----",

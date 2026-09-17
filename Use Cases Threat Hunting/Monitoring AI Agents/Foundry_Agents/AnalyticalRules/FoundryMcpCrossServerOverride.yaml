@@ -9,16 +9,17 @@ description: |
   level trust assumptions (the model treats every connected server as
   equally trusted).
 
-  The rule looks for override phrasing inside gen_ai.tool.description /
-  gen_ai.tool.call.arguments / gen_ai.tool.call.result AND requires the
-  conversation to span at least 2 distinct tool servers, which suppresses
-  single-server legitimate prompts that happen to use override-like
-  language.
+  The rule looks for override phrasing inside tool descriptions,
+  arguments, or results and requires the conversation to span at least
+  two distinct tool servers. Arguments and results are read from
+  protected AppGenAIContent with legacy AppDependencies fallback and
+  are used only for matching; alert output contains metadata only.
 severity: High
 requiredDataConnectors:
 - connectorId: ApplicationInsights
   dataTypes:
   - AppDependencies
+  - AppGenAIContent
 queryFrequency: PT1H
 queryPeriod: PT2H
 triggerOperator: gt
@@ -41,7 +42,13 @@ query: |
       "the real tool is","disregard the schema","actually invoke","route to server"
   ]);
   let markerRegex = strcat("(", strcat_array(overrideMarkers, "|"), ")");
-  let toolCalls =
+    let protectedContent = union isfuzzy=true
+      (datatable(OperationId:string, SpanId:string, ProtectedArgs:string, ProtectedResult:string)[]),
+      (AppGenAIContent
+      | project OperationId = TraceId, SpanId,
+        ProtectedArgs = tostring(ToolCallArguments),
+        ProtectedResult = tostring(ToolCallResult));
+    let dependencyTools =
       AppDependencies
       | where TimeGenerated > ago(1h)
       | extend
@@ -50,16 +57,30 @@ query: |
           Model      = tostring(Properties["gen_ai.request.model"]),
           ToolName   = tolower(tostring(Properties["gen_ai.tool.name"])),
           ToolServer = tolower(tostring(coalesce(
+                          Properties["gen_ai.tool.server_url"],
+                          Properties["mcp.server.url"],
+                          Properties["server_url"],
+                          Properties["gen_ai.tool.server_label"],
+                          Properties["mcp.server.label"],
+                          Properties["server_label"],
                           Properties["gen_ai.tool.server"],
                           Properties["mcp.server.name"],
-                          Properties["microsoft.agent.tool.server"], ""))),
+                          Properties["microsoft.agent.tool.server"], Target, ""))),
           ToolDesc   = tolower(tostring(coalesce(
                           Properties["gen_ai.tool.description"],
                           Properties["microsoft.agent.tool.description"],
                           Properties["mcp.tool.description"], ""))),
-          ToolArgs   = tolower(tostring(Properties["gen_ai.tool.call.arguments"])),
-          ToolResult = tolower(tostring(Properties["gen_ai.tool.call.result"]))
-      | where isnotempty(ConvId) and isnotempty(ToolServer);
+            LegacyArgs   = tostring(Properties["gen_ai.tool.call.arguments"]),
+            LegacyResult = tostring(Properties["gen_ai.tool.call.result"]),
+            SpanId = Id
+          | where isnotempty(ConvId) and isnotempty(ToolServer)
+          | project TimeGenerated, OperationId, SpanId, Agent, ConvId, Model,
+            ToolName, ToolServer, ToolDesc, LegacyArgs, LegacyResult;
+        let toolCalls =
+          dependencyTools
+          | join kind=leftouter protectedContent on OperationId, SpanId
+          | extend ToolArgs = tolower(coalesce(ProtectedArgs, LegacyArgs)),
+            ToolResult = tolower(coalesce(ProtectedResult, LegacyResult));
   let convServers =
       toolCalls
       | summarize ServerCount = dcount(ToolServer),

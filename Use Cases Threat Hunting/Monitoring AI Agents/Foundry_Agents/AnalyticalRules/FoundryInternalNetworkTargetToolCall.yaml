@@ -1,0 +1,86 @@
+id: 2b34b735-3ae9-449a-a3d4-4109068a971f
+name: Foundry - Successful tool call to internal network target
+description: |
+  Detects a successful Foundry tool span whose protected arguments or result
+  contain a loopback, link-local, cloud metadata, or RFC1918 HTTP/S target.
+  This is a high-confidence SSRF-like destination and completed tool-call
+  signal, but the span alone does not prove that the destination returned data.
+  Review the tool implementation, target authorization, result, and egress
+  logs before declaring exploitation.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+  - AppGenAIContent
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Discovery
+- LateralMovement
+relevantTechniques:
+- T1016
+- T1021
+query: |
+  let protectedContent = union isfuzzy=true
+    (datatable(OperationId:string, SpanId:string, ProtectedArgs:string, ProtectedResult:string)[]),
+    (AppGenAIContent
+    | project OperationId=TraceId, SpanId,
+        ProtectedArgs=tostring(ToolCallArguments),
+        ProtectedResult=tostring(ToolCallResult));
+  AppDependencies
+  | where Success == true and isnotempty(tostring(Properties["gen_ai.tool.name"]))
+  | extend Agent=tostring(Properties["gen_ai.agent.name"]), Model=tostring(Properties["gen_ai.request.model"]), ConvId=tostring(Properties["gen_ai.conversation.id"]), ProjectId=tostring(Properties["microsoft.foundry.project.id"]), ToolName=tostring(Properties["gen_ai.tool.name"]), ToolType=tostring(Properties["gen_ai.tool.type"]), LegacyArgs=tostring(Properties["gen_ai.tool.call.arguments"]), LegacyResult=tostring(Properties["gen_ai.tool.call.result"]), SpanId=Id
+  | join kind=leftouter protectedContent on OperationId, SpanId
+  | extend ToolArgs=coalesce(ProtectedArgs, LegacyArgs), ToolResult=coalesce(ProtectedResult, LegacyResult)
+  | extend TargetUrl=extract(@"(?i)https?://[A-Za-z0-9.\-:\[\]]+", 0, strcat(ToolArgs, " ", ToolResult))
+  | where isnotempty(TargetUrl)
+  | extend TargetHost=tolower(tostring(parse_url(TargetUrl)["Host"]))
+  | extend TargetClass=case(
+      TargetHost in ("localhost", "::1", "[::1]"), "Loopback",
+      TargetHost matches regex @"^127\.", "Loopback",
+      TargetHost matches regex @"^169\.254\." or TargetHost in ("metadata.google.internal", "metadata.azure.internal"), "Link-local or metadata service",
+      TargetHost matches regex @"^10\." or TargetHost matches regex @"^192\.168\." or TargetHost matches regex @"^172\.(1[6-9]|2[0-9]|3[01])\.", "RFC1918 private network",
+      "Public")
+  | where TargetClass != "Public"
+  | extend AccountName=iff(isempty(Agent), "unknown-agent", Agent)
+  | project TimeGenerated, Signal="SUCCESSFUL INTERNAL-TARGET TOOL CALL", TargetClass, TargetUrl, TargetHost, AccountName, Agent, Model, ProjectId, ConvId, ToolName, ToolType, OperationId, SpanId
+  | order by TimeGenerated desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+- entityType: URL
+  fieldMappings:
+  - identifier: Url
+    columnName: TargetUrl
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- SSRF
+- OWASP-LLM06

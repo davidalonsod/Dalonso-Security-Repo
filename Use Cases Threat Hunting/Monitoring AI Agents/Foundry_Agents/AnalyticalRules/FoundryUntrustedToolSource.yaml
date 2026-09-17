@@ -12,13 +12,15 @@ description: |
   Populate that watchlist with the hostnames of approved tool / retrieval
   endpoints before enabling the rule - while it is empty the leftanti
   join treats every fetched host as untrusted. URLs are extracted from
-  gen_ai.tool.call.arguments and gen_ai.tool.call.result, so content
-  recording must be enabled for the arguments to be present.
+  tool arguments and results in protected AppGenAIContent with legacy
+  AppDependencies fallback, so approved content recording and protected
+  table access are required after the September 2026 migration.
 severity: Medium
 requiredDataConnectors:
 - connectorId: ApplicationInsights
   dataTypes:
   - AppDependencies
+  - AppGenAIContent
 queryFrequency: PT1H
 queryPeriod: PT1H
 triggerOperator: gt
@@ -35,7 +37,13 @@ query: |
       _GetWatchlist('FoundryTrustedToolSources')
       | project SourceUri = tolower(tostring(column_ifexists('SourceUri', '')))
       | where isnotempty(SourceUri);
-  AppDependencies
+    let protectedContent = union isfuzzy=true
+      (datatable(OperationId:string, SpanId:string, ProtectedArgs:string, ProtectedResult:string)[]),
+      (AppGenAIContent
+      | project OperationId = TraceId, SpanId,
+        ProtectedArgs = tostring(ToolCallArguments),
+        ProtectedResult = tostring(ToolCallResult));
+    AppDependencies
   | where isnotempty(Properties["gen_ai.tool.name"])
       or isnotempty(Properties["gen_ai.tool.call.arguments"])
   | extend
@@ -44,8 +52,12 @@ query: |
       ConvId     = tostring(Properties["gen_ai.conversation.id"]),
       ToolName   = tostring(Properties["gen_ai.tool.name"]),
       ToolType   = tostring(Properties["gen_ai.tool.type"]),
-      ToolArgs   = tostring(Properties["gen_ai.tool.call.arguments"]),
-      ToolResult = tostring(Properties["gen_ai.tool.call.result"])
+        LegacyArgs   = tostring(Properties["gen_ai.tool.call.arguments"]),
+        LegacyResult = tostring(Properties["gen_ai.tool.call.result"]),
+        SpanId = Id
+      | join kind=leftouter protectedContent on OperationId, SpanId
+      | extend ToolArgs = coalesce(ProtectedArgs, LegacyArgs),
+        ToolResult = coalesce(ProtectedResult, LegacyResult)
   | extend SourceUri = tolower(extract(@"https?://([A-Za-z0-9.\-]+)", 1, strcat(ToolArgs, " ", ToolResult)))
   | where isnotempty(SourceUri)
   | join kind=leftanti trusted on SourceUri

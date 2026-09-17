@@ -1,0 +1,96 @@
+id: f65dfa15-a00f-40b4-98ce-eac92d87afc3
+name: Foundry - Command-capable MCP tool executed
+description: |
+  Detects a successful Microsoft Foundry MCP tool call whose emitted
+  name, description, or server metadata indicates shell, command, code
+  execution, SSH, offensive tooling, or remote-code-execution
+  capability. This narrows the broader sensitive-tool rule to observed
+  MCP execution with a high-impact command surface.
+
+  Tool-name and description matching is a capability signal: validate
+  the reviewed server definition, arguments, approval evidence, target,
+  and resulting impact before declaring exploitation. Replace general
+  command tools with narrow typed operations, schema validation,
+  server-side authorization, constrained execution, and explicit human
+  approval for consequential actions.
+severity: High
+requiredDataConnectors:
+- connectorId: ApplicationInsights
+  dataTypes:
+  - AppDependencies
+queryFrequency: PT1H
+queryPeriod: PT1H
+triggerOperator: gt
+triggerThreshold: 0
+enabled: true
+tactics:
+- Execution
+relevantTechniques:
+- T1059
+query: |
+  AppDependencies
+  | where Success == true and isnotempty(tostring(Properties["gen_ai.tool.name"]))
+  | extend
+      Agent = tostring(Properties["gen_ai.agent.name"]),
+      Model = tostring(Properties["gen_ai.request.model"]),
+      ConvId = tostring(Properties["gen_ai.conversation.id"]),
+      ToolName = tostring(Properties["gen_ai.tool.name"]),
+      ToolType = tostring(Properties["gen_ai.tool.type"]),
+      ToolDescription = tostring(Properties["gen_ai.tool.description"]),
+      ServerLabel = coalesce(tostring(Properties["gen_ai.tool.server_label"]), tostring(Properties["mcp.server.label"]), tostring(Properties["server_label"])),
+      ServerUrl = coalesce(tostring(Properties["gen_ai.tool.server_url"]), tostring(Properties["mcp.server.url"]), tostring(Properties["server_url"])),
+      Operation = tostring(Properties["gen_ai.operation.name"])
+  | extend McpServer = coalesce(ServerUrl, ServerLabel, tostring(Target))
+  | where ToolType has "mcp" or Operation has "mcp" or ToolName has "mcp" or ToolDescription has "mcp" or McpServer has "mcp"
+  | extend Search = tolower(strcat(ToolName, " ", ToolDescription, " ", McpServer))
+  | where Search matches regex @"(run[_ -]?(shell|command|code)|execute[_ -]?(shell|command|code)|powershell|cmd\.exe|terminal|reverse[_ -]?shell|metasploit|kali|ssh[_ -]?exec|remote[_ -]?code[_ -]?execution|vulnerabilities/exec)"
+  | extend Signal = case(Search has_any ("reverse shell", "reverse_shell", "metasploit", "vulnerabilities/exec", "remote code execution"), "CRITICAL - exploitation capability executed", "HIGH - command execution capability executed")
+  | summarize
+      Calls = count(),
+      Conversations = dcountif(ConvId, isnotempty(ConvId)),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated),
+      Model = take_any(Model),
+      Signal = take_any(Signal)
+      by Agent, ToolName, McpServer
+  | extend
+      AccountName = iff(isempty(Agent), "unknown-agent", Agent),
+      McpServerUrl = iff(McpServer startswith "http://" or McpServer startswith "https://", McpServer, "")
+  | project LastSeen, Signal, AccountName, Agent, Model, ToolName,
+      McpServer, McpServerUrl, Calls, Conversations, FirstSeen
+  | order by LastSeen desc
+entityMappings:
+- entityType: Account
+  fieldMappings:
+  - identifier: Name
+    columnName: AccountName
+- entityType: CloudApplication
+  fieldMappings:
+  - identifier: Name
+    columnName: Model
+- entityType: URL
+  fieldMappings:
+  - identifier: Url
+    columnName: McpServerUrl
+eventGroupingSettings:
+  aggregationKind: SingleAlert
+incidentConfiguration:
+  createIncident: true
+  groupingConfiguration:
+    enabled: true
+    reopenClosedIncident: true
+    lookbackDuration: PT12H
+    matchingMethod: Selected
+    groupByEntities:
+    - Account
+    groupByAlertDetails: []
+    groupByCustomDetails: []
+version: 1.0.0
+kind: Scheduled
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- MCP
+- OWASP-LLM08
