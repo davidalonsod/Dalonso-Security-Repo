@@ -86,15 +86,6 @@ Packs can be combined. Deploy analytics disabled first, populate required
 watchlists, execute the KQL against representative telemetry, tune thresholds,
 and only then enable incident creation.
 
-## Controlled APIM simulation
-
-The [APIM attack-simulation playbook](./APIM_Gateway/Testing/APIM-Attack-Simulation-Playbook.md)
-contains inert prompts and request payloads for all seven APIM analytics, expected
-workbook evidence, deterministic mock-response guidance, stop conditions, and
-cleanup. Run it only against an owned nonproduction API.
-
----
-
 ## Configure Application Insights
 
 Use a **workspace-based** Application Insights resource whose backing
