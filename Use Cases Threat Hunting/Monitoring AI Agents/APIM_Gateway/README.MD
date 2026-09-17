@@ -40,11 +40,6 @@ The command-tool, system-prompt disclosure, unsafe-output, and availability pane
 reuse the analytic-rule KQL and are generated in both Log Analytics workspace and
 direct Application Insights modes.
 
-## Controlled simulation
-
-Use [`Testing/APIM-Attack-Simulation-Playbook.md`](Testing/APIM-Attack-Simulation-Playbook.md)
-for inert prompts, request payloads, deterministic mock-response guidance, expected
-workbook evidence, stop conditions, and cleanup steps covering all seven analytics.
 
 ## Sensitive evidence behavior
 
