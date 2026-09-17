@@ -352,16 +352,3 @@ and cross-table identity correlations resolve real values.
 ---
 
 
-## Testing
-
-The repository does not currently include a Foundry simulation harness.
-Generate traces only in an approved nonproduction project. Rebuild the
-ARM template, parse every YAML file, execute changed KQL against a test
-workspace, and run ARM validation or what-if before deployment.
-
-> **Key-name caveat**: the exact sub-keys under
-> `microsoft.foundry.content_filter.results` vary by API version. The
-> three hunts parse the common names defensively
-> (`jailbreak` / `prompt_shield` / `indirect_attack` /
-> `custom_blocklists`). Run block 2 of the verification KQL to list your
-> tenant's real keys and adjust the `extend` lines if they differ.
