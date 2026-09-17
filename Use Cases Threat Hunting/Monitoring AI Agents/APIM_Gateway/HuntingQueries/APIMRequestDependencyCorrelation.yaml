@@ -1,0 +1,23 @@
+id: f5f536b4-e1dd-440b-8ce4-dbd3dc6e4f78
+name: APIM AI Gateway - Request to dependency correlation
+description: |
+  Correlates APIM frontend requests with downstream dependency calls through
+  OperationId. Use it to reconstruct request-to-backend flow, isolate failing
+  dependencies, and connect gateway behavior with instrumented agent spans.
+query: |
+  let Requests=AppRequests
+  | where TimeGenerated > ago(24h)
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), APIName=coalesce(tostring(Properties["API Name"]), Name), RequestId=tostring(Properties["Request Id"])
+  | project RequestTime=TimeGenerated, OperationId, RequestId, Caller, ClientIP, APIName, RequestOperation=Name, RequestUrl=Url, RequestResult=ResultCode, RequestSuccess=Success, RequestDurationMs=DurationMs;
+  let Dependencies=AppDependencies
+  | where TimeGenerated > ago(24h)
+  | project DependencyTime=TimeGenerated, OperationId, DependencyName=Name, DependencyTarget=Target, DependencyResult=ResultCode, DependencySuccess=Success, DependencyDurationMs=DurationMs, DependencyType, Agent=tostring(Properties["gen_ai.agent.name"]), Model=tostring(Properties["gen_ai.request.model"]), Tool=tostring(Properties["gen_ai.tool.name"]);
+  Requests
+  | join kind=inner Dependencies on OperationId
+  | project RequestTime, DependencyTime, OperationId, RequestId, Caller, ClientIP, APIName, RequestOperation, RequestUrl, RequestResult, RequestSuccess, RequestDurationMs, DependencyName, DependencyTarget, DependencyType, DependencyResult, DependencySuccess, DependencyDurationMs, Agent, Model, Tool
+  | order by RequestTime desc, DependencyTime asc
+  | take 500
+tactics: [Discovery]
+techniques: [T1580]
+tags: [Sentinel-As-Code, Custom, APIM, AI, Correlation]

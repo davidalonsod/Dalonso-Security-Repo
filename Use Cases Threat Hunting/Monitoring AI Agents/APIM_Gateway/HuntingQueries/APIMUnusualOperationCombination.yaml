@@ -1,0 +1,36 @@
+id: 573376f6-01e1-48ac-a51f-3a061b4e1737
+name: APIM AI Gateway - Unusual API operation combination
+description: |
+  Hunts known agents or callers that combine broad operation use with new or
+  state-changing operations in the last hour. The operation set is behavioral
+  evidence only; validate the intended workflow and effective authorization.
+query: |
+  let recentWindow=1h;
+  let baselineWindow=14d;
+  let sensitiveVerbs=dynamic(["admin", "export", "delete", "remove", "drop", "update", "patch", "create", "disable", "reset", "grant", "revoke", "purge", "write", "send"]);
+  let Baseline=AppRequests
+  | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), Operation=tolower(coalesce(tostring(Properties["Operation Name"]), Name))
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller)
+  | distinct AgentKey, Operation;
+  let Recent=AppRequests
+  | where TimeGenerated > ago(recentWindow)
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), APIName=coalesce(tostring(Properties["API Name"]), Name), Operation=tolower(coalesce(tostring(Properties["Operation Name"]), Name))
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller);
+  let NewOperations=Recent
+  | join kind=leftanti Baseline on AgentKey, Operation
+  | summarize NewOperationCount=dcount(Operation), NewOperations=make_set(Operation, 25) by AgentKey;
+  Recent
+  | summarize Requests=sum(ItemCount), DistinctOperations=dcount(Operation), Operations=make_set(Operation, 50), SensitiveOperations=make_set_if(Operation, Operation has_any (sensitiveVerbs), 25), APIs=make_set(APIName, 15), Failures=sum(iff(Success == false, ItemCount, 0)), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), Caller=take_any(Caller), ClientIP=take_any(ClientIP) by AgentKey
+  | extend SensitiveOperationCount=array_length(SensitiveOperations)
+  | join kind=leftouter NewOperations on AgentKey
+  | extend NewOperationCount=coalesce(NewOperationCount, 0), NewOperations=coalesce(NewOperations, dynamic([]))
+  | where DistinctOperations >= 5 and (NewOperationCount >= 2 or SensitiveOperationCount >= 1)
+  | extend FailureRate=round(100.0 * todouble(Failures) / max_of(todouble(Requests), 1.0), 2)
+  | project LastSeen, AgentKey, Caller, ClientIP, Requests, DistinctOperations, NewOperationCount, NewOperations, SensitiveOperationCount, SensitiveOperations, APIs, Operations, Failures, FailureRate, FirstSeen
+  | order by NewOperationCount desc, DistinctOperations desc
+tactics: [Discovery, Execution]
+techniques: [T1580, T1059]
+tags: [Sentinel-As-Code, Custom, APIM, AI, BehavioralAnalytics]

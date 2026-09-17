@@ -1,0 +1,31 @@
+id: 7f4c06d9-5684-45c6-bdec-90a8c93c6854
+name: APIM AI Gateway - Request volume against seven-day baseline
+description: |
+  Compares the last hour of request volume per agent/caller and API with its
+  seven-day hourly median and p95. Use this broader hunt to tune the scheduled
+  abnormal-consumption thresholds and identify planned jobs or load tests.
+query: |
+  let recentWindow=1h;
+  let baselineWindow=7d;
+  let Historical=AppRequests
+  | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), APIName=coalesce(tostring(Properties["API Name"]), Name)
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller)
+  | summarize HourRequests=sum(ItemCount) by AgentKey, APIName, bin(TimeGenerated, 1h)
+  | summarize BaselineMedian=percentile(HourRequests, 50), BaselineP95=percentile(HourRequests, 95), BaselineHours=count() by AgentKey, APIName;
+  AppRequests
+  | where TimeGenerated > ago(recentWindow)
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), APIName=coalesce(tostring(Properties["API Name"]), Name)
+  | extend AgentKey=coalesce(tostring(Properties["AgentId"]), tostring(Properties["Agent ID"]), tostring(Properties["ApplicationId"]), tostring(Properties["Application ID"]), AppRoleName, Caller)
+  | summarize CurrentRequests=sum(ItemCount), Operations=dcount(Name), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated), Caller=take_any(Caller), ClientIP=take_any(ClientIP) by AgentKey, APIName
+  | join kind=leftouter Historical on AgentKey, APIName
+  | extend BaselineMedian=todouble(coalesce(BaselineMedian, 0)), BaselineP95=todouble(coalesce(BaselineP95, 0)), BaselineHours=tolong(coalesce(BaselineHours, 0))
+  | extend MedianRatio=round(todouble(CurrentRequests) / max_of(todouble(BaselineMedian), 1.0), 2), P95Ratio=round(todouble(CurrentRequests) / max_of(todouble(BaselineP95), 1.0), 2)
+  | extend Classification=case(BaselineHours < 6, "INSUFFICIENT BASELINE", CurrentRequests >= 50 and MedianRatio >= 3.0 and P95Ratio >= 1.5, "ANOMALOUS", MedianRatio >= 2.0, "ELEVATED", "EXPECTED RANGE")
+  | project LastSeen, Classification, AgentKey, Caller, ClientIP, APIName, CurrentRequests, BaselineMedian, BaselineP95, MedianRatio, P95Ratio, BaselineHours, Operations, FirstSeen
+  | order by MedianRatio desc
+tactics: [Impact]
+techniques: [T1496, T1499]
+tags: [Sentinel-As-Code, Custom, APIM, AI, BehavioralAnalytics]

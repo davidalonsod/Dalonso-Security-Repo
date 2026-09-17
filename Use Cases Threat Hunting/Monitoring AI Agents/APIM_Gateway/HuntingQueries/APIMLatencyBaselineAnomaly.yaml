@@ -1,0 +1,29 @@
+id: a298901a-ad71-469f-a0bc-8051fe84bdb9
+name: APIM AI Gateway - Tail-latency anomaly against baseline
+description: |
+  Compares the current p95 request duration per API operation with the prior
+  seven-day hourly distribution. High latency is an investigation signal, not
+  an incident by itself; correlate with failures, dependencies, exceptions,
+  policy changes, streaming behavior, and backend health.
+query: |
+  let recentWindow=1h;
+  let baselineWindow=7d;
+  let Historical=AppRequests
+  | where TimeGenerated between (ago(baselineWindow) .. ago(recentWindow))
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend APIName=coalesce(tostring(Properties["API Name"]), Name), Operation=coalesce(tostring(Properties["Operation Name"]), Name)
+  | summarize HourP95=percentile(DurationMs, 95), HourRequests=sum(ItemCount) by APIName, Operation, bin(TimeGenerated, 1h)
+  | summarize BaselineP95=percentile(HourP95, 50), HistoricalTailP95=percentile(HourP95, 95), BaselineHours=count() by APIName, Operation;
+  AppRequests
+  | where TimeGenerated > ago(recentWindow)
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | extend APIName=coalesce(tostring(Properties["API Name"]), Name), Operation=coalesce(tostring(Properties["Operation Name"]), Name)
+  | summarize CurrentRequests=sum(ItemCount), CurrentP95=percentile(DurationMs, 95), CurrentP99=percentile(DurationMs, 99), Failures=sum(iff(Success == false, ItemCount, 0)), LastSeen=max(TimeGenerated) by APIName, Operation
+  | join kind=inner Historical on APIName, Operation
+  | extend P95Ratio=round(CurrentP95 / max_of(BaselineP95, 1.0), 2), FailureRate=round(100.0 * todouble(Failures) / max_of(todouble(CurrentRequests), 1.0), 2)
+  | where BaselineHours >= 6 and CurrentRequests >= 10 and CurrentP95 >= 1000 and P95Ratio >= 1.5
+  | project LastSeen, APIName, Operation, CurrentRequests, CurrentP95, CurrentP99, BaselineP95, HistoricalTailP95, P95Ratio, Failures, FailureRate, BaselineHours
+  | order by P95Ratio desc
+tactics: [Impact]
+techniques: [T1499]
+tags: [Sentinel-As-Code, Custom, APIM, AI, PerformanceAnomaly]

@@ -1,0 +1,25 @@
+id: 61ca5593-6cf3-4485-9320-4c74359f6935
+name: APIM AI Gateway - Failed request to exception correlation
+description: |
+  Correlates failed APIM frontend requests with Application Insights exceptions
+  through OperationId. Use this for failure investigation; an exception is an
+  operational artifact and is not automatically a security incident.
+query: |
+  let Requests=AppRequests
+  | where TimeGenerated > ago(24h)
+  | where SDKVersion startswith "apim:" or tostring(Properties["Service Type"]) =~ "API Management"
+  | where Success == false or toint(ResultCode) >= 400
+  | extend Caller=coalesce(UserAuthenticatedId, UserId, tostring(Properties["Subscription ID"]), tostring(Properties["SubscriptionId"]), tostring(Properties["subscriptionId"]), ClientIP, "unknown"), APIName=coalesce(tostring(Properties["API Name"]), Name), RequestId=tostring(Properties["Request Id"])
+  | project RequestTime=TimeGenerated, OperationId, RequestId, Caller, ClientIP, APIName, RequestOperation=Name, RequestUrl=Url, RequestResult=ResultCode, RequestDurationMs=DurationMs;
+  let Exceptions=AppExceptions
+  | where TimeGenerated > ago(24h)
+  | extend ExceptionType=tostring(column_ifexists('Type', column_ifexists('type', ''))), ExceptionMessage=coalesce(tostring(column_ifexists('OuterMessage', column_ifexists('outerMessage', ''))), tostring(column_ifexists('InnermostMessage', column_ifexists('innermostMessage', ''))), tostring(column_ifexists('Message', column_ifexists('message', '')))), ExceptionMethod=tostring(column_ifexists('Method', column_ifexists('method', '')))
+  | project ExceptionTime=TimeGenerated, OperationId, ExceptionType, ExceptionMessage, ExceptionMethod, ProblemId;
+  Requests
+  | join kind=inner Exceptions on OperationId
+  | project RequestTime, ExceptionTime, OperationId, RequestId, Caller, ClientIP, APIName, RequestOperation, RequestUrl, RequestResult, RequestDurationMs, ExceptionType, ExceptionMessage, ExceptionMethod, ProblemId
+  | order by RequestTime desc, ExceptionTime asc
+  | take 250
+tactics: [Impact]
+techniques: [T1499]
+tags: [Sentinel-As-Code, Custom, APIM, AI, Exceptions, Correlation]
