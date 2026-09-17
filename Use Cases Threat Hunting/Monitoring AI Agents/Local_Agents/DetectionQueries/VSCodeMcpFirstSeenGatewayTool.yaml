@@ -1,0 +1,44 @@
+id: e7e71e6d-39f7-4153-8103-83b8a495f563
+name: Local agent - First-seen governed MCP tool from VS Code
+description: |
+  Detects a governed MCP server and tool tuple invoked from a VS Code or
+  GitHub Copilot client in the last hour that the account did not use during
+  the preceding 30 days. Preview event fields are extracted defensively from
+  RawEventData and AdditionalFields.
+severity: Medium
+queryFrequency: PT1H
+queryPeriod: P30D
+tactics:
+- Execution
+- Discovery
+techniques:
+- T1059
+- T1580
+query: |
+  let Calls = CloudAppEvents
+  | where Timestamp > ago(30d) and ActionType == 'ExecuteToolByGateway'
+  | extend Raw = todynamic(RawEventData), Extra = todynamic(AdditionalFields)
+  | extend Client = coalesce(UserAgent, tostring(Raw.clientName), tostring(Raw.client.name), tostring(Extra.clientName)),
+      Agent = coalesce(tostring(Raw.agentName), tostring(Raw.agent.name), tostring(Extra.agentName)),
+      McpServer = coalesce(tostring(Raw.mcpServerName), tostring(Raw.serverName), tostring(Raw.server.name), tostring(Extra.mcpServerName), ObjectName),
+      Tool = coalesce(tostring(Raw.toolName), tostring(Raw.tool.name), tostring(Extra.toolName), ActivityType),
+      Evidence = tolower(strcat(UserAgent, ' ', tostring(RawEventData), ' ', tostring(AdditionalFields)))
+  | where Evidence has_any ('visual studio code', 'vscode', 'github copilot')
+  | extend Account = coalesce(AccountId, AccountDisplayName, AccountObjectId),
+      UsageKey = strcat(tolower(McpServer), '|', tolower(Tool));
+  let Baseline = Calls
+  | where Timestamp between (ago(30d) .. ago(1h))
+  | distinct Account, UsageKey;
+  Calls
+  | where Timestamp > ago(1h)
+  | join kind=leftanti Baseline on Account, UsageKey
+  | project Timestamp, ReportId, Account, AccountObjectId, AccountDisplayName,
+      Client, Agent, McpServer, Tool, UsageKey, Application, IPAddress,
+      CountryCode, OSPlatform, DeviceType, RawEventData, AdditionalFields
+  | order by Timestamp desc
+tags:
+- Defender-XDR
+- Advanced-Hunting
+- LocalAgents
+- VSCode
+- MCP

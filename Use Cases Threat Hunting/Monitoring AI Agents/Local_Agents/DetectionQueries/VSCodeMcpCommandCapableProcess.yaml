@@ -1,0 +1,37 @@
+id: ccc07cbe-6506-424a-98f7-40aa25c1575b
+name: Local agent - VS Code launched risky MCP process
+description: |
+  Detects VS Code launching an MCP-like child process that is elevated or
+  contains shell, command, SSH, offensive-tool, or remote-execution markers.
+  Validate the complete process tree, signer, hash, extension, and user intent.
+severity: High
+queryFrequency: PT1H
+queryPeriod: PT1H
+tactics:
+- Execution
+techniques:
+- T1059
+query: |
+  DeviceProcessEvents
+  | where Timestamp > ago(1h)
+  | where InitiatingProcessFileName in~ ('code.exe', 'code-insiders.exe', 'codium.exe')
+      or InitiatingProcessParentFileName in~ ('code.exe', 'code-insiders.exe', 'codium.exe')
+  | where ProcessCommandLine has_any ('mcp', 'modelcontextprotocol', '@modelcontextprotocol', 'mcp-server', '--mcp')
+      or FileName has_any ('mcp-server', 'mcp_server')
+  | extend Search = tolower(strcat(FileName, ' ', ProcessCommandLine)),
+      Account = coalesce(AccountUpn, AccountName, InitiatingProcessAccountUpn, InitiatingProcessAccountName)
+  | where ProcessTokenElevation =~ 'TokenElevationTypeFull'
+      or Search matches regex @'(powershell|cmd\.exe|bash|sh |terminal|reverse[_ -]?shell|metasploit|kali|ssh)'
+  | extend Risk = iff(ProcessTokenElevation =~ 'TokenElevationTypeFull' or Search has_any ('reverse shell', 'metasploit', 'kali'), 'CRITICAL', 'HIGH')
+  | project Timestamp, DeviceId, DeviceName, ReportId, Risk, Account,
+      FileName, FolderPath, ProcessCommandLine, SHA1, SHA256,
+      ProcessTokenElevation, ProcessIntegrityLevel, InitiatingProcessFileName,
+      InitiatingProcessCommandLine, IsProcessRemoteSession,
+      ProcessRemoteSessionDeviceName, ProcessRemoteSessionIP
+  | order by Timestamp desc
+tags:
+- Defender-XDR
+- Advanced-Hunting
+- LocalAgents
+- VSCode
+- MCP

@@ -1,0 +1,49 @@
+id: 36c41e50-b06e-48f3-9d70-7634ce1fa521
+name: Local agent - Risky VS Code MCP configuration
+description: |
+  Detects a newly observed or updated VS Code local-agent profile whose MCP
+  configuration auto-approves actions, runs under an untrusted host process,
+  references an external URL, or exposes command-capable metadata. This is a
+  posture signal; correlate with process or gateway execution before declaring
+  successful tool use.
+severity: High
+queryFrequency: PT1H
+queryPeriod: PT1H
+tactics:
+- Execution
+- Persistence
+techniques:
+- T1059
+- T1546
+query: |
+  AgentsInfo
+  | where Timestamp > ago(1h) and Platform == 'LocalAgents'
+  | summarize arg_max(Timestamp, *) by AgentId
+  | where LifecycleStatus !in~ ('Deleted', 'Uninstalled')
+  | extend Metadata = RawAgentInfo.localAgentMetadata,
+      Process = tolower(tostring(RawAgentInfo.localAgentMetadata.relatedProcess)),
+      RawText = tolower(tostring(RawAgentInfo))
+  | where Process has_any ('code.exe', 'code-insiders.exe', 'codium.exe', 'visual studio code')
+      or RawText has_any ('vscode', 'visual studio code', 'code.exe', 'code-insiders.exe', 'codium.exe')
+  | extend DeviceName = tostring(Metadata.deviceName), AccountName = tostring(Metadata.accountName),
+      AutoApprove = tostring(Metadata.autoApprove), TrustedProcess = tostring(Metadata.trustedProcess),
+      Config = tolower(strcat(tostring(Metadata.localMcps), ' ', tostring(McpServers), ' ', tostring(DeclaredTools)))
+  | extend HasExternalMcp = Config has 'http://' or Config has 'https://',
+      HasCommandCapability = Config matches regex @'(run[_ -]?(shell|command|code)|execute[_ -]?(shell|command|code)|powershell|cmd\.exe|terminal|reverse[_ -]?shell|metasploit|kali|ssh)'
+  | where AutoApprove =~ 'true' or TrustedProcess =~ 'false' or HasExternalMcp or HasCommandCapability
+  | extend RiskReason = strcat(
+      iff(AutoApprove =~ 'true', 'AutoApprove;', ''),
+      iff(TrustedProcess =~ 'false', 'UntrustedProcess;', ''),
+      iff(HasExternalMcp, 'ExternalMcp;', ''),
+      iff(HasCommandCapability, 'CommandCapability;', ''))
+  | project Timestamp, AgentId, Agent = Name, Vendor = tostring(Metadata.vendor),
+      Version, DeviceName, AccountName, Process, AutoApprove, TrustedProcess,
+      RiskReason, McpServers = tostring(McpServers), LocalMcps = tostring(Metadata.localMcps),
+      DeclaredTools = tostring(DeclaredTools)
+  | order by Timestamp desc
+tags:
+- Defender-XDR
+- Advanced-Hunting
+- LocalAgents
+- VSCode
+- MCP

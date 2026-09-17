@@ -1,0 +1,41 @@
+id: 3942f8a7-8b8d-4dbc-9359-bae42dfa3cb9
+name: Local agent - First-seen VS Code MCP process
+description: |
+  Detects an MCP-like process name and SHA1 launched beneath VS Code in the
+  last hour that was absent from the preceding 14-day baseline. New package
+  versions and legitimate onboarding are expected tuning cases.
+severity: Medium
+queryFrequency: PT1H
+queryPeriod: P14D
+tactics:
+- Execution
+- Persistence
+techniques:
+- T1059
+- T1546
+query: |
+  let CandidateProcesses = DeviceProcessEvents
+  | where Timestamp > ago(14d)
+  | where InitiatingProcessFileName in~ ('code.exe', 'code-insiders.exe', 'codium.exe')
+      or InitiatingProcessParentFileName in~ ('code.exe', 'code-insiders.exe', 'codium.exe')
+  | where ProcessCommandLine has_any ('mcp', 'modelcontextprotocol', '@modelcontextprotocol', 'mcp-server', '--mcp')
+      or FileName has_any ('mcp-server', 'mcp_server')
+  | extend ProcessKey = strcat(tolower(FileName), '|', tolower(SHA1));
+  let Baseline = CandidateProcesses
+  | where Timestamp between (ago(14d) .. ago(1h))
+  | distinct ProcessKey;
+  CandidateProcesses
+  | where Timestamp > ago(1h)
+  | join kind=leftanti Baseline on ProcessKey
+  | extend Account = coalesce(AccountUpn, AccountName, InitiatingProcessAccountUpn, InitiatingProcessAccountName)
+  | project Timestamp, DeviceId, DeviceName, ReportId, Account, ProcessKey,
+      FileName, FolderPath, ProcessCommandLine, SHA1, SHA256,
+      ProcessVersionInfoCompanyName, ProcessVersionInfoProductName,
+      ProcessTokenElevation, InitiatingProcessFileName
+  | order by Timestamp desc
+tags:
+- Defender-XDR
+- Advanced-Hunting
+- LocalAgents
+- VSCode
+- MCP
