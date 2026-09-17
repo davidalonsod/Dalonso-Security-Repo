@@ -1,0 +1,43 @@
+id: 6cb35269-1346-433c-8bb7-59e71515702a
+name: Foundry - External MCP server targets
+description: |
+  Lists explicit HTTP/S MCP server destinations used by Foundry agents
+  and separates Microsoft/Azure, loopback, and external hosts for egress,
+  ownership, data-residency, authentication, and AI Gateway review.
+query: |
+  AppDependencies
+  | where isnotempty(tostring(Properties["gen_ai.tool.name"]))
+  | extend
+      Agent = tostring(Properties["gen_ai.agent.name"]),
+      ToolName = tostring(Properties["gen_ai.tool.name"]),
+      ToolType = tostring(Properties["gen_ai.tool.type"]),
+      ToolDescription = tostring(Properties["gen_ai.tool.description"]),
+      ServerLabel = coalesce(tostring(Properties["gen_ai.tool.server_label"]), tostring(Properties["mcp.server.label"]), tostring(Properties["server_label"])),
+      ServerUrl = coalesce(tostring(Properties["gen_ai.tool.server_url"]), tostring(Properties["mcp.server.url"]), tostring(Properties["server_url"])),
+      Operation = tostring(Properties["gen_ai.operation.name"])
+  | extend McpServer = coalesce(ServerUrl, ServerLabel, tostring(Target))
+  | where ToolType has "mcp" or Operation has "mcp" or ToolName has "mcp" or ToolDescription has "mcp" or McpServer has "mcp"
+  | where McpServer startswith "http://" or McpServer startswith "https://"
+  | extend Host = tostring(parse_url(McpServer)["Host"])
+  | extend Classification = case(
+      Host endswith ".microsoft.com" or Host endswith ".microsoftonline.com" or Host endswith ".azure.com" or Host endswith ".azure.net", "Microsoft / Azure",
+      Host in ("localhost", "127.0.0.1", "::1"), "Local",
+      "EXTERNAL - REVIEW")
+  | summarize Calls = count(), Failures = countif(Success == false),
+      Agents = make_set_if(Agent, isnotempty(Agent), 10),
+      Tools = make_set(ToolName, 20), FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by Classification, Host, McpServer
+  | order by Classification desc, Calls desc
+tactics:
+- CommandAndControl
+- Exfiltration
+techniques:
+- T1102
+- T1567
+tags:
+- Sentinel-As-Code
+- Custom
+- Foundry
+- AI
+- MCP
