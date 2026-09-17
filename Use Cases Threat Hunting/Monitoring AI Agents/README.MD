@@ -1,296 +1,259 @@
-# AI Agent Threat Detection for Microsoft Sentinel
+# CopilotStudio-AppInsights bundle (Application Insights telemetry)
 
-Monitoring AI Agents: Observability in Foundry & Copilot Studio" https://youtu.be/5Axu9dJ2lfw
+Independent, deployable-today bundle of Microsoft Sentinel **analytic
+rules** and **hunting queries** for **Microsoft Copilot Studio** agent
+runtime telemetry. Everything here reads the real trace shape that
+Copilot Studio emits to Application Insights and exports to the Sentinel
+workspace:
 
-Microsoft Sentinel detection content for monitoring **AI agents** across
-the three runtimes most organisations are putting into production today:
+- Tables: **`AppEvents`** (agent-level bot turns), **`AppDependencies`**
+  (legacy connector/action calls and environment-level agent/tool spans),
+  and optional protected **`AppGenAIContent`** for approved content hunts.
+- Property bag: **`Properties`** (the dynamic column - *not*
+  `customDimensions`, because the resource is workspace-based).
+- AppEvents keys: `Name` is `BotMessageReceived` (user -> bot) or
+  `BotMessageSend` (bot -> user); `Properties` carries `conversationId`,
+  `channelId`, `locale`, `DesignMode`, and `text` (the message body, only
+  populated when **Log sensitive properties** is enabled on the agent's
+  Application Insights settings).
+- AppDependencies keys: `DependencyType == "Connector"`,
+  `AppRoleName == "Microsoft Copilot Studio"`, with `Name` (connector
+  display name), `Target` (operation, e.g. `shared_msnweather/...`),
+  `Success`, `ResultCode`, `DurationMs`.
+- Environment-level AppDependencies keys: `gen_ai.operation.name`
+  (`invoke_agent` / `execute_tool`), `gen_ai.agent.*`, `gen_ai.tool.*`,
+  `gen_ai.conversation.id`, user/channel metadata, and shared `OperationId`.
 
-- **Microsoft Foundry / Agent Service** agents
-- **Microsoft Copilot Studio** agents
-- **OpenAI** (platform / API)
+This bundle is structured as a sibling of `../Foundry-AppInsights/`
+(which reads the Foundry `AppDependencies` / `gen_ai.*` span shape) but
+is fully independent of it.
 
-Each runtime emits a different telemetry shape, so the repo is organised
-as **independent, deployable-today bundles**. Every bundle ships its own
-analytic rules, hunting queries, watchlists, an ARM template and a
-generator script, and can be deployed on its own. They share no resources.
+> **Identity note**: Copilot Studio telemetry has no human-user field in
+> the basic event shape; the runtime `UserId` is the bot/agent identifier
+> (e.g. `pva-studio<botid>`). The rules pivot on that `UserId`, the
+> `conversationId`, the `channelId`, and the client IP. The
+> `CopilotStudioAgentMap` watchlist maps those `UserId` values to friendly
+> agent names.
 
 ---
 
-## What we monitor
+## Contents
 
-| Bundle | Runtime | Telemetry it reads | Detections |
+| Folder | Contents |
+| --- | --- |
+| `AnalyticalRules/` | 28 scheduled analytic rules (YAML) |
+| `HuntingQueries/` | 16 hunting queries (YAML) |
+| `Watchlists/` | `CopilotStudioTrustedConnectors` (approved connector targets) and `CopilotStudioAgentMap` (bot UserId -> agent name) |
+| `Deploy/` | ARM template + generator (`New-CopilotStudioArmTemplate.ps1`) |
+
+### Analytic rules
+
+| File | Severity | Signal | MITRE ATT&CK | Source |
+| --- | --- | --- | --- | --- |
+| `AnalyticalRules/CopilotStudioPromptInjectionPatterns.yaml` | Medium | Instruction-override / prompt-injection markers in user message | InitialAccess T1566, DefenseEvasion T1562 | `AppEvents` `BotMessageReceived.text` |
+| `AnalyticalRules/CopilotStudioSensitiveDataInResponse.yaml` | High | Secrets / bulk-PII (AWS key, private key, JWT, emails) in agent response | Exfiltration T1567, Collection T1213 | `AppEvents` `BotMessageSend.text` |
+| `AnalyticalRules/CopilotStudioSecretsInUserMessage.yaml` | High | Secrets / bulk-PII pasted into the user prompt | CredentialAccess T1552, Collection T1213 | `AppEvents` `BotMessageReceived.text` |
+| `AnalyticalRules/CopilotStudioSystemPromptDisclosure.yaml` | High | User asks for instructions and the response leaks instruction markers | Discovery T1082, Collection T1213 | `AppEvents` in/out join on `conversationId` |
+| `AnalyticalRules/CopilotStudioConnectorErrorStorm.yaml` | Medium | >=10 failed connector calls in one conversation (enumeration / loop) | Discovery T1046, Impact T1499 | `AppDependencies` `Success == false` |
+| `AnalyticalRules/CopilotStudioNewConnectorFirstSeen.yaml` | Medium | A connector target never seen in the 14-day baseline is invoked | Execution T1059, Persistence T1554 | `AppDependencies` `Target` |
+| `AnalyticalRules/CopilotStudioSensitiveConnectorInvocation.yaml` | Medium | High-impact connector (mail / http / sql / azure / sharepoint) invoked | Execution T1059, LateralMovement T1648 | `AppDependencies` `Name`/`Target` |
+| `AnalyticalRules/CopilotStudioConversationFloodingDoW.yaml` | Medium | Abnormal inbound message volume per session / conversation (denial-of-wallet) | Impact T1499 | `AppEvents` `BotMessageReceived` |
+| `AnalyticalRules/CopilotStudioOffHoursActivity.yaml` | Low | Published-channel activity outside business hours | InitialAccess T1078 | `AppEvents` + `hourofday()` |
+| `AnalyticalRules/CopilotStudioJailbreakOrModelProbing.yaml` | Medium | Jailbreak persona / unrestricted-mode / model-fingerprinting markers | DefenseEvasion T1562, Discovery T1082 | `AppEvents` `BotMessageReceived.text` |
+| `AnalyticalRules/CopilotStudioPrivilegeEscalationClaim.yaml` | Medium | Authority / role-impersonation claim ("I'm the CFO", "as an admin") | PrivilegeEscalation T1548, InitialAccess T1078 | `AppEvents` `BotMessageReceived.text` |
+| `AnalyticalRules/CopilotStudioBulkDataExfiltrationIntent.yaml` | Medium | Bulk-retrieval intent ("show all", "export all", "dump the table") | Collection T1213, Exfiltration T1530 | `AppEvents` `BotMessageReceived.text` |
+| `AnalyticalRules/CopilotStudioMultiStageAttackChain.yaml` | High | >=2 distinct attack stages (inject / escalate / exfil / jailbreak) in one conversation, with connector context | InitialAccess T1566, PrivilegeEscalation T1078, Exfiltration T1567 | `AppEvents` + `AppDependencies` join on `conversationId` |
+| `AnalyticalRules/CopilotStudioAsciiSmugglingInjection.yaml` | Medium | Invisible-Unicode smuggling (Tag block / zero-width / bidi override) in user prompt | DefenseEvasion T1027, InitialAccess T1566 | `AppEvents` `BotMessageReceived.text` |
+| `AnalyticalRules/CopilotStudioSuspiciousUrlInContent.yaml` | High | Phishing / malicious URL heuristics (raw-IP, punycode, shortener, bait path) in prompt or response | InitialAccess T1566, Execution T1204 | `AppEvents` `BotMessageReceived` / `BotMessageSend` |
+| `AnalyticalRules/CopilotStudioThreatIntelUrlMatch.yaml` | High | URL / domain / IP in prompt or response matched against active Sentinel threat-intel indicators | CommandAndControl T1071, InitialAccess T1566 | `AppEvents` + `ThreatIntelIndicators` join |
+| `AnalyticalRules/CopilotStudioGoalDriftBetweenTurns.yaml` | Medium | Benign opening message + no sensitive intent vocabulary, yet >=3 sensitive connector calls in same conversation | Execution T1059, DefenseEvasion T1556 | `AppEvents` + `AppDependencies` join on `conversationId` |
+| `AnalyticalRules/CopilotStudioCapabilityDisclosureExtended.yaml` | Medium | Connector / action / topic probe AND response reflects >=2 actual connector prefixes from the 7-day inventory | Discovery T1213, Discovery T1518 | `AppEvents` in/out + baseline `AppDependencies` `Target` |
+| `AnalyticalRules/CopilotStudioSessionContextContamination.yaml` | Medium | First-quartile external URL or injection marker AND later sensitive connector call in same conversation (>=5 turns) | InitialAccess T1566, Execution T1059 | `AppEvents` quartiles + `AppDependencies` |
+| `AnalyticalRules/CopilotStudioMcpCommandExecutionTool.yaml` | High | Shell, command, code, SSH, offensive, or RCE-capable MCP metadata | Execution T1059, LateralMovement T1210 | Legacy connector + environment `ExecuteTool` spans |
+| `AnalyticalRules/CopilotStudioUntrustedMcpTarget.yaml` | High | MCP connector/server/tool outside approved watchlist; disabled until curated | Execution T1059, Persistence T1554, CommandAndControl T1071 | `AppDependencies` + watchlist |
+| `AnalyticalRules/CopilotStudioMcpExploitExecutionChain.yaml` | High | Exploit/RCE intent correlated with command-capable MCP execution | Execution T1059, LateralMovement T1210 | `AppEvents` / `InvokeAgent` + connector / `ExecuteTool` join |
+| `AnalyticalRules/CopilotStudioIndirectPromptInjectionInResponse.yaml` | High | Injection markers appear in output but not user input | InitialAccess T1566, Execution T1059 | `AppEvents` in/out by `conversationId` |
+| `AnalyticalRules/CopilotStudioUnsafeActiveContentInResponse.yaml` | Medium | Active HTML, script, event-handler, or executable URI marker in output | Execution T1059, DefenseEvasion T1027 | `AppEvents` `BotMessageSend.text` |
+| `AnalyticalRules/CopilotStudioInternalNetworkTargetCall.yaml` | High | Successful connector/tool call to loopback, link-local, metadata, or RFC1918 target | Discovery T1016, LateralMovement T1021 | connector and `ExecuteTool` target/server URL |
+| `AnalyticalRules/CopilotStudioExcessiveToolAgency.yaml` | Medium | High call count, tool breadth, or state-changing operations in one conversation | Execution T1059, Impact T1499 | legacy connector + environment `ExecuteTool` spans |
+| `AnalyticalRules/CopilotStudioNewModelFirstSeen.yaml` | Medium | Model identifier absent from the agent's 14-day baseline | DefenseEvasion T1562, Execution T1059 | `gen_ai.request.model` |
+| `AnalyticalRules/CopilotStudioInterAgentPermissionMismatch.yaml` | Medium | Delegated sub-agent uses new or sensitive tools outside its baseline | LateralMovement T1210, PrivilegeEscalation T1098 | agent-to-agent and tool spans |
+
+> The text-content rules (prompt injection, sensitive output / input,
+> system-prompt disclosure, jailbreak) only fire when **Log sensitive
+> properties** is enabled on the agent (Settings -> Advanced ->
+> Application Insights), which populates `Properties.text`. The
+> connector and volume rules work from metadata alone.
+
+### Hunting queries
+
+| File | Signal | Source |
+| --- | --- | --- |
+| `HuntingQueries/AgentConversationVolumeByUser.yaml` | Busiest users / sessions / channels | `AppEvents` |
+| `HuntingQueries/AgentConnectorBaselineDeviation.yaml` | New or spiking connector vs 14-day baseline | `AppDependencies` |
+| `HuntingQueries/AgentConnectorErrorStorm.yaml` | High connector-failure rate by conversation | `AppDependencies` |
+| `HuntingQueries/AgentSensitiveResponseContent.yaml` | Secret / bulk-PII content in responses (broad) | `AppEvents` `BotMessageSend.text` |
+| `HuntingQueries/AgentPromptInjectionSignals.yaml` | Prompt-injection markers ranked by count (broad) | `AppEvents` `BotMessageReceived.text` |
+| `HuntingQueries/AgentChannelDistribution.yaml` | Channel mix + new-channel first seen | `AppEvents` `channelId` |
+| `HuntingQueries/AgentDormancyBreak.yaml` | Connector silent >=7 days then reactivates | `AppDependencies` |
+| `HuntingQueries/AgentResponseLatencyAnomaly.yaml` | Connector latency anomaly (`series_decompose_anomalies`) | `AppDependencies` `DurationMs` |
+| `HuntingQueries/AgentUntrustedConnectorTarget.yaml` | Connector target not on the trusted allowlist | `AppDependencies` + watchlist |
+| `HuntingQueries/AgentTopicTriggerEnumeration.yaml` | Many distinct non-message events in one conversation | `AppEvents` (topic / generative events) |
+| `HuntingQueries/AgentIndirectInjectionInResponse.yaml` | Injection markers in agent output that the user never typed (poisoned-data / indirect injection) | `AppEvents` in/out compare on `conversationId` |
+| `HuntingQueries/AgentToolAbuseBreadth.yaml` | Wide connector fan-out or destructive operation verbs in one conversation | `AppDependencies` `Target` |
+| `HuntingQueries/AgentMcpInventory.yaml` | Legacy and environment-level MCP server/tool inventory | `AppDependencies` |
+| `HuntingQueries/AgentMcpCommandExecutionTools.yaml` | Command-capable and offensive MCP metadata | `AppDependencies` |
+| `HuntingQueries/AgentMcpExecutionChains.yaml` | `InvokeAgent` to MCP `ExecuteTool` trace reconstruction | `AppDependencies` `OperationId` |
+| `HuntingQueries/AgentMcpExploitIntent.yaml` | Exploit/RCE/remote-command intent without returning content | `AppEvents` + `AppDependencies` + `AppGenAIContent` |
+
+The analytic rules alert on the highest-fidelity / high-severity subset
+(incidents); the hunts surface the full picture including low / medium
+severity for proactive review. The rules' `enabled` flag is bound to the
+`enableAnalyticRules` deployment parameter when the YAML rule is enabled.
+Rules intentionally disabled in YAML remain disabled after deployment.
+
+> **Table-plan note**: scheduled analytic rules can only read tables on
+> the **Analytics** plan. Confirm `AppEvents` and `AppDependencies` are on
+> the Analytics plan in the target workspace (they are by default). The
+> hunting queries work regardless.
+
+### Watchlists
+
+Two watchlists ship with the bundle (under `Watchlists/<alias>/`, each a
+`watchlist.json` definition plus a seed `data.csv`). They are deployed by
+the ARM template when `enableWatchlist` is `true` (default).
+
+| Alias | Search key | Purpose | Consumed by |
 | --- | --- | --- | --- |
-| [`Foundry-AppInsights/`](./Foundry-AppInsights/README.md) | Microsoft Foundry / Agent Service | Application Insights `AppDependencies` spans - `Properties` / `gen_ai.*` / `mcp.*` / `microsoft.foundry.content_filter.results` | 30 analytic rules + 12 hunting queries |
-| [`CopilotStudio-AppInsights/`](./CopilotStudio-AppInsights/README.md) | Microsoft Copilot Studio | Application Insights `AppEvents` (bot turns) + `AppDependencies` (connector calls) | 19 analytic rules + 12 hunting queries |
-| [`OpenAI-Connector/`](./OpenAI-Connector/README.md) | OpenAI (platform / API) | Sentinel OpenAI codeless connector - `OpenAIAuditLogs` / `OpenAIChatCompletions` / `ASimAgentEventLogs` | 6 analytic rules + 3 hunting queries |
-| [`Agent365-DataLake/`](./Agent365-DataLake/README.md) | Microsoft Agent 365 (data-lake tier) | ASIM-aligned Agent 365 tables in the Sentinel data lake | KQL jobs + summary rules + workbooks (scaffolding) |
+| `CopilotStudioTrustedConnectors` | `ConnectorTarget` | Allowlist of approved connector prefixes, full targets, and exact environment-level MCP tool names | Untrusted-target hunt and analytic rule |
+| `CopilotStudioAgentMap` | `BotId` | Maps each agent's runtime `UserId` to a friendly agent name and ownership metadata | Enrichment / friendly-name lookup; hook for future cross-table correlation hunts |
+
+#### `CopilotStudioTrustedConnectors`
+
+Columns and seed rows (`Watchlists/CopilotStudioTrustedConnectors/data.csv`):
+
+| Column | Meaning | Example |
+| --- | --- | --- |
+| `ConnectorTarget` | Lowercase target prefix, full legacy `Target` path, or exact environment-level `gen_ai.tool.name` | `shared_msnweather` |
+| `ConnectorName` | Human-friendly connector name | `MSN Weather` |
+| `Description` | Why it is approved / who owns it | `Approved mail connector` |
+
+Seed rows: `shared_msnweather`, `shared_office365`, `shared_office365users`.
+
+> **Populate before relying on the hunt.** While the list holds only the
+> three seed rows, the `AgentUntrustedConnectorTarget` hunt treats every
+> other connector as untrusted and will be noisy. Add a row for each
+> connector your agents are approved to call. To find the prefixes in use,
+> run:
+>
+> ```kql
+> AppDependencies
+> | where AppRoleName == "Microsoft Copilot Studio" or DependencyType == "Connector"
+> | extend TargetPrefix = tolower(tostring(split(Target, "/")[0]))
+> | summarize Calls = count() by TargetPrefix
+> | order by Calls desc
+> ```
+
+#### `CopilotStudioAgentMap`
+
+Columns and seed row (`Watchlists/CopilotStudioAgentMap/data.csv`):
+
+| Column | Meaning | Example |
+| --- | --- | --- |
+| `BotId` | The value seen in the `AppEvents` `UserId` column (e.g. `pva-studio<botid>`) | `pva-studioc09d8629-...` |
+| `AgentName` | Friendly agent name | `TestCopilotAgent` |
+| `Environment` | Copilot Studio environment / team | `PurviewSpainTeam` |
+| `AppId` | Optional Entra app (client) ID the agent acts under | _(blank)_ |
+| `ObjectId` | Optional Entra service-principal object ID | _(blank)_ |
+| `Owner` | Owning team / person | _(blank)_ |
+| `Description` | Free-text note | `Seed example - replace with your agents` |
+
+> Replace the single seed row with one row per agent you operate. `BotId`
+> is the join key against `AppEvents.UserId`, so it must match exactly.
+
+### Attack -> detection mapping
+
+How the detections line up with the common Copilot Studio attack classes:
+
+| Attack class | Analytic rule(s) | Hunting query(ies) |
+| --- | --- | --- |
+| Direct prompt injection | `CopilotStudioPromptInjectionPatterns` | `AgentPromptInjectionSignals` |
+| Indirect / poisoned-data injection | - | `AgentIndirectInjectionInResponse` |
+| Data exfiltration (bulk intent + bulk content) | `CopilotStudioBulkDataExfiltrationIntent`, `CopilotStudioSensitiveDataInResponse` | `AgentSensitiveResponseContent` |
+| Secrets pasted into prompt | `CopilotStudioSecretsInUserMessage` | - |
+| Privilege escalation (role impersonation) | `CopilotStudioPrivilegeEscalationClaim` | - |
+| Tool abuse / action manipulation | `CopilotStudioSensitiveConnectorInvocation`, `CopilotStudioNewConnectorFirstSeen` | `AgentToolAbuseBreadth`, `AgentUntrustedConnectorTarget`, `AgentConnectorBaselineDeviation`, `AgentDormancyBreak` |
+| Rogue / unapproved MCP server | `CopilotStudioUntrustedMcpTarget` | `AgentUntrustedConnectorTarget`, `AgentMcpInventory` |
+| MCP shell / command / RCE capability | `CopilotStudioMcpCommandExecutionTool` | `AgentMcpCommandExecutionTools`, `AgentMcpExecutionChains` |
+| Exploit intent followed by MCP execution | `CopilotStudioMcpExploitExecutionChain` | `AgentMcpExploitIntent`, `AgentMcpExecutionChains` |
+| System-prompt extraction | `CopilotStudioSystemPromptDisclosure` | - |
+| Jailbreak / safety bypass | `CopilotStudioJailbreakOrModelProbing` | - |
+| Enumeration / denial-of-wallet | `CopilotStudioConnectorErrorStorm`, `CopilotStudioConversationFloodingDoW` | `AgentConnectorErrorStorm`, `AgentConversationVolumeByUser`, `AgentTopicTriggerEnumeration` |
+| Combined multi-stage chain | `CopilotStudioMultiStageAttackChain` | - |
+| Anomalous / off-hours behaviour | `CopilotStudioOffHoursActivity` | `AgentChannelDistribution`, `AgentResponseLatencyAnomaly` |
+
+### Microsoft AI Red Team v2.0 taxonomy coverage
+
+Three rules port the applicable subset of the Microsoft AI Red Team v2.0
+failure-mode taxonomy
+(<https://www.microsoft.com/en-us/security/blog/2026/06/04/updating-taxonomy-failure-modes-agentic-ai-systems-year-red-teaming-taught-us/>)
+to the Copilot Studio `AppEvents` / `AppDependencies` shape:
+
+| v2.0 failure mode | Rule |
+| --- | --- |
+| Goal Hijacking | `CopilotStudioGoalDriftBetweenTurns` |
+| Capability / Architecture Disclosure | `CopilotStudioCapabilityDisclosureExtended` (+ `CopilotStudioSystemPromptDisclosure`) |
+| Session Context Contamination | `CopilotStudioSessionContextContamination` |
+
+Environment-level telemetry now provides MCP tool names, types, call IDs,
+arguments, and results, so the bundle covers MCP invocation abuse and
+command-capable tools. It still doesn't expose approval decisions (HitL
+bypass), trusted MCP server descriptions (description poisoning),
+persistent-memory spans (memory poisoning), or computer-use observations.
+Tool arguments/results are sensitive and aren't returned by the new rules.
 
 ---
 
-## Coverage at a glance
+## Prerequisites
 
-All three runtime bundles align to the **Microsoft AI Red Team v2.0
-failure-mode taxonomy**
-([blog, June 2026](https://www.microsoft.com/en-us/security/blog/2026/06/04/updating-taxonomy-failure-modes-agentic-ai-systems-year-red-teaming-taught-us/))
-and to MITRE ATT&CK. The depth of coverage tracks what each telemetry
-source actually exposes.
-
-| Threat area | Foundry | Copilot Studio | OpenAI |
-| --- | :---: | :---: | :---: |
-| Prompt injection / jailbreak (direct + indirect) | yes | yes | partial |
-| Sensitive data in prompt / response (secrets, PII) | yes | yes | n/a |
-| System-prompt / capability disclosure | yes | yes | - |
-| Sensitive / new tool or connector invocation | yes | yes | yes |
-| Goal hijacking / goal drift across a session | yes | yes | - |
-| Session context contamination | yes | yes | - |
-| Token / cost spike (denial-of-wallet) | yes | yes | yes |
-| Red-team / automated-pacing anomaly | yes | yes | yes |
-| Threat-intel URL match | yes | yes | - |
-| Off-hours / geo anomaly | yes | yes | yes |
-| Multi-stage attack chain | yes | yes | - |
-| Human-in-the-loop (HitL) consent bypass | yes | n/a | n/a |
-| MCP tool-description / cross-server abuse | yes | n/a | n/a |
-| Agent memory poisoning | yes | n/a | n/a |
-| Computer-use (CUA) visual attack | yes | n/a | n/a |
-| Inter-agent permission mismatch | yes | n/a | n/a |
-| Org-config override / abuse chain | - | - | yes |
-
-`n/a` means the runtime does not emit the telemetry that detection needs
-(for example Copilot Studio exposes no consent, MCP, memory or
-computer-use surface). The deepest agentic coverage therefore lives in
-the Foundry bundle, where the `gen_ai.*` / `mcp.*` span shape carries the
-required keys.
-
----
-
-## Which bundle should I deploy?
-
-- Running **Foundry / Agent Service** agents with Application Insights
-  tracing enabled -> [`Foundry-AppInsights/`](./Foundry-AppInsights/README.md).
-- Running **Copilot Studio** agents with Application Insights wired up
-  (and "Log sensitive properties" on for text-content rules) ->
-  [`CopilotStudio-AppInsights/`](./CopilotStudio-AppInsights/README.md).
-- Calling the **OpenAI** platform / API and ingesting it through the
-  Sentinel OpenAI connector -> [`OpenAI-Connector/`](./OpenAI-Connector/README.md).
-- Onboarding **Agent 365** observability into the Sentinel **data lake**
-  -> [`Agent365-DataLake/`](./Agent365-DataLake/README.md).
-
-You can deploy any combination; the bundles are independent.
-
----
-
-## Configure Application Insights
-
-Use a **workspace-based** Application Insights resource whose backing
-Log Analytics workspace is the Microsoft Sentinel workspace where you
-deploy these detections. A connection to another workspace can show
-traces in Application Insights but does not populate the tables queried
-by this repository in the target Sentinel workspace.
-
-### Microsoft Foundry - one configuration per project
-
-Application Insights is connected at the **Foundry project** scope. The
-connection automatically enables server-side tracing for every prompt
-and hosted agent in that project; you do not configure each agent
-separately. Repeat these steps for each project that you want to monitor.
-
-1. In the Azure portal, create or select a workspace-based Application
-  Insights resource connected to the target Sentinel workspace.
-2. Give operators who need to query traces **Log Analytics Reader** on
-  the Application Insights resource or its backing workspace. If the
-  tables are protected, also assign **Privileged Monitoring Data
-  Reader**.
-3. Open [Microsoft Foundry](https://ai.azure.com/) and ensure the **New
-  Foundry** experience is selected.
-4. Open the project, select **Agents**, and then select **Traces**.
-5. Select **Connect**, choose the Application Insights resource from
-  step 1, and select **Connect** again. You can create a resource from
-  this dialog, but verify that it uses the target Sentinel workspace.
-6. If **Connect** is not shown, select **Manage** -> **Project details**
-  -> **Connected resources** -> **Add connection** -> **Application
-  Insights**.
-7. Run an agent once. After a few minutes, confirm the run appears under
-  the project's **Traces** view.
-8. In the Sentinel workspace, run the following query and confirm that
-  the project is producing `gen_ai.*` spans:
-
-  ```kusto
-  AppDependencies
-  | where TimeGenerated > ago(30m)
-  | where isnotempty(tostring(Properties["gen_ai.agent.name"]))
-  | project TimeGenerated,
-     AgentName = tostring(Properties["gen_ai.agent.name"]),
-     Operation = tostring(Properties["gen_ai.operation.name"]),
-     Success
-  | take 20
-  ```
-
-For custom client-side code paths that need prompt and response content,
-set `AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED=true` and
-`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` in the agent
-host. Treat prompt, response, and tool-argument tracing as sensitive
-production data and review access, retention, and ingestion cost first.
-
-To connect multiple Foundry projects, use the repository helper in
-[`Foundry-AppInsights/Deploy/Enable-FoundryTracing.ps1`](./Foundry-AppInsights/Deploy/Enable-FoundryTracing.ps1).
-It inventories projects in dry-run mode by default and changes them only
-with `-Apply`. This is still a **per-project connection** performed in
-bulk; one project connection covers all agents inside that project.
-
-Full Foundry prerequisites and helper-script examples are in
-[`Foundry-AppInsights/README.md`](./Foundry-AppInsights/README.md).
-
-### Copilot Studio - one configuration per agent
-
-Use this mode for the existing `CopilotStudio-AppInsights` rules. It is
-available to agents that use the **standard harness** and emits the
-event-based `AppEvents` and connector `AppDependencies` shape expected
-by the bundle.
-
-1. In the Azure portal, open the workspace-based Application Insights
-  resource connected to the target Sentinel workspace and copy its
-  **Connection string** from **Overview**.
-2. Open [Copilot Studio](https://copilotstudio.microsoft.com/), select
-  the correct Power Platform environment, and open the agent.
-3. Select **Settings** -> **Advanced** -> **Application Insights**.
-4. Paste the connection string.
-5. Turn on **Enable logging**.
-6. Turn on **Log conversation details** when user identity, message text,
-  and tool input/output are required. In some UI versions, message text
-  is controlled by **Log sensitive Activity properties** or **Log
-  sensitive properties**; enable it only after privacy and compliance
-  approval. The repository's text-content detections remain silent
-  when message text is not collected.
-7. Optionally turn on **Node execution events** when topic/node
-  diagnostics are needed.
-8. Save the settings and run a new test conversation. Telemetry is not
-  retroactive.
-9. In the Sentinel workspace, verify both event and connector telemetry:
-
-  ```kusto
-  union isfuzzy=true
-     (AppEvents
-      | where TimeGenerated > ago(30m)
-      | where Name in ("BotMessageReceived", "BotMessageSend")
-      | project TimeGenerated, Table="AppEvents", Name,
-        ConversationId=tostring(Properties["conversationId"])),
-     (AppDependencies
-      | where TimeGenerated > ago(30m)
-      | where AppRoleName == "Microsoft Copilot Studio"
-        or DependencyType == "Connector"
-      | project TimeGenerated, Table="AppDependencies", Name,
-        ConversationId=tostring(Properties["conversationId"]))
-  | take 20
-  ```
-
-Repeat steps 2-8 for every standard-harness agent that needs the current
-Sentinel detection bundle.
-
-### Copilot Studio - all agents in an environment (preview)
-
-Copilot Studio also supports a centralized **environment-level** export.
-This configures all eligible Copilot Studio agents in one Power Platform
-environment, including standard- and GitHub Copilot-harness agents. It
-does not include declarative agents. There is currently no single
-tenant-wide switch; repeat the export for each environment.
-
-Requirements and limitations:
-
-- The Power Platform environment must be a **Managed Environment**.
-- The feature is preview, is rolling out by region, and might require
-  the environment's **Early release cycle** in a non-production test.
-- The configuring identity needs the tenant-level **Power Platform
-  administrator** or **Dynamics 365 administrator** role and the
-  Dataverse **Environment administrator** or **System administrator**
-  role.
-- The identity also needs **Contributor** or **Owner** on the target
-  Application Insights resource, and Application Insights **local
-  authentication must be enabled**.
-
-Configure the export:
-
-1. Sign in to the [Power Platform admin
-  center](https://admin.powerplatform.microsoft.com/).
-2. Select **Manage** -> **Data export** -> **App Insights**.
-3. Select **New data export** and enter a descriptive package name.
-4. Select **Copilot Studio** as the data type and configure any required
-  filters.
-5. Select the source Managed Environment, and then select **Next**.
-6. Select the Azure subscription, resource group, and workspace-based
-  Application Insights destination, and then select **Next**.
-7. Review the configuration and select **Create**.
-8. Run a test conversation. Initial delivery can take up to 24 hours.
-9. In Application Insights **Logs**, verify that `InvokeAgent`,
-  `ExecuteTool`, and `OutputMessages` spans appear in `dependencies`
-  and share an `operation_Id` for each turn. In the Sentinel workspace,
-  the corresponding table is `AppDependencies`.
-
-Environment-level export uses an OpenTelemetry-aligned span schema in
-`dependencies` / `AppDependencies`, with agent fields under
-`customDimensions` / `Properties` as `gen_ai.*`. It is **not the same
-schema** as the agent-level `AppEvents` + connector `AppDependencies`
-telemetry consumed by the current `CopilotStudio-AppInsights` rules.
-Microsoft also recommends not sending both scopes to the same
-Application Insights instance. Therefore:
-
-- Use **agent-level telemetry** for the existing Copilot Studio bundle.
-- Use **environment-level telemetry** for centralized all-agent
-  observability, preferably in a separate Application Insights resource.
-- Do not enable the existing Copilot Studio analytic rules against only
-  environment-level telemetry until the rules are adapted and tested
-  for its OpenTelemetry schema.
-
-Official setup references:
-
-- [Set up tracing in Microsoft Foundry](https://learn.microsoft.com/azure/foundry/observability/how-to/trace-agent-setup)
-- [Copilot Studio agent-level telemetry](https://learn.microsoft.com/microsoft-copilot-studio/advanced-bot-framework-composer-capture-telemetry)
-- [Copilot Studio environment-level telemetry](https://learn.microsoft.com/microsoft-copilot-studio/advanced-environment-level-agent-telemetry)
-- [Export Power Platform data to Application Insights](https://learn.microsoft.com/power-platform/admin/set-up-export-application-insights)
-
----
+1. **Microsoft Sentinel** enabled on the target Log Analytics workspace.
+2. The agent's **Application Insights** resource is **workspace-based**
+   and points at the **same** workspace named in `workspaceName`, so the
+   `AppEvents` / `AppDependencies` tables are populated. (In Copilot
+   Studio: Settings -> Advanced -> Application Insights -> paste the
+   workspace-based resource's **Connection string**.)
+3. **Enable logging** turned on for the agent; **Log sensitive
+   properties** enabled if you want the text-content rules to fire
+   (otherwise `Properties.text` is empty and those rules stay silent).
+4. For full MCP trace coverage, configure environment-level Copilot Studio
+  Application Insights export in a managed environment. Initial delivery
+  can take up to 24 hours.
+5. Some conversations generated **after** the above, so there is data to
+   read.
+6. Deployer needs **Microsoft Sentinel Contributor** on the workspace
+   resource group.
 
 ## Deploy
 
-Each bundle regenerates and ships its own ARM template. The general flow
-is the same everywhere:
-
 ```powershell
-# 1. (re)build the template from the YAML sources
-.\<Bundle>\Deploy\New-*ArmTemplate.ps1
+# (re)build the template from the YAML sources
+.\Deploy\New-CopilotStudioArmTemplate.ps1
 
-# 2. deploy with Azure CLI
+# deploy (Azure CLI)
 az deployment group create `
   --resource-group <sentinel-rg> `
-  --template-file .\<Bundle>\Deploy\azuredeploy.json `
-  --parameters workspaceName=<workspace-name> enableAnalyticRules=true
+  --template-file ./Deploy/azuredeploy.json `
+  --parameters workspaceName=<workspace-name> enableAnalyticRules=true enableWatchlist=true
 ```
 
-See each bundle's `README.md` and `Deploy/README.md` for the exact
-parameters, watchlist requirements and prerequisites.
+Full details in [`Deploy/README.md`](./Deploy/README.md).
 
----
-
-## Repository layout
-
-| Path | Contents |
-| --- | --- |
-| `Foundry-AppInsights/` | Foundry / Agent Service detection bundle (rules, hunts, watchlists, Simulation harness, ARM) |
-| `CopilotStudio-AppInsights/` | Copilot Studio detection bundle (rules, hunts, watchlists, ARM) |
-| `OpenAI-Connector/` | OpenAI CCF connector detection bundle (rules, hunts, ARM) |
-| `Agent365-DataLake/` | Agent 365 data-lake-tier observability bundle (discovery notes, KQL jobs, summary rules, workbooks) |
-| `Discovery/`, `Hunting/`, `KqlJobs/`, `SummaryRules/`, `Workbooks/` | Data-lake-tier working folders referenced by `Agent365-DataLake/README.md` |
-
----
-
-## Pre-requisites
-
-- Microsoft Sentinel enabled on the target Log Analytics workspace.
-- The relevant telemetry source connected for whichever bundle you
-  deploy (Foundry / Copilot Studio Application Insights export, or the
-  OpenAI connector, or the Agent 365 data-lake connector).
-- Permissions to create analytic rules, hunting queries and watchlists
-  on the workspace.
-
-Per-bundle prerequisites (tracing flags, sensitive-property logging,
-parser installation, watchlist seeding) are documented inside each
-bundle's `README.md`.
+> **Watchlist**: the `AgentUntrustedConnectorTarget` hunt and disabled-by-default
+> `CopilotStudioUntrustedMcpTarget` rule join against
+> the `CopilotStudioTrustedConnectors` watchlist (column
+> `ConnectorTarget`). The ARM template deploys it from
+> `Watchlists/CopilotStudioTrustedConnectors/` (toggle with the
+> `enableWatchlist` parameter, default true). Replace the seed rows with
+> your approved connector/MCP identifiers **before** relying on those detections
+> - while the watchlist only has seed rows the join treats every other
+> connector as untrusted and the hunt will be noisy.
