@@ -43,7 +43,7 @@ direct Application Insights modes.
 
 ## Sensitive evidence behavior
 
-The user explicitly requested full payload visibility. These rules and hunts return
+full payload visibility. These rules and hunts return
 `Input`, `Instructions`, `Tools`, `RequestBody`, and `ResponseBody`. Scheduled rule
 matches are copied into Sentinel alerts and incidents. Treat the workspace, alerts,
 exports, screenshots, notebooks, and tickets as sensitive stores. Restrict access and
