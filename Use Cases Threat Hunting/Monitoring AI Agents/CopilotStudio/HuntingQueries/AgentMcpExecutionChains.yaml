@@ -1,0 +1,42 @@
+id: 876d67fd-2ee4-46d3-8b46-3ef231e061b2
+name: Copilot Studio - Agent to MCP execution chains
+description: |
+  Reconstructs environment-level Copilot Studio turns by joining InvokeAgent
+  roots to MCP ExecuteTool spans on OperationId. Shows the user, channel,
+  conversation, tools, failures, and call count for investigation.
+query: |
+  let lookback = 7d;
+  let Roots = AppDependencies
+  | where TimeGenerated > ago(lookback)
+  | where tostring(Properties["gen_ai.operation.name"]) == "invoke_agent"
+  | summarize Agent = take_any(tostring(Properties["gen_ai.agent.name"])),
+      Conversation = take_any(tostring(Properties["gen_ai.conversation.id"])),
+      User = take_any(coalesce(tostring(Properties["user.email"]), tostring(Properties["user.id"]))),
+      Channel = take_any(tostring(Properties["microsoft.channel.name"])),
+      RootSuccess = take_any(Success), RootTime = min(TimeGenerated) by OperationId;
+  let Tools = AppDependencies
+  | where TimeGenerated > ago(lookback)
+  | where tostring(Properties["gen_ai.operation.name"]) == "execute_tool"
+  | extend Tool = tostring(Properties["gen_ai.tool.name"]),
+           ToolType = tostring(Properties["gen_ai.tool.type"])
+  | where Tool has "mcp" or ToolType has "mcp"
+  | summarize ToolCalls = count(), MCPTools = make_set(Tool, 20),
+      ToolTypes = make_set(ToolType, 10), ToolFailures = countif(Success == false),
+      LastToolCall = max(TimeGenerated) by OperationId;
+  Roots
+  | join kind=inner Tools on OperationId
+  | project RootTime, LastToolCall, OperationId, Agent, Conversation, User,
+      Channel, MCPTools, ToolTypes, ToolCalls, ToolFailures, RootSuccess
+  | order by LastToolCall desc
+tactics:
+- Execution
+- Discovery
+techniques:
+- T1059
+- T1518
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- MCP
+- Trace

@@ -1,0 +1,45 @@
+id: 579bde62-2240-49cc-8143-6cdb3471fc7f
+name: Copilot Studio - MCP server and tool inventory
+description: |
+  Inventories MCP connector targets and environment-level MCP ExecuteTool
+  spans. Use the resulting exact Target / Tool values to populate the
+  CopilotStudioTrustedConnectors watchlist and identify owners before
+  enabling enforcement rules.
+query: |
+  let lookback = 30d;
+  let Legacy = AppDependencies
+  | where TimeGenerated > ago(lookback)
+  | where AppRoleName == "Microsoft Copilot Studio"
+  | where Name has "MCP" or Target has "mcp"
+  | project TimeGenerated, OperationId, Success, DurationMs,
+      Agent = "", Conversation = tostring(Properties["conversationId"]),
+      Tool = Name, ToolType = "MCP - connector telemetry", Target = tostring(Target),
+      Source = "Agent-level connector";
+  let Modern = AppDependencies
+  | where TimeGenerated > ago(lookback)
+  | where tostring(Properties["gen_ai.operation.name"]) == "execute_tool"
+  | extend Tool = tostring(Properties["gen_ai.tool.name"]),
+           ToolType = tostring(Properties["gen_ai.tool.type"])
+  | where Tool has "mcp" or ToolType has "mcp"
+  | project TimeGenerated, OperationId, Success, DurationMs,
+      Agent = tostring(Properties["gen_ai.agent.name"]),
+      Conversation = tostring(Properties["gen_ai.conversation.id"]),
+      Tool, ToolType, Target = tostring(Target), Source = "Environment ExecuteTool";
+  union Legacy, Modern
+  | summarize Calls = count(), Failures = countif(Success == false),
+      Agents = make_set_if(Agent, isnotempty(Agent), 20),
+      Conversations = dcountif(Conversation, isnotempty(Conversation)),
+      AvgMs = round(avg(DurationMs), 0), P95Ms = round(percentile(DurationMs, 95), 0),
+      FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+      by Tool, ToolType, Target, Source
+  | order by Calls desc
+tactics:
+- Discovery
+techniques:
+- T1518
+tags:
+- Sentinel-As-Code
+- Custom
+- CopilotStudio
+- MCP
+- Inventory
