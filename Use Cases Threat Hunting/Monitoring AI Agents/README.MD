@@ -49,23 +49,6 @@ evaluation, vector-store audit, provenance, or package-install evidence is added
 Microsoft 365 Copilot also does not expose the tool arguments and target details
 needed to substantiate SSRF or function-call manipulation.
 
-## Workbook
-
-The V2 AI Agents Monitoring workbook provides 20 tabs and 183 query tiles. Its
-**AI Attack Matrix** maps 30 risks to Foundry, Copilot Studio, Microsoft 365
-Copilot, APIM, Defender, and OpenAI evidence using four coverage states:
-
-| State | Meaning |
-| --- | --- |
-| `COVERED` | Direct workbook visibility and deployable detection content exist |
-| `OBSERVABLE` | Relevant evidence exists but does not establish the complete attack |
-| `PARTIAL` | Evidence is heuristic, schema-dependent, or limited to one telemetry plane |
-| `GAP` | Current telemetry cannot substantiate the claim |
-
-Runtime verdicts are separate: `PASS` means an explicit control block, `FAIL`
-means suspicious behavior was allowed or emitted, `ERROR` means an operational
-failure prevented a conclusion, and `INCONCLUSIVE` means impact cannot be proven.
-No event is never treated as an automatic pass.
 
 ## Choose a pack
 
