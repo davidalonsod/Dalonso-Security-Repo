@@ -251,3 +251,22 @@ M365 Copilot Security Monitoring with Microsoft Sentinel | Detections, Alerts & 
 09:57 - AI Agents Security & Monitoring Workbook
 12:28 - Summary & Key Takeaways
 
+Are You Missing Identity Attacks? Monitoring and Hunting Entra ID Threats with Sentinel https://youtu.be/dQERERdqa18
+
+00:00 - Introduction: Why Raw Entra ID Audit Logs Are Hard to Triage
+01:58 - Configuring the Entra ID Connector in Microsoft Sentinel
+02:57 - CISO Overview & Identity Risk Scoring
+07:38 - SOC Triage Queue: Prioritizing High-Impact Changes
+08:31 - Service Principals & App Lifecycle Monitoring
+09:00 - Privileged Identity Management (PIM) & Role Assignments
+11:14 - App Secrets, Credentials & Critical Permission Grants
+14:10 - Conditional Access Tampering & MFA Bypass Tracking
+16:11 - User & Group Lifecycle Management
+17:53 - Attack Paths & Multi-Stage Chains (MITRE ATT&CK)
+19:34 - Deep-Dive User Investigation Timeline
+20:24 - Identity Governance & Architecture Insights
+21:49 - MITRE ATT&CK Coverage Mapping in Sentinel
+22:56 - Data Health Check & Readiness Dashboard
+24:10 - Deploying Custom Detections & Hunting Rules from GitHub
+25:29 - Summary & Next Steps
+
