@@ -17,5 +17,7 @@ https://youtu.be/Ea6_optTTj4
 
 Are Your Firewall Logs Too Noisy? Stop Attacks with Sentinel https://youtu.be/_q_tG7GscZA
 
+How to Detect AI Agent Threats with Microsoft Sentinel https://youtu.be/Y-0Yq6fcd60 
+
 
 
