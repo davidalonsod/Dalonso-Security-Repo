@@ -1,5 +1,7 @@
 # 🛡️ Microsoft Defender for Cloud — CIEM Risk & Least Privilege Dashboard
 
+Are Your Cloud Permissions Over-Privileged? Multi-Cloud CIEM Explained with Defender for Cloud https://youtu.be/sDRjvGuBV0s 
+
 An **Azure-hosted multi-cloud Workbook** that turns Microsoft Defender for Cloud's CIEM view
 into a **Cloud Infrastructure Entitlement Management operations console**. It combines
 Defender CIEM findings for Azure, AWS and GCP, multi-cloud Defender CSPM attack paths, Azure
