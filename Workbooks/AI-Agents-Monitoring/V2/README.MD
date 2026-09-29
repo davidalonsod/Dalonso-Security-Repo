@@ -1,6 +1,6 @@
 # 🤖 AI Agents Monitoring Workbook
 
-Stop Guessing What Your AI Agents Are Doing and Monitor AI Agents at Scale https://youtu.be/GYHOH9GUcDc
+AI Agents Monitoring V2 for Microsoft Sentinel | What's New?  New Features, MCP & Threat Hunting https://youtu.be/cNhf7BT-e_8
 
 Unified Microsoft Sentinel workbook for **threat hunting and telemetry across your
 entire agentic-AI estate** — Microsoft 365 Copilot, Copilot Studio agents, Azure AI
