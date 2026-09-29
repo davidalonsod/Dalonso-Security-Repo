@@ -270,3 +270,20 @@ Are You Missing Identity Attacks? Monitoring and Hunting Entra ID Threats with S
 24:10 - Deploying Custom Detections & Hunting Rules from GitHub
 25:29 - Summary & Next Steps
 
+
+AI Agents Monitoring V2 for Microsoft Sentinel | What's New?  New Features, MCP & Threat Hunting https://youtu.be/cNhf7BT-e_8
+
+00:00 - Introduction & What's New in V2
+01:36 - GitHub Repo & Workbook JSON Deployment
+03:21 - Microsoft 365 Copilot: Telemetry & Threat Detections
+05:20 - Copilot Studio: Visibility, MCP Tools & Watchlists
+07:20 - Azure AI Foundry: Models, Tokens & Guardrails
+08:41 - Azure APIM: Telemetry, Anomalies & Security Insights
+12:00 - Content Safety, Prompt Injections & Sensitive Data
+13:35 - Defender XDR & Alert Correlations
+14:08 - Telemetry Data Sources & Table Health
+16:05 - Defender Advanced Hunting & Agent Inventory
+17:22 - Identity & Governance: Unowned & Inactive Agents
+18:12 - Local Agents, VS Code Monitoring & MCP Activity
+20:31 - Summary & How to Update
+
