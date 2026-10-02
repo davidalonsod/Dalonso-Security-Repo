@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agentic-action-provenance-graph:access-model-evaluation-schema:1.0.0",
+  "title": "Agent Effective Access Evaluation Report",
+  "description": "The OUTPUT contract produced by the Phase 2 evaluator (access-graph/scripts/evaluate-access.mjs) from a Phase 1 access-model-schema.json instance. This is the only place 'effective access' is asserted -- it is always a derived result, never a raw input fact. The workbook (access-graph/workbook) and docs render this shape directly so the visualization layer never re-implements access logic.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "evaluatedAt", "inputSource", "agents", "driftFindings"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "evaluatedAt": { "type": "string", "format": "date-time" },
+    "inputSource": { "type": "string", "description": "Path or identifier of the access-model-schema.json instance this report was computed from." },
+    "windowDays": { "type": "integer", "description": "The observed-usage lookback window applied, e.g. 90." },
+    "telemetryCoveragePercent": { "type": "number", "minimum": 0, "maximum": 100 },
+    "agents": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/agentEvaluation" }
+    },
+    "driftFindings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/driftFinding" }
+    },
+    "blastRadiusResults": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/blastRadiusResult" }
+    }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "confidence": { "enum": ["low", "medium", "high"] },
+    "resolvedPermission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resourceApp", "permission", "permissionType", "grantTypes", "status", "confidence"],
+      "properties": {
+        "resourceApp": { "type": "string" },
+        "permission": { "type": "string" },
+        "permissionType": { "enum": ["application", "delegated"] },
+        "grantTypes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Every grantType (direct/inherited/group/...) contributing to this resolved permission -- the provenance union."
+        },
+        "status": {
+          "enum": ["effective", "blocked", "incomplete-resource-grant"],
+          "description": "effective: materialized and not fully blocked by a constraint. blocked: denied/conditional-access/disabled entirely removes it. incomplete-resource-grant: e.g. Sites.Selected consented but no sites/{id}/permissions grant exists yet, so it grants access to nothing."
+        },
+        "blockedBy": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "reach": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "theoretical": { "type": "string", "description": "Best-case maximum this permission could reach if unconstrained, e.g. 'tenant-wide'." },
+            "configured": { "type": "string", "description": "What constraints actually narrow it to, e.g. '3 resource-specific-consent sites'." },
+            "observedResourceIds": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "observedCount": { "type": "integer" },
+            "utilization": {
+              "enum": ["observed-used", "carried-not-proven-used", "not-observed", "unknown"]
+            }
+          }
+        },
+        "confidence": { "$ref": "#/$defs/confidence" }
+      }
+    },
+    "agentEvaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentIdentityId", "blueprintId", "resolvedPermissions", "sensitiveExposure"],
+      "properties": {
+        "agentIdentityId": { "$ref": "#/$defs/identifier" },
+        "blueprintId": { "$ref": "#/$defs/identifier" },
+        "resolvedPermissions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/resolvedPermission" }
+        },
+        "sensitiveExposure": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["resourceId", "classification", "access"],
+            "properties": {
+              "resourceId": { "type": "string" },
+              "classification": { "enum": ["public", "internal", "confidential", "highlyConfidential"] },
+              "access": { "enum": ["read", "readWrite", "none"] },
+              "viaPermission": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "driftFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentIdentityId", "kind", "severity", "description"],
+      "properties": {
+        "agentIdentityId": { "$ref": "#/$defs/identifier" },
+        "kind": {
+          "enum": ["write-beyond-read-baseline", "new-resource-app-beyond-baseline", "direct-grant-beyond-baseline", "all-allowed-scopes-unbounded-baseline"]
+        },
+        "severity": { "enum": ["low", "medium", "high", "critical"] },
+        "description": { "type": "string" },
+        "baselinePermissions": { "type": "array", "items": { "type": "string" } },
+        "effectivePermissions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "blastRadiusResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["changeProposalId", "confirmedAffectedAgentCount", "potentiallyAffectedAgentCount", "confidence"],
+      "properties": {
+        "changeProposalId": { "type": "string" },
+        "confirmedAffectedAgentCount": { "type": "integer" },
+        "potentiallyAffectedAgentCount": { "type": "integer" },
+        "affectedBlueprintIds": { "type": "array", "items": { "type": "string" } },
+        "affectedBusinessProcessIds": { "type": "array", "items": { "type": "string" } },
+        "unknownDependencyCount": { "type": "integer" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "dataAsOf": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

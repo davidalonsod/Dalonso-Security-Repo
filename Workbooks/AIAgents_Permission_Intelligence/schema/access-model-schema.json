@@ -1,0 +1,371 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agentic-action-provenance-graph:access-model-schema:1.0.0",
+  "title": "Agent Effective Access Canonical Model",
+  "description": "Phase 1 of the Agent ID Effective Privilege & Inheritance Graph. A reusable, source-agnostic data contract for an AI agent's identity, entitlements, boundaries, observed runtime behavior, and business dependencies. Instances of this schema are produced by adapters (e.g. the Phase 3 KQL queries in access-graph/kql/) and consumed by the Phase 2 evaluator (access-graph/scripts/evaluate-access.mjs) and the workbook. Every record that represents a claim about the environment carries an 'observation' block so a reader can judge how the claim was obtained and how stale it might be -- this schema never asserts effective access directly; effective access is always a derived, evaluator-computed result (see access-model-evaluation-schema.json).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "metadata",
+    "blueprints",
+    "agentIdentities",
+    "entitlements",
+    "resources"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "description", "tenantRef", "generatedAt", "deploymentStatus"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "tenantRef": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A non-sensitive label for the tenant/environment this instance describes, e.g. 'contoso-prod' or 'example-only'. Never put a real tenant GUID in example/sample files."
+        },
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "telemetryCoveragePercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Share of the asOf window for which runtime telemetry (executions[]) is actually available. Used to distinguish 'not observed' from 'no telemetry collected'. Omit if unknown."
+        },
+        "deploymentStatus": {
+          "enum": ["draft", "requires-tuning", "ready", "deployed", "retired"]
+        },
+        "statusReason": { "type": "string" }
+      }
+    },
+    "blueprints": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/blueprint" }
+    },
+    "agentIdentities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/agentIdentity" }
+    },
+    "credentials": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/credential" }
+    },
+    "entitlements": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entitlement" }
+    },
+    "constraints": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/constraint" }
+    },
+    "resources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/resource" }
+    },
+    "executions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/execution" }
+    },
+    "businessProcesses": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/businessProcess" }
+    },
+    "changeProposals": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/changeProposal" }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "confidence": {
+      "enum": ["low", "medium", "high"]
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "confidence"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where this record came from, e.g. 'Entra Agent ID Graph snapshot', 'MicrosoftGraphActivityLogs query', 'manual entry'."
+        },
+        "sourceTable": {
+          "type": "string",
+          "description": "The real KQL/Graph table or endpoint this record would come from in a live tenant, e.g. MicrosoftGraphActivityLogs, AADServicePrincipalSignInLogs, /servicePrincipals/{id}/appRoleAssignments. Optional but recommended for traceability back to a query, mirroring investigation/case-schema.json's evidenceTable.sourceTable."
+        },
+        "asOf": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When this fact was true/collected (valid time), not necessarily when it was ingested."
+        },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "note": { "type": "string" }
+      }
+    },
+    "permissionRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resourceApp", "permission", "permissionType"],
+      "properties": {
+        "resourceApp": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The resource application the permission is defined on, e.g. 'Microsoft Graph', 'SharePoint Online'."
+        },
+        "permission": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The permission/scope/role value, e.g. 'Sites.ReadWrite.All'."
+        },
+        "permissionType": {
+          "enum": ["application", "delegated"],
+          "description": "application = app-only/autonomous role; delegated = OBO scope exercised on behalf of a user."
+        }
+      }
+    },
+    "blueprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "displayName", "appId", "signInAudience", "baselinePermissions", "observation"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "displayName": { "type": "string", "minLength": 1 },
+        "appId": { "type": "string", "minLength": 1 },
+        "signInAudience": {
+          "enum": ["AzureADMyOrg", "AzureADMultipleOrgs"]
+        },
+        "baselinePermissions": {
+          "type": "array",
+          "description": "The governance-approved baseline: the inheritable permissions configured on the blueprint (configure-inheritable-permissions-blueprints), i.e. what agent identities created from this blueprint are INTENDED to receive. This is the 'Blueprint baseline' compared against effective privilege to compute drift.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["resourceApp", "permission", "permissionType", "inheritancePattern"],
+            "properties": {
+              "resourceApp": { "type": "string", "minLength": 1 },
+              "permission": { "type": "string", "minLength": 1 },
+              "permissionType": { "enum": ["application", "delegated"] },
+              "inheritancePattern": {
+                "enum": ["enumeratedScopes", "allAllowedScopes"],
+                "description": "enumeratedScopes: only this exact permission inherits. allAllowedScopes: every delegated scope ever granted to the blueprint for this resourceApp inherits, including future grants -- a key drift-risk flag."
+              }
+            }
+          }
+        },
+        "observation": { "$ref": "#/$defs/observation" }
+      }
+    },
+    "agentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "displayName", "blueprintId", "servicePrincipalId", "status", "observation"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "displayName": { "type": "string", "minLength": 1 },
+        "blueprintId": { "$ref": "#/$defs/identifier" },
+        "servicePrincipalId": { "type": "string", "minLength": 1 },
+        "owner": { "type": "string" },
+        "sponsor": { "type": "string" },
+        "status": {
+          "enum": ["active", "disabled", "deleted"]
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "observation": { "$ref": "#/$defs/observation" }
+      }
+    },
+    "credential": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "blueprintId", "type", "observation"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "blueprintId": {
+          "$ref": "#/$defs/identifier",
+          "description": "Credentials live on the Blueprint, not on individual Agent Identities -- Agent Identities cannot hold their own credentials (PropertyNotCompatibleWithAgentIdentity)."
+        },
+        "type": {
+          "enum": ["managedIdentity", "federatedIdentityCredential", "certificate", "clientSecret", "sdkSidecar"]
+        },
+        "issuer": { "type": "string" },
+        "subject": { "type": "string" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "lastRotatedAt": { "type": "string", "format": "date-time" },
+        "lastUsedAt": { "type": "string", "format": "date-time" },
+        "observation": { "$ref": "#/$defs/observation" }
+      }
+    },
+    "entitlement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "agentIdentityId", "resourceApp", "permission", "permissionType", "grantType", "executionContext", "consentState", "observation"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "agentIdentityId": { "$ref": "#/$defs/identifier" },
+        "resourceApp": { "type": "string", "minLength": 1 },
+        "permission": { "type": "string", "minLength": 1 },
+        "permissionType": { "enum": ["application", "delegated"] },
+        "grantType": {
+          "enum": ["inherited", "direct", "group", "accessPackage", "resourceSpecificConsent", "azureRbacRole"],
+          "description": "How this agent identity came to hold the permission -- the 'provenance' of the grant. inherited: from the blueprint's inheritable permissions. direct: assigned straight to this agent identity. group: via a security-group membership. accessPackage: via Entra entitlement management. resourceSpecificConsent: Sites.Selected-style per-resource grant. azureRbacRole: an Azure RBAC role assignment."
+        },
+        "executionContext": {
+          "enum": ["application", "delegatedObo", "managedIdentity", "federatedWorkload", "unknown"],
+          "description": "The runtime identity mode this grant is exercised under. Determines the access-intersection formula the evaluator applies (app-only vs. OBO-bounded-by-the-invoking-user)."
+        },
+        "consentState": {
+          "enum": ["declared", "consented", "inheritable", "materialized"],
+          "description": "declared: listed in required resource access only. consented: admin has granted consent on the blueprint principal. inheritable: configured to flow to child agent identities. materialized: actually present on this agent identity's service principal today. Only 'materialized' entitlements are counted toward effective access."
+        },
+        "sourceId": {
+          "type": "string",
+          "description": "The id of the blueprint, group, or access package this grant originates from, when grantType is not 'direct'."
+        },
+        "grantedAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "observation": { "$ref": "#/$defs/observation" }
+      }
+    },
+    "constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "description", "observation"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "appliesToAgentIdentityId": {
+          "$ref": "#/$defs/identifier",
+          "description": "Omit if the constraint applies tenant-wide to the permission rather than to one agent identity."
+        },
+        "appliesToPermission": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resourceApp": { "type": "string" },
+            "permission": { "type": "string" }
+          }
+        },
+        "kind": {
+          "enum": [
+            "resourceSpecificAcl",
+            "conditionalAccessBlock",
+            "rbacCondition",
+            "denyAssignment",
+            "dlpPolicy",
+            "networkBoundary",
+            "pimEligibleNotActive",
+            "credentialExpired",
+            "disabledIdentity"
+          ]
+        },
+        "scopeResourceIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/identifier" },
+          "description": "For resourceSpecificAcl: the specific resources this constraint narrows a broad grant down to (e.g. Sites.Selected plus a sites/{id}/permissions grant). Narrows 'theoretical reach' down to 'configured reach'."
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "observation": { "$ref": "#/$defs/observation" }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "displayName", "resourceApp", "resourceType", "classification"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "displayName": { "type": "string", "minLength": 1 },
+        "resourceApp": { "type": "string", "minLength": 1 },
+        "resourceType": {
+          "enum": ["sharepointSite", "oneDriveAccount", "exchangeMailbox", "sqlDatabase", "vectorIndex", "mcpTool", "other"]
+        },
+        "classification": {
+          "enum": ["public", "internal", "confidential", "highlyConfidential"]
+        },
+        "owner": { "type": "string" },
+        "businessProcessIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/identifier" }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "agentIdentityId", "timestamp", "executionContext", "requestMethod", "responseStatusCode", "resultType", "observation"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "agentIdentityId": { "$ref": "#/$defs/identifier" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "executionContext": {
+          "enum": ["application", "delegatedObo", "managedIdentity", "federatedWorkload", "unknown"]
+        },
+        "resourceApp": { "type": "string" },
+        "permissionClaims": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The scopes/roles carried in the token for this call (MicrosoftGraphActivityLogs.Scopes/Roles). Carrying a claim does not itself prove the permission was exercised -- see permissionUsed."
+        },
+        "permissionUsed": {
+          "type": "string",
+          "description": "The single permission this specific operation is mapped to, derived from requestUri+requestMethod, not merely copied from permissionClaims. Omit if the mapping is not yet known (status = unknown in the evaluator)."
+        },
+        "requestUri": { "type": "string" },
+        "requestMethod": { "type": "string" },
+        "responseStatusCode": { "type": "integer" },
+        "resourceId": { "$ref": "#/$defs/identifier" },
+        "resultType": {
+          "enum": ["success", "denied", "throttled", "error"]
+        },
+        "observation": { "$ref": "#/$defs/observation" }
+      }
+    },
+    "businessProcess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "displayName"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "displayName": { "type": "string", "minLength": 1 },
+        "ownerTeam": { "type": "string" },
+        "dependentResourceIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/identifier" }
+        },
+        "dependentAgentIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/identifier" }
+        }
+      }
+    },
+    "changeProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "description"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "kind": {
+          "enum": ["removeEntitlement", "disableAgentIdentity", "disableBlueprint", "downscopeToResourceSpecific"]
+        },
+        "targetAgentIdentityId": { "$ref": "#/$defs/identifier" },
+        "targetBlueprintId": { "$ref": "#/$defs/identifier" },
+        "targetPermission": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resourceApp": { "type": "string" },
+            "permission": { "type": "string" }
+          }
+        },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
