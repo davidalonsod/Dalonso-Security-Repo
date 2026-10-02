@@ -1,0 +1,517 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.41.2.15936",
+      "templateHash": "3350110134507939625"
+    }
+  },
+  "parameters": {
+    "resourceGroupName": {
+      "type": "string",
+      "defaultValue": "RG_Sentinel",
+      "metadata": {
+        "description": "Existing resource group containing LAWSentinel and aa-sentinel-sync."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "northeurope",
+      "metadata": {
+        "description": "Azure region for collector resources."
+      }
+    },
+    "workspaceName": {
+      "type": "string",
+      "defaultValue": "LAWSentinel",
+      "metadata": {
+        "description": "Existing Log Analytics workspace name."
+      }
+    },
+    "automationAccountName": {
+      "type": "string",
+      "defaultValue": "aa-sentinel-sync",
+      "metadata": {
+        "description": "Existing Automation Account name."
+      }
+    },
+    "automationPrincipalId": {
+      "type": "string",
+      "defaultValue": "4e4b610b-2595-4bdd-82a2-437af67d6570",
+      "metadata": {
+        "description": "System-assigned managed identity principal ID for the existing Automation Account."
+      }
+    },
+    "tableName": {
+      "type": "string",
+      "defaultValue": "AgentPermissionEdges_CL",
+      "metadata": {
+        "description": "Custom table name. Must end in _CL."
+      }
+    },
+    "dataCollectionEndpointName": {
+      "type": "string",
+      "defaultValue": "dce-agent-permission-edges",
+      "metadata": {
+        "description": "Dedicated Data Collection Endpoint name."
+      }
+    },
+    "dataCollectionRuleName": {
+      "type": "string",
+      "defaultValue": "dcr-agent-permission-edges",
+      "metadata": {
+        "description": "Dedicated Data Collection Rule name."
+      }
+    },
+    "retentionInDays": {
+      "type": "int",
+      "defaultValue": 90,
+      "minValue": 30,
+      "metadata": {
+        "description": "Analytics retention for the custom table."
+      }
+    },
+    "totalRetentionInDays": {
+      "type": "int",
+      "defaultValue": 365,
+      "minValue": 30,
+      "metadata": {
+        "description": "Total retention for the custom table."
+      }
+    },
+    "collectorVersion": {
+      "type": "string",
+      "defaultValue": "1.0.0",
+      "metadata": {
+        "description": "Collector version written to Automation variables and table rows."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "defaultValue": {
+        "workload": "agent-permission-intelligence",
+        "dataClassification": "security-metadata",
+        "managedBy": "bicep"
+      },
+      "metadata": {
+        "description": "Tags applied to new Azure resources."
+      }
+    }
+  },
+  "variables": {
+    "readerRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(subscription().id, parameters('automationPrincipalId'), variables('readerRoleDefinitionId'))]",
+      "properties": {
+        "roleDefinitionId": "[variables('readerRoleDefinitionId')]",
+        "principalId": "[parameters('automationPrincipalId')]",
+        "principalType": "ServicePrincipal",
+        "description": "Read Azure resource and RBAC metadata for Agent Permission Intelligence."
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "agent-permission-edge-ingestion",
+      "resourceGroup": "[parameters('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "workspaceName": {
+            "value": "[parameters('workspaceName')]"
+          },
+          "automationAccountName": {
+            "value": "[parameters('automationAccountName')]"
+          },
+          "automationPrincipalId": {
+            "value": "[parameters('automationPrincipalId')]"
+          },
+          "tableName": {
+            "value": "[parameters('tableName')]"
+          },
+          "dataCollectionEndpointName": {
+            "value": "[parameters('dataCollectionEndpointName')]"
+          },
+          "dataCollectionRuleName": {
+            "value": "[parameters('dataCollectionRuleName')]"
+          },
+          "retentionInDays": {
+            "value": "[parameters('retentionInDays')]"
+          },
+          "totalRetentionInDays": {
+            "value": "[parameters('totalRetentionInDays')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.41.2.15936",
+              "templateHash": "10324393672171898101"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string"
+            },
+            "workspaceName": {
+              "type": "string"
+            },
+            "automationAccountName": {
+              "type": "string"
+            },
+            "automationPrincipalId": {
+              "type": "string"
+            },
+            "tableName": {
+              "type": "string"
+            },
+            "dataCollectionEndpointName": {
+              "type": "string"
+            },
+            "dataCollectionRuleName": {
+              "type": "string"
+            },
+            "retentionInDays": {
+              "type": "int"
+            },
+            "totalRetentionInDays": {
+              "type": "int"
+            },
+            "tags": {
+              "type": "object"
+            }
+          },
+          "variables": {
+            "columns": [
+              {
+                "name": "TimeGenerated",
+                "type": "datetime"
+              },
+              {
+                "name": "EdgeId",
+                "type": "string"
+              },
+              {
+                "name": "EdgeClass",
+                "type": "string"
+              },
+              {
+                "name": "Relation",
+                "type": "string"
+              },
+              {
+                "name": "TenantId",
+                "type": "guid"
+              },
+              {
+                "name": "SubjectId",
+                "type": "string"
+              },
+              {
+                "name": "SubjectType",
+                "type": "string"
+              },
+              {
+                "name": "TargetId",
+                "type": "string"
+              },
+              {
+                "name": "TargetType",
+                "type": "string"
+              },
+              {
+                "name": "PermissionId",
+                "type": "string"
+              },
+              {
+                "name": "PermissionValue",
+                "type": "string"
+              },
+              {
+                "name": "PermissionMode",
+                "type": "string"
+              },
+              {
+                "name": "AuthorizationMechanism",
+                "type": "string"
+              },
+              {
+                "name": "GrantOrigin",
+                "type": "string"
+              },
+              {
+                "name": "ConsentType",
+                "type": "string"
+              },
+              {
+                "name": "DeclarationState",
+                "type": "string"
+              },
+              {
+                "name": "GrantState",
+                "type": "string"
+              },
+              {
+                "name": "TokenState",
+                "type": "string"
+              },
+              {
+                "name": "ConfiguredEdgeId",
+                "type": "string"
+              },
+              {
+                "name": "ResourceScope",
+                "type": "string"
+              },
+              {
+                "name": "Operation",
+                "type": "string"
+              },
+              {
+                "name": "EventId",
+                "type": "string"
+              },
+              {
+                "name": "SourceSystem",
+                "type": "string"
+              },
+              {
+                "name": "SourceTable",
+                "type": "string"
+              },
+              {
+                "name": "SourceObjectId",
+                "type": "string"
+              },
+              {
+                "name": "EvidenceAuthority",
+                "type": "string"
+              },
+              {
+                "name": "Confidence",
+                "type": "string"
+              },
+              {
+                "name": "ObservedAt",
+                "type": "datetime"
+              },
+              {
+                "name": "RetrievedAt",
+                "type": "datetime"
+              },
+              {
+                "name": "ValidFrom",
+                "type": "datetime"
+              },
+              {
+                "name": "ValidTo",
+                "type": "datetime"
+              },
+              {
+                "name": "CollectorName",
+                "type": "string"
+              },
+              {
+                "name": "CollectorVersion",
+                "type": "string"
+              },
+              {
+                "name": "Details",
+                "type": "dynamic"
+              }
+            ],
+            "streamColumns": "[map(variables('columns'), lambda('column', if(equals(lambdaVariables('column').name, 'TenantId'), createObject('name', lambdaVariables('column').name, 'type', 'string'), lambdaVariables('column'))))]",
+            "streamName": "[format('Custom-{0}', parameters('tableName'))]",
+            "monitoringMetricsPublisherRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4e42-8a64-420c390055eb')]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.OperationalInsights/workspaces/tables",
+              "apiVersion": "2023-09-01",
+              "name": "[format('{0}/{1}', parameters('workspaceName'), parameters('tableName'))]",
+              "properties": {
+                "retentionInDays": "[parameters('retentionInDays')]",
+                "totalRetentionInDays": "[parameters('totalRetentionInDays')]",
+                "schema": {
+                  "name": "[parameters('tableName')]",
+                  "columns": "[variables('columns')]"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/dataCollectionEndpoints",
+              "apiVersion": "2023-03-11",
+              "name": "[parameters('dataCollectionEndpointName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "description": "Logs Ingestion endpoint for Agent Permission Intelligence edges.",
+                "networkAcls": {
+                  "publicNetworkAccess": "Enabled"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/dataCollectionRules",
+              "apiVersion": "2023-03-11",
+              "name": "[parameters('dataCollectionRuleName')]",
+              "location": "[parameters('location')]",
+              "kind": "Direct",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "description": "Normalizes Agent Permission Intelligence edge records into LAWSentinel.",
+                "dataCollectionEndpointId": "[resourceId('Microsoft.Insights/dataCollectionEndpoints', parameters('dataCollectionEndpointName'))]",
+                "streamDeclarations": {
+                  "[format('{0}', variables('streamName'))]": {
+                    "columns": "[variables('streamColumns')]"
+                  }
+                },
+                "destinations": {
+                  "logAnalytics": [
+                    {
+                      "name": "lawDestination",
+                      "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+                    }
+                  ]
+                },
+                "dataFlows": [
+                  {
+                    "streams": [
+                      "[variables('streamName')]"
+                    ],
+                    "destinations": [
+                      "lawDestination"
+                    ],
+                    "transformKql": "source | extend TenantId=toguid(TenantId)",
+                    "outputStream": "[variables('streamName')]"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/dataCollectionEndpoints', parameters('dataCollectionEndpointName'))]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces/tables', parameters('workspaceName'), parameters('tableName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('dataCollectionRuleName'))]",
+              "name": "[guid(resourceId('Microsoft.Insights/dataCollectionRules', parameters('dataCollectionRuleName')), parameters('automationPrincipalId'), variables('monitoringMetricsPublisherRoleDefinitionId'))]",
+              "properties": {
+                "roleDefinitionId": "[variables('monitoringMetricsPublisherRoleDefinitionId')]",
+                "principalId": "[parameters('automationPrincipalId')]",
+                "principalType": "ServicePrincipal",
+                "description": "Send normalized Agent Permission Intelligence edges through the Logs Ingestion API."
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('dataCollectionRuleName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "workspaceResourceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+            },
+            "automationAccountResourceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Automation/automationAccounts', parameters('automationAccountName'))]"
+            },
+            "automationPrincipalId": {
+              "type": "string",
+              "value": "[parameters('automationPrincipalId')]"
+            },
+            "streamName": {
+              "type": "string",
+              "value": "[variables('streamName')]"
+            },
+            "dataCollectionEndpointId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Insights/dataCollectionEndpoints', parameters('dataCollectionEndpointName'))]"
+            },
+            "logsIngestionEndpoint": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Insights/dataCollectionEndpoints', parameters('dataCollectionEndpointName')), '2023-03-11').logsIngestion.endpoint]"
+            },
+            "dataCollectionRuleId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('dataCollectionRuleName'))]"
+            },
+            "dataCollectionRuleImmutableId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Insights/dataCollectionRules', parameters('dataCollectionRuleName')), '2023-03-11').immutableId]"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "workspaceResourceId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'agent-permission-edge-ingestion'), '2025-04-01').outputs.workspaceResourceId.value]"
+    },
+    "automationAccountResourceId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'agent-permission-edge-ingestion'), '2025-04-01').outputs.automationAccountResourceId.value]"
+    },
+    "automationPrincipalId": {
+      "type": "string",
+      "value": "[parameters('automationPrincipalId')]"
+    },
+    "tableName": {
+      "type": "string",
+      "value": "[parameters('tableName')]"
+    },
+    "streamName": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'agent-permission-edge-ingestion'), '2025-04-01').outputs.streamName.value]"
+    },
+    "dataCollectionEndpointId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'agent-permission-edge-ingestion'), '2025-04-01').outputs.dataCollectionEndpointId.value]"
+    },
+    "logsIngestionEndpoint": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'agent-permission-edge-ingestion'), '2025-04-01').outputs.logsIngestionEndpoint.value]"
+    },
+    "dataCollectionRuleId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'agent-permission-edge-ingestion'), '2025-04-01').outputs.dataCollectionRuleId.value]"
+    },
+    "dataCollectionRuleImmutableId": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, parameters('resourceGroupName')), 'Microsoft.Resources/deployments', 'agent-permission-edge-ingestion'), '2025-04-01').outputs.dataCollectionRuleImmutableId.value]"
+    },
+    "collectorVersion": {
+      "type": "string",
+      "value": "[parameters('collectorVersion')]"
+    },
+    "subscriptionId": {
+      "type": "string",
+      "value": "[subscription().subscriptionId]"
+    },
+    "tenantId": {
+      "type": "string",
+      "value": "[tenant().tenantId]"
+    }
+  }
+}
