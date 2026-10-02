@@ -1,0 +1,113 @@
+// Phase 3, query 7 of 9: schema verification for the native Microsoft
+// Sentinel data-lake Agent Observability system tables.
+//
+// SCHEMA RE-VERIFIED directly against the live tenant's `getschema` output on
+// 2026-10-02 (previous 2026-10-01 capture contained four columns --
+// `PlatformAgentId`, `EventTypeName`, `ToolServerName`, `ClientIp` -- that do
+// NOT exist and caused live workbook panels to fail with
+// `SemanticError: Failed to resolve scalar expression`). This file remains a
+// preflight because the tables are preview/system data and their schemas can
+// evolve. Run each block separately after a platform update and compare the
+// result with the confirmed columns listed below before running the KQL jobs
+// in queries 08 and 09.
+//
+// Confirmed relationships used by query 08:
+//   EntraAgentIdentities.agentAppId
+//       -> EntraAgentIdentityBlueprints.appId
+//   EntraAgentUsers.agentIdentitySPID
+//       -> EntraAgentIdentities.id
+//
+// The first relationship is surfaced with a BlueprintJoinStatus column in
+// query 08 so unmatched rows remain visible instead of being silently dropped.
+//
+// IMPORTANT AUTHORIZATION LIMITATION:
+// - EntraAgentIdentityBlueprints.appRoles and oauth2PermissionScopes describe
+//   roles/scopes exposed by the blueprint application.
+// - They do NOT, by themselves, prove which permissions the blueprint or child
+//   identity has been granted on another resource application.
+// - Direct/inherited effective permission calculation still needs
+//   AgentsInfo.Permissions or authoritative Microsoft Graph reads of
+//   appRoleAssignments, oauth2PermissionGrants, and inheritablePermissions.
+//
+// DATA-LAKE / WORKBOOK BOUNDARY:
+// Azure Monitor Workbooks query the analytics tier. These system tables live
+// in the Sentinel data-lake tier. Use queries 08 and 09 as one-time or
+// scheduled Sentinel KQL jobs and promote their projected outputs to analytics
+// tables (recommended names:
+// AgentIdentityInventory_KQL_CL and AgentExecutionActivity_KQL_CL). Promoting
+// data incurs analytics-tier storage/query charges, so keep the projections
+// narrow and the lookback bounded.
+
+// Confirmed blueprint columns (24):
+// id, appId, createdDateTime, disabledByMicrosoftStatus, isDisabled,
+// displayName, groupMembershipClaims, optionalClaims, publisherDomain,
+// signInAudience, verifiedPublisher, certification, tags, appRoles,
+// oauth2PermissionScopes, preAuthorizedApplications,
+// serviceManagementReference, uniqueName, tenantId, organizationId,
+// _SnapshotTime, _ReceivedTime, TimeGenerated, _Workspace.
+EntraAgentIdentityBlueprints
+| getschema
+
+// Confirmed agent-identity columns (16):
+// id, appId, displayName, createdDateTime, createdByAppId, agentAppId,
+// accountEnabled, servicePrincipalType, tags, lifecycle, tenantId,
+// organizationId, _SnapshotTime, _ReceivedTime, TimeGenerated, _Workspace.
+EntraAgentIdentities
+| getschema
+
+// Confirmed embodied-agent-user columns (13):
+// id, agentIdentityBlueprintId, displayName, userPrincipalName,
+// agentIdentitySPID, mailNickname, accountEnabled, tenantId, organizationId,
+// _SnapshotTime, _ReceivedTime, TimeGenerated, _Workspace.
+EntraAgentUsers
+| getschema
+
+// Confirmed unified-observability columns (69, re-verified directly against
+// the live tenant on 2026-10-02 via `UnifiedAgentObservability | getschema`).
+// This supersedes the earlier 2026-10-01 capture, which incorrectly included
+// four non-existent columns (`PlatformAgentId`, `EventTypeName`,
+// `ToolServerName`, `ClientIp`) that caused live workbook panels to fail with
+// `SemanticError: Failed to resolve scalar expression`. Do not use those four
+// names in any query against this table.
+// TimeGenerated, EventUid, EventOriginalUid, EventSchema,
+// EventSchemaVersion, EventStartTime, EventEndTime, EventCount, EventVendor,
+// EventProduct, SrcAgentId, SrcAgentName, SrcAgentOriginalType,
+// SrcAgentDescription, SrcAgentBlueprintId, SrcIpAddr, SrcFQDN,
+// SrcPortNumber, TargetAgentId, TargetAgentName, TargetAgentUsername,
+// TargetAgentUserId, TargetAgentOriginalType, TargetAgentDescription,
+// TargetAgentBlueprintId, PlatformTargetAgentId, PlatformTargetAgentName,
+// PlatformTargetAgentDescription, PlatformTargetOriginalAgentType,
+// ActorUserId, ActorUserIdType, ActorUserScope, ActorUserScopeId,
+// ActorUsername, ActorUsernameType, ActingAppName, ActingAppId, ActingAppType,
+// EventSessionId, EventSessionName, EventType, EventOriginalType,
+// EventRequestId, EventRequestTemperature, EventRequestTopP,
+// EventRequestPresencePenalty, EventRequestFrequencyPenalty,
+// EventRequestSeed, EventResponseId, EventOriginalRequestDetails,
+// EventOriginalResultDetails, EventErrorDetails, EventOriginalErrorType,
+// EventThoughtProcessDetails, EventThoughtProcessId, EventFinishReasons,
+// EventOutputType, ToolId, ToolName, ToolDescription, ToolOriginalType,
+// ModelProviderName, ModelName, InputTokensUsed, OutputTokensUsed,
+// AdditionalFields, _ReceivedTime, TenantId, _Workspace.
+UnifiedAgentObservability
+| getschema
+
+// Population/freshness check. Run separately from the getschema blocks.
+union isfuzzy=true withsource=TableName
+(
+    EntraAgentIdentityBlueprints
+    | project RecordTime = coalesce(_SnapshotTime, TimeGenerated)
+),
+(
+    EntraAgentIdentities
+    | project RecordTime = coalesce(_SnapshotTime, TimeGenerated)
+),
+(
+    EntraAgentUsers
+    | project RecordTime = coalesce(_SnapshotTime, TimeGenerated)
+),
+(
+    UnifiedAgentObservability
+    | project RecordTime = coalesce(EventStartTime, TimeGenerated)
+)
+| summarize Rows=count(), Oldest=min(RecordTime), Newest=max(RecordTime) by TableName
+| order by TableName asc

@@ -1,0 +1,91 @@
+// Phase 3, query 6 of 7: Agent execution spans from CloudAppEvents (Agent 365 OTel telemetry).
+//
+// *** CONFIRMED FIELD MAPPING, UNTESTED AGAINST A LIVE TENANT *** -- every
+// RawEventData key referenced below is taken verbatim from the official
+// Microsoft Learn "Agent 365 observability attribute reference":
+// https://learn.microsoft.com/microsoft-agent-365/developer/observability-attribute-reference
+// That page documents exactly which OpenTelemetry span attribute lands in
+// which CloudAppEvents.RawEventData JSON key -- this is the strongest
+// available grounding for an executions[] adapter, because (unlike
+// Microsoft Graph activity logs) it natively carries agent id, blueprint id,
+// conversation id, channel, and tool name/type on every row.
+//
+// UNCONFIRMED: which CloudAppEvents.ActionType value(s) carry these rows in
+// your tenant. The existing ../../detections/CAND-001.kql guesses
+// "SentinelAIToolRunCompleted" without having validated it against a live
+// tenant (see that file's own header). Step 1 below is a schema-discovery
+// query to confirm the real value(s) before Step 2 filters on them -- do not
+// skip it.
+//
+// Populates (access-model-schema.json):
+//   - executions[].agentIdentityId (AgentId/TargetAgentId)
+//   - executions[].timestamp, .requestMethod-equivalent (Operation),
+//     .resultType (derived from ErrorType/ErrorMessage presence)
+//   - executions[].permissionUsed -- for execute_tool spans, ToolName/ToolType
+//     is a MCP/tool-capability signal, a different and often more precise
+//     granularity than a Microsoft Graph permission string (see the "non-Graph
+//     tool & RAG index RBAC" gap this covers, vs. query 02's Graph-only view)
+//   - a join key (AgentBlueprintId) back to query 05's blueprints[] rows
+//
+// Required table: CloudAppEvents (Microsoft Defender XDR advanced hunting /
+// Microsoft Sentinel; requires Microsoft Agent 365 telemetry ingestion to be
+// configured for your agents -- see the observability docs linked above).
+
+// Step 1 -- REQUIRED FIRST RUN. Confirm which ActionType(s) actually carry
+// Agent 365 span payloads in your tenant, using a confirmed field name
+// (AgentBlueprintId) as the detection signal instead of guessing ActionType.
+// CloudAppEvents
+// | where Timestamp > ago(1d)
+// | where RawEventData has "AgentBlueprintId" or RawEventData has "TargetAgentBlueprintID"
+// | summarize Count = count() by ActionType
+// | order by Count desc
+// Use the ActionType value(s) this returns to replace the PLACEHOLDER list
+// in Step 2's `where` clause below.
+
+let LookbackWindow = 90d; // PLACEHOLDER -- should match the evaluator's --windowDays argument.
+let AgentSpanActionTypes = dynamic(["SentinelAIToolRunCompleted"]); // PLACEHOLDER -- replace with the confirmed value(s) from Step 1.
+CloudAppEvents
+| where Timestamp > ago(LookbackWindow)
+| where ActionType in (AgentSpanActionTypes)
+| where isnotempty(RawEventData)
+| extend Operation = tostring(RawEventData.Operation)
+| extend AgentIdentityId = coalesce(tostring(RawEventData.TargetAgentId), tostring(RawEventData.AgentId), tostring(RawEventData.AgentId))
+| extend AgentBlueprintId = coalesce(tostring(RawEventData.TargetAgentBlueprintID), tostring(RawEventData.AgentBlueprintId))
+| extend ConversationId = tostring(RawEventData.ConversationId)
+| extend ChannelName = tostring(RawEventData.ChannelName)
+| extend ToolName = tostring(RawEventData.ToolName)
+| extend ToolType = tostring(RawEventData.ToolType)
+| extend ToolId = tostring(RawEventData.ToolId)
+| extend ClientIP = tostring(RawEventData.ClientIP)
+| extend UserKey = tostring(RawEventData.UserKey)
+| extend UserId = tostring(RawEventData.UserId)
+| extend SpanId = tostring(RawEventData.OpId)
+| extend ParentSpanId = tostring(RawEventData.ParentId)
+| extend CompletionTime = todatetime(RawEventData.CompletionTime)
+| extend ErrorMessage = tostring(RawEventData.ErrorMessage)
+| extend ErrorType = tostring(RawEventData.ErrorType)
+| extend ResultType = case(
+    isnotempty(ErrorType) or isnotempty(ErrorMessage), "error",
+    "success"
+    // NOTE: there is no confirmed "denied" (authorization-failure) signal in
+    // this attribute set today -- ErrorType is a free-form OTel status
+    // category, not an HTTP-style status code. Do not assume ErrorType values
+    // map to "denied" without inspecting real ErrorType values in your tenant first.
+)
+| extend PermissionUsed = iff(Operation == "execute_tool" and isnotempty(ToolName), strcat(ToolType, ":", ToolName), "")
+| project
+    Timestamp,
+    AgentIdentityId,
+    AgentBlueprintId,
+    Operation,
+    ConversationId,
+    ChannelName,
+    ToolName, ToolType, ToolId,
+    PermissionUsed,
+    ClientIP,
+    UserKey, UserId,
+    SpanId, ParentSpanId,
+    CompletionTime,
+    ResultType,
+    ErrorType, ErrorMessage
+| order by Timestamp desc

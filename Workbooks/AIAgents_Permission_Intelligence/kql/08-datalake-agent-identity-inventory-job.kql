@@ -1,0 +1,124 @@
+// Phase 3, query 8 of 9: native Agent 365 identity inventory projection.
+//
+// The workbook queries the source tables directly through its Data lake data
+// source. Use this file as an OPTIONAL one-time or scheduled KQL job when you
+// want to retain a narrow projection in the analytics tier, join it to
+// analytics-only sources, or reduce repeated lake-query cost. Suggested table:
+//   AgentIdentityInventory_KQL_CL
+//
+// Sources (all confirmed data-lake schemas):
+// - EntraAgentIdentityBlueprints
+// - EntraAgentIdentities
+// - EntraAgentUsers
+//
+// Security semantics:
+// - The identity -> blueprint join uses
+//   EntraAgentIdentities.agentAppId == EntraAgentIdentityBlueprints.appId.
+// - The user -> identity join uses
+//   EntraAgentUsers.agentIdentitySPID == EntraAgentIdentities.id.
+// - Blueprint appRoles/oauth2PermissionScopes are retained as JSON for
+//   inventory only. They are permissions EXPOSED by the blueprint app, not
+//   proof of resource permissions GRANTED to it.
+// - Do not calculate effective access from this output alone. Supplement it
+//   with AgentsInfo.Permissions or authoritative Microsoft Graph grant reads.
+
+let LatestBlueprints =
+    EntraAgentIdentityBlueprints
+    | summarize arg_max(_SnapshotTime, *) by id
+    | project
+        BlueprintObjectId = id,
+        BlueprintAppId = appId,
+        BlueprintName = displayName,
+        BlueprintCreatedDateTime = createdDateTime,
+        BlueprintDisabled = isDisabled,
+        BlueprintDisabledByMicrosoftStatus = disabledByMicrosoftStatus,
+        BlueprintSignInAudience = signInAudience,
+        BlueprintPublisherDomain = publisherDomain,
+        BlueprintAppRolesJson = tostring(appRoles),
+        BlueprintOauth2PermissionScopesJson = tostring(oauth2PermissionScopes),
+        BlueprintPreAuthorizedApplicationsJson = tostring(preAuthorizedApplications),
+        BlueprintTagsJson = tostring(tags),
+        BlueprintSnapshotTime = _SnapshotTime;
+let LatestUsers =
+    EntraAgentUsers
+    | summarize arg_max(_SnapshotTime, *) by id
+    | summarize
+        AgentUserCount = count(),
+        EnabledAgentUserCount = countif(accountEnabled),
+        AgentUsers = make_set(
+            bag_pack(
+                "id", id,
+                "displayName", displayName,
+                "userPrincipalName", userPrincipalName,
+                "accountEnabled", accountEnabled,
+                "agentIdentityBlueprintId", agentIdentityBlueprintId
+            ),
+            100
+        )
+        by AgentIdentityObjectId = agentIdentitySPID
+    | extend AgentUsersJson = tostring(AgentUsers)
+    | project-away AgentUsers;
+EntraAgentIdentities
+| summarize arg_max(_SnapshotTime, *) by id
+| project
+    AgentIdentityObjectId = id,
+    AgentIdentityAppId = appId,
+    AgentName = displayName,
+    AgentCreatedDateTime = createdDateTime,
+    CreatedByAppId = createdByAppId,
+    BlueprintJoinAppId = agentAppId,
+    AgentAccountEnabled = accountEnabled,
+    AgentStatus = iff(accountEnabled, "active", "disabled"),
+    ServicePrincipalType = servicePrincipalType,
+    AgentTagsJson = tostring(tags),
+    AgentLifecycleJson = tostring(lifecycle),
+    TenantId = tenantId,
+    OrganizationId = organizationId,
+    AgentSnapshotTime = _SnapshotTime,
+    SourceWorkspace = _Workspace
+| join kind=leftouter (LatestBlueprints)
+    on $left.BlueprintJoinAppId == $right.BlueprintAppId
+| join kind=leftouter (LatestUsers)
+    on AgentIdentityObjectId
+| extend
+    BlueprintJoinStatus = iff(isnotempty(BlueprintObjectId), "matched", "unmatched"),
+    AgentUserCount = coalesce(AgentUserCount, long(0)),
+    EnabledAgentUserCount = coalesce(EnabledAgentUserCount, long(0)),
+    DataAsOf = case(
+        isnull(BlueprintSnapshotTime), AgentSnapshotTime,
+        isnull(AgentSnapshotTime), BlueprintSnapshotTime,
+        AgentSnapshotTime >= BlueprintSnapshotTime, AgentSnapshotTime,
+        BlueprintSnapshotTime
+    )
+| project
+    DataAsOf,
+    AgentIdentityObjectId,
+    AgentIdentityAppId,
+    AgentName,
+    AgentStatus,
+    AgentAccountEnabled,
+    ServicePrincipalType,
+    AgentCreatedDateTime,
+    CreatedByAppId,
+    AgentTagsJson,
+    AgentLifecycleJson,
+    BlueprintObjectId,
+    BlueprintAppId,
+    BlueprintName,
+    BlueprintJoinStatus,
+    BlueprintDisabled,
+    BlueprintDisabledByMicrosoftStatus,
+    BlueprintSignInAudience,
+    BlueprintPublisherDomain,
+    BlueprintCreatedDateTime,
+    BlueprintAppRolesJson,
+    BlueprintOauth2PermissionScopesJson,
+    BlueprintPreAuthorizedApplicationsJson,
+    BlueprintTagsJson,
+    AgentUserCount,
+    EnabledAgentUserCount,
+    AgentUsersJson,
+    TenantId,
+    OrganizationId,
+    SourceWorkspace
+| order by BlueprintName asc, AgentName asc

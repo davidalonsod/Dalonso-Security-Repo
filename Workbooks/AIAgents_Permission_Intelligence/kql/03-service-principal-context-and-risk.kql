@@ -1,0 +1,59 @@
+// Phase 3, query 3 of 4: Service principal context, Conditional Access outcome, and risk.
+//
+// *** DRAFT, UNTESTED *** -- see the repository README "Project status" warning.
+// Column names below are confirmed against the Azure Monitor table reference
+// (AADServicePrincipalSignInLogs, AADServicePrincipalRiskEvents), not against a
+// live tenant's actual populated data -- confirm both tables are enabled and
+// non-empty in your workspace before relying on this query.
+//
+// Purpose: supplies the evidence behind constraints[] of kind
+// "conditionalAccessBlock" and "disabledIdentity", and behind the kill-switch
+// confidence shown in the Blast Radius page of the workbook -- i.e. whether a
+// proposed "disable this agent identity" action would actually be enforced
+// immediately (blocked sign-ins already happening) or only take effect once
+// any already-issued tokens expire.
+//
+// Populates (access-model-schema.json): constraints[] candidates (kind
+// conditionalAccessBlock / disabledIdentity), and a secondary signal for
+// credentials[].lastUsedAt.
+//
+// Required tables: AADServicePrincipalSignInLogs, AADServicePrincipalRiskEvents
+// (both require Microsoft Entra Workload ID Premium for full risk/CA detail).
+let LookbackWindow = 30d; // PLACEHOLDER
+let SignInContext =
+    AADServicePrincipalSignInLogs
+    | where TimeGenerated > ago(LookbackWindow)
+    | where isnotempty(ServicePrincipalId)
+    | summarize
+        LastSignInAttempt = max(TimeGenerated),
+        SuccessCount = countif(ResultType == "0" or ResultType == "Success"), // PLACEHOLDER -- confirm ResultType's success encoding in your tenant; both "0" and "Success" have been observed across Entra sign-in log variants.
+        FailureCount = countif(ResultType != "0" and ResultType != "Success"),
+        ConditionalAccessBlockedCount = countif(ConditionalAccessStatus =~ "failure"),
+        DistinctResources = dcount(ResourceDisplayName),
+        IsAgenticSignIn = anyif(isnotempty(Agent), isnotempty(Agent)) // "Agent" column: "Details of agentic sign-in" per the AADServicePrincipalSignInLogs reference.
+        by ServicePrincipalId, ServicePrincipalName, AppId;
+let RiskContext =
+    AADServicePrincipalRiskEvents
+    | where TimeGenerated > ago(LookbackWindow)
+    | summarize
+        LatestRiskLevel = arg_max(DetectedDateTime, RiskLevel),
+        LatestRiskState = arg_max(DetectedDateTime, RiskState),
+        RiskEventCount = count()
+        by ServicePrincipalId;
+SignInContext
+| join kind=leftouter (RiskContext) on ServicePrincipalId
+| extend
+    RecommendedConstraintKind = case(
+        ConditionalAccessBlockedCount > 0, "conditionalAccessBlock",
+        LatestRiskState =~ "atRisk" or LatestRiskState =~ "confirmedCompromised", "disabledIdentity", // PLACEHOLDER -- your governance process, not this query, decides whether risk alone justifies marking the identity disabled; this is a suggestion for human review, not an automatic constraint.
+        "none"
+    ),
+    KillSwitchConfidence = case(
+        FailureCount == 0 and SuccessCount > 0, "low",  // identity is actively succeeding sign-ins right now; disabling it will need token-expiry time to fully take effect, not just the disable API call.
+        ConditionalAccessBlockedCount > 0,      "high", // already being blocked at sign-in time; a disable action is likely to be immediately effective.
+        "medium"
+    )
+| project ServicePrincipalId, ServicePrincipalName, AppId, LastSignInAttempt, SuccessCount, FailureCount,
+          ConditionalAccessBlockedCount, DistinctResources, IsAgenticSignIn,
+          LatestRiskLevel, LatestRiskState, RiskEventCount, RecommendedConstraintKind, KillSwitchConfidence
+| order by RiskEventCount desc, ConditionalAccessBlockedCount desc

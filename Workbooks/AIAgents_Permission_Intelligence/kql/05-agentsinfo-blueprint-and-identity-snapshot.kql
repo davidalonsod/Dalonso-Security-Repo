@@ -1,0 +1,80 @@
+// Phase 3, query 5 of 7: Agent/blueprint identity snapshot from AgentsInfo.
+//
+// *** CONFIRMED SCHEMA, UNTESTED AGAINST A LIVE TENANT *** -- column names below
+// are taken verbatim from the official Microsoft Learn reference for the
+// AgentsInfo (Preview) table:
+// https://learn.microsoft.com/defender-xdr/advanced-hunting-agentsinfo-table
+// This is a materially stronger source than generic Microsoft Graph activity
+// logs for this specific purpose: AgentsInfo is a native Microsoft Agent 365 /
+// Entra Agent ID table that already carries EntraAgentId, EntraBlueprintId,
+// LifecycleStatus, Owners, and a structured Permissions record -- the exact
+// shape the canonical model needs. Prefer this query over
+// 01-agent-entitlement-materialization.kql when your tenant has Agent 365 /
+// Microsoft Defender XDR advanced hunting enabled for AI agents.
+//
+// IMPORTANT -- one documented nuance to carry through: `EntraAgentId` is
+// described as the agent's "enterprise application OBJECT identifier", which
+// may differ from the appId/client_id used elsewhere (Microsoft Graph
+// activity logs' ServicePrincipalId is also an object ID, so these two should
+// usually align -- but do not assume this without checking a known agent's
+// values side by side first, exactly as CAND-002's "UNVERIFIED JOIN-KEY
+// ASSUMPTION" comment in ../../detections/CAND-001.kql already warns for a
+// related join).
+//
+// Populates (access-model-schema.json):
+//   - agentIdentities[].id / .blueprintId / .status / .owner / .createdAt
+//   - blueprints[].id (via EntraBlueprintId)
+//   - entitlements[] candidate rows (via Permissions -- see step 2 below;
+//     the exact inner shape of the Permissions dynamic bag is NOT yet
+//     confirmed against a live tenant, so step 2 is written as a
+//     schema-discovery step, not a finished projection)
+//   - credentials[].type (via ToolsAuthenticationType, same caveat)
+//
+// Required table: AgentsInfo (Microsoft Defender XDR advanced hunting /
+// Microsoft Sentinel; requires Microsoft Agent 365 and the relevant Defender
+// XDR license). Note the table lineage: AIAgentsInfo is transitioning to
+// AgentsInfo; use AgentsInfo (this query already does).
+
+// Step 1 -- confirmed columns, safe to use as-is.
+AgentsInfo
+| where Timestamp > ago(7d) // PLACEHOLDER -- AgentsInfo is a snapshot-style table; widen if your agents publish less often than weekly.
+| where isnotempty(EntraAgentId)
+| summarize arg_max(Timestamp, *) by EntraAgentId // one row per agent: the latest known snapshot.
+| project
+    Timestamp,
+    AgentId,
+    AgentName,
+    Platform,
+    EntraAgentId,          // -> agentIdentities[].id / servicePrincipalId (pending the object-id-vs-appId check above)
+    EntraBlueprintId,       // -> agentIdentities[].blueprintId
+    LifecycleStatus,        // Active | Blocked | Uninstalled | Deleted -> agentIdentities[].status
+    PublishedStatus,        // Draft | Published
+    Owners,                 // dynamic -> agentIdentities[].owner (pick primary owner)
+    SharedWith,
+    InstanceCount,          // number of agent identities minted from this blueprint
+    CreatedDateTime,        // -> agentIdentities[].createdAt
+    LastPublishedDateTime,
+    LastUpdatedDateTime,
+    ObservabilityId,        // correlates this row to its CloudAppEvents/UnifiedAgentObservability telemetry -- the join key for query 06
+    ToolsAuthenticationType, // structured identity/auth/authorization model -- candidate for credentials[].type
+    Permissions,             // dynamic: requested + granted permissions, approval state, consent enumeration
+    DeclaredTools, McpServers // declared capability surface, for the "non-Graph tool & RAG index RBAC" dimension of resources[]
+| order by EntraBlueprintId asc, EntraAgentId asc
+
+// Step 2 -- schema discovery for Permissions before trusting any projection of it.
+// Run this separately first; the official docs describe the CONTENTS of
+// Permissions ("includes those that have been requested and granted, their
+// approval state, and consent enumeration") but not its exact property names.
+// AgentsInfo
+// | where Timestamp > ago(7d) and isnotempty(EntraAgentId)
+// | summarize arg_max(Timestamp, *) by EntraAgentId
+// | project EntraAgentId, Permissions
+// | take 5
+// Once you've confirmed the real property names (for example Permissions
+// might look like `[{"resourceApp": "...", "permission": "...", "state":
+// "granted"}, ...]` -- CONFIRM, do not assume), extend Step 1 with:
+//   | mv-expand Permission = Permissions
+//   | extend ResourceApp = tostring(Permission.resourceApp), // PLACEHOLDER property name
+//            PermissionValue = tostring(Permission.permission), // PLACEHOLDER property name
+//            ApprovalState = tostring(Permission.state) // PLACEHOLDER property name
+// to produce one row per (agent, permission) suitable for entitlements[].

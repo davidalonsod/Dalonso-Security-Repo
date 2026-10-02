@@ -1,0 +1,58 @@
+// Phase 3, query 4 of 4: Blast-radius dependency rollup.
+//
+// *** DRAFT, UNTESTED *** -- see the repository README "Project status" warning.
+//
+// Purpose: a KQL-native approximation of the Phase 2 evaluator's blast-radius
+// simulation (access-graph/scripts/evaluate-access.mjs), for ad hoc exploration
+// directly inside the workbook's "Blast Radius" page without waiting for a full
+// evaluator run. It answers: "if I remove {TargetResourceApp}/{TargetPermission}
+// tenant-wide, how many agent identities, blueprints, and business processes
+// are touched, split into confirmed (actively used in the lookback window) vs.
+// potential (granted but not observed in use)?"
+//
+// This query CANNOT discover "business processes" or "blueprint family" on its
+// own -- neither concept exists as a native column in Microsoft Graph activity
+// logs or Entra sign-in logs. You must maintain your own reference table (a
+// Log Analytics custom table, e.g. AgentBusinessDependencies_CL, or an
+// externaldata() CSV/JSON) with at least these columns, one row per
+// (agent, business process) dependency:
+//   AgentServicePrincipalId : string  -- matches ServicePrincipalId in Graph activity/sign-in logs
+//   AgentBlueprintId        : string  -- your blueprint/agent-family label
+//   BusinessProcessId       : string
+//   BusinessProcessName     : string
+// Without this table, the query still returns the agent- and blueprint-level
+// counts (which ARE derivable from native tables), but affectedBusinessProcess
+// columns will be empty and must be sourced from the Phase 2 evaluator's JSON
+// output instead, which reads businessProcesses[] from the canonical model.
+//
+// Populates (access-model-evaluation-schema.json): blastRadiusResults[]
+// confirmedAffectedAgentCount / potentiallyAffectedAgentCount /
+// affectedBlueprintIds / affectedBusinessProcessIds, computed directly from
+// telemetry as a cross-check against the evaluator's file-based computation.
+//
+// Required tables: MicrosoftGraphActivityLogs, plus your own
+// AgentBusinessDependencies_CL reference table (optional, see above).
+let TargetResourceApp = "Microsoft Graph"; // PLACEHOLDER
+let TargetPermission = "Sites.ReadWrite.All"; // PLACEHOLDER
+let LookbackWindow = 90d; // PLACEHOLDER -- should match the evaluator's --windowDays argument.
+let GrantedPrincipals =
+    MicrosoftGraphActivityLogs
+    | where TimeGenerated > ago(LookbackWindow)
+    | where Roles has TargetPermission or Scopes has TargetPermission
+    | summarize
+        LastClaimSeen = max(TimeGenerated),
+        ConfirmedUsed = countif(RequestMethod in ("PATCH", "POST", "PUT", "DELETE")) > 0 // coarse proxy for "actually exercised a write call"; prefer query 02's PermissionUsed classification when available.
+        by ServicePrincipalId;
+GrantedPrincipals
+| extend BlastRadiusStatus = iff(ConfirmedUsed, "confirmed", "potential")
+| join kind=leftouter (
+    // OPTIONAL -- replace with your own AgentBusinessDependencies_CL table; left empty here so the query
+    // still runs (as a documented cross-join no-op) even if you have not created that table yet.
+    print AgentServicePrincipalId = "", AgentBlueprintId = "", BusinessProcessId = "", BusinessProcessName = ""
+    | where isnotempty(AgentServicePrincipalId)
+) on $left.ServicePrincipalId == $right.AgentServicePrincipalId
+| summarize
+    ConfirmedAffectedAgentCount = dcountif(ServicePrincipalId, BlastRadiusStatus == "confirmed"),
+    PotentiallyAffectedAgentCount = dcountif(ServicePrincipalId, BlastRadiusStatus == "potential"),
+    AffectedBlueprintIds = make_set_if(AgentBlueprintId, isnotempty(AgentBlueprintId)),
+    AffectedBusinessProcessIds = make_set_if(BusinessProcessId, isnotempty(BusinessProcessId))

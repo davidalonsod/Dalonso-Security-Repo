@@ -1,0 +1,46 @@
+// Phase 3, query 1 of 4: Agent entitlement materialization.
+//
+// *** DRAFT, UNTESTED *** -- see the repository README "Project status" warning.
+// Authored from public Microsoft Learn documentation (Microsoft Graph activity
+// logs schema: https://learn.microsoft.com/graph/microsoft-graph-activity-logs-overview),
+// not validated against a live tenant. Placeholder values (ago() windows,
+// resourceApp names) must be confirmed before use.
+//
+// Purpose: approximate which (resourceApp, permission) pairs are actually
+// MATERIALIZED on an agent identity's service principal, by distinct-ing the
+// Roles/Scopes token claims this service principal has presented to Microsoft
+// Graph. This is a cross-check for -- not a replacement for -- the authoritative
+// source of truth, which is a direct read of /servicePrincipals/{id}/appRoleAssignments
+// and /servicePrincipals/{id}/oauth2PermissionGrants via Microsoft Graph. Token
+// claims can lag a revoked grant by the token's remaining lifetime, and a
+// service principal that has not called Graph recently will show nothing here
+// even though its grant is still materialized -- treat absence-of-evidence in
+// this query as "unknown", never as "not granted".
+//
+// Populates (access-model-schema.json): a confirmation signal for
+// entitlements[].consentState == "materialized", entitlements[].permissionType,
+// and entitlements[].observation.sourceTable.
+//
+// Required table: MicrosoftGraphActivityLogs (enable via Microsoft Entra ID
+// diagnostic settings -> "MicrosoftGraphActivityLogs" -> Log Analytics workspace).
+let LookbackWindow = 30d; // PLACEHOLDER -- tune to your agent call frequency; a quiet agent needs a longer window before "no rows" is meaningful.
+MicrosoftGraphActivityLogs
+| where TimeGenerated > ago(LookbackWindow)
+| where isnotempty(ServicePrincipalId)
+| extend RoleClaims = iif(isempty(Roles), dynamic([]), split(Roles, " "))
+| extend ScopeClaims = iif(isempty(Scopes), dynamic([]), split(Scopes, " "))
+| mv-expand ClaimValue = array_concat(RoleClaims, ScopeClaims) to typeof(string)
+| where isnotempty(ClaimValue)
+| extend PermissionType = iff(set_has_element(RoleClaims, ClaimValue), "application", "delegated") // NOTE: in() requires scalar constants and fails against a dynamic array (Kusto error "in(): failed to cast argument 2 to scalar constant"); set_has_element() is the correct dynamic-array membership check.
+| summarize
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    CallCount = count(),
+    DistinctTokens = dcount(UniqueTokenId)
+    by ServicePrincipalId, ResourceApp = "Microsoft Graph", Permission = ClaimValue, PermissionType
+| order by ServicePrincipalId asc, Permission asc
+// Next step (manual, not yet encoded as KQL): for each (ServicePrincipalId, Permission)
+// row with LastSeen older than your revocation-propagation window, cross-check
+// against a live Microsoft Graph read of appRoleAssignments/oauth2PermissionGrants
+// before concluding the grant still exists -- this table alone cannot prove a
+// *current* negative (i.e. that a permission was removed).

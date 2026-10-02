@@ -1,0 +1,115 @@
+// Phase 3, query 9 of 9: native Agent 365 execution/tool telemetry projection.
+//
+// The workbook queries UnifiedAgentObservability directly through its Data
+// lake data source. Use this file as an OPTIONAL one-time or scheduled KQL job
+// when you want analytics-tier retention, joins with analytics-only sources,
+// or a smaller recurring projection. Suggested table:
+//   AgentExecutionActivity_KQL_CL
+//
+// Keep the job lookback and schedule bounded to control promotion costs. A
+// common starting point is a daily job over the previous 2 days (overlap is
+// intentional for late-arriving records; de-duplicate downstream by EventUid).
+//
+// Source: UnifiedAgentObservability (73-column schema confirmed in the tenant).
+//
+// This output intentionally excludes EventThoughtProcessDetails,
+// EventOriginalRequestDetails, and EventOriginalResultDetails. Those fields can
+// contain prompts, responses, tool arguments/results, or reasoning data. The
+// workbook needs identity, lineage, tool, model, timing, and error metadata --
+// not raw content.
+
+let LookbackWindow = 2d; // PLACEHOLDER: align with the KQL job schedule.
+UnifiedAgentObservability
+| where TimeGenerated > ago(LookbackWindow)
+| extend
+    EventTime = coalesce(EventStartTime, TimeGenerated),
+    AgentIdentityId = coalesce(TargetAgentId, SrcAgentId, PlatformTargetAgentId),
+    AgentName = coalesce(TargetAgentName, SrcAgentName, PlatformTargetAgentName),
+    AgentBlueprintId = coalesce(TargetAgentBlueprintId, SrcAgentBlueprintId),
+    Operation = coalesce(EventOriginalType, EventType),
+    ExecutionContext = case(
+        isnotempty(ActorUserId) or isnotempty(ActorUsername), "delegatedObo",
+        isnotempty(ActingAppId), "application",
+        isnotempty(SrcAgentId), "agentToAgent",
+        "unknown"
+    ),
+    ResultType = case(
+        isnotempty(EventErrorDetails) or isnotempty(EventOriginalErrorType), "error",
+        isnotempty(EventResponseId) or isnotnull(EventEndTime), "success",
+        "unknown"
+    ),
+    Capability = case(
+        isnotempty(ToolName), strcat(
+            coalesce(ToolOriginalType, "tool"),
+            ":",
+            ToolName
+        ),
+        isnotempty(ModelName), strcat(
+            "model:",
+            coalesce(ModelProviderName, "unknown"),
+            "/",
+            ModelName
+        ),
+        isnotempty(TargetAgentId) and isnotempty(SrcAgentId), "agent-to-agent",
+        Operation
+    ),
+    ResourceLocator = coalesce(ToolId, TargetAgentId),
+    DurationMs = iff(
+        isnotnull(EventStartTime) and isnotnull(EventEndTime),
+        datetime_diff("millisecond", EventEndTime, EventStartTime),
+        long(null)
+    )
+| project
+    TimeGenerated = EventTime,
+    EventUid,
+    EventOriginalUid,
+    EventSchema,
+    EventSchemaVersion,
+    EventVendor,
+    EventProduct,
+    AgentIdentityId,
+    AgentName,
+    AgentBlueprintId,
+    SrcAgentId,
+    SrcAgentName,
+    SrcAgentBlueprintId,
+    TargetAgentId,
+    TargetAgentName,
+    TargetAgentUserId,
+    TargetAgentUsername,
+    ActorUserId,
+    ActorUsername,
+    ActorUserScope,
+    ActingAppId,
+    ActingAppName,
+    ActingAppType,
+    ExecutionContext,
+    EventSessionId,
+    EventSessionName,
+    Operation,
+    EventRequestId,
+    EventResponseId,
+    ResultType,
+    EventOriginalErrorType,
+    EventErrorDetails,
+    EventFinishReasons = tostring(EventFinishReasons),
+    EventOutputType,
+    Capability,
+    ResourceLocator,
+    ToolId,
+    ToolName,
+    ToolDescription,
+    ToolOriginalType,
+    ModelProviderName,
+    ModelName,
+    InputTokensUsed,
+    OutputTokensUsed,
+    DurationMs,
+    SrcIpAddr,
+    SrcFQDN,
+    SrcPortNumber,
+    EventCount,
+    TenantId,
+    SourceWorkspace = _Workspace,
+    AdditionalFieldsJson = tostring(AdditionalFields)
+| order by TimeGenerated desc

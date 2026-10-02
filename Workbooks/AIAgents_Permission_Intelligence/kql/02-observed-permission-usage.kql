@@ -1,0 +1,66 @@
+// Phase 3, query 2 of 4: Observed permission usage (the entitlement-vs-usage gap).
+//
+// *** DRAFT, UNTESTED *** -- see the repository README "Project status" warning.
+// Authored from public Microsoft Learn documentation, not validated against a
+// live tenant.
+//
+// Purpose: this is the key corrective to "a scope appeared in the token, so it
+// must have been used." It classifies each individual Graph call by the HTTP
+// verb + URL shape into the single permission that call actually required, so
+// "permissionUsed" (an affirmative, call-level fact) is never confused with
+// "permissionClaims" (everything the token was merely carrying). Only rows
+// with ResponseStatusCode in the 2xx range and a resolved PermissionUsed should
+// ever be treated as "observed-used" by the Phase 2 evaluator; everything else
+// is, at best, "carried-not-proven-used".
+//
+// Populates (access-model-schema.json): executions[].permissionUsed,
+// executions[].requestUri, executions[].requestMethod,
+// executions[].responseStatusCode, executions[].resultType,
+// executions[].resourceId (after the manual resource-id mapping step below).
+//
+// Required table: MicrosoftGraphActivityLogs.
+//
+// IMPORTANT -- resourceId mapping is NOT solved by this query. Microsoft Graph
+// URLs identify SharePoint sites/drives/mailboxes by tenant-specific GUIDs or
+// hostnames, not by the human-readable resource ids used in
+// access-model-schema.json's resources[] (e.g. "finance-site"). You must join
+// the ResolvedResourceId column below against your own reference table that
+// maps those GUIDs/hostnames to canonical resource ids -- there is no public,
+// generic table that already contains this mapping. Until that join exists,
+// treat ResolvedResourceId as a raw Graph identifier, not a canonical resource id.
+let LookbackWindow = 90d; // PLACEHOLDER -- should match the evaluator's --windowDays argument so KQL and the evaluator agree on "the window".
+MicrosoftGraphActivityLogs
+| where TimeGenerated > ago(LookbackWindow)
+| where isnotempty(ServicePrincipalId)
+| extend RequestPath = tostring(parse_url(RequestUri).Path)
+| extend ResourceApp = "Microsoft Graph"
+| extend PermissionUsed = case(
+    RequestPath matches regex @"(?i)/sites/[^/]+/lists/[^/]+/items", iff(RequestMethod in ("PATCH", "POST", "PUT", "DELETE"), "Sites.ReadWrite.All", "Sites.Read.All"),
+    RequestPath matches regex @"(?i)/sites/[^/]+/drive",              iff(RequestMethod in ("PATCH", "POST", "PUT", "DELETE"), "Files.ReadWrite.All", "Files.Read.All"),
+    RequestPath matches regex @"(?i)/sites/[^/]+$",                    iff(RequestMethod in ("PATCH", "POST", "PUT", "DELETE"), "Sites.ReadWrite.All", "Sites.Read.All"),
+    RequestPath matches regex @"(?i)/me/drive|/users/[^/]+/drive",     iff(RequestMethod in ("PATCH", "POST", "PUT", "DELETE"), "Files.ReadWrite.All", "Files.Read.All"),
+    RequestPath matches regex @"(?i)/messages|/mailFolders",           "Mail.Read",
+    "Unmapped" // PLACEHOLDER -- extend this case() list with every Graph path shape your agents actually call; an "Unmapped" result must never be silently treated as evidence of use.
+)
+| extend ResolvedResourceId = extract(@"(?i)/sites/([^/]+)", 1, RequestPath) // PLACEHOLDER -- replace with a join to your GUID/hostname -> canonical-resource-id reference table.
+| extend ResultType = case(
+    ResponseStatusCode between (200 .. 299), "success",
+    ResponseStatusCode in (401, 403),        "denied",
+    ResponseStatusCode == 429,               "throttled",
+    "error"
+)
+| project
+    TimeGenerated,
+    ServicePrincipalId,
+    ResourceApp,
+    PermissionUsed,
+    PermissionClaims = Scopes,
+    ApplicationClaims = Roles,
+    RequestUri,
+    RequestMethod,
+    ResponseStatusCode,
+    ResultType,
+    ResolvedResourceId,
+    UniqueTokenId
+| where PermissionUsed != "Unmapped"
+| order by TimeGenerated desc
