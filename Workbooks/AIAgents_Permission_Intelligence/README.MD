@@ -1,4 +1,8 @@
- Agent 365 Permission Intelligence
+What Permissions Do Your AI Agents Really Have? | AI Agents Permission Intelligence https://youtu.be/S-YZ9hB3ffI
+
+https://davidalonsodominguez.substack.com/publish/posts/detail/218466422?referrer=%2Fpublish%2Fhome
+
+Agent 365 Permission Intelligence
 
 An evidence-backed identity and access graph for answering four questions about AI agents:
 
