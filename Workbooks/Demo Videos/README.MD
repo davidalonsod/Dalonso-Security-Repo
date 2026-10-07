@@ -287,3 +287,24 @@ AI Agents Monitoring V2 for Microsoft Sentinel | What's New?  New Features, MCP 
 18:12 - Local Agents, VS Code Monitoring & MCP Activity
 20:31 - Summary & How to Update
 
+What Permissions Do Your AI Agents Really Have? | AI Agents Permission Intelligence https://youtu.be/S-YZ9hB3ffI
+
+00:00 - Introduction & AI Agent Identity Types (Service Principal vs Agent Id in  Entra ID)
+00:26 - Sentinel Workbook Overview & Least-Privilege Architecture
+02:35 - Workbook Filters: Demo Data vs Live Tenant
+03:48 - Data Sources: Data Lake, Entra ID, and Advanced Hunting
+04:39 - Custom Table Setup (AgentPermissionsEdge)
+07:18 - Collection Architecture: Azure Automation Runbook & Managed Identity
+08:18 - Executive Overview: Privilege Exposure & Evidence Coverage
+10:00 - Agent Identity & Lifecycle Tracking
+11:22 - Access Configurations & Authorization Grants (Delegated vs App)
+13:06 - Observed Activity & Real-World Usage (Copilot, Analysts & Hunters)
+15:12 - Effective Permissions & Target Resource Classification
+16:30 - Blueprint Drift & Permissions Hygiene
+17:03 - Sensitive Scope Exposure Analysis
+18:54 - Access Paths & Relationship Graph
+20:20 - Impact Analysis & Blast Radius Modeling
+21:52 - Evidence Health, Freshness & Telemetry
+23:20 - Permissions 360 & Active Agent Posture
+25:47 - GitHub Repo Resources: Bicep, KQL Queries & Deployment
+
