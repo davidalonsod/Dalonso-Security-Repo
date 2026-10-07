@@ -1,0 +1,94 @@
+// Microsoft Sentinel / Log Analytics adaptation of CAND-001.
+// Complete and validate all three placeholders before creating an analytics rule.
+let CorrelationWindow = 4h;  // PLACEHOLDER - tune from count-only workspace replay
+let SuspiciousPromptTerms = dynamic([]);  // PLACEHOLDER - approved tenant-specific terms; empty matches all nonempty inputs
+let RequiredAlertCategories = dynamic([]);  // PLACEHOLDER - approved category values; empty matches all categories
+let AIToolRuns =
+    CloudAppEvents
+    | where TimeGenerated > ago(5h)
+    | where ActionType =~ "SentinelAIToolRunCompleted"
+    | where isnotempty(AccountObjectId)
+    | extend
+        ToolName=tostring(RawEventData.ToolName),
+        InputParameters=tostring(RawEventData.InputParameters),
+        APIsCalled=tostring(RawEventData.APIsCalled),
+        TablesRead=tostring(RawEventData.TablesRead),
+        DatabasesRead=tostring(RawEventData.DatabasesRead)
+    | where isnotempty(InputParameters)
+    | where array_length(SuspiciousPromptTerms) == 0
+        or InputParameters has_any (SuspiciousPromptTerms)
+    | project
+        AIToolRunTimestamp=TimeGenerated,
+        ReportId,
+        AccountObjectId,
+        AccountDisplayName,
+        AccountId,
+        Application,
+        ApplicationId,
+        IPAddress,
+        ToolName,
+        InputParameters,
+        APIsCalled,
+        TablesRead,
+        DatabasesRead;
+AlertEvidence
+| where TimeGenerated > ago(1h)
+| where isnotempty(AlertId) and isnotempty(AccountObjectId)
+| where array_length(RequiredAlertCategories) == 0
+    or Categories has_any (RequiredAlertCategories)
+| project
+    AlertTimestamp=TimeGenerated,
+    AlertId,
+    AlertTitle=Title,
+    AlertCategories=Categories,
+    AttackTechniques,
+    ServiceSource,
+    DetectionSource,
+    EvidenceEntityType=EntityType,
+    EvidenceRole,
+    EvidenceSeverity=Severity,
+    AccountObjectId,
+    AccountUpn,
+    EvidenceApplication=Application,
+    EvidenceApplicationId=ApplicationId
+| join kind=inner (AIToolRuns) on AccountObjectId
+| where AlertTimestamp between (AIToolRunTimestamp .. AIToolRunTimestamp + CorrelationWindow)
+| summarize
+    AIToolRunCount=dcount(ReportId),
+    AIToolRunReportIds=make_set(ReportId, 5),
+    AIToolRunTools=make_set(ToolName, 5),
+    AlertCount=dcount(AlertId),
+    AlertIds=make_set(AlertId, 5),
+    Alerts=make_set(AlertTitle, 5),
+    AlertCategorySet=make_set(AlertCategories, 5),
+    EvidenceSources=make_set(ServiceSource, 5),
+    arg_max(AlertTimestamp, *)
+    by AlertId, AccountObjectId
+| project
+    TimeGenerated=AlertTimestamp,
+    AlertId,
+    AccountObjectId,
+    AccountUpn,
+    AccountDisplayName,
+    AccountId,
+    Application,
+    ApplicationId,
+    IPAddress,
+    AIToolRunTimestamp,
+    AIToolRunCount,
+    AIToolRunReportIds,
+    AIToolRunTools,
+    InputParameters,
+    APIsCalled,
+    TablesRead,
+    DatabasesRead,
+    AlertCount,
+    AlertIds,
+    Alerts,
+    AlertCategorySet,
+    EvidenceSources,
+    AttackTechniques,
+    DetectionSource,
+    EvidenceEntityType,
+    EvidenceRole,
+    EvidenceSeverity

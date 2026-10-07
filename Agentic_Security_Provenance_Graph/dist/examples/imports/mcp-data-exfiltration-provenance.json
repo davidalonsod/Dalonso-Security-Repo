@@ -1,0 +1,388 @@
+{
+  "$schema": "../../graph-schema.json",
+  "version": "1.1.0",
+  "metadata": {
+    "title": "Unapproved MCP Data Exfiltration Investigation",
+    "description": "Demonstrates how an indirect prompt injection can influence a finance agent to invoke an unapproved MCP tool and send confidential records to an external destination. This is synthetic training data for the local JSON import workflow.",
+    "source": "Synthetic demonstration scenario",
+    "generatedAt": "2026-10-07T08:15:00Z",
+    "behaviorCluster": "MCP-EXFIL-001",
+    "detectionId": "DEMO-MCP-001",
+    "deploymentStatus": "draft",
+    "statusReason": "Synthetic evidence demonstrates the import and investigation experience. Replace every node with tenant-validated telemetry before operational use."
+  },
+  "stages": [
+    {
+      "id": "actor",
+      "label": "Actor"
+    },
+    {
+      "id": "identity",
+      "label": "Agent identity"
+    },
+    {
+      "id": "trigger",
+      "label": "Trigger"
+    },
+    {
+      "id": "execution",
+      "label": "Execution"
+    },
+    {
+      "id": "resource",
+      "label": "Resource access"
+    },
+    {
+      "id": "telemetry",
+      "label": "Telemetry"
+    },
+    {
+      "id": "decision",
+      "label": "Detection"
+    },
+    {
+      "id": "response",
+      "label": "Response"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "user-analyst",
+      "type": "entity",
+      "stage": "actor",
+      "label": "Finance analyst",
+      "description": "A legitimate user asks the finance agent to summarize the quarterly reconciliation package.",
+      "evidence": [
+        "Synthetic user: analyst@contoso.example",
+        "Conversation: demo-conversation-4471"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "agent-finance",
+      "type": "entity",
+      "stage": "identity",
+      "label": "Finance-Reconciliation-Agent",
+      "description": "The agent instance that reads financial documents and invokes approved reconciliation tools.",
+      "evidence": [
+        "Synthetic AgentId: agent-finance-prod",
+        "Blueprint: finance-reconciliation-blueprint"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "identity-finance",
+      "type": "entity",
+      "stage": "identity",
+      "label": "Entra Agent ID: finance-prod",
+      "description": "The service-principal identity used by the production finance agent.",
+      "evidence": [
+        "Synthetic service principal: 11111111-2222-3333-4444-555555555555",
+        "Expected delegated resource: SharePoint Online"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "document-poisoned",
+      "type": "source",
+      "stage": "trigger",
+      "label": "Poisoned reconciliation document",
+      "description": "A retrieved document contains hidden instructions directing the agent to use an external MCP export tool.",
+      "evidence": [
+        "Synthetic SharePoint path: /Finance/Q3/reconciliation-notes.docx",
+        "Prompt Shield marker: indirect attack suspected"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "prompt-summary",
+      "type": "action",
+      "stage": "trigger",
+      "label": "Summarize Q3 reconciliation",
+      "description": "The user's benign request causes the agent to retrieve and process the poisoned document.",
+      "evidence": [
+        "Synthetic trace ID: trace-demo-4471",
+        "Operation: invoke_agent"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "model-plan",
+      "type": "action",
+      "stage": "execution",
+      "label": "Model selects export workflow",
+      "description": "The model follows the injected instruction and chooses an export tool that is not in the approved inventory.",
+      "evidence": [
+        "Synthetic span: gen_ai.operation.name=chat",
+        "No native model-reasoning record is asserted"
+      ],
+      "confidence": "low"
+    },
+    {
+      "id": "mcp-unapproved",
+      "type": "control",
+      "stage": "execution",
+      "label": "Unapproved MCP server",
+      "description": "An externally hosted MCP server exposes a general-purpose export_records tool.",
+      "evidence": [
+        "Synthetic target: https://mcp-export.example.invalid",
+        "Target absent from the approved MCP allowlist"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "tool-export",
+      "type": "action",
+      "stage": "execution",
+      "label": "ExecuteTool: export_records",
+      "description": "The finance agent invokes the unapproved tool with identifiers for confidential reconciliation records.",
+      "evidence": [
+        "Synthetic operation: ExecuteTool",
+        "Synthetic tool name: export_records"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "sharepoint-confidential",
+      "type": "entity",
+      "stage": "resource",
+      "label": "Confidential finance library",
+      "description": "The SharePoint resource containing quarterly reconciliations and vendor-payment evidence.",
+      "evidence": [
+        "Synthetic sensitivity: Confidential",
+        "Synthetic site: Finance Operations"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "external-endpoint",
+      "type": "entity",
+      "stage": "resource",
+      "label": "External collection endpoint",
+      "description": "The destination controlled by the unapproved MCP integration.",
+      "evidence": [
+        "Synthetic domain uses the reserved .invalid suffix",
+        "No real network destination is contacted"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "telemetry-tool-span",
+      "type": "telemetry",
+      "stage": "telemetry",
+      "label": "AppDependencies tool span",
+      "description": "OpenTelemetry records the agent, conversation, tool, target, result, and shared operation ID.",
+      "evidence": [
+        "Table: AppDependencies",
+        "OperationId: trace-demo-4471",
+        "gen_ai.tool.name: export_records"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "telemetry-agent-lake",
+      "type": "telemetry",
+      "stage": "telemetry",
+      "label": "Unified agent execution event",
+      "description": "Agent 365 observability records the source agent, tool invocation, actor, and external target.",
+      "evidence": [
+        "Table: UnifiedAgentObservability",
+        "EventOriginalType: ExecuteToolByGateway"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "detection-mcp",
+      "type": "detection",
+      "stage": "decision",
+      "label": "Unapproved MCP tool detection",
+      "description": "A detection correlates the first-seen external MCP target, sensitive resource context, and export tool invocation.",
+      "evidence": [
+        "Synthetic detection: DEMO-MCP-001",
+        "Evidence classification: correlated"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "finding-exfiltration",
+      "type": "finding",
+      "stage": "decision",
+      "label": "Potential agent-driven data exfiltration",
+      "description": "The observed chain is consistent with an agent being manipulated into sending confidential records to an unapproved external integration.",
+      "evidence": [
+        "Tool execution is observed",
+        "Successful receipt by a real attacker is not demonstrated"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "response-disable",
+      "type": "output",
+      "stage": "response",
+      "label": "Disable integration and contain identity",
+      "description": "The response plan disables the MCP integration, blocks the target, reviews the Agent ID grants, and opens a Sentinel incident.",
+      "evidence": [
+        "Recommended action only; no automatic change is performed",
+        "Preserve trace-demo-4471 for investigation"
+      ],
+      "confidence": "high"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-user-agent",
+      "from": "user-analyst",
+      "to": "agent-finance",
+      "relation": "invokes",
+      "description": "The finance analyst starts the agent conversation.",
+      "evidence": "Shared synthetic conversation ID demo-conversation-4471.",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "edge-agent-identity",
+      "from": "agent-finance",
+      "to": "identity-finance",
+      "relation": "authenticates-as",
+      "description": "The agent uses its Entra Agent ID for downstream access.",
+      "evidence": "Synthetic agent-to-service-principal inventory mapping.",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "edge-user-prompt",
+      "from": "user-analyst",
+      "to": "prompt-summary",
+      "relation": "submits",
+      "description": "The analyst submits the reconciliation request.",
+      "evidence": "Shared synthetic conversation and trace context.",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "edge-document-prompt",
+      "from": "document-poisoned",
+      "to": "prompt-summary",
+      "relation": "grounds",
+      "description": "The document is retrieved as grounding content for the request.",
+      "evidence": "Resource access and interaction occur in the same synthetic conversation.",
+      "evidenceType": "correlated"
+    },
+    {
+      "id": "edge-document-plan",
+      "from": "document-poisoned",
+      "to": "model-plan",
+      "relation": "influences",
+      "description": "The hidden document instruction may influence the model's tool choice.",
+      "evidence": "Prompt Shield marker and adjacent model/tool activity; no model reasoning is recorded.",
+      "evidenceType": "contextual",
+      "conditional": true
+    },
+    {
+      "id": "edge-prompt-plan",
+      "from": "prompt-summary",
+      "to": "model-plan",
+      "relation": "triggers",
+      "description": "The user request starts the model-planning span.",
+      "evidence": "Synthetic shared trace ID trace-demo-4471.",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "edge-plan-tool",
+      "from": "model-plan",
+      "to": "tool-export",
+      "relation": "selects",
+      "description": "The model selects export_records.",
+      "evidence": "Adjacent model and tool spans under trace-demo-4471.",
+      "evidenceType": "correlated"
+    },
+    {
+      "id": "edge-server-tool",
+      "from": "mcp-unapproved",
+      "to": "tool-export",
+      "relation": "exposes",
+      "description": "The external MCP server publishes the export_records capability.",
+      "evidence": "Synthetic MCP inventory mapping.",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "edge-identity-resource",
+      "from": "identity-finance",
+      "to": "sharepoint-confidential",
+      "relation": "can-read",
+      "description": "The agent identity can read the finance library.",
+      "evidence": "Synthetic delegated permission plus resource assignment.",
+      "evidenceType": "contextual",
+      "conditional": true
+    },
+    {
+      "id": "edge-resource-tool",
+      "from": "sharepoint-confidential",
+      "to": "tool-export",
+      "relation": "provides-records",
+      "description": "Confidential records become inputs to the export tool.",
+      "evidence": "Synthetic resource identifiers appear in the tool arguments.",
+      "evidenceType": "correlated"
+    },
+    {
+      "id": "edge-tool-external",
+      "from": "tool-export",
+      "to": "external-endpoint",
+      "relation": "sends-to",
+      "description": "The MCP tool targets the external collection endpoint.",
+      "evidence": "Synthetic tool target metadata.",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "edge-tool-span",
+      "from": "tool-export",
+      "to": "telemetry-tool-span",
+      "relation": "recorded-by",
+      "description": "The tool invocation is recorded as an Application Insights dependency.",
+      "evidence": "Shared OperationId trace-demo-4471.",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "edge-tool-lake",
+      "from": "tool-export",
+      "to": "telemetry-agent-lake",
+      "relation": "observed-by",
+      "description": "Agent 365 observability records the tool execution.",
+      "evidence": "Correlated agent, tool, actor, and bounded timestamp.",
+      "evidenceType": "correlated"
+    },
+    {
+      "id": "edge-span-detection",
+      "from": "telemetry-tool-span",
+      "to": "detection-mcp",
+      "relation": "feeds",
+      "description": "The tool span contributes execution and target evidence.",
+      "evidence": "Detection projects the same synthetic OperationId.",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "edge-lake-detection",
+      "from": "telemetry-agent-lake",
+      "to": "detection-mcp",
+      "relation": "enriches",
+      "description": "The lake event adds source agent and actor context.",
+      "evidence": "Identity and time-window correlation.",
+      "evidenceType": "correlated"
+    },
+    {
+      "id": "edge-detection-finding",
+      "from": "detection-mcp",
+      "to": "finding-exfiltration",
+      "relation": "raises",
+      "description": "The detection raises the potential exfiltration finding.",
+      "evidence": "Synthetic detection result DEMO-MCP-001.",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "edge-finding-response",
+      "from": "finding-exfiltration",
+      "to": "response-disable",
+      "relation": "recommends",
+      "description": "The finding recommends containment and grant review.",
+      "evidence": "Synthetic response playbook mapping.",
+      "evidenceType": "contextual"
+    }
+  ]
+}

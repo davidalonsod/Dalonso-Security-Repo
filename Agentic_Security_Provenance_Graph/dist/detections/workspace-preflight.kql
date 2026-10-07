@@ -1,0 +1,92 @@
+// Microsoft Sentinel / Log Analytics preflight for CAND-001.
+// Run each numbered query separately in Microsoft Sentinel > Logs.
+// These checks return aggregate metadata only; they do not return prompt text,
+// account identifiers, IP addresses, or raw alert evidence.
+
+// 1. Confirm that both required tables have recent data.
+union isfuzzy=true withsource=TableName
+(
+    CloudAppEvents
+    | where TimeGenerated > ago(14d)
+    | project TimeGenerated
+),
+(
+    AlertEvidence
+    | where TimeGenerated > ago(14d)
+    | project TimeGenerated
+)
+| summarize Rows=count(), FirstEvent=min(TimeGenerated), LastEvent=max(TimeGenerated) by TableName
+| order by TableName asc
+
+// 2. Confirm whether the report's exact Sentinel AI action type exists.
+// If ExactMatches is zero, inspect the discovery query below before changing the rule.
+CloudAppEvents
+| where TimeGenerated > ago(30d)
+| summarize
+    TotalCloudAppEvents=count(),
+    ExactMatches=countif(ActionType =~ "SentinelAIToolRunCompleted"),
+    FirstExactMatch=minif(TimeGenerated, ActionType =~ "SentinelAIToolRunCompleted"),
+    LastExactMatch=maxif(TimeGenerated, ActionType =~ "SentinelAIToolRunCompleted")
+
+// 3. Discover nearby AI, Copilot, Sentinel, and tool action types.
+// Review the result; do not assume that a similarly named action has equivalent semantics.
+CloudAppEvents
+| where TimeGenerated > ago(30d)
+| where ActionType has_any ("AI", "Copilot", "Sentinel", "Tool")
+    or Application has_any ("AI", "Copilot", "Sentinel")
+| summarize Events=count(), FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated)
+    by ActionType, Application
+| top 100 by Events desc
+
+// 4. Measure required field coverage without returning sensitive values.
+CloudAppEvents
+| where TimeGenerated > ago(30d)
+| where ActionType =~ "SentinelAIToolRunCompleted"
+| summarize
+    Events=count(),
+    WithAccountObjectId=countif(isnotempty(AccountObjectId)),
+    WithReportId=countif(isnotempty(ReportId)),
+    WithInputParameters=countif(isnotempty(tostring(RawEventData.InputParameters))),
+    WithToolName=countif(isnotempty(tostring(RawEventData.ToolName))),
+    WithIPAddress=countif(isnotempty(IPAddress))
+
+// 5. Measure AlertEvidence join-key coverage and discover category values.
+AlertEvidence
+| where TimeGenerated > ago(30d)
+| summarize
+    EvidenceRows=count(),
+    WithAlertId=countif(isnotempty(AlertId)),
+    WithAccountObjectId=countif(isnotempty(AccountObjectId)),
+    DistinctAlerts=dcount(AlertId),
+    DistinctAccounts=dcountif(AccountObjectId, isnotempty(AccountObjectId))
+
+// 6. Review common downstream categories and sources before setting
+// RequiredAlertCategories. Results contain aggregate labels only.
+AlertEvidence
+| where TimeGenerated > ago(30d)
+| summarize EvidenceRows=count(), DistinctAlerts=dcount(AlertId)
+    by Categories, ServiceSource, DetectionSource
+| top 100 by EvidenceRows desc
+
+// 7. Count-only historical replay of the broad correlation.
+// Start with 24h, then expand to 14d only if the query is performant.
+let ReplayLookback = 24h;
+let CorrelationWindow = 4h;
+let AIToolRuns =
+    CloudAppEvents
+    | where TimeGenerated > ago(ReplayLookback + CorrelationWindow)
+    | where ActionType =~ "SentinelAIToolRunCompleted"
+    | where isnotempty(AccountObjectId)
+    | where isnotempty(tostring(RawEventData.InputParameters))
+    | project AIToolRunTimestamp=TimeGenerated, ReportId, AccountObjectId;
+AlertEvidence
+| where TimeGenerated > ago(ReplayLookback)
+| where isnotempty(AlertId) and isnotempty(AccountObjectId)
+| project AlertTimestamp=TimeGenerated, AlertId, AccountObjectId
+| join kind=inner (AIToolRuns) on AccountObjectId
+| where AlertTimestamp between (AIToolRunTimestamp .. AIToolRunTimestamp + CorrelationWindow)
+| summarize
+    CorrelatedRows=count(),
+    DistinctAlerts=dcount(AlertId),
+    DistinctAccounts=dcount(AccountObjectId),
+    DistinctToolRuns=dcount(ReportId)

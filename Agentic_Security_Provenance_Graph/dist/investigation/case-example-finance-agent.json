@@ -1,0 +1,101 @@
+{
+  "$schema": "./case-schema.json",
+  "version": "1.0.0",
+  "incident": {
+    "title": "Suspicious agent-driven SharePoint modification",
+    "risk": "high",
+    "agentName": "Finance-Reconciliation-Agent",
+    "agentId": "a365-fin-0231",
+    "agentIdentity": "FinanceAgent-prod@contoso",
+    "initiatingUser": "user@contoso.com",
+    "conversationId": "conv-8f72...",
+    "investigationConfidencePercent": 87
+  },
+  "steps": [
+    {
+      "actor": "David",
+      "action": "Asked agent to reconcile Q3 financial documents",
+      "evidenceType": "exact"
+    },
+    {
+      "actor": "Finance-Reconciliation-Agent",
+      "action": "invoke_agent",
+      "evidenceType": "exact",
+      "confidencePercent": 100
+    },
+    {
+      "actor": "MCP: SharePoint Enterprise",
+      "action": "ExecuteTool: search",
+      "evidenceType": "exact",
+      "confidencePercent": 100,
+      "branches": [
+        "/sites/Finance/Q3",
+        "/sites/Finance/M&A",
+        "/sites/Board"
+      ],
+      "flag": "unusual resource for this agent"
+    },
+    {
+      "actor": "MCP: SharePoint Enterprise",
+      "action": "ExecuteTool: update-file",
+      "evidenceType": "exact"
+    },
+    {
+      "actor": "Microsoft Graph",
+      "action": "PATCH /enterprise/...",
+      "evidenceType": "correlated",
+      "confidencePercent": 92
+    },
+    {
+      "actor": "Board-Forecast-Q3.xlsx",
+      "action": "File modified",
+      "evidenceType": "audit"
+    }
+  ],
+  "evidenceTable": [
+    { "time": "10:31:02", "entity": "User", "action": "Invoked Finance Agent", "evidence": "Agent 365 span", "confidencePercent": 100, "sourceTable": "AppDependencies (InvokeAgent span) or UnifiedAgentObservability" },
+    { "time": "10:31:03", "entity": "Agent", "action": "Started conversation", "evidence": "ConversationId", "confidencePercent": 100, "sourceTable": "AppDependencies customDimensions.gen_ai.conversation.id" },
+    { "time": "10:31:05", "entity": "Agent", "action": "Called SharePoint MCP", "evidence": "Parent/child span", "confidencePercent": 100, "sourceTable": "AppDependencies operation_Id/operation_ParentId" },
+    { "time": "10:31:06", "entity": "MCP", "action": "Search /Finance/Q3", "evidence": "Tool span", "confidencePercent": 100, "sourceTable": "AppDependencies ExecuteTool span" },
+    { "time": "10:31:09", "entity": "MCP", "action": "Search /Board", "evidence": "Tool span", "confidencePercent": 100, "sourceTable": "AppDependencies ExecuteTool span" },
+    { "time": "10:31:12", "entity": "Graph", "action": "PATCH request", "evidence": "Identity + time correlation", "confidencePercent": 92, "sourceTable": "CloudAppEvents (Application=Microsoft Graph, joined by AccountObjectId + time window)" },
+    { "time": "10:31:13", "entity": "SharePoint", "action": "File modified", "evidence": "Audit evidence", "confidencePercent": 96, "sourceTable": "CloudAppEvents / Office 365 audit log (file update record)" }
+  ],
+  "anomalies": [
+    {
+      "title": "New resource family",
+      "description": "Agent had never accessed /sites/Board.",
+      "baseline": "No prior access to /sites/Board in the agent's activity history",
+      "current": "Search executed against /sites/Board in this conversation"
+    },
+    {
+      "title": "Privilege expansion",
+      "description": "The agent's action type escalated from read to write within the same conversation.",
+      "baseline": "READ",
+      "current": "WRITE"
+    },
+    {
+      "title": "Sensitive resource",
+      "description": "The modified file is classified as highly confidential.",
+      "current": "Target classified as Highly Confidential"
+    }
+  ],
+  "blastRadius": {
+    "rootLabel": "1 Agent",
+    "branches": [
+      { "label": "Agent Identity", "count": 1 },
+      { "label": "SharePoint sites", "count": 3 },
+      { "label": "Files read", "count": 17 },
+      { "label": "Sensitive file modified", "count": 1 }
+    ]
+  },
+  "recommendation": {
+    "priority": "high",
+    "investigate": [
+      "why the agent accessed the Board site",
+      "whether the WRITE permission is expected",
+      "whether the MCP tool invocation was authorized",
+      "whether similar Graph operations occurred in other conversations"
+    ]
+  }
+}

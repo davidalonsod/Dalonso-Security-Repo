@@ -1,0 +1,80 @@
+// Preflight discovery for Agent Observability tables (AgentsInfo, BehaviorInfo,
+// UnifiedAgentObservability, and the Entra Agent ID identity tables).
+// Run each numbered query separately. These return aggregates and schema
+// metadata only; they do not return prompt text, guardrail content, or raw
+// agent instructions.
+//
+// Background: the source PuzzleMask report only referenced CloudAppEvents and
+// AlertEvidence because that is what its authors had confirmed. It explicitly
+// states "no explicit gatekeeper decision field was confirmed" as a gap. The
+// tables below are official (AgentsInfo, BehaviorInfo) or tenant-observed
+// (UnifiedAgentObservability, Entra Agent ID tables) sources that may close
+// that gap. Confirm each one exists and is populated in your tenant before
+// depending on it.
+
+// 1. Confirm AgentsInfo exists and is populated, and check Guardrails coverage.
+// AgentsInfo replaces AIAgentsInfo (retired July 1, 2026). Use AgentsInfo, not AIAgentsInfo.
+AgentsInfo
+| where Timestamp > ago(30d)
+| summarize
+    Agents=dcount(AgentId),
+    WithEntraAgentId=dcountif(AgentId, isnotempty(EntraAgentId)),
+    WithGuardrails=dcountif(AgentId, isnotempty(Guardrails) and array_length(Guardrails) > 0),
+    WithInstructions=dcountif(AgentId, isnotempty(Instructions)),
+    WithObservabilityId=dcountif(AgentId, isnotempty(ObservabilityId))
+    by Platform, LifecycleStatus
+
+// 2. Confirm BehaviorInfo exists and is populated (requires Defender for Cloud
+// Apps and UEBA). Review which MITRE categories are actually present in your tenant.
+BehaviorInfo
+| where Timestamp > ago(30d)
+| summarize Behaviors=count(), DistinctAccounts=dcountif(AccountObjectId, isnotempty(AccountObjectId))
+    by Categories, ServiceSource, DetectionSource
+| top 100 by Behaviors desc
+
+// 3. Confirm UnifiedAgentObservability exists in this workspace/data lake and
+// discover its actual column names before relying on any assumed schema.
+// This table's schema was not confirmed against a first-party Microsoft Learn
+// reference at authoring time; treat every column name here as provisional.
+UnifiedAgentObservability
+| where Timestamp > ago(1d)
+| take 5
+
+// 4. Confirm the Entra Agent ID identity tables exist and measure population.
+union isfuzzy=true withsource=TableName
+(
+    EntraAgentIdentityBlueprints
+    | project Timestamp = column_ifexists("Timestamp", datetime(null))
+),
+(
+    EntraAgentIdentities
+    | project Timestamp = column_ifexists("Timestamp", datetime(null))
+),
+(
+    EntraAgentUsers
+    | project Timestamp = column_ifexists("Timestamp", datetime(null))
+)
+| summarize Rows=count() by TableName
+
+// 5. UNVERIFIED JOIN-KEY ASSUMPTION - validate before trusting this result.
+// AgentsInfo.EntraAgentId is documented as the agent's application object ID.
+// BehaviorInfo.AccountObjectId is documented as an Entra ID account identifier,
+// which for many activity sources is a service principal or user object ID, not
+// necessarily the same object as the application. Do not assume these two
+// columns share an identifier space until you confirm it with real values from
+// query 1 and query 2 above (for example, by manually checking a known agent's
+// EntraAgentId against the AccountObjectId seen in its own BehaviorInfo/CloudAppEvents rows).
+// This query is exploratory groundwork for CAND-002, not a validated join.
+BehaviorInfo
+| where Timestamp > ago(30d)
+| where isnotempty(AccountObjectId)
+| summarize BehaviorCount=count(), DistinctCategories=dcount(Categories) by AccountObjectId
+| join kind=inner (
+    AgentsInfo
+    | where Timestamp > ago(30d)
+    | where isnotempty(EntraAgentId)
+    | project EntraAgentId, AgentName, Platform, Guardrails
+) on $left.AccountObjectId == $right.EntraAgentId
+| summarize CorrelatedAccounts=dcount(AccountObjectId), TotalBehaviors=sum(BehaviorCount)
+// If CorrelatedAccounts is 0, the join key assumption is likely wrong for your
+// tenant. Inspect a single known agent manually instead of trusting this join.

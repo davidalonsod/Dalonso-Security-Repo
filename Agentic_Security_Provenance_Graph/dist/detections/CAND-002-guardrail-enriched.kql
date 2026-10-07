@@ -1,0 +1,96 @@
+// CAND-002 (proposed) - Guardrail-enriched correlation for BC-1 (gatekeeper evasion, T1562).
+//
+// STATUS: draft / requires tenant validation. This is NOT part of the original
+// PuzzleMask report. It is proposed because AgentsInfo.Guardrails and
+// BehaviorInfo's MITRE-classified Categories are official telemetry that may
+// close two gaps the report explicitly flagged in CAND-001:
+//   1. "No explicit gatekeeper decision field was confirmed."
+//   2. Raw AlertEvidence is a weaker downstream signal than pre-classified
+//      MITRE ATT&CK behaviors.
+//
+// Before relying on this query:
+//   - Run agent-observability-preflight.kql queries 1, 2, and 5 first.
+//   - Confirm the AccountObjectId-to-EntraAgentId join key assumption in query 5
+//     against real values from your tenant; do not assume it is correct.
+//   - Populate every placeholder below with tenant-approved values.
+//   - Replay in count-only mode before creating an analytics rule.
+
+let CorrelationWindow = 4h;  // PLACEHOLDER - maximum allowed delay between a completed AI tool run and a corroborating BehaviorInfo record
+let RequiredBehaviorCategories = dynamic([]);  // PLACEHOLDER - MITRE-mapped BehaviorInfo categories to require; empty matches all categories
+let SuspiciousPromptTerms = dynamic([]);  // PLACEHOLDER - tenant-specific prompt-safety bypass or prohibited-instruction terms
+
+// Agents with weak or absent declared guardrail coverage.
+let WeaklyGuardedAgents =
+    AgentsInfo
+    | where Timestamp > ago(5h)
+    | where isnotempty(EntraAgentId)
+    | where array_length(Guardrails) == 0
+    | project AgentId, AgentName, Platform, EntraAgentId, ObservabilityId;
+
+// Completed AI tool runs from weakly-guarded agents with suspicious input.
+let AIToolRuns =
+    CloudAppEvents
+    | where TimeGenerated > ago(5h)
+    | where ActionType =~ "SentinelAIToolRunCompleted"
+    | where isnotempty(AccountObjectId)
+    | extend InputParameters = tostring(RawEventData.InputParameters)
+    | where isnotempty(InputParameters)
+    | where array_length(SuspiciousPromptTerms) == 0
+        or InputParameters has_any (SuspiciousPromptTerms)
+    | join kind=inner (WeaklyGuardedAgents) on $left.AccountObjectId == $right.EntraAgentId
+    | project
+        AIToolRunTimestamp = TimeGenerated,
+        AccountObjectId,
+        AccountDisplayName,
+        Application,
+        IPAddress,
+        InputParameters,
+        AgentId,
+        AgentName,
+        Platform;
+
+// MITRE-classified downstream behaviors for the same account.
+BehaviorInfo
+| where Timestamp > ago(1h)
+| where isnotempty(AccountObjectId)
+| where array_length(RequiredBehaviorCategories) == 0
+    or Categories has_any (RequiredBehaviorCategories)
+| project
+    BehaviorTimestamp = Timestamp,
+    BehaviorId,
+    BehaviorTitle = Title,
+    BehaviorCategories = Categories,
+    AttackTechniques,
+    ServiceSource,
+    DetectionSource,
+    AccountObjectId
+| join kind=inner (AIToolRuns) on AccountObjectId
+| where BehaviorTimestamp between (AIToolRunTimestamp .. AIToolRunTimestamp + CorrelationWindow)
+| summarize
+    ToolRunCount = count(),
+    BehaviorCount = dcount(BehaviorId),
+    BehaviorIds = make_set(BehaviorId, 5),
+    Behaviors = make_set(BehaviorTitle, 5),
+    BehaviorCategorySet = make_set(BehaviorCategories, 5),
+    arg_max(BehaviorTimestamp, *)
+    by BehaviorId, AccountObjectId
+| project
+    TimeGenerated = BehaviorTimestamp,
+    BehaviorId,
+    AccountObjectId,
+    AccountDisplayName,
+    AgentId,
+    AgentName,
+    Platform,
+    Application,
+    IPAddress,
+    AIToolRunTimestamp,
+    ToolRunCount,
+    InputParameters,
+    BehaviorCount,
+    BehaviorIds,
+    Behaviors,
+    BehaviorCategorySet,
+    AttackTechniques,
+    ServiceSource,
+    DetectionSource

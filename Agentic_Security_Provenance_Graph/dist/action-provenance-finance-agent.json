@@ -1,0 +1,347 @@
+{
+  "$schema": "./graph-schema.json",
+  "version": "1.0.0",
+  "metadata": {
+    "title": "Finance-Reconciliation-Agent Action Provenance (example)",
+    "description": "Illustrates the 'what happened' execution chain for a single agent run -- prompt, model/tool calls, downstream resource access, and the resulting security finding. Companion to graph-data.json, which answers 'why do we believe it' instead of 'what happened'.",
+    "source": "investigation/case-example-finance-agent.json (an authored narrative transcription, not raw tenant telemetry)",
+    "generatedAt": "2026-09-30T15:00:00Z",
+    "deploymentStatus": "draft",
+    "statusReason": "This graph is a worked example illustrating the Action Provenance mode, not a detection. Several hops (the model-call span, the MCP-to-Graph call) are plausible architecture, not literally present in the transcribed case -- marked contextual/conditional below."
+  },
+  "stages": [
+    { "id": "who", "label": "Who" },
+    { "id": "agent", "label": "Agent" },
+    { "id": "trigger", "label": "Trigger" },
+    { "id": "execution", "label": "Execution" },
+    { "id": "integration", "label": "Integration" },
+    { "id": "resource", "label": "Resource" },
+    { "id": "outcome", "label": "Outcome" }
+  ],
+  "nodes": [
+    {
+      "id": "who-user",
+      "type": "entity",
+      "stage": "who",
+      "label": "David (user)",
+      "description": "The initiating user who asked the agent to reconcile Q3 financial documents.",
+      "evidence": [
+        "Investigation case initiatingUser: user@contoso.com",
+        "Prompt: 'Asked agent to reconcile Q3 financial documents'"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "agent-finance",
+      "type": "entity",
+      "stage": "agent",
+      "label": "Finance-Reconciliation-Agent",
+      "description": "The AI agent instance that received the prompt and executed the tool chain.",
+      "evidence": [
+        "AgentId: a365-fin-0231 (investigation case)",
+        "This example does not specify the hosting platform (Copilot Studio, Foundry, or custom); confirm in AgentsInfo.Platform for a real case"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "agent-identity",
+      "type": "entity",
+      "stage": "agent",
+      "label": "Agent identity: FinanceAgent-prod@contoso",
+      "description": "The Entra Agent ID service-principal identity backing this agent instance.",
+      "evidence": [
+        "Investigation case agentIdentity field",
+        "Would correspond to AgentsInfo.EntraAgentId / an EntraAgentIdentities row in a real tenant"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "trigger-prompt",
+      "type": "action",
+      "stage": "trigger",
+      "label": "Prompt: reconcile Q3 documents",
+      "description": "User-submitted natural-language request that started the conversation.",
+      "evidence": [
+        "ConversationId: conv-8f72... (investigation case)",
+        "gen_ai.conversation.id would thread this and later turns in AppDependencies"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "trigger-invoke",
+      "type": "action",
+      "stage": "trigger",
+      "label": "invoke_agent span",
+      "description": "The agent run starts; this is the trace root span in OpenTelemetry GenAI semantics.",
+      "evidence": [
+        "AppDependencies name=InvokeAgent",
+        "operation_Id shared by every span in this turn (Microsoft Learn)"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "execution-model",
+      "type": "action",
+      "stage": "execution",
+      "label": "Model call (chat)",
+      "description": "The agent's underlying model is invoked to plan the response and decide which tool to call.",
+      "evidence": [
+        "Not present in the transcribed investigation case -- added here as the typical adjacent span (gen_ai.operation.name=chat) because most agent frameworks emit one",
+        "Confirm with a real AppDependencies query before trusting this hop for an actual incident"
+      ],
+      "confidence": "low"
+    },
+    {
+      "id": "execution-tool",
+      "type": "action",
+      "stage": "execution",
+      "label": "ExecuteTool: search",
+      "description": "Tool-call span invoking the SharePoint MCP connector to search for financial documents.",
+      "evidence": [
+        "AppDependencies name=ExecuteTool",
+        "gen_ai.tool.name example format: workiqsharepoint:mcp_SharePointRemoteServer (Microsoft Learn)",
+        "operation_ParentId = the InvokeAgent span's id"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "integration-mcp",
+      "type": "entity",
+      "stage": "integration",
+      "label": "MCP: SharePoint Enterprise",
+      "description": "The Model Context Protocol connector/gateway that brokers the tool call to SharePoint.",
+      "evidence": [
+        "gen_ai.tool.type example: 'MCP - Power Platform Connector' (Microsoft Learn)",
+        "Investigation case actor: 'MCP: SharePoint Enterprise'"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "integration-graph",
+      "type": "action",
+      "stage": "integration",
+      "label": "Microsoft Graph request",
+      "description": "The MCP connector calls Microsoft Graph on the agent's behalf to search and later update files.",
+      "evidence": [
+        "Investigation case: 'PATCH /enterprise/...'",
+        "In the source narrative this was corroborated at 92% via identity+time correlation, not a shared trace ID"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "resource-site",
+      "type": "entity",
+      "stage": "resource",
+      "label": "SharePoint site: /sites/Board",
+      "description": "A resource family this agent had not previously accessed.",
+      "evidence": [
+        "Investigation case anomaly: 'Agent had never accessed /sites/Board'"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "resource-docs",
+      "type": "output",
+      "stage": "resource",
+      "label": "17 documents read",
+      "description": "Aggregate read activity observed during the search across the Finance/Q3, Finance/M&A, and Board sites.",
+      "evidence": [
+        "Investigation case blast radius: 17 files read"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "resource-file",
+      "type": "entity",
+      "stage": "resource",
+      "label": "Board-Forecast-Q3.xlsx",
+      "description": "The specific file later modified by the agent.",
+      "evidence": [
+        "File name from the investigation case's audit evidence row"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "outcome-modified",
+      "type": "output",
+      "stage": "outcome",
+      "label": "File modified",
+      "description": "Audit-log-confirmed write action against the file.",
+      "evidence": [
+        "CloudAppEvents / Office 365 audit log record",
+        "96% confidence in the source investigation case"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "outcome-label",
+      "type": "entity",
+      "stage": "outcome",
+      "label": "Sensitivity label: Highly Confidential",
+      "description": "The resource's classification, read directly from file metadata.",
+      "evidence": [
+        "Investigation case anomaly: 'Target classified as Highly Confidential'"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "outcome-finding",
+      "type": "finding",
+      "stage": "outcome",
+      "label": "Security finding: unauthorized-looking write",
+      "description": "New resource family, a first WRITE by this agent, against a Highly Confidential file. This is an analyst judgment call weighing several signals together, not a deterministic rule firing.",
+      "evidence": [
+        "3 anomalies: new resource family, privilege expansion (READ to WRITE), sensitive resource",
+        "Investigation confidence: 87% (authored for this example, not measured against a real tenant)"
+      ],
+      "confidence": "medium"
+    }
+  ],
+  "edges": [
+    {
+      "id": "ap01",
+      "from": "who-user",
+      "to": "trigger-prompt",
+      "relation": "submits",
+      "description": "The user submits the request that becomes the conversation's first turn.",
+      "evidence": "Investigation case step 1",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "ap02",
+      "from": "trigger-prompt",
+      "to": "trigger-invoke",
+      "relation": "starts",
+      "description": "The prompt triggers the agent run.",
+      "evidence": "Same ConversationId; adjacent turn start",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "ap03",
+      "from": "agent-finance",
+      "to": "trigger-invoke",
+      "relation": "executes",
+      "description": "This agent instance owns the InvokeAgent span.",
+      "evidence": "InvokeAgent span's gen_ai.agent.id / gen_ai.agent.name identify this agent",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "ap04",
+      "from": "agent-identity",
+      "to": "agent-finance",
+      "relation": "backs",
+      "description": "The running agent instance is backed by this Entra Agent ID identity.",
+      "evidence": "AgentsInfo.EntraAgentId / EntraAgentIdentities would tie the running agent to its Entra identity",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "ap05",
+      "from": "trigger-invoke",
+      "to": "execution-model",
+      "relation": "calls",
+      "description": "The agent run calls the model to plan/respond.",
+      "evidence": "Typical chat span nested via operation_ParentId; not literally present in the transcribed case",
+      "evidenceType": "contextual",
+      "conditional": true
+    },
+    {
+      "id": "ap06",
+      "from": "trigger-invoke",
+      "to": "execution-tool",
+      "relation": "calls",
+      "description": "The agent run calls the SharePoint search tool.",
+      "evidence": "ExecuteTool span nested via operation_ParentId = InvokeAgent span id",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "ap07",
+      "from": "execution-tool",
+      "to": "integration-mcp",
+      "relation": "routes-through",
+      "description": "The tool call is routed through this MCP connector.",
+      "evidence": "gen_ai.tool.name identifies the MCP connector on the span itself",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "ap08",
+      "from": "integration-mcp",
+      "to": "integration-graph",
+      "relation": "calls",
+      "description": "The MCP connector performs the Graph call on the agent's behalf.",
+      "evidence": "Architectural fact about how this MCP connector works; not directly observed in a single trace in this example",
+      "evidenceType": "contextual"
+    },
+    {
+      "id": "ap09",
+      "from": "integration-graph",
+      "to": "resource-site",
+      "relation": "touches",
+      "description": "The Graph request targets this SharePoint site.",
+      "evidence": "Observed via CloudAppEvents Application + time window, not a shared span ID",
+      "evidenceType": "correlated"
+    },
+    {
+      "id": "ap10",
+      "from": "resource-site",
+      "to": "resource-docs",
+      "relation": "yields",
+      "description": "The search against this site (and its siblings) yields the aggregate read count.",
+      "evidence": "Aggregate count of files read across matched sites",
+      "evidenceType": "contextual"
+    },
+    {
+      "id": "ap11",
+      "from": "resource-docs",
+      "to": "resource-file",
+      "relation": "includes",
+      "description": "This specific file is one of the read results, and later the write target.",
+      "evidence": "Inferred membership; the aggregate count does not individually enumerate every file",
+      "evidenceType": "contextual"
+    },
+    {
+      "id": "ap12",
+      "from": "integration-graph",
+      "to": "outcome-modified",
+      "relation": "performs",
+      "description": "A second Graph call performs the write action.",
+      "evidence": "Investigation case: PATCH request at 92% identity+time correlation",
+      "evidenceType": "correlated"
+    },
+    {
+      "id": "ap13",
+      "from": "resource-file",
+      "to": "outcome-modified",
+      "relation": "is-target-of",
+      "description": "The audit log names this exact file as modified.",
+      "evidence": "CloudAppEvents / Office 365 audit log record names the file directly",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "ap14",
+      "from": "outcome-modified",
+      "to": "outcome-label",
+      "relation": "reveals",
+      "description": "The modified file's classification is read from its own metadata, independent of the write event.",
+      "evidence": "Sensitivity label is a file property, not derived from the write itself",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "ap15",
+      "from": "outcome-label",
+      "to": "outcome-finding",
+      "relation": "elevates-risk-of",
+      "description": "A Highly Confidential label combined with the other anomalies supports (does not prove) a security finding.",
+      "evidence": "Analyst judgment call weighing classification + behavior together",
+      "evidenceType": "contextual"
+    },
+    {
+      "id": "ap16",
+      "from": "outcome-modified",
+      "to": "outcome-finding",
+      "relation": "elevates-risk-of",
+      "description": "A first WRITE against a new resource family is judged anomalous relative to this agent's history.",
+      "evidence": "Anomalies: new resource family, privilege expansion (READ to WRITE)",
+      "evidenceType": "contextual"
+    }
+  ]
+}
