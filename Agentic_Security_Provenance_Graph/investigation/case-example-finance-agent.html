@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Suspicious agent-driven SharePoint modification</title>
+<link rel="stylesheet" href="investigation-report.css">
+</head>
+<body>
+<div id="validation-banner" role="alert">
+  <strong>⚠ NOT VALIDATED AGAINST TENANT DATA.</strong>
+  This report is a template/example rendering. Every confidence percentage and source table below was authored by hand or transcribed from a narrative &mdash;
+  none of it was queried live from <code>CloudAppEvents</code>, <code>AppDependencies</code>, <code>BehaviorInfo</code>, or any other tenant table by this script.
+  Confirm every row against your own tenant before treating this incident as real or acting on it.
+</div>
+<h1>Suspicious agent-driven SharePoint modification</h1>
+<p><strong>Risk:</strong> <span class="risk-high">High</span></p>
+<p><strong>Agent:</strong> <code>Finance-Reconciliation-Agent</code></p>
+<p><strong>Agent ID:</strong> <code>a365-fin-0231</code></p>
+<p><strong>Agent Identity:</strong> <code>FinanceAgent-prod@contoso</code></p>
+<p><strong>Initiating user:</strong> <code>user@contoso.com</code></p>
+<p><strong>Conversation:</strong> <code>conv-8f72...</code></p>
+<p><strong>Investigation confidence:</strong> <strong>87%</strong></p>
+
+<h2>What happened</h2>
+<pre>David
+
+  │
+
+  │ Asked agent to reconcile Q3 financial documents
+  │ Evidence: EXACT
+
+  ▼
+
+Finance-Reconciliation-Agent
+
+  │
+
+  │ invoke_agent
+  │ Evidence: EXACT — 100%
+
+  ▼
+
+MCP: SharePoint Enterprise
+
+  │
+
+  │ ExecuteTool: search
+  │ Evidence: EXACT — 100%
+  │
+  ├── /sites/Finance/Q3
+  ├── /sites/Finance/M&amp;A
+  └── /sites/Board
+        │
+        │ unusual resource for this agent
+        ▼
+
+MCP: SharePoint Enterprise
+
+  │
+
+  │ ExecuteTool: update-file
+  │ Evidence: EXACT
+
+  ▼
+
+Microsoft Graph
+
+  │
+
+  │ PATCH /enterprise/...
+  │ Evidence: CORRELATED — 92%
+
+  ▼
+
+Board-Forecast-Q3.xlsx</pre>
+
+<h2>Evidence table</h2>
+<table>
+<thead><tr><th>Time</th><th>Entity</th><th>Action</th><th>Evidence</th><th>Confidence</th></tr></thead>
+<tbody>
+    <tr>
+      <td>10:31:02</td>
+      <td>User</td>
+      <td>Invoked Finance Agent</td>
+      <td>Agent 365 span</td>
+      <td>100%</td>
+    </tr>
+    <tr>
+      <td>10:31:03</td>
+      <td>Agent</td>
+      <td>Started conversation</td>
+      <td>ConversationId</td>
+      <td>100%</td>
+    </tr>
+    <tr>
+      <td>10:31:05</td>
+      <td>Agent</td>
+      <td>Called SharePoint MCP</td>
+      <td>Parent/child span</td>
+      <td>100%</td>
+    </tr>
+    <tr>
+      <td>10:31:06</td>
+      <td>MCP</td>
+      <td>Search /Finance/Q3</td>
+      <td>Tool span</td>
+      <td>100%</td>
+    </tr>
+    <tr>
+      <td>10:31:09</td>
+      <td>MCP</td>
+      <td>Search /Board</td>
+      <td>Tool span</td>
+      <td>100%</td>
+    </tr>
+    <tr>
+      <td>10:31:12</td>
+      <td>Graph</td>
+      <td>PATCH request</td>
+      <td>Identity + time correlation</td>
+      <td>92%</td>
+    </tr>
+    <tr>
+      <td>10:31:13</td>
+      <td>SharePoint</td>
+      <td>File modified</td>
+      <td>Audit evidence</td>
+      <td>96%</td>
+    </tr>
+</tbody>
+</table>
+
+<h2>Why this is suspicious</h2>
+<p><strong>3 anomalies detected</strong></p>
+<ol>
+    <li>
+      <strong>New resource family</strong>
+      <p>Agent had never accessed /sites/Board.</p>
+      <p>Baseline: No prior access to /sites/Board in the agent's activity history</p>
+      <p>Current: Search executed against /sites/Board in this conversation</p>
+    </li>
+    <li>
+      <strong>Privilege expansion</strong>
+      <p>The agent's action type escalated from read to write within the same conversation.</p>
+      <p>Baseline: READ</p>
+      <p>Current: WRITE</p>
+    </li>
+    <li>
+      <strong>Sensitive resource</strong>
+      <p>The modified file is classified as highly confidential.</p>
+      
+      <p>Current: Target classified as Highly Confidential</p>
+    </li>
+</ol>
+
+<h2>Blast radius</h2>
+<pre>1 Agent
+   │
+   ├── 1 Agent Identity
+   │
+   ├── 3 SharePoint sites
+   │
+   ├── 17 Files read
+   │
+   └── 1 Sensitive file modified</pre>
+
+<h2>Analyst recommendation</h2>
+<p><strong>Priority: HIGH</strong></p>
+<p>Investigate:</p>
+<ul><li>why the agent accessed the Board site</li><li>whether the WRITE permission is expected</li><li>whether the MCP tool invocation was authorized</li><li>whether similar Graph operations occurred in other conversations</li>
+</ul>
+
+<h2>Evidence-to-telemetry map</h2>
+<table>
+<thead><tr><th>Time</th><th>Evidence</th><th>Source table</th></tr></thead>
+<tbody>
+    <tr><td>10:31:02</td><td>Agent 365 span</td><td>AppDependencies (InvokeAgent span) or UnifiedAgentObservability</td></tr>
+    <tr><td>10:31:03</td><td>ConversationId</td><td>AppDependencies customDimensions.gen_ai.conversation.id</td></tr>
+    <tr><td>10:31:05</td><td>Parent/child span</td><td>AppDependencies operation_Id/operation_ParentId</td></tr>
+    <tr><td>10:31:06</td><td>Tool span</td><td>AppDependencies ExecuteTool span</td></tr>
+    <tr><td>10:31:09</td><td>Tool span</td><td>AppDependencies ExecuteTool span</td></tr>
+    <tr><td>10:31:12</td><td>Identity + time correlation</td><td>CloudAppEvents (Application=Microsoft Graph, joined by AccountObjectId + time window)</td></tr>
+    <tr><td>10:31:13</td><td>Audit evidence</td><td>CloudAppEvents / Office 365 audit log (file update record)</td></tr>
+</tbody>
+</table>
+</body>
+</html>
