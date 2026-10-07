@@ -1,0 +1,798 @@
+{
+  "$schema": "./graph-schema.json",
+  "version": "1.1.0",
+  "metadata": {
+    "title": "PuzzleMask Evidence Provenance Graph",
+    "description": "Traceable provenance from the PuzzleMask source claim through agent action, telemetry, correlation, validation, and MITRE ATT&CK mapping. This is the 'why do we believe it' view -- see action-provenance-finance-agent.json for the 'what happened' view.",
+    "source": "detection_report (1).md",
+    "generatedAt": "2026-09-30T14:01:17Z",
+    "behaviorCluster": "BC-1",
+    "detectionId": "CAND-001",
+    "deploymentStatus": "requires-tuning",
+    "statusReason": "The report summary says ready to deploy, but the detection body explicitly marks three placeholders and says the rule is not deploy-ready until they are completed."
+  },
+  "stages": [
+    {
+      "id": "source",
+      "label": "Source"
+    },
+    {
+      "id": "threat",
+      "label": "Threat behavior"
+    },
+    {
+      "id": "action",
+      "label": "Agent action"
+    },
+    {
+      "id": "telemetry",
+      "label": "Telemetry"
+    },
+    {
+      "id": "correlation",
+      "label": "Correlation"
+    },
+    {
+      "id": "decision",
+      "label": "Decision"
+    },
+    {
+      "id": "mapping",
+      "label": "Mapping"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "source-report",
+      "type": "source",
+      "stage": "source",
+      "label": "PuzzleMask detection report",
+      "description": "Detection Proposal Report - PuzzleMask: Abusing Plain Prose as a Covert AI Attack Vector.",
+      "evidence": [
+        "Source file: detection_report (1).md",
+        "One behavior cluster and one proposed detection"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "behavior-bc1",
+      "type": "behavior",
+      "stage": "threat",
+      "label": "Gatekeeper evasion (BC-1)",
+      "description": "Adversarial prompt text is crafted to evade policy screening so unsafe instructions reach a downstream model or tool-enabled agent.",
+      "evidence": [
+        "Kill-chain phase: Defense Evasion",
+        "Choke point: attack action",
+        "Variants: encoding, surface, parameter"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "action-prompt",
+      "type": "action",
+      "stage": "action",
+      "label": "Submit disguised prompt",
+      "description": "An account submits policy-violating instructions hidden in ordinary prose.",
+      "evidence": [
+        "Prompt content is projected as InputParameters",
+        "No exact prompt examples were supplied by the source"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "control-gatekeeper",
+      "type": "control",
+      "stage": "action",
+      "label": "Policy gatekeeper",
+      "description": "The lightweight content-safety or policy-screening control that PuzzleMask attempts to bypass.",
+      "evidence": [
+        "No explicit gatekeeper decision field was confirmed"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "action-tool-run",
+      "type": "action",
+      "stage": "action",
+      "label": "Complete Sentinel AI tool run",
+      "description": "The downstream AI or tool-enabled workflow completes after receiving input.",
+      "evidence": [
+        "ActionType == SentinelAIToolRunCompleted"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "entity-account",
+      "type": "entity",
+      "stage": "telemetry",
+      "label": "Account",
+      "description": "The primary entity used to attribute and correlate the AI tool run with downstream alert evidence.",
+      "evidence": [
+        "Join key: AccountObjectId",
+        "Projected context: AccountUpn, AccountDisplayName, AccountId"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "entity-context",
+      "type": "entity",
+      "stage": "telemetry",
+      "label": "Application and source IP",
+      "description": "Cloud application and network context used during analyst triage.",
+      "evidence": [
+        "Entity fields: Application, ApplicationId, IPAddress"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "telemetry-cloudapp",
+      "type": "telemetry",
+      "stage": "telemetry",
+      "label": "CloudAppEvents",
+      "description": "Records the completed Sentinel AI tool run and its input, tools, APIs, tables, and databases.",
+      "evidence": [
+        "Must-have columns: Timestamp, ActionType, AccountObjectId, RawEventData, ReportId",
+        "Lookup ingestion window: 5h"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "telemetry-alert",
+      "type": "telemetry",
+      "stage": "telemetry",
+      "label": "AlertEvidence",
+      "description": "Provides later security evidence for the same account to corroborate downstream impact.",
+      "evidence": [
+        "Must-have columns: Timestamp, AlertId, Title, Categories, AccountObjectId, ServiceSource, DetectionSource, Severity",
+        "Scheduled ingestion window: 1h"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "entity-agent-identity",
+      "type": "entity",
+      "stage": "telemetry",
+      "label": "Entra Agent ID chain",
+      "description": "The official Microsoft Entra identity model for AI agents: an agent identity blueprint (template/app registration) is used to create an agent identity blueprint principal, which issues agent identities (service principal instances), optionally paired with an agent's user account.",
+      "evidence": [
+        "Sentinel schema browser tables: EntraAgentIdentityBlueprints, EntraAgentIdentityBlueprintPrincipals, EntraAgentIdentities, EntraAgentUsers",
+        "Microsoft Learn: agentType values agenticApp, agentIdentityBlueprintPrincipal, agenticAppInstance, agentIDuser",
+        "blueprintId links an agent identity instance back to its blueprint template"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "telemetry-agentsinfo",
+      "type": "telemetry",
+      "stage": "telemetry",
+      "label": "AgentsInfo",
+      "description": "Advanced hunting inventory table for AI agents across platforms (Copilot Studio, Foundry, Copilot, third-party, endpoint-discovered). Exposes declared guardrails, system prompt, permissions, tools, and an ObservabilityId correlation key.",
+      "evidence": [
+        "Column Guardrails: guardrails attached to the agent and their coverage",
+        "Column Instructions: the agent's system prompt defining default behavior and operating boundaries",
+        "Column Permissions, DeclaredTools, McpServers, Capabilities: declared authZ/tool surface",
+        "Column ObservabilityId: correlates the agent with usage/activity data in Microsoft Agent 365",
+        "Replaces AIAgentsInfo; AIAgentsInfo is retired July 1, 2026 (Microsoft Learn, June 2026 naming change)"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "telemetry-behaviorinfo",
+      "type": "telemetry",
+      "stage": "telemetry",
+      "label": "BehaviorInfo",
+      "description": "Advanced hunting table of correlated behaviors from Defender for Cloud Apps and UEBA, pre-classified against MITRE ATT&CK, with an account join key and a bounded activity window.",
+      "evidence": [
+        "Column Categories: threat/breach classification per MITRE ATT&CK",
+        "Column AttackTechniques: MITRE ATT&CK techniques tied to the behavior",
+        "Column AccountObjectId, StartTime, EndTime: same join key and time-bounding pattern as CAND-001",
+        "Preview table; requires Defender for Cloud Apps and UEBA to be deployed"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "telemetry-unifiedagentobservability",
+      "type": "telemetry",
+      "stage": "telemetry",
+      "label": "UnifiedAgentObservability",
+      "description": "Runtime activity telemetry for AI agents, reported to exist in the Sentinel data lake and to include prompts, tool invocations, and session/channel context, keyed by ObservabilityId.",
+      "evidence": [
+        "Observed directly in tenant schema browser (Agent Observability system tables)",
+        "Community/GitHub sources describe InvokeAgent, InferenceCall, ExecuteToolByGateway, ExecuteToolBySDK, AISpanOutput event types",
+        "Not yet confirmed against a first-party Microsoft Learn schema reference; treat column names as unverified until checked in your tenant"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "telemetry-appdependencies",
+      "type": "telemetry",
+      "stage": "telemetry",
+      "label": "AppDependencies (Application Insights)",
+      "description": "OpenTelemetry GenAI agent spans (InvokeAgent, ExecuteTool, OutputMessages) exported by Copilot Studio, Foundry, or custom-instrumented agents into the dependencies/AppDependencies table. Distinct product plane from Defender Advanced Hunting; this is the same App* table family tracked by the tenant's Telemetry Health & Cost workbook.",
+      "evidence": [
+        "Columns: operation_Id (shared per agent turn/trace), operation_ParentId (parent-child span linkage), customDimensions (gen_ai.* and microsoft.* keys)",
+        "customDimensions key gen_ai.conversation.id: threads multiple turns of one conversation",
+        "customDimensions key gen_ai.agent.id / gen_ai.agent.name: agent identity as seen by the instrumentation SDK",
+        "Log Analytics table name: AppDependencies"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "telemetry-appgenaicontent",
+      "type": "telemetry",
+      "stage": "telemetry",
+      "label": "AppGenAIContent",
+      "description": "Dedicated Application Insights table for generative AI content: prompts, model responses, system instructions, and tool call arguments/results, split out because this content is often sensitive (PII/PHI) and should be a protected table.",
+      "evidence": [
+        "Routes gen_ai.input.messages, gen_ai.output.messages, gen_ai.system_instructions, gen_ai.tool.definitions, gen_ai.tool.call.arguments, gen_ai.tool.call.result",
+        "Before Sept 30 2026: also duplicated into AppDependencies/AppTraces/AppEvents; after that date, only a pointer remains in those tables",
+        "Log Analytics table name: AppGenAIContent"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "finding-cross-plane-bridge",
+      "type": "finding",
+      "stage": "decision",
+      "label": "Confirmed bridge: App Insights spans to Entra Agent ID",
+      "description": "Application Insights AppDependencies spans carry a customDimensions key, microsoft.a365.agent.blueprint.id, that Microsoft Learn documents as the agent identity blueprint's ID -- the same identifier space as EntraAgentIdentityBlueprints and AgentsInfo.EntraBlueprintId. This is a confirmed, documented join key across the two telemetry planes, not an assumption like the AccountObjectId/EntraAgentId join used elsewhere in this graph.",
+      "evidence": [
+        "Microsoft Learn: 'Integrate agent observability using direct OTel' lists microsoft.a365.agent.blueprint.id as a run-wide span attribute",
+        "AgentsInfo.EntraBlueprintId: 'the unique identifier by Microsoft Entra ID for the agent identity blueprint'",
+        "gen_ai.conversation.id (AppDependencies) is a plausible secondary bridge to UnifiedAgentObservability/ObservabilityId, but that pairing is unverified"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "finding-guardrail-signal",
+      "type": "finding",
+      "stage": "decision",
+      "label": "Guardrails field may fill the gatekeeper gap",
+      "description": "The report explicitly says no gatekeeper decision field was confirmed. AgentsInfo.Guardrails documents guardrails attached to an agent and their coverage, which is a plausible first-party signal for exactly that gap and should be checked before accepting the account-and-time approximation as final.",
+      "evidence": [
+        "Report gap: 'no explicit gatekeeper decision field was confirmed'",
+        "AgentsInfo.Guardrails: guardrails attached to the agent and their coverage",
+        "BehaviorInfo.Categories/AttackTechniques: pre-classified MITRE ATT&CK behaviors, stronger than raw AlertEvidence"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "detection-cand002",
+      "type": "detection",
+      "stage": "correlation",
+      "label": "CAND-002 guardrail-enriched correlation",
+      "description": "Proposed enrichment that replaces the blind CloudAppEvents-to-AlertEvidence account join with an agent-aware correlation: identify agents with weak/absent guardrail coverage in AgentsInfo, then correlate their tool runs to MITRE-classified BehaviorInfo records for the same account.",
+      "evidence": [
+        "Not present in the source report; proposed based on tenant-observed Agent Observability tables",
+        "Query: detections/CAND-002-guardrail-enriched.kql",
+        "Requires tenant validation before use; column names for UnifiedAgentObservability are unverified"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "parameter-terms",
+      "type": "parameter",
+      "stage": "correlation",
+      "label": "SuspiciousPromptTerms",
+      "description": "Tenant-specific prompt-safety bypass or prohibited-instruction terms.",
+      "evidence": [
+        "Default: empty dynamic array",
+        "Empty default excludes nothing"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "parameter-window",
+      "type": "parameter",
+      "stage": "correlation",
+      "label": "CorrelationWindow",
+      "description": "Maximum elapsed time between the AI tool run and downstream evidence.",
+      "evidence": [
+        "Default: 4h",
+        "Shorter windows reduce unrelated joins"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "parameter-categories",
+      "type": "parameter",
+      "stage": "correlation",
+      "label": "RequiredAlertCategories",
+      "description": "Optional tenant-specific alert categories required for consequence corroboration.",
+      "evidence": [
+        "Default: empty dynamic array",
+        "Empty default excludes nothing"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "detection-cand001",
+      "type": "detection",
+      "stage": "correlation",
+      "label": "CAND-001 correlation",
+      "description": "Inner-joins completed AI tool runs to later alert evidence on AccountObjectId and bounded event ordering.",
+      "evidence": [
+        "Methodology: correlation",
+        "Strategy: multi_table_correlation",
+        "Frequency: every hour",
+        "Query: detections/CAND-001.kql"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "validation-replay",
+      "type": "validation",
+      "stage": "decision",
+      "label": "14-day replay",
+      "description": "Historical replay across 336 consecutive one-hour windows measured rule volume.",
+      "evidence": [
+        "Total hits: 0",
+        "Tenant median noise threshold: 2",
+        "Classification: not_noisy",
+        "Signal effectiveness is unproven because no positive events were observed"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "finding-readiness",
+      "type": "finding",
+      "stage": "decision",
+      "label": "Readiness conflict",
+      "description": "The report matrix says ready to deploy, while the query section says the rule is not deploy-ready until placeholders are filled.",
+      "evidence": [
+        "Summary: 1 ready to deploy",
+        "Placeholder notice: not deploy-ready",
+        "Conservative resolved status: requires tuning"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "finding-limitations",
+      "type": "finding",
+      "stage": "decision",
+      "label": "Known provenance gaps",
+      "description": "The signal approximates bypass and can join unrelated actions for busy accounts.",
+      "evidence": [
+        "No explicit gatekeeper decision field",
+        "Account-level correlation may be ambiguous",
+        "Lookback consistency warning: design 1h is smaller than largest rule window 5h"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "finding-query-surface",
+      "type": "finding",
+      "stage": "decision",
+      "label": "Query-surface mismatch",
+      "description": "The source query uses Defender Advanced Hunting's Timestamp field, while the official Microsoft Sentinel Log Analytics schemas expose TimeGenerated.",
+      "evidence": [
+        "CloudAppEvents Log Analytics schema: TimeGenerated",
+        "AlertEvidence Log Analytics schema: TimeGenerated",
+        "Sentinel-adapted query: detections/CAND-001-sentinel.kql"
+      ],
+      "confidence": "high"
+    },
+    {
+      "id": "output-alert",
+      "type": "output",
+      "stage": "decision",
+      "label": "Candidate alert",
+      "description": "A low-severity investigation lead containing the account, AI run context, and downstream alert evidence.",
+      "evidence": [
+        "Severity: Low",
+        "Requires analyst triage and tenant tuning"
+      ],
+      "confidence": "medium"
+    },
+    {
+      "id": "technique-t1562",
+      "type": "technique",
+      "stage": "mapping",
+      "label": "MITRE ATT&CK T1562",
+      "description": "Impair Defenses, mapped by the report to the gatekeeper-evasion behavior.",
+      "evidence": [
+        "Exact technique-ID coverage: 1 of 1",
+        "Kill-chain phase: Defense Evasion"
+      ],
+      "confidence": "high"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e01",
+      "from": "source-report",
+      "to": "behavior-bc1",
+      "relation": "documents",
+      "description": "The report defines behavior cluster BC-1.",
+      "evidence": "Behavior Cluster Index",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e02",
+      "from": "behavior-bc1",
+      "to": "action-prompt",
+      "relation": "manifests-as",
+      "description": "Gatekeeper evasion manifests as a disguised adversarial prompt.",
+      "evidence": "Evidence D001",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e03",
+      "from": "action-prompt",
+      "to": "control-gatekeeper",
+      "relation": "targets",
+      "description": "The prompt is crafted to evade the policy-screening control.",
+      "evidence": "Attacker objective",
+      "evidenceType": "contextual"
+    },
+    {
+      "id": "e04",
+      "from": "control-gatekeeper",
+      "to": "action-tool-run",
+      "relation": "precedes",
+      "description": "The hypothesized bypass occurs before downstream tool execution.",
+      "evidence": "Detection strategy",
+      "evidenceType": "contextual",
+      "conditional": true
+    },
+    {
+      "id": "e05",
+      "from": "action-tool-run",
+      "to": "telemetry-cloudapp",
+      "relation": "emits",
+      "description": "Completed tool execution is observed in CloudAppEvents.",
+      "evidence": "ActionType filter",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e06",
+      "from": "entity-account",
+      "to": "telemetry-cloudapp",
+      "relation": "attributed-by",
+      "description": "CloudAppEvents attributes the tool run to AccountObjectId.",
+      "evidence": "CloudAppEvents projection",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e07",
+      "from": "entity-context",
+      "to": "telemetry-cloudapp",
+      "relation": "contextualizes",
+      "description": "Application and IP context describe the tool run.",
+      "evidence": "Entity mapping",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e08",
+      "from": "entity-account",
+      "to": "telemetry-alert",
+      "relation": "attributed-by",
+      "description": "AlertEvidence attributes downstream evidence to the same AccountObjectId.",
+      "evidence": "AlertEvidence projection",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e09",
+      "from": "telemetry-cloudapp",
+      "to": "detection-cand001",
+      "relation": "provides-input",
+      "description": "The detection consumes completed AI tool runs.",
+      "evidence": "AIToolRuns subquery",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e10",
+      "from": "telemetry-alert",
+      "to": "detection-cand001",
+      "relation": "provides-input",
+      "description": "The detection consumes downstream alert evidence.",
+      "evidence": "AlertEvidence query",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e42",
+      "from": "telemetry-cloudapp",
+      "to": "telemetry-alert",
+      "relation": "correlated-with",
+      "description": "CAND-001's actual join: a completed AI tool run and later alert evidence for the same account within a bounded window. There is no shared trace or session ID -- this is an identity-plus-time join, so unrelated activity for busy accounts can match.",
+      "evidence": "join kind=inner (AIToolRuns) on AccountObjectId; Timestamp between run and run+CorrelationWindow",
+      "evidenceType": "correlated",
+      "conditional": true
+    },
+    {
+      "id": "e11",
+      "from": "parameter-terms",
+      "to": "detection-cand001",
+      "relation": "filters",
+      "description": "Prompt terms optionally focus InputParameters.",
+      "evidence": "InputParameters has_any SuspiciousPromptTerms",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e12",
+      "from": "parameter-window",
+      "to": "detection-cand001",
+      "relation": "constrains",
+      "description": "The time window bounds ordering after AIToolRunTimestamp.",
+      "evidence": "Timestamp between AI run and AI run + CorrelationWindow",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e13",
+      "from": "parameter-categories",
+      "to": "detection-cand001",
+      "relation": "filters",
+      "description": "Alert categories optionally narrow downstream evidence.",
+      "evidence": "Categories has_any RequiredAlertCategories",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e14",
+      "from": "detection-cand001",
+      "to": "validation-replay",
+      "relation": "was-validated-by",
+      "description": "The query was replayed against historical tenant data.",
+      "evidence": "Detection Execution Stats",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e15",
+      "from": "validation-replay",
+      "to": "finding-readiness",
+      "relation": "qualifies",
+      "description": "Zero-hit validation supports low measured noise but does not prove efficacy.",
+      "evidence": "0 hits in 336 windows",
+      "evidenceType": "contextual"
+    },
+    {
+      "id": "e16",
+      "from": "source-report",
+      "to": "finding-readiness",
+      "relation": "contains-conflict",
+      "description": "Two report sections give incompatible deployment-readiness statements.",
+      "evidence": "Package Summary and placeholder notice",
+      "evidenceType": "conflict"
+    },
+    {
+      "id": "e17",
+      "from": "control-gatekeeper",
+      "to": "finding-limitations",
+      "relation": "not-directly-observed",
+      "description": "No confirmed telemetry records the gatekeeper decision.",
+      "evidence": "Potential Gaps",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e18",
+      "from": "detection-cand001",
+      "to": "finding-limitations",
+      "relation": "is-qualified-by",
+      "description": "Known assumptions and ambiguous joins limit confidence.",
+      "evidence": "Potential Gaps",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e19",
+      "from": "detection-cand001",
+      "to": "output-alert",
+      "relation": "produces",
+      "description": "A matched correlation produces an investigation lead.",
+      "evidence": "Detection output projection",
+      "evidenceType": "exact",
+      "conditional": true
+    },
+    {
+      "id": "e20",
+      "from": "behavior-bc1",
+      "to": "technique-t1562",
+      "relation": "mapped-to",
+      "description": "The report maps BC-1 to T1562.",
+      "evidence": "Behavior Cluster Index",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e21",
+      "from": "output-alert",
+      "to": "technique-t1562",
+      "relation": "classified-as",
+      "description": "Candidate alerts inherit the report's T1562 mapping.",
+      "evidence": "Detection metadata",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e22",
+      "from": "source-report",
+      "to": "finding-query-surface",
+      "relation": "contains-query-for",
+      "description": "The report's KQL uses Defender Advanced Hunting timestamp semantics.",
+      "evidence": "Source query projects Timestamp",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e23",
+      "from": "finding-query-surface",
+      "to": "detection-cand001",
+      "relation": "requires-adaptation",
+      "description": "The query must use TimeGenerated when run in Microsoft Sentinel Log Analytics.",
+      "evidence": "Official Azure Monitor table schemas",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e24",
+      "from": "entity-agent-identity",
+      "to": "telemetry-agentsinfo",
+      "relation": "attributed-by",
+      "description": "AgentsInfo inventories agents keyed to their Entra agent identity and blueprint.",
+      "evidence": "AgentsInfo.EntraAgentId, EntraBlueprintId columns",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e25",
+      "from": "entity-agent-identity",
+      "to": "telemetry-behaviorinfo",
+      "relation": "attributed-by",
+      "description": "BehaviorInfo has a native AccountObjectId column, so it can attribute records to an account -- but whether that account ID is the same identifier as this agent's EntraAgentId/entity-agent-identity is not confirmed by any schema reference found.",
+      "evidence": "BehaviorInfo.AccountObjectId column exists; its equivalence to EntraAgentId is unverified (see detections/agent-observability-preflight.kql query 5)",
+      "evidenceType": "contextual",
+      "conditional": true
+    },
+    {
+      "id": "e43",
+      "from": "telemetry-agentsinfo",
+      "to": "telemetry-behaviorinfo",
+      "relation": "correlated-with",
+      "description": "CAND-002's proposed join: weakly-guarded agents (AgentsInfo) linked to MITRE-classified behaviors (BehaviorInfo) for the same account. Weaker than the CAND-001 join above -- it additionally assumes AgentsInfo.EntraAgentId and BehaviorInfo.AccountObjectId share an identifier space, which is unverified.",
+      "evidence": "agent-observability-preflight.kql query 5 checks this assumption; CorrelatedAccounts=0 would falsify it",
+      "evidenceType": "contextual",
+      "conditional": true
+    },
+    {
+      "id": "e26",
+      "from": "entity-agent-identity",
+      "to": "telemetry-unifiedagentobservability",
+      "relation": "attributed-by",
+      "description": "Reported runtime activity telemetry is keyed by ObservabilityId back to the agent identity.",
+      "evidence": "Community-sourced description; unverified against first-party schema",
+      "evidenceType": "contextual",
+      "conditional": true
+    },
+    {
+      "id": "e27",
+      "from": "action-tool-run",
+      "to": "telemetry-agentsinfo",
+      "relation": "is-configured-in",
+      "description": "The agent executing the tool run has a declared configuration, including guardrails, in AgentsInfo.",
+      "evidence": "AgentsInfo inventories agent configuration and posture",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e28",
+      "from": "control-gatekeeper",
+      "to": "telemetry-agentsinfo",
+      "relation": "may-be-observed-in",
+      "description": "The hypothesized policy-screening control may correspond to the agent's declared Guardrails rather than being unobservable.",
+      "evidence": "AgentsInfo.Guardrails: guardrails attached to the agent and their coverage",
+      "evidenceType": "contextual",
+      "conditional": true
+    },
+    {
+      "id": "e29",
+      "from": "telemetry-agentsinfo",
+      "to": "finding-guardrail-signal",
+      "relation": "may-resolve",
+      "description": "A confirmed Guardrails value would directly address the report's stated gatekeeper-decision gap.",
+      "evidence": "Report gap vs. AgentsInfo.Guardrails schema",
+      "evidenceType": "contextual"
+    },
+    {
+      "id": "e30",
+      "from": "telemetry-behaviorinfo",
+      "to": "finding-guardrail-signal",
+      "relation": "may-resolve",
+      "description": "MITRE-classified BehaviorInfo records are a stronger downstream corroboration signal than raw AlertEvidence.",
+      "evidence": "BehaviorInfo.Categories, AttackTechniques columns",
+      "evidenceType": "contextual"
+    },
+    {
+      "id": "e31",
+      "from": "finding-limitations",
+      "to": "finding-guardrail-signal",
+      "relation": "is-qualified-by",
+      "description": "The known provenance gap in CAND-001 is directly addressed by proposing CAND-002.",
+      "evidence": "Report limitation: no explicit gatekeeper decision field was confirmed",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e32",
+      "from": "finding-guardrail-signal",
+      "to": "detection-cand002",
+      "relation": "motivates",
+      "description": "The guardrail and behavior signals motivate a stronger, agent-aware detection candidate.",
+      "evidence": "detections/CAND-002-guardrail-enriched.kql",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e33",
+      "from": "telemetry-agentsinfo",
+      "to": "detection-cand002",
+      "relation": "provides-input",
+      "description": "CAND-002 consumes agent guardrail coverage to prioritize weakly-guarded agents.",
+      "evidence": "AgentsInfo.Guardrails filter",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e34",
+      "from": "telemetry-behaviorinfo",
+      "to": "detection-cand002",
+      "relation": "provides-input",
+      "description": "CAND-002 consumes MITRE-classified behaviors as downstream corroboration instead of raw AlertEvidence.",
+      "evidence": "BehaviorInfo.Categories, AttackTechniques",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e35",
+      "from": "telemetry-unifiedagentobservability",
+      "to": "detection-cand002",
+      "relation": "provides-input",
+      "description": "Runtime agent activity telemetry is an optional enrichment input, pending tenant schema verification.",
+      "evidence": "Requires confirmation in your tenant before use",
+      "evidenceType": "contextual",
+      "conditional": true
+    },
+    {
+      "id": "e36",
+      "from": "detection-cand002",
+      "to": "technique-t1562",
+      "relation": "mapped-to",
+      "description": "CAND-002 targets the same T1562 gatekeeper-evasion behavior as CAND-001, with stronger corroboration.",
+      "evidence": "Shared behavior cluster BC-1",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e37",
+      "from": "action-tool-run",
+      "to": "telemetry-appdependencies",
+      "relation": "emits",
+      "description": "If the agent executing the tool run is OpenTelemetry GenAI-instrumented, the same run is also observed as InvokeAgent/ExecuteTool/OutputMessages spans.",
+      "evidence": "AppDependencies span model",
+      "evidenceType": "contextual",
+      "conditional": true
+    },
+    {
+      "id": "e38",
+      "from": "telemetry-appgenaicontent",
+      "to": "telemetry-appdependencies",
+      "relation": "stores-content-for",
+      "description": "AppGenAIContent holds the actual prompt/response/tool-call content that AppDependencies spans reference.",
+      "evidence": "gen_ai.input.messages, gen_ai.output.messages routed to AppGenAIContent",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e39",
+      "from": "telemetry-appdependencies",
+      "to": "finding-cross-plane-bridge",
+      "relation": "confirms",
+      "description": "The microsoft.a365.agent.blueprint.id span attribute is the documented bridge key into the Entra Agent ID identity chain.",
+      "evidence": "Microsoft Learn OTel agent observability reference",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e40",
+      "from": "finding-cross-plane-bridge",
+      "to": "entity-agent-identity",
+      "relation": "bridges-to",
+      "description": "microsoft.a365.agent.blueprint.id equals the agent identity blueprint ID used by EntraAgentIdentityBlueprints and AgentsInfo.EntraBlueprintId.",
+      "evidence": "Same identifier space, confirmed by Microsoft Learn",
+      "evidenceType": "exact"
+    },
+    {
+      "id": "e41",
+      "from": "finding-cross-plane-bridge",
+      "to": "telemetry-agentsinfo",
+      "relation": "bridges-to",
+      "description": "The blueprint ID recorded on App Insights spans matches AgentsInfo.EntraBlueprintId, letting an analyst pivot from a runtime span to the agent's declared Guardrails and Instructions.",
+      "evidence": "AgentsInfo.EntraBlueprintId column description",
+      "evidenceType": "exact"
+    }
+  ]
+}
