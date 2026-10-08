@@ -1,14 +1,5 @@
  CIEM Gap Coverage and Change Record
 
- Coverage decisions, implementation evidence, remaining dependencies, and validation results
- for the Microsoft Defender for Cloud CIEM Risk & Least Privilege workbook.
-
-| Document metadata | Value |
-|---|---|
-| Workbook artifact | `Defender-CIEM-RiskLeastPrivilege-Workbook_V2.json` |
-| Source of truth | `Build-CIEMWorkbook.ps1` |
-| Review date | 2026-10-08 |
-| Language | English |
 
  Executive summary
 
