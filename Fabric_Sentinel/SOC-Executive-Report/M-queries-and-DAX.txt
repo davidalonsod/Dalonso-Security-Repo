@@ -1,0 +1,43 @@
+Fallback: in Power BI Desktop > Get data > Blank query > Advanced editor, paste each block, name the query as the table, then add the measures.
+
+// ===== Table: Findings
+let
+    Source = AzureDataExplorer.Contents("https://trd-2gtxb2yrad9vq2b4qt.z3.kusto.fabric.microsoft.com", "SOC_Analytics", "EntraBruteForceFindings | where TimeGenerated > ago(7d) | project TimeGenerated, Pattern = tostring(Pattern), Severity = tostring(Severity), IPAddress = tostring(IPAddress), Country = tostring(Country), City = tostring(City), Latitude = todouble(Latitude), Longitude = todouble(Longitude), Failures = tolong(Failures), Users = tolong(Users), SuccessAfter = tobool(SuccessAfter), TargetedUsers = tostring(TargetedUsers), CompromisedUsers = tostring(CompromisedUsers)", [])
+in
+    Source
+
+// Measures for Findings:
+Attacker IPs = DISTINCTCOUNT(Findings[IPAddress])
+Compromised IPs = CALCULATE(DISTINCTCOUNT(Findings[IPAddress]), Findings[SuccessAfter] = TRUE())
+Attack Failures = SUM(Findings[Failures])
+Attack Countries = DISTINCTCOUNT(Findings[Country])
+
+// ===== Table: SignIns
+let
+    Source = AzureDataExplorer.Contents("https://trd-2gtxb2yrad9vq2b4qt.z3.kusto.fabric.microsoft.com", "SOC_Analytics", "SigninGeo7d | project UserId = tostring(UserId), IP = tostring(IP), Day = todatetime(Day), SignIns = tolong(SignIns), Failures = tolong(Failures), Successes = tolong(Successes), Country = tostring(Country), City = tostring(City), Latitude = todouble(Latitude), Longitude = todouble(Longitude)", [])
+in
+    Source
+
+// Measures for SignIns:
+Sign-ins = SUM(SignIns[SignIns])
+Failed Sign-ins = SUM(SignIns[Failures])
+Failure Rate = DIVIDE([Failed Sign-ins], [Sign-ins])
+
+// ===== Table: UsersAtRisk
+let
+    Source = AzureDataExplorer.Contents("https://trd-2gtxb2yrad9vq2b4qt.z3.kusto.fabric.microsoft.com", "SOC_Analytics", "UsersAtRisk() | project UserId = tostring(UserId), RiskScore = tolong(RiskScore), RiskLevel = tostring(RiskLevel), Compromised = tolong(Compromised), AttackerIPs = tolong(AttackerIPs), Patterns = tostring(Patterns), Failures = tolong(Failures), Countries = tolong(Countries), ImpossibleTravel = tolong(ImpossibleTravel)", [])
+in
+    Source
+
+// Measures for UsersAtRisk:
+High-Risk Users = CALCULATE(COUNTROWS(UsersAtRisk), UsersAtRisk[RiskLevel] IN {"Critical", "High"})
+
+// ===== Table: Incidents
+let
+    Source = AzureDataExplorer.Contents("https://trd-2gtxb2yrad9vq2b4qt.z3.kusto.fabric.microsoft.com", "SOC_Analytics", "DailyIncidentRiskFindings | summarize arg_max(TimeGenerated, *) by IncidentNumber | project IncidentNumber = tolong(IncidentNumber), Title = tostring(Title), Severity = tostring(Severity), Status = tostring(Status), Owner = tostring(Owner), AgeHours = tolong(AgeHours), Alerts = tolong(Alerts), RiskScore = tolong(RiskScore), RiskTier = tostring(RiskTier), Reason = tostring(Reason), ReportDate = todatetime(ReportDate)", [])
+in
+    Source
+
+// Measures for Incidents:
+Open Incidents = CALCULATE(COUNTROWS(Incidents), Incidents[Status] <> "Closed")
+High-Risk Incidents = CALCULATE(COUNTROWS(Incidents), Incidents[RiskTier] IN {"Critical", "High"})
