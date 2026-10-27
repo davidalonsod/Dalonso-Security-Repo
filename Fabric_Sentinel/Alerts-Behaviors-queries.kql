@@ -1,0 +1,540 @@
+// ===== [1 - Alert Overview] Alerts (Sentinel + Defender XDR)
+set query_results_cache_max_age = time(5m);
+let SA = external_table('SecurityAlert')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize arg_max(TimeGenerated, *) by SystemAlertId
+| extend Ent = tostring(Entities)
+| where isempty(_entity) or Ent has _entity or CompromisedEntity has _entity
+| extend SevRank = case(AlertSeverity =~ "High", 1, AlertSeverity =~ "Medium", 2, AlertSeverity =~ "Low", 3, 4);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+print Alerts = toscalar(SA | count) + toscalar(XA | count)
+
+// ===== [1 - Alert Overview] High-severity alerts
+set query_results_cache_max_age = time(5m);
+let SA = external_table('SecurityAlert')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize arg_max(TimeGenerated, *) by SystemAlertId
+| extend Ent = tostring(Entities)
+| where isempty(_entity) or Ent has _entity or CompromisedEntity has _entity
+| extend SevRank = case(AlertSeverity =~ "High", 1, AlertSeverity =~ "Medium", 2, AlertSeverity =~ "Low", 3, 4);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+print HighAlerts = toscalar(SA | where AlertSeverity =~ "High" | count) + toscalar(XA | where Severity =~ "High" | count)
+
+// ===== [1 - Alert Overview] Alerts over time by product
+set query_results_cache_max_age = time(5m);
+let Step = iff(_endTime - _startTime > 3d, 6h, 1h);
+let SA = external_table('SecurityAlert')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize arg_max(TimeGenerated, *) by SystemAlertId
+| extend Ent = tostring(Entities)
+| where isempty(_entity) or Ent has _entity or CompromisedEntity has _entity
+| extend SevRank = case(AlertSeverity =~ "High", 1, AlertSeverity =~ "Medium", 2, AlertSeverity =~ "Low", 3, 4);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+union
+ (SA | project TimeGenerated, Product = ProductName),
+ (XA | project TimeGenerated = AlertTime, Product = ServiceSource)
+| summarize Alerts = count() by bin(TimeGenerated, Step), Product
+| order by TimeGenerated asc
+
+// ===== [1 - Alert Overview] Alerts by product and severity
+set query_results_cache_max_age = time(5m);
+let SA = external_table('SecurityAlert')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize arg_max(TimeGenerated, *) by SystemAlertId
+| extend Ent = tostring(Entities)
+| where isempty(_entity) or Ent has _entity or CompromisedEntity has _entity
+| extend SevRank = case(AlertSeverity =~ "High", 1, AlertSeverity =~ "Medium", 2, AlertSeverity =~ "Low", 3, 4);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+union
+ (SA | project Product = ProductName, Severity = AlertSeverity),
+ (XA | project Product = ServiceSource, Severity)
+| summarize Alerts = count() by Product, Severity
+| order by Alerts desc
+
+// ===== [1 - Alert Overview] MITRE ATT&CK tactics across all alerts
+set query_results_cache_max_age = time(5m);
+let SA = external_table('SecurityAlert')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize arg_max(TimeGenerated, *) by SystemAlertId
+| extend Ent = tostring(Entities)
+| where isempty(_entity) or Ent has _entity or CompromisedEntity has _entity
+| extend SevRank = case(AlertSeverity =~ "High", 1, AlertSeverity =~ "Medium", 2, AlertSeverity =~ "Low", 3, 4);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+union
+ (SA | mv-expand Tactic = split(Tactics, ",") to typeof(string) | project Tactic = trim(" ", Tactic)),
+ (XA | project Tactic = Category)
+| where isnotempty(Tactic) and Tactic != "Unknown"
+| summarize Alerts = count() by Tactic
+| order by Alerts desc
+
+// ===== [1 - Alert Overview] Top alert names
+set query_results_cache_max_age = time(5m);
+let SA = external_table('SecurityAlert')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize arg_max(TimeGenerated, *) by SystemAlertId
+| extend Ent = tostring(Entities)
+| where isempty(_entity) or Ent has _entity or CompromisedEntity has _entity
+| extend SevRank = case(AlertSeverity =~ "High", 1, AlertSeverity =~ "Medium", 2, AlertSeverity =~ "Low", 3, 4);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+union
+ (SA | project Name = AlertName, Product = ProductName, Severity = AlertSeverity, TimeGenerated, SevRank),
+ (XA | project Name = Title, Product = ServiceSource, Severity, TimeGenerated = AlertTime, SevRank = case(Severity =~ "High", 1, Severity =~ "Medium", 2, Severity =~ "Low", 3, 4))
+| summarize Alerts = count(), Severity = take_any(Severity), SevRank = min(SevRank), LastSeen = max(TimeGenerated) by Name, Product
+| order by SevRank asc, Alerts desc
+| project-away SevRank
+| take 50
+
+// ===== [1 - Alert Overview] MITRE techniques (Defender XDR alerts)
+set query_results_cache_max_age = time(5m);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+XA
+| where isnotempty(Techniques) and Techniques != "[]"
+| mv-expand Technique = todynamic(Techniques) to typeof(string)
+| summarize Alerts = dcount(AlertId) by Technique
+| top 15 by Alerts
+
+// ===== [1 - Alert Overview] Detection sources
+set query_results_cache_max_age = time(5m);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+XA
+| summarize Alerts = count() by DetectionSource, Severity
+| order by Alerts desc
+
+// ===== [2 - Cross-Domain Correlation] Entities in alerts from several products (multi-stage attacks)
+set query_results_cache_max_age = time(5m);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+XE
+| join kind=inner XA on AlertId
+| summarize Alerts = dcount(AlertId), Products = dcount(ServiceSource), ProductList = make_set(ServiceSource, 10), Tactics = make_set(Category, 10),
+            Titles = make_set(Title, 10), High = dcountif(AlertId, Severity =~ "High"), FirstAlert = min(AlertTime), LastAlert = max(AlertTime) by EntityType, Value
+| extend Severity = case(Products >= 3 or (Products >= 2 and High > 0), "1-High (cross-domain)", Products >= 2, "2-Medium (two products)", Alerts >= 5, "3-Medium (repeated)", "4-Low")
+| order by Severity asc, Products desc, Alerts desc
+| take 50
+
+// ===== [2 - Cross-Domain Correlation] Kill-chain progression per entity (tactics covered)
+set query_results_cache_max_age = time(5m);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+let Order = dynamic(["InitialAccess","Execution","Persistence","PrivilegeEscalation","DefenseEvasion","CredentialAccess","Discovery","LateralMovement","Collection","CommandAndControl","Exfiltration","Impact"]);
+XE
+| where EntityType in~ ("User", "Mailbox", "Machine", "Account")
+| join kind=inner XA on AlertId
+| summarize Tactics = make_set(Category), Alerts = dcount(AlertId), FirstAlert = min(AlertTime), LastAlert = max(AlertTime), Titles = make_set(Title, 8) by EntityType, Value
+| extend Covered = array_length(set_intersect(Tactics, Order))
+| extend Severity = case(Covered >= 4, "1-Critical (4+ stages)", Covered == 3, "2-High (3 stages)", Covered == 2, "3-Medium", "4-Low")
+| extend SpanHours = datetime_diff('hour', LastAlert, FirstAlert)
+| project Severity, EntityType, Value, Covered, Tactics, Alerts, SpanHours, FirstAlert, LastAlert, Titles
+| order by Severity asc, Covered desc, Alerts desc
+| take 50
+
+// ===== [2 - Cross-Domain Correlation] Top alerted users
+set query_results_cache_max_age = time(5m);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+XE
+| where EntityType in~ ("User", "Mailbox", "Account")
+| join kind=inner XA on AlertId
+| summarize Alerts = dcount(AlertId), High = dcountif(AlertId, Severity =~ "High"), Products = make_set(ServiceSource, 5), Titles = make_set(Title, 5), LastAlert = max(AlertTime) by User = Value
+| order by High desc, Alerts desc
+| take 50
+
+// ===== [2 - Cross-Domain Correlation] Top alerted devices, IPs and URLs
+set query_results_cache_max_age = time(5m);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+XE
+| where EntityType in~ ("Machine", "Ip", "Url", "File", "Process", "CloudApplication", "OAuthApplication")
+| join kind=inner XA on AlertId
+| summarize Alerts = dcount(AlertId), High = dcountif(AlertId, Severity =~ "High"), Products = make_set(ServiceSource, 5), Titles = make_set(Title, 5), LastAlert = max(AlertTime) by EntityType, Value
+| order by High desc, Alerts desc
+| take 50
+
+// ===== [2 - Cross-Domain Correlation] Sentinel analytics alerts: compromised entities
+set query_results_cache_max_age = time(5m);
+let SA = external_table('SecurityAlert')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize arg_max(TimeGenerated, *) by SystemAlertId
+| extend Ent = tostring(Entities)
+| where isempty(_entity) or Ent has _entity or CompromisedEntity has _entity
+| extend SevRank = case(AlertSeverity =~ "High", 1, AlertSeverity =~ "Medium", 2, AlertSeverity =~ "Low", 3, 4);
+SA
+| where isnotempty(CompromisedEntity) or isnotempty(Ent)
+| mv-expand E = todynamic(Ent)
+| extend Kind = tostring(E.Type), Value = tolower(coalesce(tostring(E.UserPrincipalName), strcat(tostring(E.Name), iff(isnotempty(tostring(E.UPNSuffix)), strcat("@", tostring(E.UPNSuffix)), "")), tostring(E.HostName), tostring(E.Address), tostring(E.Url), tostring(E.DomainName)))
+| where isnotempty(Kind) and isnotempty(Value) and Value != "@"
+| summarize Alerts = dcount(SystemAlertId), High = dcountif(SystemAlertId, AlertSeverity =~ "High"), Rules = make_set(AlertName, 5), Products = make_set(ProductName, 5), LastAlert = max(TimeGenerated) by Kind, Value
+| order by High desc, Alerts desc
+| take 50
+
+// ===== [3 - Incidents (SecurityIncident)] Open incidents
+set query_results_cache_max_age = time(5m);
+let Inc = external_table('SecurityIncident')
+| where TimeGenerated between ((_startTime - 30d) .. _endTime)
+| summarize arg_max(TimeGenerated, *) by IncidentNumber
+| where CreatedTime between (_startTime .. _endTime) or Status != "Closed"
+| extend OwnerName = coalesce(tostring(todynamic(tostring(Owner)).assignedTo), tostring(todynamic(tostring(Owner)).userPrincipalName), "Unassigned")
+| extend SevRank = case(Severity =~ "High", 1, Severity =~ "Medium", 2, Severity =~ "Low", 3, 4);
+Inc | where Status != "Closed" | summarize OpenIncidents = count()
+
+// ===== [3 - Incidents (SecurityIncident)] Mean time to resolve (hours)
+set query_results_cache_max_age = time(5m);
+let Inc = external_table('SecurityIncident')
+| where TimeGenerated between ((_startTime - 30d) .. _endTime)
+| summarize arg_max(TimeGenerated, *) by IncidentNumber
+| where CreatedTime between (_startTime .. _endTime) or Status != "Closed"
+| extend OwnerName = coalesce(tostring(todynamic(tostring(Owner)).assignedTo), tostring(todynamic(tostring(Owner)).userPrincipalName), "Unassigned")
+| extend SevRank = case(Severity =~ "High", 1, Severity =~ "Medium", 2, Severity =~ "Low", 3, 4);
+Inc | where Status == "Closed" and isnotnull(ClosedTime) | summarize MTTR_Hours = round(avg(datetime_diff('minute', ClosedTime, CreatedTime)) / 60.0, 1)
+
+// ===== [3 - Incidents (SecurityIncident)] Incidents by status and severity
+set query_results_cache_max_age = time(5m);
+let Inc = external_table('SecurityIncident')
+| where TimeGenerated between ((_startTime - 30d) .. _endTime)
+| summarize arg_max(TimeGenerated, *) by IncidentNumber
+| where CreatedTime between (_startTime .. _endTime) or Status != "Closed"
+| extend OwnerName = coalesce(tostring(todynamic(tostring(Owner)).assignedTo), tostring(todynamic(tostring(Owner)).userPrincipalName), "Unassigned")
+| extend SevRank = case(Severity =~ "High", 1, Severity =~ "Medium", 2, Severity =~ "Low", 3, 4);
+Inc | summarize Incidents = count() by Status, Severity | order by Incidents desc
+
+// ===== [3 - Incidents (SecurityIncident)] Closed incidents by classification
+set query_results_cache_max_age = time(5m);
+let Inc = external_table('SecurityIncident')
+| where TimeGenerated between ((_startTime - 30d) .. _endTime)
+| summarize arg_max(TimeGenerated, *) by IncidentNumber
+| where CreatedTime between (_startTime .. _endTime) or Status != "Closed"
+| extend OwnerName = coalesce(tostring(todynamic(tostring(Owner)).assignedTo), tostring(todynamic(tostring(Owner)).userPrincipalName), "Unassigned")
+| extend SevRank = case(Severity =~ "High", 1, Severity =~ "Medium", 2, Severity =~ "Low", 3, 4);
+Inc | where Status == "Closed" | summarize Incidents = count() by Class = iff(isempty(Classification), "Not set", Classification) | order by Incidents desc
+
+// ===== [3 - Incidents (SecurityIncident)] Analyst workload (open incidents per owner)
+set query_results_cache_max_age = time(5m);
+let Inc = external_table('SecurityIncident')
+| where TimeGenerated between ((_startTime - 30d) .. _endTime)
+| summarize arg_max(TimeGenerated, *) by IncidentNumber
+| where CreatedTime between (_startTime .. _endTime) or Status != "Closed"
+| extend OwnerName = coalesce(tostring(todynamic(tostring(Owner)).assignedTo), tostring(todynamic(tostring(Owner)).userPrincipalName), "Unassigned")
+| extend SevRank = case(Severity =~ "High", 1, Severity =~ "Medium", 2, Severity =~ "Low", 3, 4);
+Inc | where Status != "Closed" | summarize Open = count(), High = countif(Severity =~ "High") by OwnerName | order by Open desc
+
+// ===== [3 - Incidents (SecurityIncident)] Ageing open incidents
+set query_results_cache_max_age = time(5m);
+let Inc = external_table('SecurityIncident')
+| where TimeGenerated between ((_startTime - 30d) .. _endTime)
+| summarize arg_max(TimeGenerated, *) by IncidentNumber
+| where CreatedTime between (_startTime .. _endTime) or Status != "Closed"
+| extend OwnerName = coalesce(tostring(todynamic(tostring(Owner)).assignedTo), tostring(todynamic(tostring(Owner)).userPrincipalName), "Unassigned")
+| extend SevRank = case(Severity =~ "High", 1, Severity =~ "Medium", 2, Severity =~ "Low", 3, 4);
+Inc
+| where Status != "Closed"
+| extend AgeDays = datetime_diff('day', now(), CreatedTime)
+| extend SLA = case(Severity =~ "High" and AgeDays >= 1, "1-Breached (High > 1 day)", Severity =~ "Medium" and AgeDays >= 3, "2-Breached (Medium > 3 days)", AgeDays >= 7, "3-Breached (> 7 days)", "4-Within SLA")
+| project SLA, IncidentNumber, Title, Severity, Status, OwnerName, AgeDays, CreatedTime, ProviderName
+| order by SLA asc, AgeDays desc
+| take 50
+
+// ===== [3 - Incidents (SecurityIncident)] Noisiest incident titles and false-positive rate
+set query_results_cache_max_age = time(5m);
+let Inc = external_table('SecurityIncident')
+| where TimeGenerated between ((_startTime - 30d) .. _endTime)
+| summarize arg_max(TimeGenerated, *) by IncidentNumber
+| where CreatedTime between (_startTime .. _endTime) or Status != "Closed"
+| extend OwnerName = coalesce(tostring(todynamic(tostring(Owner)).assignedTo), tostring(todynamic(tostring(Owner)).userPrincipalName), "Unassigned")
+| extend SevRank = case(Severity =~ "High", 1, Severity =~ "Medium", 2, Severity =~ "Low", 3, 4);
+Inc
+| summarize Incidents = count(), Closed = countif(Status == "Closed"), FalsePositive = countif(Classification == "FalsePositive"), Benign = countif(Classification == "BenignPositive"),
+            TruePositive = countif(Classification == "TruePositive") by Title
+| extend FPRate = round(100.0 * (FalsePositive + Benign) / max_of(Closed, long(1)), 1)
+| extend Action = case(FPRate >= 80 and Closed >= 5, "1-Tune or suppress rule", TruePositive > 0, "3-Keep (true positives)", "2-Review")
+| order by Action asc, Incidents desc
+| take 50
+
+// ===== [4 - UEBA Behaviors & Anomalies] UEBA investigation priority over time (top users)
+set query_results_cache_max_age = time(5m);
+let Step = iff(_endTime - _startTime > 3d, 6h, 1h);
+let Ueba = external_table('BehaviorAnalytics')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_user) or UserPrincipalName =~ _user
+| where isempty(_entity) or UserPrincipalName has _entity or SourceIPAddress has _entity;
+let Top = Ueba | where InvestigationPriority > 0 | summarize P = max(InvestigationPriority) by UserPrincipalName | top 10 by P | project UserPrincipalName;
+Ueba
+| where UserPrincipalName in (Top)
+| summarize MaxPriority = max(InvestigationPriority) by bin(TimeGenerated, Step), UserPrincipalName
+| order by TimeGenerated asc
+
+// ===== [4 - UEBA Behaviors & Anomalies] Users with highest UEBA priority and first-time behaviours
+set query_results_cache_max_age = time(5m);
+let Ueba = external_table('BehaviorAnalytics')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_user) or UserPrincipalName =~ _user
+| where isempty(_entity) or UserPrincipalName has _entity or SourceIPAddress has _entity;
+Ueba
+| where InvestigationPriority > 0
+| extend AI = todynamic(tostring(ActivityInsights)), UI = todynamic(tostring(UsersInsights))
+| summarize MaxPriority = max(InvestigationPriority), Events = count(), Activities = make_set(ActionType, 10),
+            FirstTimeCountry = countif(tostring(AI.FirstTimeUserConnectedFromCountry) == "True"),
+            FirstTimeApp = countif(tostring(AI.FirstTimeUserUsedApp) == "True" or tostring(AI.FirstTimeUserAccessedResource) == "True"),
+            UncommonAmongPeers = countif(tostring(AI.CountryUncommonlyConnectedFromAmongPeers) == "True" or tostring(AI.ActionUncommonlyPerformedAmongPeers) == "True"),
+            UncommonISP = countif(tostring(AI.ISPUncommonlyUsedInTenant) == "True"),
+            Dormant = countif(tostring(UI.IsDormantAccount) == "True"), IPs = make_set(SourceIPAddress, 5), Locations = make_set(SourceIPLocation, 5) by UserPrincipalName
+| extend Severity = case(MaxPriority >= 7, "1-High", MaxPriority >= 4, "2-Medium", "3-Low")
+| order by MaxPriority desc
+| take 50
+
+// ===== [4 - UEBA Behaviors & Anomalies] Anomalies by template
+set query_results_cache_max_age = time(5m);
+let Anom = external_table('Anomalies')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_user) or UserPrincipalName =~ _user
+| where isempty(_entity) or UserPrincipalName has _entity or SourceIpAddress has _entity or tostring(Entities) has _entity;
+Anom | summarize Anomalies = count() by AnomalyTemplateName | top 15 by Anomalies
+
+// ===== [4 - UEBA Behaviors & Anomalies] Top anomalous users (ML anomalies)
+set query_results_cache_max_age = time(5m);
+let Anom = external_table('Anomalies')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_user) or UserPrincipalName =~ _user
+| where isempty(_entity) or UserPrincipalName has _entity or SourceIpAddress has _entity or tostring(Entities) has _entity;
+Anom
+| summarize Anomalies = count(), MaxScore = max(todouble(Score)), Templates = make_set(AnomalyTemplateName, 10), Tactics = make_set(Tactics, 10),
+            IPs = make_set(SourceIpAddress, 5), LastSeen = max(TimeGenerated) by UserPrincipalName
+| where isnotempty(UserPrincipalName)
+| extend Severity = case(MaxScore >= 0.8, "1-High", MaxScore >= 0.5, "2-Medium", "3-Low")
+| order by MaxScore desc
+| take 50
+
+// ===== [4 - UEBA Behaviors & Anomalies] Users with behaviours AND alerts (correlated)
+set query_results_cache_max_age = time(5m);
+let Ueba = external_table('BehaviorAnalytics')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_user) or UserPrincipalName =~ _user
+| where isempty(_entity) or UserPrincipalName has _entity or SourceIPAddress has _entity;
+let Anom = external_table('Anomalies')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_user) or UserPrincipalName =~ _user
+| where isempty(_entity) or UserPrincipalName has _entity or SourceIpAddress has _entity or tostring(Entities) has _entity;
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+let U1 = Ueba | where InvestigationPriority > 0 | summarize UebaPriority = max(InvestigationPriority) by User = tolower(UserPrincipalName);
+let U2 = Anom | summarize AnomalyScore = max(todouble(Score)), AnomalyTypes = make_set(AnomalyTemplateName, 5) by User = tolower(UserPrincipalName);
+let U3 = XE | where EntityType in~ ("User", "Mailbox", "Account") | join kind=inner XA on AlertId
+| summarize Alerts = dcount(AlertId), HighAlerts = dcountif(AlertId, Severity =~ "High"), AlertTitles = make_set(Title, 5) by User = Value;
+U3
+| join kind=leftouter U1 on User
+| join kind=leftouter U2 on User
+| extend UebaPriority = coalesce(UebaPriority, 0), AnomalyScore = coalesce(AnomalyScore, 0.0)
+| where UebaPriority > 0 or AnomalyScore > 0
+| extend RiskScore = HighAlerts * 10 + Alerts * 3 + UebaPriority * 2 + toint(AnomalyScore * 10)
+| extend Severity = case(RiskScore >= 40, "1-High", RiskScore >= 15, "2-Medium", "3-Low")
+| project Severity, User, RiskScore, Alerts, HighAlerts, UebaPriority, AnomalyScore, AnomalyTypes, AlertTitles
+| order by RiskScore desc
+| take 50
+
+// ===== [5 - Detection Health] Analytics rule and connector health issues (SentinelHealth)
+set query_results_cache_max_age = time(5m);
+external_table('SentinelHealth')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Status !in~ ("Success")
+| summarize Failures = count(), LastFailure = max(TimeGenerated), Reasons = make_set(Description, 3) by SentinelResourceType, SentinelResourceName, Status
+| extend Severity = case(Status =~ "Failure" and Failures >= 3, "1-High (repeated failure)", Status =~ "Failure", "2-Medium", "3-Low (warning)")
+| order by Severity asc, Failures desc
+| take 50
+
+// ===== [5 - Detection Health] Health events over time
+set query_results_cache_max_age = time(5m);
+let Step = iff(_endTime - _startTime > 3d, 6h, 1h);
+external_table('SentinelHealth')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize Events = count() by bin(TimeGenerated, Step), Status
+| order by TimeGenerated asc
+
+// ===== [5 - Detection Health] Alert volume per analytics rule
+set query_results_cache_max_age = time(5m);
+let SA = external_table('SecurityAlert')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize arg_max(TimeGenerated, *) by SystemAlertId
+| extend Ent = tostring(Entities)
+| where isempty(_entity) or Ent has _entity or CompromisedEntity has _entity
+| extend SevRank = case(AlertSeverity =~ "High", 1, AlertSeverity =~ "Medium", 2, AlertSeverity =~ "Low", 3, 4);
+SA
+| where ProductName has "Sentinel" or ProviderName has "ASI"
+| summarize Alerts = count(), Entities = dcount(CompromisedEntity), High = countif(AlertSeverity =~ "High"), LastAlert = max(TimeGenerated) by AlertName
+| extend Noise = case(Alerts >= 100, "1-Very noisy", Alerts >= 20, "2-Noisy", "3-Normal")
+| order by Alerts desc
+| take 50
+
+// ===== [6 - Entity Investigation] Entity timeline (set User or Entity)
+set query_results_cache_max_age = time(5m);
+let SA = external_table('SecurityAlert')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize arg_max(TimeGenerated, *) by SystemAlertId
+| extend Ent = tostring(Entities)
+| where isempty(_entity) or Ent has _entity or CompromisedEntity has _entity
+| extend SevRank = case(AlertSeverity =~ "High", 1, AlertSeverity =~ "Medium", 2, AlertSeverity =~ "Low", 3, 4);
+let XA = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let XE = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend EntityType = tostring(PE.EntityType), EvidenceRole = tostring(PE.EvidenceRole),
+         Value = coalesce(tostring(PE.AccountUpn), tostring(PE.AccountName), tostring(PE.DeviceName), tostring(PE.RemoteIP), tostring(PE.Url), tostring(PE.FileName), tostring(PE.SHA256), tostring(PE.EmailSubject), tostring(PE.Application), tostring(PE.OAuthApplicationId), tostring(PE.CloudResource))
+| where isnotempty(Value)
+| where isempty(_entity) or Value has _entity
+| project AlertId, EntityType, EvidenceRole, Value = tolower(Value);
+let Ueba = external_table('BehaviorAnalytics')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_user) or UserPrincipalName =~ _user
+| where isempty(_entity) or UserPrincipalName has _entity or SourceIPAddress has _entity;
+let Anom = external_table('Anomalies')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_user) or UserPrincipalName =~ _user
+| where isempty(_entity) or UserPrincipalName has _entity or SourceIpAddress has _entity or tostring(Entities) has _entity;
+let Active = isnotempty(_entity) or isnotempty(_user);
+let K = tolower(coalesce(_user, _entity));
+union
+ (SA | where Active | where Ent has K or CompromisedEntity has K | project TimeGenerated, Source = strcat("Alert - ", ProductName), Severity = AlertSeverity, Activity = AlertName, Detail = Tactics),
+ (XE | where Active | where Value has K | join kind=inner XA on AlertId | project TimeGenerated = AlertTime, Source = strcat("XDR alert - ", ServiceSource), Severity, Activity = Title, Detail = strcat(EntityType, ": ", Value)),
+ (Ueba | where Active | where tolower(UserPrincipalName) has K or SourceIPAddress has K | project TimeGenerated, Source = "UEBA", Severity = tostring(InvestigationPriority), Activity = ActionType, Detail = strcat(SourceIPAddress, " ", SourceIPLocation)),
+ (Anom | where Active | where tolower(UserPrincipalName) has K or SourceIpAddress has K | project TimeGenerated, Source = "Anomaly", Severity = tostring(Score), Activity = AnomalyTemplateName, Detail = Description)
+| order by TimeGenerated desc
+| take 500

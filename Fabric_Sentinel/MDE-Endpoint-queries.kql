@@ -1,0 +1,876 @@
+// ===== [1 - Endpoint Overview] High-severity endpoint alerts
+set query_results_cache_max_age = time(5m);
+let EpAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ServiceSource has_any ("Endpoint", "Defender for Endpoint", "Antivirus") or DetectionSource has_any ("EDR", "Antivirus", "Endpoint", "Custom detection", "Automated investigation")
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let AlertDev = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend DevName = tostring(PE.DeviceName), EvUser = tostring(PE.AccountName)
+| where isnotempty(DevName)
+| summarize Users = make_set_if(EvUser, isnotempty(EvUser), 5) by AlertId, DevName
+| where isempty(_device) or DevName contains _device;
+EpAlerts
+| join kind=inner (AlertDev | distinct AlertId) on AlertId
+| where Severity =~ "High"
+| summarize HighAlerts = dcount(AlertId)
+
+// ===== [1 - Endpoint Overview] Devices with alerts
+set query_results_cache_max_age = time(5m);
+let EpAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ServiceSource has_any ("Endpoint", "Defender for Endpoint", "Antivirus") or DetectionSource has_any ("EDR", "Antivirus", "Endpoint", "Custom detection", "Automated investigation")
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let AlertDev = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend DevName = tostring(PE.DeviceName), EvUser = tostring(PE.AccountName)
+| where isnotempty(DevName)
+| summarize Users = make_set_if(EvUser, isnotempty(EvUser), 5) by AlertId, DevName
+| where isempty(_device) or DevName contains _device;
+EpAlerts
+| join kind=inner AlertDev on AlertId
+| summarize DevicesWithAlerts = dcount(DevName)
+
+// ===== [1 - Endpoint Overview] Devices reporting process telemetry
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+Proc
+| summarize ActiveDevices = dcount(DeviceName)
+
+// ===== [1 - Endpoint Overview] Suspicious executions (encoded PowerShell / LOLBin abuse)
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+Proc
+| where (FileName in~ ("powershell.exe", "pwsh.exe") and ProcessCommandLine matches regex @"(?i)(-e(nc|ncodedcommand)?\s+[a-z0-9+/=]{20,}|frombase64string|downloadstring|downloadfile|invoke-expression|iex\s*\()")
+     or (FileName =~ "certutil.exe" and ProcessCommandLine has_any ("urlcache", "-decode", "http"))
+     or (FileName =~ "mshta.exe" and ProcessCommandLine has_any ("http", "javascript", "vbscript"))
+     or (FileName =~ "regsvr32.exe" and ProcessCommandLine has_any ("/i:http", "scrobj"))
+     or (FileName =~ "bitsadmin.exe" and ProcessCommandLine has "/transfer")
+| summarize SuspiciousExecutions = count()
+
+// ===== [1 - Endpoint Overview] Endpoint alerts over time by severity
+set query_results_cache_max_age = time(5m);
+let Step = iff(_endTime - _startTime > 3d, 6h, 1h);
+let EpAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ServiceSource has_any ("Endpoint", "Defender for Endpoint", "Antivirus") or DetectionSource has_any ("EDR", "Antivirus", "Endpoint", "Custom detection", "Automated investigation")
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let AlertDev = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend DevName = tostring(PE.DeviceName), EvUser = tostring(PE.AccountName)
+| where isnotempty(DevName)
+| summarize Users = make_set_if(EvUser, isnotempty(EvUser), 5) by AlertId, DevName
+| where isempty(_device) or DevName contains _device;
+EpAlerts
+| join kind=inner (AlertDev | distinct AlertId) on AlertId
+| summarize Alerts = dcount(AlertId) by bin(AlertTime, Step), Severity
+| order by AlertTime asc
+
+// ===== [1 - Endpoint Overview] Endpoint alerts by category
+set query_results_cache_max_age = time(5m);
+let EpAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ServiceSource has_any ("Endpoint", "Defender for Endpoint", "Antivirus") or DetectionSource has_any ("EDR", "Antivirus", "Endpoint", "Custom detection", "Automated investigation")
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let AlertDev = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend DevName = tostring(PE.DeviceName), EvUser = tostring(PE.AccountName)
+| where isnotempty(DevName)
+| summarize Users = make_set_if(EvUser, isnotempty(EvUser), 5) by AlertId, DevName
+| where isempty(_device) or DevName contains _device;
+EpAlerts
+| join kind=inner (AlertDev | distinct AlertId) on AlertId
+| summarize Alerts = dcount(AlertId) by Category, Severity
+| order by Alerts desc
+
+// ===== [1 - Endpoint Overview] MITRE ATT&CK techniques in endpoint alerts
+set query_results_cache_max_age = time(5m);
+let EpAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ServiceSource has_any ("Endpoint", "Defender for Endpoint", "Antivirus") or DetectionSource has_any ("EDR", "Antivirus", "Endpoint", "Custom detection", "Automated investigation")
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let AlertDev = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend DevName = tostring(PE.DeviceName), EvUser = tostring(PE.AccountName)
+| where isnotempty(DevName)
+| summarize Users = make_set_if(EvUser, isnotempty(EvUser), 5) by AlertId, DevName
+| where isempty(_device) or DevName contains _device;
+EpAlerts
+| join kind=inner (AlertDev | distinct AlertId) on AlertId
+| where isnotempty(Techniques) and Techniques != "[]"
+| mv-expand Technique = todynamic(Techniques) to typeof(string)
+| summarize Alerts = dcount(AlertId) by Technique
+| top 15 by Alerts
+
+// ===== [1 - Endpoint Overview] Detection sources
+set query_results_cache_max_age = time(5m);
+let EpAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ServiceSource has_any ("Endpoint", "Defender for Endpoint", "Antivirus") or DetectionSource has_any ("EDR", "Antivirus", "Endpoint", "Custom detection", "Automated investigation")
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let AlertDev = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend DevName = tostring(PE.DeviceName), EvUser = tostring(PE.AccountName)
+| where isnotempty(DevName)
+| summarize Users = make_set_if(EvUser, isnotempty(EvUser), 5) by AlertId, DevName
+| where isempty(_device) or DevName contains _device;
+EpAlerts
+| join kind=inner (AlertDev | distinct AlertId) on AlertId
+| summarize Alerts = dcount(AlertId) by DetectionSource
+| order by Alerts desc
+
+// ===== [1 - Endpoint Overview] Riskiest devices (weighted by alert severity)
+set query_results_cache_max_age = time(5m);
+let EpAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ServiceSource has_any ("Endpoint", "Defender for Endpoint", "Antivirus") or DetectionSource has_any ("EDR", "Antivirus", "Endpoint", "Custom detection", "Automated investigation")
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let AlertDev = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend DevName = tostring(PE.DeviceName), EvUser = tostring(PE.AccountName)
+| where isnotempty(DevName)
+| summarize Users = make_set_if(EvUser, isnotempty(EvUser), 5) by AlertId, DevName
+| where isempty(_device) or DevName contains _device;
+EpAlerts
+| join kind=inner AlertDev on AlertId
+| extend Points = case(Severity =~ "High", 10, Severity =~ "Medium", 5, Severity =~ "Low", 1, 0)
+| summarize RiskScore = sum(Points), Alerts = dcount(AlertId), High = dcountif(AlertId, Severity =~ "High"), Medium = dcountif(AlertId, Severity =~ "Medium"),
+            Titles = make_set(Title, 5), Categories = make_set(Category, 5), Users = make_set(Users, 5), LastAlert = max(AlertTime) by DevName
+| extend Severity = case(High > 0, "1-High", Medium > 0, "2-Medium", "3-Low")
+| project Severity, Device = DevName, RiskScore, Alerts, High, Medium, Titles, Categories, Users, LastAlert
+| order by RiskScore desc
+| take 50
+
+// ===== [2 - Execution & LOLBins] Encoded / obfuscated PowerShell
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+Proc
+| where FileName in~ ("powershell.exe", "pwsh.exe", "powershell_ise.exe") or InitiatingProcessFileName in~ ("powershell.exe", "pwsh.exe")
+| where isnotempty(ProcessCommandLine)
+| extend Cmd = tolower(ProcessCommandLine)
+| extend Encoded = Cmd matches regex @"-e(nc|ncodedcommand)?\s+[a-z0-9+/=]{20,}" or Cmd has "frombase64string",
+         Download = Cmd has_any ("downloadstring", "downloadfile", "invoke-webrequest", "iwr ", "net.webclient", "start-bitstransfer", "http://", "https://"),
+         Exec = Cmd has_any ("invoke-expression", "iex(", "iex (", "| iex"),
+         Hidden = Cmd has_any ("-w hidden", "-windowstyle hidden", "-nop", "-noprofile", "bypass", "-noni")
+| extend Score = toint(Encoded) * 3 + toint(Download) * 3 + toint(Exec) * 2 + toint(Hidden)
+| where Score >= 2
+| extend Severity = case(Score >= 6, "1-High", Score >= 4, "2-Medium", "3-Low")
+| project TimeGenerated, Severity, Score, DeviceName, AccountName, ParentProcess = InitiatingProcessFileName, Encoded, Download, Exec, Hidden, ProcessCommandLine
+| order by Severity asc, Score desc, TimeGenerated desc
+| take 50
+
+// ===== [2 - Execution & LOLBins] LOLBin abuse (living-off-the-land binaries)
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+Proc
+| extend Cmd = tolower(ProcessCommandLine), F = tolower(FileName)
+| extend Technique = case(
+    F == "certutil.exe" and Cmd has_any ("urlcache", "-decode", "-decodehex", "-split", "http"), "certutil download/decode",
+    F == "mshta.exe" and Cmd has_any ("http", "javascript", "vbscript", ".hta"), "mshta remote/script",
+    F == "rundll32.exe" and Cmd has_any ("javascript:", "\\appdata\\", "\\temp\\", "\\programdata\\", "\\users\\public\\", ",#1", "url.dll", "zipfldr", "advpack"), "rundll32 proxy execution",
+    F == "regsvr32.exe" and Cmd has_any ("/i:http", "scrobj", "/i:\\\\"), "regsvr32 squiblydoo",
+    F == "bitsadmin.exe" and Cmd has_any ("/transfer", "/addfile", "/setnotifycmdline"), "bitsadmin transfer",
+    F == "wmic.exe" and Cmd has_any ("process call create", "/node:", "shadowcopy"), "wmic execution",
+    F in ("msbuild.exe", "installutil.exe", "regasm.exe", "regsvcs.exe") and Cmd has_any ("\\temp\\", "\\appdata\\", "\\users\\public\\", "/u", "/logfile="), "trusted developer utility proxy",
+    F == "cmstp.exe" and Cmd has "/s", "cmstp bypass",
+    F in ("curl.exe", "wget.exe") and Cmd has_any ("http", "-o ", "--output"), "curl/wget download",
+    F == "msiexec.exe" and Cmd has_any ("http://", "https://"), "msiexec remote install",
+    F in ("wscript.exe", "cscript.exe") and Cmd has_any (".js", ".jse", ".vbs", ".vbe", ".wsf") and Cmd has_any ("\\temp\\", "\\downloads\\", "\\appdata\\"), "script host from user path",
+    F == "esentutl.exe" and Cmd has_any ("/y", "/vss"), "esentutl copy",
+    "")
+| where isnotempty(Technique)
+| extend Severity = case(Cmd has_any ("http://", "https://"), "1-High (remote payload)", Technique has_any ("proxy", "bypass", "squiblydoo"), "2-Medium", "3-Low")
+| summarize Executions = count(), Devices = dcount(DeviceName), DeviceList = make_set(DeviceName, 5), Accounts = make_set(AccountName, 5),
+            SampleCommand = take_any(ProcessCommandLine), LastSeen = max(TimeGenerated) by Severity, Technique, FileName
+| order by Severity asc, Executions desc
+| take 50
+
+// ===== [2 - Execution & LOLBins] Office / PDF / browser apps spawning shells or LOLBins
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+let Shells = dynamic(["cmd.exe","powershell.exe","pwsh.exe","powershell_ise.exe","wscript.exe","cscript.exe","mshta.exe","rundll32.exe","regsvr32.exe","certutil.exe","bitsadmin.exe","msbuild.exe","installutil.exe","wmic.exe","cmstp.exe","curl.exe"]);
+Proc
+| where InitiatingProcessFileName in~ ("winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "onenote.exe", "msaccess.exe", "mspub.exe", "visio.exe", "acrord32.exe", "acrobat.exe", "teams.exe", "ms-teams.exe")
+| where FileName in~ (Shells)
+| extend Severity = case(ProcessCommandLine has_any ("http", "-enc", "frombase64", "downloadstring"), "1-High", "2-Medium")
+| project TimeGenerated, Severity, DeviceName, AccountName, Parent = InitiatingProcessFileName, Child = FileName, ProcessCommandLine, ParentCommand = InitiatingProcessCommandLine
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [2 - Execution & LOLBins] Executables launched from user-writable paths
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+let UserPaths = dynamic([@"\appdata\local\temp\", @"\downloads\", @"\users\public\", @"\programdata\", @"\appdata\roaming\", @"\windows\temp\", @"\perflogs\"]);
+Proc
+| where FileName endswith ".exe" or FileName endswith ".scr" or FileName endswith ".com"
+| extend Path = tolower(FolderPath)
+| where Path has_any (UserPaths)
+| summarize Executions = count(), Devices = dcount(DeviceName), DeviceList = make_set(DeviceName, 5), Accounts = make_set(AccountName, 5),
+            Parents = make_set(InitiatingProcessFileName, 5), Paths = make_set(FolderPath, 3), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by FileName, SHA256
+| extend Severity = case(Devices == 1 and Executions <= 3, "2-Medium (rare)", Devices >= 5, "3-Low (widespread)", "3-Low")
+| order by Devices asc, FirstSeen desc
+| take 50
+
+// ===== [2 - Execution & LOLBins] Rare processes across the fleet (seen on one device)
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+Proc
+| where isnotempty(SHA256)
+| summarize Devices = dcount(DeviceName), Executions = count(), Device = take_any(DeviceName), Account = take_any(AccountName), Path = take_any(FolderPath),
+            Parent = take_any(InitiatingProcessFileName), SampleCommand = take_any(ProcessCommandLine), FirstSeen = min(TimeGenerated) by FileName, SHA256
+| where Devices == 1
+| extend Severity = iff(tolower(Path) has_any ("\\temp\\", "\\appdata\\", "\\downloads\\", "\\users\\public\\", "\\programdata\\"), "2-Medium (user path)", "3-Low")
+| project Severity, FileName, Device, Account, Executions, Path, Parent, SampleCommand, SHA256, FirstSeen
+| order by Severity asc, FirstSeen desc
+| take 50
+
+// ===== [2 - Execution & LOLBins] Suspicious execution trend by technique
+set query_results_cache_max_age = time(5m);
+let Step = iff(_endTime - _startTime > 3d, 6h, 1h);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+Proc
+| extend Cmd = tolower(ProcessCommandLine), F = tolower(FileName)
+| extend Technique = case(
+    F in ("powershell.exe", "pwsh.exe") and (Cmd matches regex @"-e(nc|ncodedcommand)?\s+[a-z0-9+/=]{20,}" or Cmd has "frombase64string"), "Encoded PowerShell",
+    F in ("powershell.exe", "pwsh.exe") and Cmd has_any ("downloadstring", "downloadfile", "invoke-webrequest", "net.webclient"), "PowerShell download",
+    F == "certutil.exe" and Cmd has_any ("urlcache", "-decode"), "certutil",
+    F in ("mshta.exe", "regsvr32.exe", "rundll32.exe") and Cmd has_any ("http", "javascript", "scrobj"), "Proxy execution",
+    F in ("wmic.exe", "psexec.exe", "psexesvc.exe", "winrs.exe"), "Remote execution tools",
+    "")
+| where isnotempty(Technique)
+| summarize Executions = count() by bin(TimeGenerated, Step), Technique
+| order by TimeGenerated asc
+
+// ===== [3 - Credential Access] LSASS memory access and dumping
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+let Evt = external_table('DeviceEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+let Benign = dynamic(["msmpeng.exe","mssense.exe","senseir.exe","sensecncproxy.exe","svchost.exe","csrss.exe","wininit.exe","lsm.exe","wmiprvse.exe","taskmgr.exe","mrt.exe","lsass.exe","services.exe","vmtoolsd.exe","sensendr.exe","mpdefendercoreservice.exe"]);
+union
+ (Proc
+  | where ProcessCommandLine has "lsass" or ProcessCommandLine has_any ("comsvcs.dll, minidump", "comsvcs.dll,#24", "MiniDump", "sekurlsa", "nanodump", "lsassy")
+  | where ProcessCommandLine has_any ("minidump", "procdump", "-ma", "comsvcs", "sekurlsa", "nanodump", "dump", "lsassy")
+  | project TimeGenerated, DeviceName, Account = AccountName, Process = FileName, Detail = ProcessCommandLine, Source = "Process command line"),
+ (Evt
+  | where ActionType in ("OpenProcessApiCall", "ReadProcessMemoryApiCall") and FileName =~ "lsass.exe"
+  | where tolower(InitiatingProcessFileName) !in (Benign)
+  | project TimeGenerated, DeviceName, Account = InitiatingProcessAccountName, Process = InitiatingProcessFileName, Detail = strcat(ActionType, " ", InitiatingProcessCommandLine), Source = "LSASS handle access")
+| extend Severity = case(Detail has_any ("minidump", "comsvcs", "sekurlsa", "procdump", "nanodump"), "1-High (dump)", "2-Medium (handle access)")
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [3 - Credential Access] Credential theft tools and techniques
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+let Tools = dynamic(["mimikatz","sekurlsa","lsadump","kerberos::","privilege::debug","rubeus","kerberoast","asreproast","dcsync","pypykatz","lazagne","secretsdump","invoke-mimikatz","get-gpppassword","safetykatz","sharpdump","nanodump","outflank","hashdump","wce.exe","gsecdump","pwdump","dsinternals","get-adreplaccount"]);
+Proc
+| where ProcessCommandLine has_any (Tools) or FileName has_any (Tools) or InitiatingProcessCommandLine has_any (Tools)
+| project TimeGenerated, Severity = "1-High", DeviceName, AccountName, FileName, ProcessCommandLine, Parent = InitiatingProcessFileName, SHA256
+| order by TimeGenerated desc
+| take 50
+
+// ===== [3 - Credential Access] Registry hive / NTDS.dit / shadow copy credential theft
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+Proc
+| extend Cmd = tolower(ProcessCommandLine)
+| extend Technique = case(
+    FileName =~ "reg.exe" and Cmd has "save" and Cmd has_any ("hklm\\sam", "hklm\\system", "hklm\\security", "hkey_local_machine\\sam"), "Registry hive export (SAM/SYSTEM/SECURITY)",
+    FileName =~ "ntdsutil.exe" and Cmd has_any ("ifm", "create full", "snapshot"), "NTDS.dit export (ntdsutil)",
+    FileName =~ "vssadmin.exe" and Cmd has "create shadow", "Shadow copy created",
+    Cmd has "harddiskvolumeshadowcopy" and Cmd has_any ("ntds", "sam", "system"), "Copy from shadow copy",
+    FileName =~ "esentutl.exe" and Cmd has "ntds", "esentutl NTDS copy",
+    FileName =~ "diskshadow.exe", "diskshadow",
+    "")
+| where isnotempty(Technique)
+| project TimeGenerated, Severity = "1-High", Technique, DeviceName, AccountName, ProcessCommandLine, Parent = InitiatingProcessFileName
+| order by TimeGenerated desc
+| take 50
+
+// ===== [3 - Credential Access] Brute force against devices (failed logons)
+set query_results_cache_max_age = time(5m);
+let Logon = external_table('DeviceLogonEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account;
+let Threshold = 10;
+Logon
+| where ActionType == "LogonFailed"
+| summarize Failures = count(), Accounts = dcount(AccountName), AccountList = make_set(AccountName, 10), Types = make_set(LogonType), Reasons = make_set(FailureReason, 5),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by DeviceName, RemoteIP
+| extend PublicSource = isnotempty(RemoteIP) and not(ipv4_is_private(RemoteIP)) and RemoteIP !in ("127.0.0.1", "::1", "-")
+| extend Severity = case(Failures >= Threshold and PublicSource, "1-High (internet brute force)", Accounts >= 5, "2-High (password spray)", Failures >= Threshold, "3-Medium", "4-Low")
+| order by Severity asc, Failures desc
+| take 50
+
+// ===== [4 - Persistence & Defense Evasion] Autostart registry changes (Run keys, Winlogon, IFEO, services)
+set query_results_cache_max_age = time(5m);
+let Reg = external_table('DeviceRegistryEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+let UserPaths = dynamic([@"\appdata\local\temp\", @"\downloads\", @"\users\public\", @"\programdata\", @"\appdata\roaming\", @"\windows\temp\", @"\perflogs\"]);
+Reg
+| where ActionType in ("RegistryValueSet", "RegistryKeyCreated")
+| where RegistryKey has_any (@"\CurrentVersion\Run", @"\CurrentVersion\RunOnce", @"\Winlogon", @"\Image File Execution Options", @"\CurrentControlSet\Services", @"\Explorer\Shell Folders", @"\Policies\Explorer\Run", @"\Active Setup\Installed Components")
+| where InitiatingProcessFileName !in~ ("msiexec.exe", "trustedinstaller.exe", "tiworker.exe", "msmpeng.exe", "mssense.exe", "svchost.exe", "services.exe", "officeclicktorun.exe", "onedrivesetup.exe", "teams.exe")
+| extend Data = tolower(RegistryValueData)
+| extend Severity = case(Data has_any (UserPaths) or Data has_any ("powershell", "cmd /c", "mshta", "rundll32", "regsvr32", "wscript", "http"), "1-High (suspicious payload)",
+                         RegistryKey has "Image File Execution Options" and RegistryValueName =~ "Debugger", "1-High (IFEO hijack)", "3-Low")
+| project TimeGenerated, Severity, DeviceName, RegistryKey, RegistryValueName, RegistryValueData, Process = InitiatingProcessFileName, Account = InitiatingProcessAccountName
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [4 - Persistence & Defense Evasion] Scheduled tasks and services created
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+let Evt = external_table('DeviceEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+union
+ (Proc
+  | where (FileName =~ "schtasks.exe" and ProcessCommandLine has "/create") or (FileName =~ "sc.exe" and ProcessCommandLine has_any ("create", "config")) or ProcessCommandLine has_any ("New-ScheduledTask", "Register-ScheduledTask", "New-Service")
+  | project TimeGenerated, DeviceName, Account = AccountName, Type = "Command line", Detail = ProcessCommandLine),
+ (Evt
+  | where ActionType in ("ScheduledTaskCreated", "ServiceInstalled", "ScheduledTaskUpdated")
+  | extend AF = todynamic(tostring(AdditionalFields))
+  | project TimeGenerated, DeviceName, Account = InitiatingProcessAccountName, Type = ActionType, Detail = strcat(tostring(AF.TaskName), tostring(AF.ServiceName), " ", tostring(AF.ServiceAccount), " ", tostring(AF.TaskContent), FileName, " ", FolderPath))
+| extend D = tolower(Detail)
+| extend Severity = case(D has_any ("powershell", "cmd /c", "mshta", "rundll32", "regsvr32", "\\temp\\", "\\appdata\\", "\\users\\public\\", "http", "-enc"), "1-High (suspicious action)", "3-Low")
+| project-away D
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [4 - Persistence & Defense Evasion] Microsoft Defender tampering and exclusions
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+let Reg = external_table('DeviceRegistryEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+let Evt = external_table('DeviceEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+union
+ (Proc
+  | where ProcessCommandLine has_any ("Set-MpPreference", "Add-MpPreference", "DisableRealtimeMonitoring", "DisableAntiSpyware", "DisableBehaviorMonitoring", "DisableIOAVProtection", "ExclusionPath", "ExclusionProcess", "ExclusionExtension", "-RemoveDefinitions", "WinDefend")
+  | where not(ProcessCommandLine has "Get-MpPreference")
+  | project TimeGenerated, DeviceName, Account = AccountName, Source = "Command line", Detail = ProcessCommandLine),
+ (Reg
+  | where RegistryKey has @"\Windows Defender" and (RegistryValueName has_any ("Disable", "TamperProtection") or RegistryKey has "Exclusions")
+  | project TimeGenerated, DeviceName, Account = InitiatingProcessAccountName, Source = "Registry", Detail = strcat(RegistryKey, " | ", RegistryValueName, " = ", RegistryValueData)),
+ (Evt
+  | where ActionType has_any ("Tamper", "AntivirusDefinitionsUpdateFailed", "AntivirusScanCancelled")
+  | project TimeGenerated, DeviceName, Account = InitiatingProcessAccountName, Source = ActionType, Detail = tostring(AdditionalFields))
+| extend Severity = case(Detail has_any ("Disable", "Exclusion", "RemoveDefinitions", "TamperProtection") or Source has "Tamper", "1-High", "2-Medium")
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [4 - Persistence & Defense Evasion] Log clearing, audit and firewall tampering
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+Proc
+| extend Cmd = tolower(ProcessCommandLine)
+| extend Technique = case(
+    FileName =~ "wevtutil.exe" and Cmd has_any (" cl ", "clear-log", " sl "), "Event log cleared/disabled",
+    Cmd has_any ("clear-eventlog", "remove-eventlog", "limit-eventlog"), "PowerShell event log clearing",
+    FileName =~ "auditpol.exe" and Cmd has_any ("/clear", "/remove", "/set") and Cmd has "disable", "Audit policy tampering",
+    FileName =~ "fsutil.exe" and Cmd has "deletejournal", "USN journal deleted",
+    FileName =~ "netsh.exe" and Cmd has "firewall" and Cmd has_any ("state off", "disable", "add rule", "allowedprogram", "portopening"), "Firewall modified",
+    Cmd has "set-netfirewallprofile" and Cmd has "false", "Firewall disabled (PowerShell)",
+    "")
+| where isnotempty(Technique)
+| extend Severity = iff(Technique has_any ("cleared", "deleted", "disabled", "tampering"), "1-High", "2-Medium")
+| project TimeGenerated, Severity, Technique, DeviceName, AccountName, ProcessCommandLine, Parent = InitiatingProcessFileName
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [5 - Lateral Movement & Logons] Logons by type and result
+set query_results_cache_max_age = time(5m);
+let Logon = external_table('DeviceLogonEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account;
+Logon
+| summarize Logons = count() by LogonType, ActionType
+| order by Logons desc
+
+// ===== [5 - Lateral Movement & Logons] Account fan-out (one account logging on to many devices)
+set query_results_cache_max_age = time(5m);
+let Logon = external_table('DeviceLogonEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account;
+let Threshold = 10;
+Logon
+| where ActionType == "LogonSuccess" and LogonType in ("Network", "RemoteInteractive", "NewCredentials")
+| where AccountName !endswith "$" and AccountName !in~ ("system", "local service", "network service", "anonymous logon", "dwm-1", "umfd-0")
+| summarize Devices = dcount(DeviceName), DeviceList = make_set(DeviceName, 15), Logons = count(), Types = make_set(LogonType), SourceIPs = make_set(RemoteIP, 10),
+            Admin = countif(tostring(IsLocalAdmin) in~ ("true", "1")), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by AccountDomain, AccountName
+| extend Severity = case(Devices >= Threshold and Admin > 0, "1-High (admin fan-out)", Devices >= Threshold, "2-Medium (fan-out)", "3-Low")
+| order by Severity asc, Devices desc
+| take 50
+
+// ===== [5 - Lateral Movement & Logons] RDP logons (internal and from the internet)
+set query_results_cache_max_age = time(5m);
+let Logon = external_table('DeviceLogonEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account;
+Logon
+| where LogonType == "RemoteInteractive"
+| extend Public = isnotempty(RemoteIP) and RemoteIP !in ("-", "::1", "127.0.0.1") and not(ipv4_is_private(RemoteIP))
+| summarize Logons = countif(ActionType == "LogonSuccess"), Failures = countif(ActionType == "LogonFailed"), Accounts = make_set(AccountName, 10), LastSeen = max(TimeGenerated)
+    by DeviceName, RemoteIP, Public
+| extend Country = iff(Public, tostring(geo_info_from_ip_address(RemoteIP).country), "Internal")
+| extend Severity = case(Public and Logons > 0, "1-High (internet RDP success)", Public, "2-Medium (internet RDP attempts)", Failures >= 10, "3-Medium (internal failures)", "4-Low")
+| order by Severity asc, Logons desc
+| take 50
+
+// ===== [5 - Lateral Movement & Logons] Remote execution (PsExec, WMI, WinRM, PowerShell remoting)
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+Proc
+| extend Cmd = tolower(ProcessCommandLine)
+| extend Technique = case(
+    FileName in~ ("psexec.exe", "psexec64.exe", "paexec.exe") or FileName =~ "psexesvc.exe" or InitiatingProcessFileName =~ "psexesvc.exe", "PsExec",
+    InitiatingProcessFileName =~ "wmiprvse.exe" and FileName in~ ("cmd.exe", "powershell.exe", "pwsh.exe", "rundll32.exe", "mshta.exe"), "WMI remote execution",
+    FileName =~ "wmic.exe" and Cmd has "/node:", "WMIC remote",
+    InitiatingProcessFileName =~ "wsmprovhost.exe" or FileName =~ "winrs.exe", "WinRM / PowerShell remoting",
+    Cmd has_any ("invoke-command", "enter-pssession", "new-pssession") and Cmd has "-computername", "PowerShell remoting (client)",
+    FileName =~ "sc.exe" and Cmd matches regex @"sc(\.exe)?\s+\\\\", "Remote service control",
+    FileName =~ "schtasks.exe" and Cmd has "/s ", "Remote scheduled task",
+    "")
+| where isnotempty(Technique)
+| summarize Executions = count(), Accounts = make_set(AccountName, 5), Samples = make_set(ProcessCommandLine, 3), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by DeviceName, Technique
+| extend Severity = case(Technique in ("PsExec", "WMI remote execution", "Remote service control"), "1-High", "2-Medium")
+| order by Severity asc, Executions desc
+| take 50
+
+// ===== [5 - Lateral Movement & Logons] Internal scanning / lateral fan-out over SMB, RDP, WinRM, RPC
+set query_results_cache_max_age = time(5m);
+let Net = external_table('DeviceNetworkEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+let Threshold = 20;
+Net
+| where RemotePort in (445, 3389, 5985, 5986, 135, 22) and ipv4_is_private(RemoteIP)
+| summarize Targets = dcount(RemoteIP), Attempts = count(), Failed = countif(ActionType == "ConnectionFailed"), Ports = make_set(RemotePort), SampleTargets = make_set(RemoteIP, 10),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by DeviceName, InitiatingProcessFileName
+| extend Severity = case(Targets >= Threshold and Failed > Attempts / 2, "1-High (scanning)", Targets >= Threshold, "2-Medium (fan-out)", "3-Low")
+| order by Severity asc, Targets desc
+| take 50
+
+// ===== [6 - Network & Command-and-Control] Scripts and LOLBins connecting to the internet
+set query_results_cache_max_age = time(5m);
+let Net = external_table('DeviceNetworkEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+let Shells = dynamic(["cmd.exe","powershell.exe","pwsh.exe","powershell_ise.exe","wscript.exe","cscript.exe","mshta.exe","rundll32.exe","regsvr32.exe","certutil.exe","bitsadmin.exe","msbuild.exe","installutil.exe","wmic.exe","cmstp.exe","curl.exe"]);
+Net
+| where InitiatingProcessFileName in~ (Shells) and ActionType in ("ConnectionSuccess", "ConnectionAttempt")
+| where isnotempty(RemoteIP) and not(ipv4_is_private(RemoteIP)) and RemoteIP !startswith "127."
+| summarize Connections = count(), Destinations = make_set(coalesce(RemoteUrl, RemoteIP), 10), Ports = make_set(RemotePort), Commands = make_set(InitiatingProcessCommandLine, 3),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by DeviceName, InitiatingProcessFileName, InitiatingProcessAccountName
+| extend Severity = case(InitiatingProcessFileName in~ ("mshta.exe", "regsvr32.exe", "rundll32.exe", "certutil.exe", "msbuild.exe", "installutil.exe"), "1-High", "2-Medium")
+| order by Severity asc, Connections desc
+| take 50
+
+// ===== [6 - Network & Command-and-Control] Beaconing (regular connections to the same external host)
+set query_results_cache_max_age = time(5m);
+let Net = external_table('DeviceNetworkEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+let MinConnections = 20;
+let MaxJitter = 0.2;
+Net
+| where ActionType == "ConnectionSuccess" and isnotempty(RemoteIP) and not(ipv4_is_private(RemoteIP))
+| project TimeGenerated, DeviceName, RemoteIP, RemoteUrl, RemotePort, Proc = InitiatingProcessFileName
+| sort by DeviceName asc, RemoteIP asc, Proc asc, TimeGenerated asc
+| extend Delta = iff(prev(DeviceName) == DeviceName and prev(RemoteIP) == RemoteIP and prev(Proc) == Proc, datetime_diff('second', TimeGenerated, prev(TimeGenerated)), long(null))
+| where isnotnull(Delta) and Delta > 0
+| summarize Connections = count(), AvgSeconds = avg(Delta), StdSeconds = stdev(Delta), Url = take_any(RemoteUrl), Ports = make_set(RemotePort, 5) by DeviceName, RemoteIP, Proc
+| where Connections >= MinConnections
+| extend Jitter = round(StdSeconds / max_of(AvgSeconds, 1.0), 2), AvgSeconds = round(AvgSeconds, 0)
+| extend Severity = case(Jitter <= MaxJitter and Proc !in~ ("msedge.exe", "chrome.exe", "firefox.exe", "teams.exe", "ms-teams.exe", "onedrive.exe", "outlook.exe", "svchost.exe", "mssense.exe", "msmpeng.exe"), "1-High (regular beacon, unusual process)",
+                         Jitter <= MaxJitter, "2-Medium (regular beacon)", "3-Low")
+| project Severity, DeviceName, Proc, RemoteIP, Url, Ports, Connections, AvgSeconds, Jitter
+| order by Severity asc, Jitter asc
+| take 50
+
+// ===== [6 - Network & Command-and-Control] Connections to suspicious ports (C2, Tor, reverse shells)
+set query_results_cache_max_age = time(5m);
+let Net = external_table('DeviceNetworkEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+let BadPorts = dynamic([4444, 4445, 1337, 31337, 8888, 9001, 9030, 9050, 9150, 6667, 6697, 5555, 2222, 50050, 1080, 3128, 8443]);
+Net
+| where RemotePort in (BadPorts) and isnotempty(RemoteIP) and not(ipv4_is_private(RemoteIP))
+| summarize Connections = count(), Success = countif(ActionType == "ConnectionSuccess"), Processes = make_set(InitiatingProcessFileName, 5), Urls = make_set(RemoteUrl, 5), LastSeen = max(TimeGenerated)
+    by DeviceName, RemoteIP, RemotePort
+| extend Country = tostring(geo_info_from_ip_address(RemoteIP).country)
+| extend Severity = case(Success > 0 and RemotePort in (4444, 1337, 31337, 9001, 9050, 50050), "1-High", Success > 0, "2-Medium", "3-Low (attempts)")
+| order by Severity asc, Connections desc
+| take 50
+
+// ===== [6 - Network & Command-and-Control] Rare external destinations (contacted by one device)
+set query_results_cache_max_age = time(5m);
+let Net = external_table('DeviceNetworkEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+Net
+| where ActionType == "ConnectionSuccess" and isnotempty(RemoteIP) and not(ipv4_is_private(RemoteIP))
+| extend Dest = iff(isnotempty(RemoteUrl), tolower(RemoteUrl), RemoteIP)
+| summarize Devices = dcount(DeviceName), Device = take_any(DeviceName), Process = take_any(InitiatingProcessFileName), Connections = count(), Port = take_any(RemotePort), FirstSeen = min(TimeGenerated) by Dest
+| where Devices == 1
+| where Process !in~ ("msedge.exe", "chrome.exe", "firefox.exe", "svchost.exe", "msmpeng.exe", "mssense.exe", "onedrive.exe", "teams.exe", "ms-teams.exe", "officeclicktorun.exe")
+| order by FirstSeen desc
+| take 50
+
+// ===== [6 - Network & Command-and-Control] External destinations map
+set query_results_cache_max_age = time(5m);
+let Net = external_table('DeviceNetworkEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+Net
+| where ActionType == "ConnectionSuccess" and isnotempty(RemoteIP) and not(ipv4_is_private(RemoteIP))
+| summarize Connections = count() by RemoteIP
+| extend G = geo_info_from_ip_address(RemoteIP)
+| extend Latitude = todouble(G.latitude), Longitude = todouble(G.longitude), Country = tostring(G.country)
+| where isnotnull(Latitude) and isnotnull(Longitude)
+| summarize Connections = sum(Connections) by Longitude, Latitude, Country
+
+// ===== [6 - Network & Command-and-Control] Top processes making outbound connections
+set query_results_cache_max_age = time(5m);
+let Net = external_table('DeviceNetworkEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+Net
+| where ActionType == "ConnectionSuccess" and isnotempty(RemoteIP) and not(ipv4_is_private(RemoteIP))
+| summarize Connections = count() by InitiatingProcessFileName
+| top 15 by Connections
+
+// ===== [7 - Ransomware & Impact] Recovery inhibition (shadow copies, backups, boot recovery)
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+Proc
+| extend Cmd = tolower(ProcessCommandLine)
+| extend Technique = case(
+    Cmd has "vssadmin" and Cmd has_any ("delete shadows", "resize shadowstorage"), "vssadmin delete/resize shadows",
+    Cmd has "shadowcopy" and Cmd has "delete", "WMIC shadowcopy delete",
+    Cmd has "win32_shadowcopy" and Cmd has_any ("delete", "remove-"), "PowerShell shadow copy delete",
+    Cmd has "wbadmin" and Cmd has_any ("delete catalog", "delete systemstatebackup", "delete backup"), "wbadmin delete",
+    Cmd has "bcdedit" and Cmd has_any ("recoveryenabled no", "bootstatuspolicy ignoreallfailures"), "bcdedit recovery disabled",
+    Cmd has "diskshadow" and Cmd has "delete", "diskshadow delete",
+    "")
+| where isnotempty(Technique)
+| project TimeGenerated, Severity = "1-Critical", Technique, DeviceName, AccountName, ProcessCommandLine, Parent = InitiatingProcessFileName
+| order by TimeGenerated desc
+| take 50
+
+// ===== [7 - Ransomware & Impact] Security, backup and database services stopped
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+let Targets = dynamic(["vss","sql","veeam","backup","sophos","mcafee","symantec","windefend","sense","msexchange","acronis","sql server","mysql","oracle","vmware","bits","wuauserv","memtas","mepocs","sophos"]);
+Proc
+| extend Cmd = tolower(ProcessCommandLine)
+| where (FileName in~ ("net.exe", "net1.exe") and Cmd has "stop") or (FileName =~ "sc.exe" and Cmd has_any ("stop", "config") and Cmd has_any ("disabled", "stop"))
+     or (FileName =~ "taskkill.exe" and Cmd has "/f") or Cmd has_any ("stop-service", "set-service")
+| where Cmd has_any (Targets)
+| summarize Commands = count(), Services = make_set(ProcessCommandLine, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by DeviceName, AccountName
+| extend Severity = case(Commands >= 5, "1-High (mass service stop)", "2-Medium")
+| order by Severity asc, Commands desc
+| take 50
+
+// ===== [7 - Ransomware & Impact] Antivirus detections
+set query_results_cache_max_age = time(5m);
+let Evt = external_table('DeviceEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+Evt
+| where ActionType in ("AntivirusDetection", "AntivirusDetectionActionType", "AntivirusMalwareBlocked")
+| extend AF = todynamic(tostring(AdditionalFields))
+| extend Threat = tostring(AF.ThreatName), Action = tostring(AF.Action), WasRemediated = tostring(AF.WasRemediated)
+| summarize Detections = count(), Devices = dcount(DeviceName), DeviceList = make_set(DeviceName, 10), Files = make_set(FileName, 5), Paths = make_set(FolderPath, 3),
+            Remediated = countif(WasRemediated in~ ("true", "1")), LastSeen = max(TimeGenerated) by Threat
+| extend Severity = case(Remediated < Detections, "1-High (not all remediated)", Threat has_any ("Ransom", "HackTool", "Mimikatz", "CobaltStrike", "Meterpreter"), "1-High", "2-Medium")
+| order by Severity asc, Detections desc
+| take 50
+
+// ===== [7 - Ransomware & Impact] Attack surface reduction and Controlled Folder Access events
+set query_results_cache_max_age = time(5m);
+let Evt = external_table('DeviceEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+Evt
+| where ActionType startswith "Asr" or ActionType startswith "ControlledFolderAccess" or ActionType startswith "ExploitGuard"
+| extend Blocked = ActionType endswith "Blocked"
+| summarize Events = count(), Blocked = countif(Blocked), Audited = countif(not(Blocked)), Devices = dcount(DeviceName), DeviceList = make_set(DeviceName, 10),
+            Processes = make_set(InitiatingProcessFileName, 5), Files = make_set(FileName, 5), LastSeen = max(TimeGenerated) by ActionType
+| extend Severity = case(ActionType has_any ("Ransomware", "ControlledFolderAccess", "LsassCredentialTheft", "PsexecWmi"), "1-High", Audited > 0, "2-Medium (audit only - not blocked)", "3-Low")
+| order by Severity asc, Events desc
+| take 50
+
+// ===== [7 - Ransomware & Impact] Ransomware and human-operated attack alerts
+set query_results_cache_max_age = time(5m);
+let EpAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ServiceSource has_any ("Endpoint", "Defender for Endpoint", "Antivirus") or DetectionSource has_any ("EDR", "Antivirus", "Endpoint", "Custom detection", "Automated investigation")
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let AlertDev = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend DevName = tostring(PE.DeviceName), EvUser = tostring(PE.AccountName)
+| where isnotempty(DevName)
+| summarize Users = make_set_if(EvUser, isnotempty(EvUser), 5) by AlertId, DevName
+| where isempty(_device) or DevName contains _device;
+EpAlerts
+| where Title has_any ("ransom", "encrypt", "human-operated", "hands-on-keyboard", "shadow cop", "backup", "wiper", "Cobalt Strike", "Sliver", "Brute Ratel")
+| join kind=leftouter AlertDev on AlertId
+| summarize Devices = make_set(DevName, 10), Users = make_set(Users, 10) by AlertTime, AlertId, Title, Severity, Category
+| extend SevRank = case(Severity =~ "High", 1, Severity =~ "Medium", 2, Severity =~ "Low", 3, 4)
+| order by SevRank asc, AlertTime desc
+| project-away SevRank
+| take 50
+
+// ===== [8 - Device Health & Exposure] Devices that stopped reporting
+set query_results_cache_max_age = time(5m);
+let Seen = union
+ (external_table('DeviceProcessEvents') | where TimeGenerated > ago(14d) | summarize LastSeen = max(TimeGenerated) by DeviceName),
+ (external_table('DeviceNetworkEvents') | where TimeGenerated > ago(14d) | summarize LastSeen = max(TimeGenerated) by DeviceName);
+Seen
+| summarize LastSeen = max(LastSeen) by DeviceName
+| where isempty(_device) or DeviceName contains _device
+| extend HoursSilent = datetime_diff('hour', now(), LastSeen)
+| where HoursSilent >= 24
+| extend Severity = case(HoursSilent >= 72, "1-High (silent 3+ days)", "2-Medium (silent 1+ day)")
+| order by HoursSilent desc
+| take 50
+
+// ===== [8 - Device Health & Exposure] Inbound internet connections to RDP / SMB / SSH / WinRM
+set query_results_cache_max_age = time(5m);
+let Net = external_table('DeviceNetworkEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+Net
+| where ActionType == "InboundConnectionAccepted" and LocalPort in (3389, 445, 22, 5985, 5986, 135, 1433, 3306)
+| where isnotempty(RemoteIP) and not(ipv4_is_private(RemoteIP)) and RemoteIP !startswith "127."
+| summarize Connections = count(), Sources = dcount(RemoteIP), SampleSources = make_set(RemoteIP, 10), LastSeen = max(TimeGenerated) by DeviceName, LocalPort
+| extend Severity = case(LocalPort in (3389, 445, 135, 1433, 3306), "1-High (exposed service)", "2-Medium")
+| order by Severity asc, Sources desc
+| take 50
+
+// ===== [8 - Device Health & Exposure] Device activity inventory (from telemetry)
+set query_results_cache_max_age = time(5m);
+let Win = 14d;
+let P1 = external_table('DeviceProcessEvents') | where TimeGenerated > ago(Win)
+| summarize LastProcess = max(TimeGenerated), Processes = count(), Accounts = make_set(AccountName, 10) by DeviceName;
+let N1 = external_table('DeviceNetworkEvents') | where TimeGenerated > ago(Win)
+| summarize LastNetwork = max(TimeGenerated), PublicIPs = make_set_if(LocalIP, not(ipv4_is_private(LocalIP)), 3), LocalIPs = make_set_if(LocalIP, ipv4_is_private(LocalIP), 5) by DeviceName;
+P1
+| join kind=fullouter N1 on DeviceName
+| extend DeviceName = coalesce(DeviceName, DeviceName1)
+| where isempty(_device) or DeviceName contains _device
+| extend LastSeen = max_of(coalesce(LastProcess, datetime(1970-01-01)), coalesce(LastNetwork, datetime(1970-01-01)))
+| extend Status = case(LastSeen < ago(3d), "1-Silent 3+ days", LastSeen < ago(1d), "2-Silent 1+ day", isnull(LastProcess), "2-No process telemetry", "3-Active")
+| project Status, DeviceName, LastSeen, LastProcess, LastNetwork, Processes, Accounts, LocalIPs, PublicIPs
+| order by Status asc, LastSeen asc
+| take 100
+
+// ===== [8 - Device Health & Exposure] Telemetry volume per device
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+let Net = external_table('DeviceNetworkEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+union (Proc | summarize Events = count() by DeviceName | extend Table = "Process"), (Net | summarize Events = count() by DeviceName | extend Table = "Network")
+| order by Events desc
+| take 40
+
+// ===== [8 - Device Health & Exposure] DLLs executed from user-writable paths (rundll32 / regsvr32)
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+let UserPaths = dynamic([@"\appdata\local\temp\", @"\downloads\", @"\users\public\", @"\programdata\", @"\appdata\roaming\", @"\windows\temp\", @"\perflogs\"]);
+Proc
+| where FileName in~ ("rundll32.exe", "regsvr32.exe", "odbcconf.exe", "control.exe")
+| extend Cmd = tolower(ProcessCommandLine)
+| where Cmd has_any (UserPaths) or Cmd has_any (".dat,", ".tmp,", ".png,", ".jpg,", ".txt,", ".log,")
+| extend Target = replace_string(tostring(split(tostring(split(Cmd, ",")[0]), " ")[-1]), '"', '')
+| summarize Executions = count(), Devices = dcount(DeviceName), DeviceList = make_set(DeviceName, 5), Parents = make_set(InitiatingProcessFileName, 5),
+            Accounts = make_set(AccountName, 5), SampleCommand = take_any(ProcessCommandLine), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by FileName, Target
+| extend Severity = case(tostring(Parents) has_any ("winword", "excel", "outlook", "powershell", "wscript", "cscript", "mshta", "cmd"), "1-High (launched by Office/script)", Devices == 1, "2-Medium (rare)", "3-Low")
+| order by Severity asc, Executions desc
+| take 50
+
+// ===== [9 - Device Investigation] Device summary (set Device / Account)
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+let Net = external_table('DeviceNetworkEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+let Logon = external_table('DeviceLogonEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account;
+let P1 = Proc | summarize Processes = count(), Accounts = make_set(AccountName, 10), LastProcess = max(TimeGenerated) by DeviceName;
+let N1 = Net | summarize Connections = count(), ExternalIPs = dcountif(RemoteIP, not(ipv4_is_private(RemoteIP))) by DeviceName;
+let L1 = Logon | summarize Logons = countif(ActionType == "LogonSuccess"), FailedLogons = countif(ActionType == "LogonFailed") by DeviceName;
+P1
+| join kind=leftouter N1 on DeviceName
+| join kind=leftouter L1 on DeviceName
+| project DeviceName, Processes, Connections, ExternalIPs, Logons, FailedLogons, Accounts, LastProcess
+| order by Processes desc
+| take 50
+
+// ===== [9 - Device Investigation] Unified device timeline (set Device or Account)
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+let Net = external_table('DeviceNetworkEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+let Logon = external_table('DeviceLogonEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account;
+let Reg = external_table('DeviceRegistryEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+let Evt = external_table('DeviceEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or InitiatingProcessAccountName =~ _account;
+let EpAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ServiceSource has_any ("Endpoint", "Defender for Endpoint", "Antivirus") or DetectionSource has_any ("EDR", "Antivirus", "Endpoint", "Custom detection", "Automated investigation")
+| extend PA = pack_all()
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, DetectionSource, Techniques = tostring(PA.AttackTechniques);
+let AlertDev = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend PE = pack_all()
+| extend DevName = tostring(PE.DeviceName), EvUser = tostring(PE.AccountName)
+| where isnotempty(DevName)
+| summarize Users = make_set_if(EvUser, isnotempty(EvUser), 5) by AlertId, DevName
+| where isempty(_device) or DevName contains _device;
+let Active = isnotempty(_device) or isnotempty(_account);
+union
+ (Proc | where Active | project TimeGenerated, Source = "Process", DeviceName, Account = AccountName, Activity = FileName, Detail = ProcessCommandLine, Parent = InitiatingProcessFileName),
+ (Net | where Active | where ActionType in ("ConnectionSuccess", "InboundConnectionAccepted", "ConnectionFailed")
+   | project TimeGenerated, Source = "Network", DeviceName, Account = InitiatingProcessAccountName, Activity = ActionType, Detail = strcat(RemoteIP, ":", RemotePort, " ", RemoteUrl), Parent = InitiatingProcessFileName),
+ (Logon | where Active | project TimeGenerated, Source = "Logon", DeviceName, Account = AccountName, Activity = strcat(ActionType, " ", LogonType), Detail = strcat("from ", RemoteIP, " ", RemoteDeviceName), Parent = InitiatingProcessFileName),
+ (Reg | where Active | where ActionType in ("RegistryValueSet", "RegistryKeyCreated")
+   | project TimeGenerated, Source = "Registry", DeviceName, Account = InitiatingProcessAccountName, Activity = ActionType, Detail = strcat(RegistryKey, " | ", RegistryValueName, " = ", RegistryValueData), Parent = InitiatingProcessFileName),
+ (Evt | where Active | project TimeGenerated, Source = "DeviceEvent", DeviceName, Account = InitiatingProcessAccountName, Activity = ActionType, Detail = strcat(FileName, " ", tostring(AdditionalFields)), Parent = InitiatingProcessFileName),
+ (EpAlerts | join kind=inner AlertDev on AlertId | where Active
+   | project TimeGenerated = AlertTime, Source = "Alert", DeviceName = DevName, Account = tostring(Users), Activity = Severity, Detail = Title, Parent = Category)
+| order by TimeGenerated desc
+| take 500
+
+// ===== [9 - Device Investigation] Process tree summary (grandparent > parent > child)
+set query_results_cache_max_age = time(5m);
+let Proc = external_table('DeviceProcessEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_device) or DeviceName contains _device
+| where isempty(_account) or AccountName =~ _account or AccountUpn =~ _account;
+Proc
+| where isnotempty(_device) or isnotempty(_account)
+| summarize Executions = count(), SampleCommand = take_any(ProcessCommandLine), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+    by GrandParent = InitiatingProcessParentFileName, Parent = InitiatingProcessFileName, Child = FileName
+| order by Executions asc, LastSeen desc
+| take 200

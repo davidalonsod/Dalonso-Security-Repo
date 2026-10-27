@@ -1,0 +1,661 @@
+// ===== Total sign-ins
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType);
+Signins
+| summarize TotalSignins = count()
+
+// ===== Failed sign-ins
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType);
+let Failed = Signins | where ResultType != "0" and ResultType !in ("50140","50199");
+Failed
+| summarize FailedSignins = count()
+
+// ===== Failure percentage
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType);
+Signins
+| summarize Total = count(), Failures = countif(ResultType != "0" and ResultType !in ("50140","50199"))
+| project FailurePct = round(iff(Total == 0, 0.0, 100.0 * Failures / Total), 2)
+
+// ===== Sign-in detail: users / IPs / countries
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, ResultDescription, AppDisplayName, Location),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, ResultDescription, AppDisplayName, Location);
+Signins
+| extend IsFailure = ResultType != "0" and ResultType !in ("50140","50199")
+| summarize SignIns = count(), Failures = countif(IsFailure), Successes = countif(ResultType == "0"),
+            Apps = make_set(AppDisplayName, 5), FailureReasons = make_set_if(ResultDescription, IsFailure, 3),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+    by UserPrincipalName, IPAddress, Country = Location
+| extend Country = iff(isempty(Country), tostring(geo_info_from_ip_address(IPAddress).country), Country),
+         FailurePct = round(100.0 * Failures / SignIns, 1)
+| project LastSeen, UserPrincipalName, IPAddress, Country, SignIns, Successes, Failures, FailurePct, FailureReasons, Apps, FirstSeen
+| order by Failures desc, SignIns desc
+| take 200
+
+// ===== Sign-ins over time by outcome
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType);
+Signins
+| where ResultType !in ("50140","50199")
+| extend Outcome = case(ResultType == "0", "Success",
+                        ResultType in ("50126","50053","50055","50057","50034"), "Credential failure",
+                        ResultType in ("500121","50074","50076"), "MFA failure/required",
+                        ResultType == "53003", "CA blocked", "Other failure")
+| summarize Count = count() by bin(TimeGenerated, 1h), Outcome
+| order by TimeGenerated asc
+
+// ===== Top failure reasons
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, ResultDescription),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, ResultDescription);
+let Failed = Signins | where ResultType != "0" and ResultType !in ("50140","50199");
+Failed
+| extend FailureReason = iff(isempty(ResultDescription), "n/a", ResultDescription)
+| summarize Failures = count() by ResultType, FailureReason
+| extend Reason = strcat(ResultType, " - ", FailureReason)
+| top 20 by Failures
+| project Reason, Failures
+
+// ===== Top apps by failed sign-ins
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, AppDisplayName),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, AppDisplayName);
+let Failed = Signins | where ResultType != "0" and ResultType !in ("50140","50199");
+Failed
+| summarize FailedSignins = count() by AppDisplayName
+| top 15 by FailedSignins
+
+// ===== Hourly failures with anomalies
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType);
+let Failed = Signins | where ResultType != "0" and ResultType !in ("50140","50199");
+Failed
+| make-series Failures = count() default = 0 on TimeGenerated from bin(_startTime, 1h) to _endTime step 1h
+| extend (Anomalies, Score, Baseline) = series_decompose_anomalies(Failures, 2.5, -1, 'linefit')
+| project TimeGenerated, Failures, Baseline, Anomalies
+
+// ===== Sign-ins geo map
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location);
+Signins
+| where ResultType !in ("50140","50199")
+| extend Outcome = iff(ResultType == "0", "Success", "Failure")
+| summarize Count = count() by IPAddress, Outcome
+| extend Geo = geo_info_from_ip_address(IPAddress)
+| extend Latitude = todouble(Geo.latitude), Longitude = todouble(Geo.longitude)
+| where isnotnull(Latitude) and isnotnull(Longitude)
+| summarize Count = sum(Count) by Longitude, Latitude, Outcome
+
+// ===== Impossible travel sign-ins
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location);
+Signins
+| where ResultType == "0"
+| extend G = geo_info_from_ip_address(IPAddress)
+| extend Lat = todouble(G.latitude), Lon = todouble(G.longitude), Country = iff(isempty(Location), tostring(G.country), Location)
+| where isnotnull(Lat) and isnotnull(Lon)
+| sort by UserPrincipalName asc, TimeGenerated asc
+| extend PrevUser = prev(UserPrincipalName), PrevTime = prev(TimeGenerated), PrevLat = prev(Lat), PrevLon = prev(Lon), PrevIP = prev(IPAddress), PrevCountry = prev(Country)
+| where UserPrincipalName == PrevUser
+| extend DistanceKm = round(geo_distance_2points(Lon, Lat, PrevLon, PrevLat) / 1000.0, 0),
+         Minutes = datetime_diff('minute', TimeGenerated, PrevTime)
+| extend SpeedKmh = round(DistanceKm / (max_of(Minutes, 1) / 60.0), 0)
+| where DistanceKm > 500 and SpeedKmh > 900
+| project TimeGenerated, UserPrincipalName, PrevCountry, Country, PrevIP, IPAddress, DistanceKm, Minutes, SpeedKmh
+| order by SpeedKmh desc
+| take 50
+
+// ===== New countries for user (vs 30d baseline)
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location);
+let Baseline = external_table('SigninLogs')
+| where TimeGenerated between (datetime_add('day', -14, _startTime) .. _startTime)
+| project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location
+| where ResultType == "0"
+| where isempty(_user) or UserPrincipalName =~ _user
+| extend Country = iff(isempty(Location), tostring(geo_info_from_ip_address(IPAddress).country), Location)
+| where isnotempty(Country)
+| summarize BaselineCountries = make_set(Country) by UserPrincipalName;
+Signins
+| where ResultType == "0"
+| extend Country = iff(isempty(Location), tostring(geo_info_from_ip_address(IPAddress).country), Location)
+| where isnotempty(Country)
+| summarize FirstSeen = min(TimeGenerated), SignIns = count(), IPs = make_set(IPAddress, 10) by UserPrincipalName, Country
+| join kind=leftouter Baseline on UserPrincipalName
+| where isnull(BaselineCountries) or not(set_has_element(BaselineCountries, Country))
+| project FirstSeen, UserPrincipalName, NewCountry = Country, SignIns, IPs, KnownCountries = BaselineCountries
+| order by FirstSeen desc
+| take 50
+
+// ===== Brute-force attempts and follow-on successes
+set query_results_cache_max_age = time(5m);
+let Signins = materialize(union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType));
+// Thresholds - adjust to your tenant
+let BruteForceThreshold = 10;   // failures per user per hour = High
+let MinToShow = 3;              // minimum failures to list
+let Failed = Signins | where ResultType in ("50126","50053","50034","50055","50056","50057");
+let Successes = Signins | where ResultType == "0" | project UserPrincipalName, SuccessTime = TimeGenerated, SuccessIP = IPAddress;
+Failed
+| summarize Failures = count(), IPs = dcount(IPAddress), IPList = make_set(IPAddress, 10), Codes = make_set(ResultType),
+            FirstAttempt = min(TimeGenerated), LastAttempt = max(TimeGenerated) by UserPrincipalName, Window = bin(TimeGenerated, 1h)
+| where Failures >= MinToShow
+| join kind=leftouter Successes on UserPrincipalName
+| extend Followed = isnotnull(SuccessTime) and SuccessTime between (LastAttempt .. (LastAttempt + 1h))
+| summarize Failures = max(Failures), IPs = max(IPs), IPList = take_any(IPList), Codes = take_any(Codes),
+            FirstAttempt = min(FirstAttempt), LastAttempt = max(LastAttempt),
+            SuccessAfter = max(toint(Followed)), SuccessIPs = make_set_if(SuccessIP, Followed, 10) by UserPrincipalName, Window
+| extend Severity = case(Failures >= BruteForceThreshold and SuccessAfter == 1, "1-Critical (success after attack)",
+                         Failures >= BruteForceThreshold, "2-High", SuccessAfter == 1, "3-Medium (success after failures)", "4-Low")
+| project Severity, Window, UserPrincipalName, Failures, IPs, IPList, Codes, SuccessIPs, FirstAttempt, LastAttempt
+| order by Severity asc, Failures desc
+| take 50
+
+// ===== Password spray from IPs
+set query_results_cache_max_age = time(5m);
+let Signins = materialize(union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, AutonomousSystemNumber),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, AutonomousSystemNumber));
+// Thresholds - adjust to your tenant
+let SprayUsers = 5;    // distinct users from one IP = spray
+let MinUsersToShow = 2;
+let Failed = Signins | where ResultType in ("50126","50053","50034","50055","50056","50057");
+let Successes = Signins | where ResultType == "0" | summarize SuccessfulUsers = make_set(UserPrincipalName, 20) by IPAddress;
+Failed
+| summarize Users = dcount(UserPrincipalName), Failures = count(), TargetedUsers = make_set(UserPrincipalName, 20),
+            ASN = take_any(tostring(AutonomousSystemNumber)), FirstAttempt = min(TimeGenerated), LastAttempt = max(TimeGenerated) by IPAddress
+| where Users >= MinUsersToShow
+| extend AvgPerUser = round(todouble(Failures) / Users, 1)
+| join kind=leftouter Successes on IPAddress
+| extend Compromised = array_length(set_intersect(TargetedUsers, coalesce(SuccessfulUsers, dynamic([])))) > 0
+| extend Severity = case(Users >= SprayUsers and Compromised, "1-Critical (sprayed user signed in)",
+                         Users >= SprayUsers and AvgPerUser <= 3, "2-High (low-and-slow spray)",
+                         Users >= SprayUsers, "3-Medium", "4-Low")
+| project Severity, IPAddress, ASN, Users, Failures, AvgPerUser, TargetedUsers, SuccessfulUsers, FirstAttempt, LastAttempt
+| order by Severity asc, Users desc
+| take 50
+
+// ===== Botnet-style distributed attacks
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AutonomousSystemNumber),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AutonomousSystemNumber);
+// Thresholds - adjust to your tenant
+let BotnetIPs = 5;     // distinct source IPs against one user = distributed
+let MinIPsToShow = 2;
+let Failed = Signins | where ResultType in ("50126","50053","50034","50055","50056","50057");
+Failed
+| extend Country = iff(isempty(Location), tostring(geo_info_from_ip_address(IPAddress).country), Location)
+| summarize Failures = count(), IPs = dcount(IPAddress), ASNs = dcount(tostring(AutonomousSystemNumber)),
+            Countries = dcount(Country), CountryList = make_set(Country, 20), SampleIPs = make_set(IPAddress, 20),
+            FirstAttempt = min(TimeGenerated), LastAttempt = max(TimeGenerated) by UserPrincipalName
+| where IPs >= MinIPsToShow
+| extend Severity = case(IPs >= BotnetIPs and (ASNs >= 3 or Countries >= 3), "1-High (botnet pattern)",
+                         IPs >= BotnetIPs, "2-Medium (many IPs)", "3-Low")
+| project Severity, UserPrincipalName, Failures, IPs, ASNs, Countries, CountryList, SampleIPs, FirstAttempt, LastAttempt
+| order by Severity asc, IPs desc
+| take 50
+
+// ===== Top attacking IPs over time
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType);
+let Failed = Signins | where ResultType != "0" and ResultType !in ("50140","50199");
+let TopIPs = Failed | summarize Failures = count() by IPAddress | top 10 by Failures | project IPAddress;
+Failed
+| where IPAddress in (TopIPs)
+| summarize Failures = count() by bin(TimeGenerated, 1h), IPAddress
+| order by TimeGenerated asc
+
+// ===== Targeted privileged users
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType);
+let Failed = Signins | where ResultType != "0" and ResultType !in ("50140","50199");
+let PrivUsers = external_table('IdentityInfo')
+| summarize arg_max(TimeGenerated, *) by AccountUPN
+| extend Roles = tostring(AssignedRoles)
+| where Roles has "Admin" or Roles has "Administrator"
+| project AccountUPN, AccountDisplayName, Roles;
+Failed
+| summarize Failures = count(), IPs = dcount(IPAddress), LastFailure = max(TimeGenerated) by UserPrincipalName
+| join kind=inner PrivUsers on $left.UserPrincipalName == $right.AccountUPN
+| project UserPrincipalName, AccountDisplayName, Roles, Failures, IPs, LastFailure
+| order by Failures desc
+
+// ===== Logon failures by account / IP / protocol
+set query_results_cache_max_age = time(5m);
+external_table('IdentityLogonEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ActionType == "LogonFailed"
+| where isempty(_user) or AccountUpn =~ _user
+| where isempty(_ip) or IPAddress == _ip
+| summarize Failures = count(), Reasons = make_set(FailureReason, 5), Devices = make_set(DeviceName, 10) by AccountUpn, IPAddress, Protocol
+| extend BruteForce = Failures >= 20
+| order by Failures desc
+| take 50
+
+// ===== UEBA anomalies by user
+set query_results_cache_max_age = time(5m);
+external_table('BehaviorAnalytics')
+| where TimeGenerated between (_startTime .. _endTime)
+| where InvestigationPriority > 0
+| where isempty(_user) or UserPrincipalName =~ _user
+| extend AI = todynamic(ActivityInsights), UI = todynamic(UsersInsights)
+| summarize MaxPriority = max(InvestigationPriority), Events = count(),
+            Activities = make_set(ActionType, 10), IPs = make_set(SourceIPAddress, 10), Locations = make_set(SourceIPLocation, 10),
+            NewCountry = countif(tostring(AI.FirstTimeUserConnectedFromCountry) == "True"),
+            UncommonCountryAmongPeers = countif(tostring(AI.CountryUncommonlyConnectedFromAmongPeers) == "True"),
+            UncommonISP = countif(tostring(AI.ISPUncommonlyUsedInTenant) == "True"),
+            DormantAccount = countif(tostring(UI.IsDormantAccount) == "True")
+    by UserPrincipalName
+| order by MaxPriority desc
+| take 50
+
+// ===== BehaviorAnalytics investigation priority over time
+set query_results_cache_max_age = time(5m);
+let Top = external_table('BehaviorAnalytics')
+| where TimeGenerated between (_startTime .. _endTime)
+| where InvestigationPriority > 0
+| summarize P = max(InvestigationPriority) by UserPrincipalName | top 10 by P | project UserPrincipalName;
+external_table('BehaviorAnalytics')
+| where TimeGenerated between (_startTime .. _endTime)
+| where InvestigationPriority > 0 and UserPrincipalName in (Top)
+| where isempty(_user) or UserPrincipalName =~ _user
+| summarize MaxPriority = max(InvestigationPriority) by bin(TimeGenerated, 1h), UserPrincipalName
+| order by TimeGenerated asc
+
+// ===== High-risk users and events
+set query_results_cache_max_age = time(5m);
+let RiskyUsers = external_table('AADRiskyUsers')
+| summarize arg_max(TimeGenerated, *) by UserPrincipalName
+| where RiskLevel in ("high", "medium") and RiskState in ("atRisk", "confirmedCompromised")
+| project UserPrincipalName, CurrentRiskLevel = RiskLevel, RiskState, RiskLastUpdatedDateTime;
+let RiskEvents = external_table('AADUserRiskEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize RiskEvents = count(), EventTypes = make_set(RiskEventType, 10), MaxEventLevel = max(RiskLevel), IPs = make_set(IpAddress, 10) by UserPrincipalName;
+RiskyUsers
+| join kind=fullouter RiskEvents on UserPrincipalName
+| extend UserPrincipalName = coalesce(UserPrincipalName, UserPrincipalName1), RiskEvents = coalesce(RiskEvents, 0)
+| where isempty(_user) or UserPrincipalName =~ _user
+| project UserPrincipalName, CurrentRiskLevel, RiskState, RiskEvents, EventTypes, MaxEventLevel, IPs, RiskLastUpdatedDateTime
+| order by CurrentRiskLevel asc, RiskEvents desc
+| take 50
+
+// ===== Per-user sign-in anomalies
+set query_results_cache_max_age = time(5m);
+let Signins = materialize(union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType));
+let TopUsers = Signins | summarize C = count() by UserPrincipalName | top 20 by C | project UserPrincipalName;
+Signins
+| where UserPrincipalName in (TopUsers)
+| make-series SignIns = count() default = 0 on TimeGenerated from bin(_startTime, 1h) to _endTime step 1h by UserPrincipalName
+| extend (Anomalies, Score, Baseline) = series_decompose_anomalies(SignIns, 2.5, -1, 'linefit')
+| mv-expand TimeGenerated to typeof(datetime), SignIns to typeof(long), Anomalies to typeof(int), Score to typeof(double)
+| where Anomalies != 0
+| project TimeGenerated, UserPrincipalName, SignIns, Direction = iff(Anomalies > 0, "Spike", "Drop"), Score = round(Score, 2)
+| order by TimeGenerated desc
+
+// ===== Autocluster on failed sign-ins
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, AppDisplayName, ClientAppUsed, Location, AutonomousSystemNumber),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, AppDisplayName, ClientAppUsed, Location, AutonomousSystemNumber);
+let Failed = Signins | where ResultType != "0" and ResultType !in ("50140","50199");
+Failed
+| extend Country = iff(isempty(Location), tostring(geo_info_from_ip_address(IPAddress).country), Location), ASN = tostring(AutonomousSystemNumber)
+| project AppDisplayName, ClientAppUsed, ResultType, Country, ASN
+| evaluate autocluster(0.1)
+
+// ===== Composite identity risk score per user
+set query_results_cache_max_age = time(5m);
+let Signins = materialize(union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location));
+let Failed = Signins | where ResultType != "0" and ResultType !in ("50140","50199");
+let FailedCounts = Failed | summarize Failures = count() by UserPrincipalName;
+let Travel = Signins
+| where ResultType == "0"
+| extend G = geo_info_from_ip_address(IPAddress)
+| extend Lat = todouble(G.latitude), Lon = todouble(G.longitude), Country = iff(isempty(Location), tostring(G.country), Location)
+| where isnotnull(Lat) and isnotnull(Lon)
+| sort by UserPrincipalName asc, TimeGenerated asc
+| extend PrevUser = prev(UserPrincipalName), PrevTime = prev(TimeGenerated), PrevLat = prev(Lat), PrevLon = prev(Lon), PrevIP = prev(IPAddress), PrevCountry = prev(Country)
+| where UserPrincipalName == PrevUser
+| extend DistanceKm = round(geo_distance_2points(Lon, Lat, PrevLon, PrevLat) / 1000.0, 0),
+         Minutes = datetime_diff('minute', TimeGenerated, PrevTime)
+| extend SpeedKmh = round(DistanceKm / (max_of(Minutes, 1) / 60.0), 0)
+| where DistanceKm > 500 and SpeedKmh > 900
+| summarize ImpossibleTravel = count() by UserPrincipalName;
+let UEBA = external_table('BehaviorAnalytics') | where TimeGenerated between (_startTime .. _endTime)
+| summarize UEBA_MaxPriority = max(InvestigationPriority) by UserPrincipalName;
+let Anom = external_table('Anomalies') | where TimeGenerated between (_startTime .. _endTime)
+| summarize AnomalyMaxScore = max(todouble(Score)) by UserPrincipalName;
+let Risk = external_table('AADRiskyUsers') | summarize arg_max(TimeGenerated, RiskLevel, RiskState) by UserPrincipalName
+| where RiskState in ("atRisk", "confirmedCompromised");
+let Priv = external_table('IdentityInfo') | summarize arg_max(TimeGenerated, AssignedRoles) by AccountUPN
+| extend IsPrivileged = tostring(AssignedRoles) has "Admin" | project AccountUPN, IsPrivileged;
+union isfuzzy=true (FailedCounts | project UserPrincipalName), (Travel | project UserPrincipalName), (UEBA | project UserPrincipalName), (Anom | project UserPrincipalName), (Risk | project UserPrincipalName)
+| where isnotempty(UserPrincipalName)
+| distinct UserPrincipalName
+| join kind=leftouter FailedCounts on UserPrincipalName
+| join kind=leftouter Travel on UserPrincipalName
+| join kind=leftouter UEBA on UserPrincipalName
+| join kind=leftouter Anom on UserPrincipalName
+| join kind=leftouter Risk on UserPrincipalName
+| join kind=leftouter Priv on $left.UserPrincipalName == $right.AccountUPN
+| extend Failures = coalesce(Failures, 0), ImpossibleTravel = coalesce(ImpossibleTravel, 0), UEBA_MaxPriority = coalesce(UEBA_MaxPriority, 0),
+         AnomalyMaxScore = coalesce(AnomalyMaxScore, 0.0), IsPrivileged = coalesce(IsPrivileged, false)
+| extend S_UEBA = UEBA_MaxPriority * 2, S_Anomaly = round(AnomalyMaxScore * 10, 1),
+         S_Risk = case(RiskLevel == "high", 30, RiskLevel == "medium", 15, RiskLevel == "low", 5, 0),
+         S_Failures = min_of(Failures / 10, 20), S_Travel = iff(ImpossibleTravel > 0, 25, 0), S_Priv = iff(IsPrivileged, 20, 0)
+| extend RiskScore = S_UEBA + S_Anomaly + S_Risk + S_Failures + S_Travel + S_Priv
+| project UserPrincipalName, RiskScore, S_UEBA, S_Anomaly, S_Risk, S_Failures, S_Travel, S_Priv, Failures, ImpossibleTravel, RiskLevel, IsPrivileged
+| order by RiskScore desc
+| take 25
+
+// ===== Identity summary for _user / _ip
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType);
+let IdInfo = external_table('IdentityInfo') | summarize arg_max(TimeGenerated, *) by AccountUPN;
+Signins
+| summarize SignIns = count(), Failures = countif(ResultType != "0" and ResultType !in ("50140","50199")),
+            IPs = dcount(IPAddress), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by UserPrincipalName
+| join kind=leftouter (IdInfo | project AccountUPN, AccountDisplayName, Department, JobTitle, Manager, Roles = tostring(AssignedRoles), IsAccountEnabled, IsMFARegistered) on $left.UserPrincipalName == $right.AccountUPN
+| project UserPrincipalName, AccountDisplayName, Department, JobTitle, Manager, Roles, IsAccountEnabled, IsMFARegistered, SignIns, Failures, IPs, FirstSeen, LastSeen
+| order by Failures desc
+| take 50
+
+// ===== Unified identity timeline
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, ResultDescription, AppDisplayName),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, ResultDescription, AppDisplayName);
+union isfuzzy=true
+ (Signins | project TimeGenerated, Source = "SignIn", UserPrincipalName, IPAddress, Activity = AppDisplayName, Result = ResultType, Details = ResultDescription),
+ (external_table('AADUserRiskEvents') | where TimeGenerated between (_startTime .. _endTime)
+   | where (isempty(_user) or UserPrincipalName =~ _user) and (isempty(_ip) or IpAddress == _ip)
+   | project TimeGenerated, Source = "RiskEvent", UserPrincipalName, IPAddress = IpAddress, Activity = RiskEventType, Result = RiskLevel, Details = DetectionTimingType),
+ (external_table('BehaviorAnalytics') | where TimeGenerated between (_startTime .. _endTime)
+   | where (isempty(_user) or UserPrincipalName =~ _user) and (isempty(_ip) or SourceIPAddress == _ip)
+   | project TimeGenerated, Source = "UEBA", UserPrincipalName, IPAddress = SourceIPAddress, Activity = ActionType, Result = tostring(InvestigationPriority), Details = tostring(ActivityInsights)),
+ (external_table('Anomalies') | where TimeGenerated between (_startTime .. _endTime)
+   | where (isempty(_user) or UserPrincipalName =~ _user) and (isempty(_ip) or SourceIpAddress == _ip)
+   | project TimeGenerated, Source = "Anomaly", UserPrincipalName, IPAddress = SourceIpAddress, Activity = AnomalyTemplateName, Result = tostring(Score), Details = Description),
+ (external_table('AuditLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | extend Actor = tostring(todynamic(InitiatedBy).user.userPrincipalName), Target = tostring(todynamic(TargetResources)[0].userPrincipalName)
+   | where isempty(_user) or Actor =~ _user or Target =~ _user
+   | where isempty(_ip)
+   | project TimeGenerated, Source = "Audit", UserPrincipalName = coalesce(Target, Actor), IPAddress = tostring(todynamic(InitiatedBy).user.ipAddress), Activity = OperationName, Result = Result, Details = strcat("By ", Actor))
+| order by TimeGenerated desc
+| take 500
+
+// ===== Investigation map for _user / _ip
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location);
+Signins
+| where ResultType !in ("50140","50199")
+| extend Outcome = iff(ResultType == "0", "Success", "Failure")
+| summarize Count = count() by IPAddress, Outcome
+| extend Geo = geo_info_from_ip_address(IPAddress)
+| extend Latitude = todouble(Geo.latitude), Longitude = todouble(Geo.longitude)
+| where isnotnull(Latitude) and isnotnull(Longitude)
+| summarize Count = sum(Count) by Longitude, Latitude, Outcome
+
+// ===== New devices and user agents
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, ClientAppUsed, UserAgent),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, ClientAppUsed, UserAgent);
+let Baseline = external_table('SigninLogs')
+| where TimeGenerated between (datetime_add('day', -14, _startTime) .. _startTime)
+| where isempty(_user) or UserPrincipalName =~ _user
+| project UserPrincipalName, ClientAppUsed, UserAgent
+| summarize by UserPrincipalName, ClientAppUsed, UserAgent
+| extend Device = strcat(ClientAppUsed, " | ", UserAgent)
+| summarize KnownDevices = make_set(Device), KnownAgents = make_set(UserAgent) by UserPrincipalName;
+Signins
+| extend Device = strcat(ClientAppUsed, " | ", UserAgent)
+| summarize FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), SignIns = count() by UserPrincipalName, Device, UserAgent
+| join kind=leftouter Baseline on UserPrincipalName
+| extend NewDevice = isnull(KnownDevices) or not(set_has_element(KnownDevices, Device)),
+         NewUserAgent = isnull(KnownAgents) or not(set_has_element(KnownAgents, UserAgent))
+| where NewDevice or NewUserAgent
+| project FirstSeen, LastSeen, UserPrincipalName, Device, UserAgent, NewDevice, NewUserAgent, SignIns
+| order by FirstSeen desc
+| take 100
+
+// ===== MFA details for _user / _ip
+set query_results_cache_max_age = time(5m);
+let Signins = union
+ (external_table('SigninLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, AppDisplayName, AuthenticationDetails, AuthenticationRequirement),
+ (external_table('AADNonInteractiveUserSignInLogs')
+   | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_ip) or IPAddress == _ip
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, AppDisplayName, AuthenticationDetails, AuthenticationRequirement);
+Signins
+| extend AuthDet = todynamic(AuthenticationDetails)
+| mv-expand AD = iff(array_length(AuthDet) > 0, AuthDet, dynamic([{}]))
+| extend Method = tostring(AD.authenticationMethod), Succeeded = tostring(AD.succeeded), StepResult = tostring(AD.authenticationStepResultDetail)
+| where Method != "Previously satisfied"
+| project TimeGenerated, UserPrincipalName, IPAddress, AppDisplayName, ResultType, AuthenticationRequirement, Method, Succeeded, StepResult
+| order by TimeGenerated desc
+| take 200

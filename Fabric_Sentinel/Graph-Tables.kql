@@ -1,0 +1,142 @@
+// =====================================================================
+// Fabric Graph - node & edge tables built with KQL in SOC_Analytics
+// Run in a SOC_Analytics query window (highlight one command + Run),
+// or schedule the whole script in a pipeline KQL activity (bottom).
+// Needs shortcuts in SOC_Analytics: SigninLogs, AADNonInteractiveUserSignInLogs,
+// IdentityInfo, SecurityIncident, SecurityAlert
+// =====================================================================
+
+// ---------- GRAPH 1: Identity Attack Graph (7 days) ----------
+
+.set-or-replace ia_edge_signsinfrom <|
+union external_table('SigninLogs'), external_table('AADNonInteractiveUserSignInLogs')
+| where TimeGenerated > ago(7d)
+| extend UserId = tolower(UserPrincipalName), R = tostring(ResultType), IP = tostring(IPAddress)
+| where isnotempty(UserId) and isnotempty(IP)
+| summarize SignIns = count(), Failures = countif(R !in ("0", "50140", "50199")), Successes = countif(R == "0"),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated), Location = take_any(tostring(Location)) by UserId, IP
+
+.set-or-replace ia_edge_usesapp <|
+union external_table('SigninLogs'), external_table('AADNonInteractiveUserSignInLogs')
+| where TimeGenerated > ago(7d)
+| extend UserId = tolower(UserPrincipalName), R = tostring(ResultType), App = tostring(AppDisplayName)
+| where isnotempty(UserId) and isnotempty(App)
+| summarize SignIns = count(), Failures = countif(R !in ("0", "50140", "50199")), LastSeen = max(TimeGenerated) by UserId, App
+
+.set-or-replace ia_node_app <|
+ia_edge_usesapp | distinct App
+
+.set-or-replace ia_edge_attacked <|
+EntraBruteForceFindings
+| where TimeGenerated > ago(7d)
+| mv-expand UserId = split(TargetedUsers, ", ") to typeof(string)
+| where isnotempty(UserId)
+| extend Compromised = toint(indexof(CompromisedUsers, UserId) >= 0)
+| summarize LastSeen = max(TimeGenerated), Pattern = take_any(Pattern), Severity = take_any(Severity),
+            Windows = count(), Failures = sum(Failures), Compromised = max(Compromised) by IP = IPAddress, UserId
+
+.set-or-replace ia_node_ipaddress <|
+let S = ia_edge_signsinfrom
+    | summarize Users = dcount(UserId), Failures = sum(Failures), Successes = sum(Successes), Location = take_any(Location) by IP;
+let A = ia_edge_attacked
+    | summarize UsersAttacked = dcount(UserId), AnyCompromise = max(Compromised),
+                SevRank = min(case(Severity == "Critical", 1, Severity == "High", 2, Severity == "Medium", 3, 4)) by IP;
+union (S | project IP), (A | project IP)
+| distinct IP
+| join kind=leftouter S on IP
+| join kind=leftouter A on IP
+| extend G = geo_info_from_ip_address(IP)
+| extend Country = iff(isempty(Location), tostring(G.country), Location)
+| project IP,
+          Country = iff(isempty(Country), "Unknown", Country), City = tostring(G.city),
+          Latitude = todouble(G.latitude), Longitude = todouble(G.longitude),
+          Users = coalesce(Users, long(0)), Failures = coalesce(Failures, long(0)), Successes = coalesce(Successes, long(0)),
+          IsAttacker = isnotnull(UsersAttacked), UsersAttacked = coalesce(UsersAttacked, long(0)),
+          AnyCompromise = coalesce(AnyCompromise, 0),
+          MaxSeverity = case(SevRank == 1, "Critical", SevRank == 2, "High", SevRank == 3, "Medium", SevRank == 4, "Low", "")
+
+.set-or-replace ia_node_country <|
+ia_node_ipaddress | distinct Country
+
+.set-or-replace ia_edge_locatedin <|
+ia_node_ipaddress | project IP, Country
+
+.set-or-replace ia_node_user <|
+let U = union (ia_edge_signsinfrom | project UserId), (ia_edge_usesapp | project UserId), (ia_edge_attacked | project UserId)
+    | distinct UserId;
+let S = ia_edge_signsinfrom | summarize SignIns = sum(SignIns), Failures = sum(Failures), DistinctIPs = dcount(IP) by UserId;
+let Id = external_table('IdentityInfo')
+    | where TimeGenerated > ago(14d)
+    | summarize arg_max(TimeGenerated, *) by UserId = tolower(AccountUPN)
+    | project UserId, DisplayName = tostring(AccountDisplayName), Department = tostring(Department),
+              JobTitle = tostring(JobTitle), IsPrivileged = tostring(AssignedRoles) has "Administrator";
+U
+| join kind=leftouter S on UserId
+| join kind=leftouter Id on UserId
+| project UserId, DisplayName, Department, JobTitle, IsPrivileged = coalesce(IsPrivileged, false),
+          SignIns = coalesce(SignIns, long(0)), Failures = coalesce(Failures, long(0)), DistinctIPs = coalesce(DistinctIPs, long(0))
+
+// ---------- GRAPH 2: Incident Entity Graph (30 days) ----------
+
+.set-or-replace ie_node_incident <|
+external_table('SecurityIncident')
+| where TimeGenerated > ago(30d)
+| summarize arg_max(TimeGenerated, *) by IncidentNumber
+| project IncidentId = tostring(IncidentNumber), Title = tostring(Title), Severity = tostring(Severity), Status = tostring(Status),
+          Classification = tostring(Classification), CreatedTime = todatetime(CreatedTime),
+          Owner = coalesce(tostring(todynamic(tostring(Owner)).assignedTo), "Unassigned"), AlertIds = tostring(AlertIds)
+| join kind=leftouter (DailyIncidentRiskFindings
+    | summarize arg_max(ReportDate, RiskScore, RiskTier) by IncidentId = tostring(IncidentNumber)
+    | project IncidentId, RiskScore, RiskTier) on IncidentId
+| project-away IncidentId1
+
+.set-or-replace ie_node_alert <|
+external_table('SecurityAlert')
+| where TimeGenerated > ago(30d)
+| summarize arg_max(TimeGenerated, AlertName, AlertSeverity, Tactics, ProductName) by AlertId = tostring(SystemAlertId)
+| project AlertId, TimeGenerated, AlertName = tostring(AlertName), Severity = tostring(AlertSeverity),
+          Tactics = tostring(Tactics), ProductName = tostring(ProductName)
+
+.set-or-replace ie_edge_hasalert <|
+ie_node_incident
+| mv-expand AlertId = todynamic(AlertIds) to typeof(string)
+| where isnotempty(AlertId)
+| join kind=inner (ie_node_alert | project AlertId) on AlertId
+| distinct IncidentId, AlertId
+
+.set-or-replace ie_stage_entities <|
+external_table('SecurityAlert')
+| where TimeGenerated > ago(30d)
+| summarize arg_max(TimeGenerated, Entities) by AlertId = tostring(SystemAlertId)
+| mv-expand E = todynamic(tostring(Entities))
+| extend T = tolower(tostring(E.Type))
+| extend EntityId = case(
+    T == "account", tolower(iff(isnotempty(tostring(E.UPNSuffix)), strcat(tostring(E.Name), "@", tostring(E.UPNSuffix)), tostring(E.Name))),
+    T == "mailbox", tolower(tostring(E.MailboxPrimaryAddress)),
+    T == "host", tolower(tostring(E.HostName)),
+    T == "ip", tostring(E.Address), ""),
+         Kind = case(T in ("account", "mailbox"), "User", T == "host", "Host", T == "ip", "IP", "")
+| where isnotempty(EntityId) and isnotempty(Kind)
+| distinct AlertId, Kind, EntityId
+
+.set-or-replace ie_edge_involvesuser <|
+ie_stage_entities | where Kind == "User" | project AlertId, UserId = EntityId
+
+.set-or-replace ie_edge_involveshost <|
+ie_stage_entities | where Kind == "Host" | project AlertId, HostId = EntityId
+
+.set-or-replace ie_edge_involvesip <|
+ie_stage_entities | where Kind == "IP" | project AlertId, IP = EntityId
+
+.set-or-replace ie_node_user <|
+ie_edge_involvesuser | summarize Alerts = dcount(AlertId) by UserId
+
+.set-or-replace ie_node_host <|
+ie_edge_involveshost | summarize Alerts = dcount(AlertId) by HostId
+
+.set-or-replace ie_node_ipaddress <|
+ie_edge_involvesip
+| summarize Alerts = dcount(AlertId) by IP
+| join kind=leftouter (ia_node_ipaddress | project IP, Country, IsAttacker) on IP
+| extend G = geo_info_from_ip_address(IP)
+| project IP, Alerts, Country = iff(isempty(Country), tostring(G.country), Country), IsAttacker = coalesce(IsAttacker, false)

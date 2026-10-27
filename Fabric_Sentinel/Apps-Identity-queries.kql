@@ -1,0 +1,533 @@
+// ===== [1 - Apps Overview] Users signing in
+set query_results_cache_max_age = time(5m);
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Interactive"),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Non-interactive");
+Sign | where ResultType == "0" | summarize Users = dcount(UserPrincipalName)
+
+// ===== [1 - Apps Overview] Applications used
+set query_results_cache_max_age = time(5m);
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Interactive"),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Non-interactive");
+Sign | where ResultType == "0" | summarize Apps = dcount(AppDisplayName)
+
+// ===== [1 - Apps Overview] Sign-ins by application (top 15)
+set query_results_cache_max_age = time(5m);
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Interactive"),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Non-interactive");
+Sign | summarize SignIns = count() by AppDisplayName | top 15 by SignIns
+
+// ===== [1 - Apps Overview] Failed sign-ins by application
+set query_results_cache_max_age = time(5m);
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Interactive"),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Non-interactive");
+Sign | where ResultType !in ("0", "50140", "50199") | summarize Failures = count() by AppDisplayName | top 15 by Failures
+
+// ===== [1 - Apps Overview] Sign-ins over time: users vs service principals vs managed identities
+set query_results_cache_max_age = time(5m);
+let Step = iff(_endTime - _startTime > 3d, 6h, 1h);
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Interactive"),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Non-interactive");
+let Spn = external_table('AADServicePrincipalSignInLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend SpName = coalesce(tostring(P.ServicePrincipalName), tostring(P.AppDisplayName)), SpAppId = tostring(P.AppId), Resource = tostring(P.ResourceDisplayName), Loc = tostring(P.Location)
+| where isempty(_app) or SpName has _app or SpAppId has _app
+| project TimeGenerated, SpName, SpAppId, IPAddress, ResultType, Resource, Loc;
+let Mi = external_table('AADManagedIdentitySignInLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend SpName = coalesce(tostring(P.ServicePrincipalName), tostring(P.AppDisplayName)), Resource = tostring(P.ResourceDisplayName)
+| where isempty(_app) or SpName has _app
+| project TimeGenerated, SpName, IPAddress = tostring(P.IPAddress), ResultType, Resource;
+union
+ (Sign | project TimeGenerated, Type = Kind),
+ (Spn | project TimeGenerated, Type = "Service principal"),
+ (Mi | project TimeGenerated, Type = "Managed identity")
+| summarize SignIns = count() by bin(TimeGenerated, Step), Type
+| order by TimeGenerated asc
+
+// ===== [1 - Apps Overview] Legacy and unusual client apps
+set query_results_cache_max_age = time(5m);
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Interactive"),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Non-interactive");
+Sign
+| where ClientAppUsed !in~ ("Browser", "Mobile Apps and Desktop clients", "")
+| summarize SignIns = count(), Success = countif(ResultType == "0"), Users = dcount(UserPrincipalName), UserList = make_set(UserPrincipalName, 10), IPs = make_set(IPAddress, 10) by ClientAppUsed, AppDisplayName
+| extend Severity = case(Success > 0 and ClientAppUsed has_any ("IMAP", "POP", "SMTP", "Exchange ActiveSync", "Authenticated SMTP", "Other clients", "Exchange Web Services", "MAPI"), "1-High (legacy auth succeeded)", Success > 0, "2-Medium", "3-Low (blocked)")
+| order by Severity asc, SignIns desc
+| take 50
+
+// ===== [2 - Cloud App Activity (CloudAppEvents)] Activity by cloud app
+set query_results_cache_max_age = time(5m);
+let Cae = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend R = todynamic(tostring(P.RawEventData))
+| extend User = tolower(coalesce(tostring(R.UserId), tostring(P.AccountId), tostring(P.AccountDisplayName))), App = tostring(P.Application), Country = tostring(P.CountryCode),
+         Isp = tostring(P.ISP), AnonProxy = tostring(P.IsAnonymousProxy) in~ ("true", "1"), AdminOp = tostring(P.IsAdminOperation) in~ ("true", "1")
+| where isempty(_user) or User =~ _user
+| where isempty(_app) or App has _app;
+Cae | summarize Events = count() by App | top 15 by Events
+
+// ===== [2 - Cloud App Activity (CloudAppEvents)] Admin operations by app and action
+set query_results_cache_max_age = time(5m);
+let Cae = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend R = todynamic(tostring(P.RawEventData))
+| extend User = tolower(coalesce(tostring(R.UserId), tostring(P.AccountId), tostring(P.AccountDisplayName))), App = tostring(P.Application), Country = tostring(P.CountryCode),
+         Isp = tostring(P.ISP), AnonProxy = tostring(P.IsAnonymousProxy) in~ ("true", "1"), AdminOp = tostring(P.IsAdminOperation) in~ ("true", "1")
+| where isempty(_user) or User =~ _user
+| where isempty(_app) or App has _app;
+Cae | where AdminOp | summarize Events = count(), Admins = make_set(User, 10), LastSeen = max(TimeGenerated) by App, ActionType | order by Events desc | take 50
+
+// ===== [2 - Cloud App Activity (CloudAppEvents)] Activity through anonymous proxies / Tor
+set query_results_cache_max_age = time(5m);
+let Cae = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend R = todynamic(tostring(P.RawEventData))
+| extend User = tolower(coalesce(tostring(R.UserId), tostring(P.AccountId), tostring(P.AccountDisplayName))), App = tostring(P.Application), Country = tostring(P.CountryCode),
+         Isp = tostring(P.ISP), AnonProxy = tostring(P.IsAnonymousProxy) in~ ("true", "1"), AdminOp = tostring(P.IsAdminOperation) in~ ("true", "1")
+| where isempty(_user) or User =~ _user
+| where isempty(_app) or App has _app;
+Cae
+| where AnonProxy
+| summarize Events = count(), Actions = make_set(ActionType, 10), Apps = make_set(App, 5), IPs = make_set(tostring(P.IPAddress), 10), Countries = make_set(Country, 5), LastSeen = max(TimeGenerated) by User
+| extend Severity = iff(tostring(Actions) has_any ("Download", "Send", "Rule", "Consent", "Add", "Delete", "Update"), "1-High (sensitive actions)", "2-Medium")
+| order by Severity asc, Events desc
+| take 50
+
+// ===== [2 - Cloud App Activity (CloudAppEvents)] Mass download / deletion / sharing per user
+set query_results_cache_max_age = time(5m);
+let Cae = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend R = todynamic(tostring(P.RawEventData))
+| extend User = tolower(coalesce(tostring(R.UserId), tostring(P.AccountId), tostring(P.AccountDisplayName))), App = tostring(P.Application), Country = tostring(P.CountryCode),
+         Isp = tostring(P.ISP), AnonProxy = tostring(P.IsAnonymousProxy) in~ ("true", "1"), AdminOp = tostring(P.IsAdminOperation) in~ ("true", "1")
+| where isempty(_user) or User =~ _user
+| where isempty(_app) or App has _app;
+let Threshold = 100;
+Cae
+| extend Kind = case(ActionType has_any ("FileDownloaded", "FileSyncDownloadedFull"), "Download", ActionType has_any ("FileDeleted", "FileRecycled", "HardDelete", "SoftDelete", "MoveToDeletedItems"), "Delete",
+                     ActionType has_any ("SharingSet", "AnonymousLinkCreated", "SharingInvitationCreated", "AddedToSecureLink"), "Share", "")
+| where isnotempty(Kind)
+| summarize Events = count(), Objects = dcount(tostring(P.ObjectName)), IPs = make_set(tostring(P.IPAddress), 5), Apps = make_set(App, 5) by User, Kind, Hour = bin(TimeGenerated, 1h)
+| extend Severity = case(Events >= Threshold * 5, "1-High", Events >= Threshold, "2-Medium", "3-Low")
+| order by Severity asc, Events desc
+| take 50
+
+// ===== [2 - Cloud App Activity (CloudAppEvents)] Cloud app activity from countries never used for sign-in
+set query_results_cache_max_age = time(5m);
+let Cae = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend R = todynamic(tostring(P.RawEventData))
+| extend User = tolower(coalesce(tostring(R.UserId), tostring(P.AccountId), tostring(P.AccountDisplayName))), App = tostring(P.Application), Country = tostring(P.CountryCode),
+         Isp = tostring(P.ISP), AnonProxy = tostring(P.IsAnonymousProxy) in~ ("true", "1"), AdminOp = tostring(P.IsAdminOperation) in~ ("true", "1")
+| where isempty(_user) or User =~ _user
+| where isempty(_app) or App has _app;
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Interactive"),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Non-interactive");
+let SignCountries = Sign | where ResultType == "0" and isnotempty(Location) | summarize Known = make_set(Location) by User = tolower(UserPrincipalName);
+Cae
+| where isnotempty(Country)
+| summarize Events = count(), Actions = make_set(ActionType, 10), IPs = make_set(tostring(P.IPAddress), 5), LastSeen = max(TimeGenerated) by User, Country
+| join kind=inner SignCountries on User
+| where not(set_has_element(Known, Country))
+| extend Severity = iff(tostring(Actions) has_any ("Download", "Send", "Rule", "Consent", "Delete"), "1-High (possible token theft)", "2-Medium")
+| project Severity, User, Country, KnownSignInCountries = Known, Events, Actions, IPs, LastSeen
+| order by Severity asc, Events desc
+| take 50
+
+// ===== [3 - OAuth Apps & Service Principals] OAuth consents and permission grants
+set query_results_cache_max_age = time(5m);
+let Aud = external_table('AuditLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend IB = todynamic(tostring(InitiatedBy)), TR = todynamic(tostring(TargetResources))
+| extend Actor = coalesce(tostring(IB.user.userPrincipalName), tostring(IB.app.displayName)), ActorIP = coalesce(tostring(IB.user.ipAddress), tostring(IB.app.ipAddress)),
+         Target = coalesce(tostring(TR[0].displayName), tostring(TR[0].userPrincipalName)), TargetType = tostring(TR[0].type), Props = tostring(TR[0].modifiedProperties)
+| where isempty(_user) or Actor =~ _user or Target =~ _user
+| where isempty(_app) or Target has _app or Actor has _app;
+Aud
+| where OperationName has_any ("Consent to application", "Add delegated permission grant", "Add app role assignment to service principal", "Add OAuth2PermissionGrant")
+| extend HighRisk = Props has_any ("Mail.Read", "Mail.ReadWrite", "Mail.Send", "MailboxSettings", "Files.ReadWrite.All", "Sites.ReadWrite.All", "Directory.ReadWrite.All", "RoleManagement.ReadWrite", "AppRoleAssignment.ReadWrite.All", "full_access_as_user", "offline_access", "User.ReadWrite.All", "Application.ReadWrite.All")
+| extend AdminConsent = Props has "IsAdminConsent" and Props has "True"
+| extend Severity = case(HighRisk and AdminConsent, "1-Critical (admin consent, high-risk scopes)", HighRisk, "2-High (high-risk scopes)", "3-Medium")
+| project TimeGenerated, Severity, OperationName, Actor, ActorIP, App = Target, HighRisk, AdminConsent, Props
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [3 - OAuth Apps & Service Principals] New apps, credentials and owners (app persistence)
+set query_results_cache_max_age = time(5m);
+let Aud = external_table('AuditLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend IB = todynamic(tostring(InitiatedBy)), TR = todynamic(tostring(TargetResources))
+| extend Actor = coalesce(tostring(IB.user.userPrincipalName), tostring(IB.app.displayName)), ActorIP = coalesce(tostring(IB.user.ipAddress), tostring(IB.app.ipAddress)),
+         Target = coalesce(tostring(TR[0].displayName), tostring(TR[0].userPrincipalName)), TargetType = tostring(TR[0].type), Props = tostring(TR[0].modifiedProperties)
+| where isempty(_user) or Actor =~ _user or Target =~ _user
+| where isempty(_app) or Target has _app or Actor has _app;
+Aud
+| where OperationName has_any ("Add application", "Add service principal", "Add service principal credentials", "Update application - Certificates and secrets management", "Add owner to application", "Add owner to service principal", "Update application")
+| extend Severity = case(OperationName has_any ("credentials", "Certificates and secrets"), "1-High (new secret/cert)", OperationName has "owner", "2-Medium (owner added)", "3-Low")
+| project TimeGenerated, Severity, OperationName, Actor, ActorIP, App = Target, Result, Props
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [3 - OAuth Apps & Service Principals] Service principal sign-ins: new IPs and failures
+set query_results_cache_max_age = time(5m);
+let Spn = external_table('AADServicePrincipalSignInLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend SpName = coalesce(tostring(P.ServicePrincipalName), tostring(P.AppDisplayName)), SpAppId = tostring(P.AppId), Resource = tostring(P.ResourceDisplayName), Loc = tostring(P.Location)
+| where isempty(_app) or SpName has _app or SpAppId has _app
+| project TimeGenerated, SpName, SpAppId, IPAddress, ResultType, Resource, Loc;
+let Base = external_table('AADServicePrincipalSignInLogs')
+| where TimeGenerated between ((_startTime - 14d) .. _startTime)
+| extend P = pack_all()
+| summarize by SpAppId = tostring(P.AppId), IPAddress;
+Spn
+| join kind=leftouter (Base | extend Known = true) on SpAppId, IPAddress
+| summarize SignIns = count(), Failures = countif(ResultType != "0"), NewIPs = make_set_if(IPAddress, isnull(Known), 10), Resources = make_set(Resource, 5), Locations = make_set(Loc, 5), LastSeen = max(TimeGenerated) by SpName, SpAppId
+| extend NewIPCount = array_length(NewIPs)
+| extend Severity = case(NewIPCount > 0 and Failures > 0, "1-High (new IP + failures)", NewIPCount > 0, "2-Medium (new IP)", Failures >= 10, "3-Medium (failures)", "4-Low")
+| order by Severity asc, NewIPCount desc
+| take 50
+
+// ===== [3 - OAuth Apps & Service Principals] Managed identity sign-ins by resource
+set query_results_cache_max_age = time(5m);
+let Mi = external_table('AADManagedIdentitySignInLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend SpName = coalesce(tostring(P.ServicePrincipalName), tostring(P.AppDisplayName)), Resource = tostring(P.ResourceDisplayName)
+| where isempty(_app) or SpName has _app
+| project TimeGenerated, SpName, IPAddress = tostring(P.IPAddress), ResultType, Resource;
+Mi
+| summarize SignIns = count(), Failures = countif(ResultType != "0"), Resources = make_set(Resource, 10), IPs = make_set(IPAddress, 5), LastSeen = max(TimeGenerated) by SpName
+| order by Failures desc, SignIns desc
+| take 50
+
+// ===== [3 - OAuth Apps & Service Principals] Privileged role assignments
+set query_results_cache_max_age = time(5m);
+let Aud = external_table('AuditLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend IB = todynamic(tostring(InitiatedBy)), TR = todynamic(tostring(TargetResources))
+| extend Actor = coalesce(tostring(IB.user.userPrincipalName), tostring(IB.app.displayName)), ActorIP = coalesce(tostring(IB.user.ipAddress), tostring(IB.app.ipAddress)),
+         Target = coalesce(tostring(TR[0].displayName), tostring(TR[0].userPrincipalName)), TargetType = tostring(TR[0].type), Props = tostring(TR[0].modifiedProperties)
+| where isempty(_user) or Actor =~ _user or Target =~ _user
+| where isempty(_app) or Target has _app or Actor has _app;
+Aud
+| where OperationName has_any ("Add member to role", "Add eligible member to role", "Add scoped member to role", "Add member to role in PIM completed")
+| mv-apply MP = todynamic(Props) on (summarize Role = take_anyif(replace_string(tostring(MP.newValue), '"', ''), tostring(MP.displayName) == "Role.DisplayName"))
+| extend Severity = iff(Props has_any ("Global Administrator", "Privileged Role Administrator", "Application Administrator", "Cloud Application Administrator", "Exchange Administrator", "Security Administrator"), "1-High (tier-0 role)", "2-Medium")
+| project TimeGenerated, Severity, OperationName, Actor, ActorIP, Target, Role, Props
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [4 - Microsoft Graph Activity] Graph requests by calling app
+set query_results_cache_max_age = time(5m);
+let Graph = external_table('MicrosoftGraphActivityLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend Caller = coalesce(tostring(P.AppId), ""), UserId = tostring(P.UserId), SpId = tostring(P.ServicePrincipalId), Uri = tolower(tostring(P.RequestUri)),
+         Method = tostring(P.RequestMethod), Status = toint(P.ResponseStatusCode), Ip = tostring(P.IPAddress), Ua = tostring(P.UserAgent)
+| where isempty(_app) or Caller has _app
+| project TimeGenerated, Caller, UserId, SpId, Uri, Method, Status, Ip, Ua;
+Graph | summarize Requests = count() by Caller | top 15 by Requests
+
+// ===== [4 - Microsoft Graph Activity] Graph errors over time (401 / 403 / 429)
+set query_results_cache_max_age = time(5m);
+let Step = iff(_endTime - _startTime > 3d, 6h, 1h);
+let Graph = external_table('MicrosoftGraphActivityLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend Caller = coalesce(tostring(P.AppId), ""), UserId = tostring(P.UserId), SpId = tostring(P.ServicePrincipalId), Uri = tolower(tostring(P.RequestUri)),
+         Method = tostring(P.RequestMethod), Status = toint(P.ResponseStatusCode), Ip = tostring(P.IPAddress), Ua = tostring(P.UserAgent)
+| where isempty(_app) or Caller has _app
+| project TimeGenerated, Caller, UserId, SpId, Uri, Method, Status, Ip, Ua;
+Graph | where Status in (401, 403, 429) | summarize Requests = count() by bin(TimeGenerated, Step), StatusCode = tostring(Status) | order by TimeGenerated asc
+
+// ===== [4 - Microsoft Graph Activity] Sensitive Graph endpoints by app (mail, files, directory, roles)
+set query_results_cache_max_age = time(5m);
+let Graph = external_table('MicrosoftGraphActivityLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend Caller = coalesce(tostring(P.AppId), ""), UserId = tostring(P.UserId), SpId = tostring(P.ServicePrincipalId), Uri = tolower(tostring(P.RequestUri)),
+         Method = tostring(P.RequestMethod), Status = toint(P.ResponseStatusCode), Ip = tostring(P.IPAddress), Ua = tostring(P.UserAgent)
+| where isempty(_app) or Caller has _app
+| project TimeGenerated, Caller, UserId, SpId, Uri, Method, Status, Ip, Ua;
+Graph
+| extend Area = case(Uri has_any ("/messages", "/mailfolders", "/sendmail"), "Mail", Uri has_any ("/drive", "/drives", "/sites"), "Files", Uri has_any ("/directoryroles", "/rolemanagement", "/approleassignments"), "Roles",
+                     Uri has_any ("/applications", "/serviceprincipals", "/oauth2permissiongrants"), "Apps", Uri has_any ("/users", "/groups", "/devices"), "Directory", Uri has "/security", "Security", "")
+| where isnotempty(Area)
+| summarize Requests = count(), Writes = countif(Method in~ ("POST", "PATCH", "PUT", "DELETE")), Users = dcount(UserId), IPs = make_set(Ip, 5), Agents = make_set(Ua, 3), LastSeen = max(TimeGenerated) by Caller, Area
+| extend Severity = case(Area in ("Mail", "Roles", "Apps") and Writes > 0, "1-High (writes to sensitive area)", Area in ("Mail", "Files") and Requests >= 1000, "2-Medium (bulk read)", "3-Low")
+| order by Severity asc, Requests desc
+| take 50
+
+// ===== [4 - Microsoft Graph Activity] Directory enumeration bursts (many objects per caller)
+set query_results_cache_max_age = time(5m);
+let Graph = external_table('MicrosoftGraphActivityLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend Caller = coalesce(tostring(P.AppId), ""), UserId = tostring(P.UserId), SpId = tostring(P.ServicePrincipalId), Uri = tolower(tostring(P.RequestUri)),
+         Method = tostring(P.RequestMethod), Status = toint(P.ResponseStatusCode), Ip = tostring(P.IPAddress), Ua = tostring(P.UserAgent)
+| where isempty(_app) or Caller has _app
+| project TimeGenerated, Caller, UserId, SpId, Uri, Method, Status, Ip, Ua;
+let Threshold = 500;
+Graph
+| where Uri has_any ("/users", "/groups", "/serviceprincipals", "/applications", "/devices", "/directoryroles") and Method =~ "GET"
+| summarize Requests = count(), Uris = dcount(Uri), IPs = make_set(Ip, 5), Agents = make_set(Ua, 3) by Caller, UserId, Hour = bin(TimeGenerated, 1h)
+| extend Severity = case(Uris >= Threshold and tostring(Agents) has_any ("python", "powershell", "curl", "azurehound", "roadtools", "graphrunner", "go-http"), "1-High (tooling enumeration)", Uris >= Threshold, "2-Medium (bulk enumeration)", "3-Low")
+| order by Severity asc, Uris desc
+| take 50
+
+// ===== [4 - Microsoft Graph Activity] Graph calls from IPs never seen in any sign-in (possible token replay)
+set query_results_cache_max_age = time(5m);
+let Graph = external_table('MicrosoftGraphActivityLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend Caller = coalesce(tostring(P.AppId), ""), UserId = tostring(P.UserId), SpId = tostring(P.ServicePrincipalId), Uri = tolower(tostring(P.RequestUri)),
+         Method = tostring(P.RequestMethod), Status = toint(P.ResponseStatusCode), Ip = tostring(P.IPAddress), Ua = tostring(P.UserAgent)
+| where isempty(_app) or Caller has _app
+| project TimeGenerated, Caller, UserId, SpId, Uri, Method, Status, Ip, Ua;
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Interactive"),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Non-interactive");
+let SignIps = Sign | where ResultType == "0" | summarize by IPAddress;
+let Ids = external_table('IdentityInfo') | summarize arg_max(TimeGenerated, *) by AccountObjectId | project UserId = tostring(AccountObjectId), AccountUPN;
+Graph
+| where isnotempty(UserId) and isnotempty(Ip)
+| join kind=leftanti SignIps on $left.Ip == $right.IPAddress
+| summarize Requests = count(), Uris = make_set(Uri, 5), Callers = make_set(Caller, 5), Agents = make_set(Ua, 3), FirstSeen = min(TimeGenerated) by UserId, Ip
+| join kind=leftouter Ids on UserId
+| extend Country = tostring(geo_info_from_ip_address(Ip).country)
+| extend Severity = case(tostring(Uris) has_any ("/messages", "/mailfolders", "/drive", "/approleassignments", "/rolemanagement"), "1-High (sensitive data from unknown IP)", Requests >= 100, "2-Medium", "3-Low")
+| project Severity, User = coalesce(AccountUPN, UserId), Ip, Country, Requests, Callers, Uris, Agents, FirstSeen
+| order by Severity asc, Requests desc
+| take 50
+
+// ===== [5 - On-Prem Identity (Defender for Identity)] AD logon failures by account and protocol
+set query_results_cache_max_age = time(5m);
+external_table('IdentityLogonEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_user) or AccountUpn =~ _user or AccountName =~ _user
+| where ActionType == "LogonFailed"
+| summarize Failures = count(), Devices = make_set(DeviceName, 5), Targets = make_set(DestinationDeviceName, 5), IPs = make_set(IPAddress, 5), Reasons = make_set(FailureReason, 5) by AccountUpn, Protocol
+| extend Severity = case(Failures >= 50, "1-High", Failures >= 10, "2-Medium", "3-Low")
+| order by Severity asc, Failures desc
+| take 50
+
+// ===== [5 - On-Prem Identity (Defender for Identity)] NTLM and weak-protocol authentication
+set query_results_cache_max_age = time(5m);
+external_table('IdentityLogonEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize Logons = count() by Protocol, ActionType
+| order by Logons desc
+
+// ===== [5 - On-Prem Identity (Defender for Identity)] AD reconnaissance (LDAP / SAMR / DNS queries)
+set query_results_cache_max_age = time(5m);
+external_table('IdentityQueryEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_user) or AccountUpn =~ _user or AccountName =~ _user
+| summarize Queries = count(), Types = make_set(QueryType, 10), Targets = dcount(QueryTarget), SampleTargets = make_set(QueryTarget, 10), Devices = make_set(DeviceName, 5) by AccountUpn, Protocol, ActionType
+| extend Severity = case(Targets >= 100 or tostring(Types) has_any ("AllUsers", "AllGroups", "Admin", "AllComputers", "Spn"), "1-High (broad enumeration)", Targets >= 20, "2-Medium", "3-Low")
+| order by Severity asc, Targets desc
+| take 50
+
+// ===== [5 - On-Prem Identity (Defender for Identity)] Sensitive directory changes (groups, passwords, accounts)
+set query_results_cache_max_age = time(5m);
+external_table('IdentityDirectoryEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_user) or AccountUpn =~ _user or TargetAccountUpn =~ _user
+| extend AF = tostring(AdditionalFields)
+| where ActionType has_any ("Group Membership changed", "Account Password changed", "Account Password Never Expires changed", "Account Disabled changed", "Account Constrained Delegation", "SID-History", "Account Supported Encryption Types changed", "Directory Services replication")
+| extend Severity = case(AF has_any ("Domain Admins", "Enterprise Admins", "Administrators", "Schema Admins", "Account Operators", "Backup Operators") or ActionType has_any ("SID-History", "replication", "Delegation"), "1-High (tier-0)", ActionType has "Password Never Expires", "2-Medium", "3-Low")
+| project TimeGenerated, Severity, ActionType, Actor = AccountUpn, Target = coalesce(TargetAccountUpn, TargetAccountDisplayName), DeviceName, AF
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [6 - Identity x Apps Correlation] Composite identity & app risk per user
+set query_results_cache_max_age = time(5m);
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Interactive"),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Non-interactive");
+let Cae = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend R = todynamic(tostring(P.RawEventData))
+| extend User = tolower(coalesce(tostring(R.UserId), tostring(P.AccountId), tostring(P.AccountDisplayName))), App = tostring(P.Application), Country = tostring(P.CountryCode),
+         Isp = tostring(P.ISP), AnonProxy = tostring(P.IsAnonymousProxy) in~ ("true", "1"), AdminOp = tostring(P.IsAdminOperation) in~ ("true", "1")
+| where isempty(_user) or User =~ _user
+| where isempty(_app) or App has _app;
+let Aud = external_table('AuditLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend IB = todynamic(tostring(InitiatedBy)), TR = todynamic(tostring(TargetResources))
+| extend Actor = coalesce(tostring(IB.user.userPrincipalName), tostring(IB.app.displayName)), ActorIP = coalesce(tostring(IB.user.ipAddress), tostring(IB.app.ipAddress)),
+         Target = coalesce(tostring(TR[0].displayName), tostring(TR[0].userPrincipalName)), TargetType = tostring(TR[0].type), Props = tostring(TR[0].modifiedProperties)
+| where isempty(_user) or Actor =~ _user or Target =~ _user
+| where isempty(_app) or Target has _app or Actor has _app;
+let Risk = external_table('AADUserRiskEvents') | where TimeGenerated between (_startTime .. _endTime)
+| summarize V = count() by User = tolower(UserPrincipalName) | extend Signal = "RiskDetection", Weight = 8;
+let Fails = Sign | where ResultType !in ("0", "50140", "50199") | summarize V = count() by User = tolower(UserPrincipalName) | extend Signal = "FailedSignIns", Weight = 1;
+let Legacy = Sign | where ResultType == "0" and ClientAppUsed has_any ("IMAP", "POP", "SMTP", "ActiveSync", "Other clients") | summarize V = count() by User = tolower(UserPrincipalName) | extend Signal = "LegacyAuth", Weight = 6;
+let Proxy = Cae | where AnonProxy | summarize V = count() by User | extend Signal = "AnonProxyActivity", Weight = 8;
+let Admin = Cae | where AdminOp | summarize V = count() by User | extend Signal = "AdminOperations", Weight = 2;
+let Consent = Aud | where OperationName has "Consent to application" | summarize V = count() by User = tolower(Actor) | extend Signal = "OAuthConsent", Weight = 8;
+let Roles = Aud | where OperationName has "member to role" | summarize V = count() by User = tolower(Target) | extend Signal = "RoleAssigned", Weight = 10;
+union Risk, Fails, Legacy, Proxy, Admin, Consent, Roles
+| where isnotempty(User)
+| extend Points = min_of(V, long(5)) * Weight
+| summarize RiskScore = sum(Points), Signals = make_bag(bag_pack(Signal, V)), SignalCount = dcount(Signal) by User
+| extend Severity = case(RiskScore >= 40 or SignalCount >= 4, "1-High", RiskScore >= 15, "2-Medium", "3-Low")
+| project Severity, User, RiskScore, SignalCount, Signals
+| order by RiskScore desc
+| take 50
+
+// ===== [6 - Identity x Apps Correlation] Risky sign-in followed by app consent or role change (within 24h)
+set query_results_cache_max_age = time(5m);
+let Aud = external_table('AuditLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend IB = todynamic(tostring(InitiatedBy)), TR = todynamic(tostring(TargetResources))
+| extend Actor = coalesce(tostring(IB.user.userPrincipalName), tostring(IB.app.displayName)), ActorIP = coalesce(tostring(IB.user.ipAddress), tostring(IB.app.ipAddress)),
+         Target = coalesce(tostring(TR[0].displayName), tostring(TR[0].userPrincipalName)), TargetType = tostring(TR[0].type), Props = tostring(TR[0].modifiedProperties)
+| where isempty(_user) or Actor =~ _user or Target =~ _user
+| where isempty(_app) or Target has _app or Actor has _app;
+let RiskEv = external_table('AADUserRiskEvents') | where TimeGenerated between ((_startTime - 1d) .. _endTime)
+| project RiskTime = TimeGenerated, User = tolower(UserPrincipalName), RiskEventType, RiskLevel, RiskIp = IpAddress;
+Aud
+| where OperationName has_any ("Consent to application", "member to role", "Add service principal credentials", "Add owner to application", "Update user", "Reset password", "Register security info", "User registered security info")
+| extend User = tolower(Actor)
+| join kind=inner RiskEv on User
+| where TimeGenerated between (RiskTime .. (RiskTime + 24h))
+| extend Severity = case(OperationName has_any ("Consent", "role", "credentials", "owner"), "1-Critical", OperationName has_any ("security info", "Reset password"), "2-High (MFA / password change after risk)", "3-Medium")
+| project TimeGenerated, Severity, User, RiskEventType, RiskLevel, RiskTime, RiskIp, OperationName, Target, ActorIP
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [6 - Identity x Apps Correlation] On-prem recon account also signing in to the cloud from new places
+set query_results_cache_max_age = time(5m);
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Interactive"),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Non-interactive");
+let Recon = external_table('IdentityQueryEvents') | where TimeGenerated between (_startTime .. _endTime)
+| summarize Targets = dcount(QueryTarget), QueryTypes = make_set(QueryType, 5) by User = tolower(AccountUpn) | where Targets >= 20;
+let Base = external_table('SigninLogs') | where TimeGenerated between ((_startTime - 14d) .. _startTime) | where ResultType == "0" | summarize Known = make_set(Location) by User = tolower(UserPrincipalName);
+Sign
+| where ResultType == "0"
+| summarize Countries = make_set(Location, 10), IPs = make_set(IPAddress, 10), Apps = make_set(AppDisplayName, 5) by User = tolower(UserPrincipalName)
+| join kind=inner Recon on User
+| join kind=leftouter Base on User
+| extend NewCountries = set_difference(Countries, coalesce(Known, dynamic([])))
+| extend Severity = iff(array_length(NewCountries) > 0, "1-High (recon + new country)", "2-Medium (recon + cloud activity)")
+| project Severity, User, Targets, QueryTypes, NewCountries, Countries, IPs, Apps
+| order by Severity asc, Targets desc
+| take 50
+
+// ===== [7 - User Investigation] Unified identity & app timeline (set User)
+set query_results_cache_max_age = time(5m);
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Interactive"),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isempty(_user) or UserPrincipalName =~ _user
+   | where isempty(_app) or AppDisplayName has _app
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName, ClientAppUsed, Kind = "Non-interactive");
+let Cae = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend R = todynamic(tostring(P.RawEventData))
+| extend User = tolower(coalesce(tostring(R.UserId), tostring(P.AccountId), tostring(P.AccountDisplayName))), App = tostring(P.Application), Country = tostring(P.CountryCode),
+         Isp = tostring(P.ISP), AnonProxy = tostring(P.IsAnonymousProxy) in~ ("true", "1"), AdminOp = tostring(P.IsAdminOperation) in~ ("true", "1")
+| where isempty(_user) or User =~ _user
+| where isempty(_app) or App has _app;
+let Aud = external_table('AuditLogs')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend IB = todynamic(tostring(InitiatedBy)), TR = todynamic(tostring(TargetResources))
+| extend Actor = coalesce(tostring(IB.user.userPrincipalName), tostring(IB.app.displayName)), ActorIP = coalesce(tostring(IB.user.ipAddress), tostring(IB.app.ipAddress)),
+         Target = coalesce(tostring(TR[0].displayName), tostring(TR[0].userPrincipalName)), TargetType = tostring(TR[0].type), Props = tostring(TR[0].modifiedProperties)
+| where isempty(_user) or Actor =~ _user or Target =~ _user
+| where isempty(_app) or Target has _app or Actor has _app;
+let U = tolower(_user);
+union
+ (Sign | where isnotempty(U) | project TimeGenerated, Source = strcat("SignIn ", Kind), Activity = AppDisplayName, Result = ResultType, IP = IPAddress, Detail = Location),
+ (Cae | where isnotempty(U) | project TimeGenerated, Source = strcat("CloudApp ", App), Activity = ActionType, Result = "", IP = tostring(P.IPAddress), Detail = Country),
+ (Aud | where isnotempty(U) | project TimeGenerated, Source = "EntraAudit", Activity = OperationName, Result = Result, IP = ActorIP, Detail = Target),
+ (external_table('AADUserRiskEvents') | where TimeGenerated between (_startTime .. _endTime) | where isnotempty(U) and UserPrincipalName =~ U
+   | project TimeGenerated, Source = "RiskDetection", Activity = RiskEventType, Result = RiskLevel, IP = IpAddress, Detail = DetectionTimingType),
+ (external_table('IdentityLogonEvents') | where TimeGenerated between (_startTime .. _endTime) | where isnotempty(U) and AccountUpn =~ U
+   | project TimeGenerated, Source = "AD logon", Activity = strcat(ActionType, " ", Protocol), Result = FailureReason, IP = IPAddress, Detail = DestinationDeviceName),
+ (external_table('IdentityDirectoryEvents') | where TimeGenerated between (_startTime .. _endTime) | where isnotempty(U) and (AccountUpn =~ U or TargetAccountUpn =~ U)
+   | project TimeGenerated, Source = "AD change", Activity = ActionType, Result = "", IP = IPAddress, Detail = tostring(AdditionalFields))
+| order by TimeGenerated desc
+| take 500

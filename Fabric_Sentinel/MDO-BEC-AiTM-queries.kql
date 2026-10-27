@@ -1,0 +1,1137 @@
+// ===== [1 - Executive Overview] Threat emails
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+Mail
+| where isnotempty(ThreatTypes)
+| summarize ThreatEmails = count()
+
+// ===== [1 - Executive Overview] Threats delivered to mailbox
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+Mail
+| where isnotempty(ThreatTypes) and DeliveryAction == "Delivered"
+| summarize ThreatsDelivered = count()
+
+// ===== [1 - Executive Overview] Malicious URL click alerts
+set query_results_cache_max_age = time(5m);
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+let Clicks = ClickEv
+| where isempty(_recipient) or AccountUpn =~ _recipient
+| extend ClickedThrough = tostring(IsClickedThrough) in~ ("true", "1")
+;
+Clicks
+| where (ActionType == "ClickAllowed" and isnotempty(ThreatTypes)) or ClickedThrough
+| summarize RiskyClicks = count()
+
+// ===== [1 - Executive Overview] Delivered emails moved after delivery (ZAP / remediation)
+set query_results_cache_max_age = time(5m);
+let PostDel = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where DeliveryAction == "Delivered"
+| extend P0 = pack_all()
+| extend LatestLocation = tostring(P0.LatestDeliveryLocation), LatestAction = tostring(P0.LatestDeliveryAction)
+| where isnotempty(LatestLocation) and LatestLocation != DeliveryLocation
+| project TimeGenerated, NetworkMessageId, RecipientEmailAddress, ThreatTypes, DeliveryLocation = LatestLocation,
+          Action = LatestAction, ActionType = strcat("Moved to ", LatestLocation), ActionResult = "Success", ActionTrigger = iff(isnotempty(ThreatTypes), "ZAP / threat remediation", "Admin or user move");
+PostDel
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where ActionResult =~ "Success"
+| summarize Removals = count()
+
+// ===== [1 - Executive Overview] Email protection funnel
+set query_results_cache_max_age = time(5m);
+let PostDel = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where DeliveryAction == "Delivered"
+| extend P0 = pack_all()
+| extend LatestLocation = tostring(P0.LatestDeliveryLocation), LatestAction = tostring(P0.LatestDeliveryAction)
+| where isnotempty(LatestLocation) and LatestLocation != DeliveryLocation
+| project TimeGenerated, NetworkMessageId, RecipientEmailAddress, ThreatTypes, DeliveryLocation = LatestLocation,
+          Action = LatestAction, ActionType = strcat("Moved to ", LatestLocation), ActionResult = "Success", ActionTrigger = iff(isnotempty(ThreatTypes), "ZAP / threat remediation", "Admin or user move");
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+| project NetworkMessageId, ThreatTypes, DeliveryAction, EmailDirection;
+let M = materialize(Mail);
+let PD = PostDel
+| where ActionResult =~ "Success"
+| distinct NetworkMessageId;
+let Clk = ClickEv
+| where ActionType == "ClickAllowed"
+| distinct NetworkMessageId;
+union
+ (M | where EmailDirection == "Inbound" | summarize Count = count() | extend Stage = "1. Inbound emails"),
+ (M | where isnotempty(ThreatTypes) | summarize Count = count() | extend Stage = "2. Threat detected"),
+ (M | where isnotempty(ThreatTypes) and DeliveryAction != "Delivered" | summarize Count = count() | extend Stage = "3. Blocked / junked at delivery"),
+ (M | where isnotempty(ThreatTypes) and DeliveryAction == "Delivered" | summarize Count = count() | extend Stage = "4. Threat delivered"),
+ (M | where isnotempty(ThreatTypes) and DeliveryAction == "Delivered" and NetworkMessageId in (PD) | summarize Count = count() | extend Stage = "5. Removed post-delivery"),
+ (M | where isnotempty(ThreatTypes) and DeliveryAction == "Delivered" and NetworkMessageId !in (PD) | summarize Count = count() | extend Stage = "6. Still in mailbox"),
+ (M | where isnotempty(ThreatTypes) and NetworkMessageId in (Clk) | summarize Count = count() | extend Stage = "7. Threat link clicked (allowed)")
+| project Stage, Count
+| order by Stage asc
+
+// ===== [1 - Executive Overview] Threat emails over time by threat type
+set query_results_cache_max_age = time(5m);
+let Step = iff(_endTime - _startTime > 3d, 6h, 1h);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+Mail
+| where isnotempty(ThreatTypes)
+| mv-expand Threat = split(ThreatTypes, ",") to typeof(string)
+| extend Threat = trim(" ", Threat)
+| summarize Emails = count() by bin(TimeGenerated, Step), Threat
+| order by TimeGenerated asc
+
+// ===== [1 - Executive Overview] Threats by delivery action and location
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+Mail
+| where isnotempty(ThreatTypes)
+| summarize Emails = count() by DeliveryLocation, DeliveryAction
+| order by Emails desc
+
+// ===== [1 - Executive Overview] Detection technologies (what caught the threats)
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+Mail
+| where isnotempty(ThreatTypes) and isnotempty(tostring(DetectionMethods))
+| project DM = todynamic(tostring(DetectionMethods))
+| mv-expand DM
+| extend Threat = tostring(bag_keys(DM)[0])
+| mv-expand Method = DM[Threat] to typeof(string)
+| where isnotempty(Method)
+| summarize Emails = count() by Technique = strcat(Threat, ": ", Method)
+| top 15 by Emails
+
+// ===== [1 - Executive Overview] Most targeted recipients
+set query_results_cache_max_age = time(5m);
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+let RiskyClicks = ClickEv
+| where (ActionType == "ClickAllowed" and isnotempty(ThreatTypes)) or tostring(IsClickedThrough) in~ ("true", "1")
+| summarize RiskyClicks = count() by Recipient = tolower(AccountUpn);
+Mail
+| where isnotempty(ThreatTypes)
+| summarize Threats = count(), Phish = countif(ThreatTypes has "Phish"), Malware = countif(ThreatTypes has "Malware"),
+            Delivered = countif(DeliveryAction == "Delivered"), Senders = dcount(SenderFromAddress), LastSeen = max(TimeGenerated)
+    by Recipient = tolower(RecipientEmailAddress)
+| join kind=leftouter RiskyClicks on Recipient
+| extend RiskyClicks = coalesce(RiskyClicks, long(0))
+| extend Severity = case(RiskyClicks > 0 and Delivered > 0, "1-High (delivered + clicked)", Delivered > 0, "2-Medium (threat delivered)", "3-Low (blocked)")
+| project Severity, Recipient, Threats, Phish, Malware, Delivered, RiskyClicks, Senders, LastSeen
+| order by Severity asc, Threats desc
+| take 50
+
+// ===== [1 - Executive Overview] Top attacking sender domains
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+| extend A = todynamic(tostring(AuthenticationDetails))
+| extend SPF = tostring(A.SPF), DKIM = tostring(A.DKIM), DMARC = tostring(A.DMARC), CompAuth = tostring(A.CompAuth)
+| extend AuthFail = DMARC =~ "fail" or SPF in~ ("fail", "softfail") or CompAuth =~ "fail"
+;
+Mail
+| where isnotempty(ThreatTypes)
+| summarize Threats = count(), Recipients = dcount(RecipientEmailAddress), Delivered = countif(DeliveryAction == "Delivered"),
+            AuthFails = countif(AuthFail), ThreatTypes = make_set(ThreatTypes, 5), SenderIPs = make_set(SenderIPv4, 10),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by SenderFromDomain
+| order by Delivered desc, Threats desc
+| take 50
+
+// ===== [2 - BEC Detection] BEC financial / urgency lures from external senders
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+let InternalDomains = external_table('EmailEvents')
+| where TimeGenerated between ((_startTime - 14d) .. _endTime)
+| where EmailDirection in ("Outbound", "Intra-org")
+| distinct SenderFromDomain;
+let Keywords = dynamic(["invoice","payment","wire","transfer","bank details","banking","remittance","overdue","urgent","gift card","payroll","direct deposit","iban","swift","ach","purchase order","w-2","account change","new bank","factura","pago","transferencia","urgente","fattura","rechnung"]);
+let Seen = external_table('EmailEvents')
+| where TimeGenerated between ((_startTime - 14d) .. _startTime)
+| where EmailDirection == "Inbound"
+| summarize make_set(SenderFromDomain);
+let SeenSet = toscalar(Seen);
+Mail
+| where EmailDirection == "Inbound" and SenderFromDomain !in (InternalDomains)
+| where Subject has_any (Keywords)
+| extend A = todynamic(tostring(AuthenticationDetails))
+| extend SPF = tostring(A.SPF), DKIM = tostring(A.DKIM), DMARC = tostring(A.DMARC), CompAuth = tostring(A.CompAuth)
+| extend AuthFail = DMARC =~ "fail" or SPF in~ ("fail", "softfail") or CompAuth =~ "fail"
+| extend FirstSeenDomain = not(set_has_element(SeenSet, SenderFromDomain)), EnvelopeMismatch = SenderMailFromDomain != SenderFromDomain
+| extend Score = toint(DeliveryAction == "Delivered") * 2 + toint(AuthFail) * 2 + toint(FirstSeenDomain) * 2 + toint(EnvelopeMismatch) + toint(isnotempty(ThreatTypes)) * 2
+| extend Severity = case(Score >= 6, "1-High", Score >= 3, "2-Medium", "3-Low")
+| project TimeGenerated, Severity, Score, RecipientEmailAddress, SenderDisplayName, SenderFromAddress, SenderFromDomain, Subject,
+          DeliveryAction, DeliveryLocation, ThreatTypes, AuthFail, FirstSeenDomain, EnvelopeMismatch, SenderIPv4, NetworkMessageId
+| order by Severity asc, Score desc, TimeGenerated desc
+| take 50
+
+// ===== [2 - BEC Detection] Display-name impersonation of internal users / VIPs
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+let InternalDomains = external_table('EmailEvents')
+| where TimeGenerated between ((_startTime - 14d) .. _endTime)
+| where EmailDirection in ("Outbound", "Intra-org")
+| distinct SenderFromDomain;
+let InternalNames = external_table('EmailEvents')
+| where TimeGenerated between ((_startTime - 14d) .. _endTime)
+| where EmailDirection in ("Outbound", "Intra-org") and isnotempty(SenderDisplayName)
+| summarize by Name = tolower(trim(" ", SenderDisplayName))
+| where strlen(Name) > 4
+| summarize make_set(Name);
+let InternalNameSet = toscalar(InternalNames);
+let VipList = toscalar(print V = split(tolower(_vips), ",")
+| mv-expand V to typeof(string)
+| extend V = trim(" ", V)
+| where isnotempty(V)
+| summarize make_list(V));
+Mail
+| where EmailDirection == "Inbound" and SenderFromDomain !in (InternalDomains)
+| extend Name = tolower(trim(" ", SenderDisplayName))
+| extend MatchesInternalName = set_has_element(InternalNameSet, Name),
+         MatchesVip = array_length(VipList) > 0 and Name has_any (VipList)
+| where MatchesInternalName or MatchesVip
+| extend Severity = case(MatchesVip and DeliveryAction == "Delivered", "1-High (VIP impersonation delivered)",
+                         DeliveryAction == "Delivered", "2-Medium (internal name delivered)", "3-Low (blocked)")
+| project TimeGenerated, Severity, SenderDisplayName, SenderFromAddress, RecipientEmailAddress, Subject, DeliveryAction, ThreatTypes, MatchesVip, SenderIPv4, NetworkMessageId
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [2 - BEC Detection] Email authentication failures (SPF / DKIM / DMARC / CompAuth)
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+| extend A = todynamic(tostring(AuthenticationDetails))
+| extend SPF = tostring(A.SPF), DKIM = tostring(A.DKIM), DMARC = tostring(A.DMARC), CompAuth = tostring(A.CompAuth)
+| extend AuthFail = DMARC =~ "fail" or SPF in~ ("fail", "softfail") or CompAuth =~ "fail"
+;
+Mail
+| where EmailDirection == "Inbound" and AuthFail
+| summarize Emails = count(), Delivered = countif(DeliveryAction == "Delivered"), Recipients = dcount(RecipientEmailAddress),
+            SPFFail = countif(SPF in~ ("fail", "softfail")), DKIMFail = countif(DKIM =~ "fail"), DMARCFail = countif(DMARC =~ "fail"),
+            CompAuthFail = countif(CompAuth =~ "fail"), Threats = countif(isnotempty(ThreatTypes)), Subjects = make_set(Subject, 5)
+    by SenderFromDomain
+| extend Severity = case(Delivered > 0 and DMARCFail > 0, "1-High (DMARC fail delivered)", Delivered > 0, "2-Medium (auth fail delivered)", "3-Low")
+| project Severity, SenderFromDomain, Emails, Delivered, Recipients, SPFFail, DKIMFail, DMARCFail, CompAuthFail, Threats, Subjects
+| order by Severity asc, Delivered desc
+| take 50
+
+// ===== [2 - BEC Detection] Look-alike / cousin domains of your domains
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+let InternalDomains = external_table('EmailEvents')
+| where TimeGenerated between ((_startTime - 14d) .. _endTime)
+| where EmailDirection in ("Outbound", "Intra-org")
+| distinct SenderFromDomain;
+let Norm = (s:string) { replace_string(replace_string(translate("0135$@", "olessa", tolower(s)), "rn", "m"), "vv", "w") };
+let Roots = InternalDomains
+| extend Root = tolower(tostring(split(SenderFromDomain, ".")[0]))
+| where strlen(Root) >= 4
+| distinct Root
+| extend RootN = Norm(Root), K = 1;
+Mail
+| where EmailDirection == "Inbound" and SenderFromDomain !in (InternalDomains)
+| summarize Emails = count(), Recipients = dcount(RecipientEmailAddress), Delivered = countif(DeliveryAction == "Delivered"),
+            Threats = countif(isnotempty(ThreatTypes)), Subjects = make_set(Subject, 5), FirstSeen = min(TimeGenerated) by SenderFromDomain
+| extend SRoot = tolower(tostring(split(SenderFromDomain, ".")[0])), K = 1
+| extend SRootN = Norm(SRoot)
+| join kind=inner Roots on K
+| where SRootN == RootN or (SRoot != Root and indexof(SRoot, Root) >= 0)
+| extend Technique = iff(SRootN == RootN and SRoot != Root, "Homoglyph (0/o, 1/l, rn/m)", iff(SRoot == Root, "Same name, different TLD", "Brand inside domain"))
+| extend Severity = case(Delivered > 0, "1-High (delivered)", "2-Medium")
+| project Severity, SenderFromDomain, ImpersonatedRoot = Root, Technique, Emails, Recipients, Delivered, Threats, Subjects, FirstSeen
+| order by Severity asc, Emails desc
+| take 50
+
+// ===== [2 - BEC Detection] First-contact sender domains (not seen in previous 14 days)
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+let InternalDomains = external_table('EmailEvents')
+| where TimeGenerated between ((_startTime - 14d) .. _endTime)
+| where EmailDirection in ("Outbound", "Intra-org")
+| distinct SenderFromDomain;
+let Seen = external_table('EmailEvents')
+| where TimeGenerated between ((_startTime - 14d) .. _startTime)
+| where EmailDirection == "Inbound"
+| distinct SenderFromDomain;
+Mail
+| where EmailDirection == "Inbound" and SenderFromDomain !in (InternalDomains) and SenderFromDomain !in (Seen)
+| extend A = todynamic(tostring(AuthenticationDetails))
+| extend SPF = tostring(A.SPF), DKIM = tostring(A.DKIM), DMARC = tostring(A.DMARC), CompAuth = tostring(A.CompAuth)
+| extend AuthFail = DMARC =~ "fail" or SPF in~ ("fail", "softfail") or CompAuth =~ "fail"
+| summarize Emails = count(), Recipients = dcount(RecipientEmailAddress), Delivered = countif(DeliveryAction == "Delivered"),
+            Threats = countif(isnotempty(ThreatTypes)), AuthFails = countif(AuthFail), Subjects = make_set(Subject, 5),
+            FirstSeen = min(TimeGenerated) by SenderFromDomain
+| extend Severity = case(Delivered > 0 and (AuthFails > 0 or Threats > 0), "1-High", Recipients >= 5, "2-Medium (broad first contact)", "3-Low")
+| project Severity, SenderFromDomain, Emails, Recipients, Delivered, Threats, AuthFails, Subjects, FirstSeen
+| order by Severity asc, Recipients desc
+| take 50
+
+// ===== [2 - BEC Detection] Possible compromised internal mailboxes (outbound anomalies)
+set query_results_cache_max_age = time(5m);
+let Days = max_of((_endTime - _startTime) / 1d, 1.0);
+let Out = external_table('EmailEvents')
+| where TimeGenerated between ((_startTime - 14d) .. _endTime)
+| where EmailDirection == "Outbound"
+| where isempty(_recipient) or SenderFromAddress =~ _recipient
+| project TimeGenerated, SenderFromAddress, RecipientEmailAddress, ThreatTypes, Subject;
+let Base = Out | where TimeGenerated < _startTime | summarize BaseDaily = count() / 14.0 by SenderFromAddress;
+Out
+| where TimeGenerated >= _startTime
+| summarize Sent = count(), Recipients = dcount(RecipientEmailAddress), OutboundThreats = countif(isnotempty(ThreatTypes)),
+            ThreatSubjects = make_set_if(Subject, isnotempty(ThreatTypes), 5) by SenderFromAddress
+| join kind=leftouter Base on SenderFromAddress
+| extend BaseDaily = round(coalesce(BaseDaily, 0.0), 1), CurrentDaily = round(Sent / Days, 1)
+| extend SpikeRatio = round(CurrentDaily / max_of(BaseDaily, 1.0), 1)
+| extend Severity = case(OutboundThreats > 0, "1-High (outbound threat detected)", SpikeRatio >= 5 and Sent >= 20, "2-Medium (volume spike)", "3-Low")
+| project Severity, SenderFromAddress, Sent, Recipients, CurrentDaily, BaseDaily, SpikeRatio, OutboundThreats, ThreatSubjects
+| order by Severity asc, SpikeRatio desc
+| take 50
+
+// ===== [3 - AiTM & Credential Phishing] AiTM kill chain per user: phish -> click -> new-IP sign-in -> mailbox change
+set query_results_cache_max_age = time(5m);
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+let Clicks = ClickEv
+| where isempty(_recipient) or AccountUpn =~ _recipient
+| extend ClickedThrough = tostring(IsClickedThrough) in~ ("true", "1");
+let Window = 4h;
+let PhishIds = Mail | where isnotempty(ThreatTypes) | distinct NetworkMessageId;
+let PhishD = Mail
+| where ThreatTypes has "Phish" and DeliveryAction == "Delivered"
+| summarize PhishDelivered = count(), FirstPhish = min(TimeGenerated), PhishSubjects = make_set(Subject, 5), PhishSenders = make_set(SenderFromAddress, 5)
+    by User = tolower(RecipientEmailAddress);
+let RiskClicks = Clicks
+| where isnotempty(ThreatTypes) or ClickedThrough or NetworkMessageId in (PhishIds)
+| where ActionType == "ClickAllowed" or ClickedThrough
+| summarize RiskyClicks = count(), FirstClick = min(TimeGenerated), ClickIPs = make_set(IPAddress, 5), Urls = make_set(Url, 5)
+    by User = tolower(AccountUpn);
+let Exposed = materialize(PhishD
+| join kind=fullouter RiskClicks on User
+| extend User = coalesce(User, User1)
+| where isnotempty(User)
+| extend Exposure = min_of(coalesce(FirstPhish, datetime(2100-01-01)), coalesce(FirstClick, datetime(2100-01-01)))
+| project-away User1);
+let ExUsers = Exposed | project User;
+let Base = union
+ (external_table('SigninLogs') | where TimeGenerated between ((_startTime - 14d) .. _startTime)
+   | where tolower(UserPrincipalName) in (ExUsers)
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between ((_startTime - 14d) .. _startTime)
+   | where tolower(UserPrincipalName) in (ExUsers)
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName)
+| where ResultType == "0"
+| summarize by User = tolower(UserPrincipalName), IPAddress;
+let NewIP = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. (_endTime + Window))
+   | where tolower(UserPrincipalName) in (ExUsers)
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. (_endTime + Window))
+   | where tolower(UserPrincipalName) in (ExUsers)
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName)
+| where ResultType == "0"
+| extend User = tolower(UserPrincipalName)
+| join kind=leftanti Base on User, IPAddress;
+let SignAfter = Exposed
+| project User, Exposure
+| join kind=inner NewIP on User
+| where TimeGenerated between (Exposure .. (Exposure + Window))
+| summarize NewIPSignins = count(), SigninIPs = make_set(IPAddress, 5), Countries = make_set(Location, 5), Apps = make_set(AppDisplayName, 5), FirstNewSignin = min(TimeGenerated) by User;
+let Mbx = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. (_endTime + Window))
+| where ActionType in~ ("New-InboxRule","Set-InboxRule","UpdateInboxRules","Set-Mailbox","Add-MailboxPermission","Set-TransportRule","New-TransportRule")
+| extend User = tolower(tostring(todynamic(tostring(RawEventData)).UserId))
+| summarize MailboxChanges = count(), MailboxActions = make_set(ActionType, 5) by User;
+Exposed
+| join kind=leftouter SignAfter on User
+| join kind=leftouter Mbx on User
+| extend PhishDelivered = coalesce(PhishDelivered, long(0)), RiskyClicks = coalesce(RiskyClicks, long(0)), NewIPSignins = coalesce(NewIPSignins, long(0)), MailboxChanges = coalesce(MailboxChanges, long(0))
+| extend Severity = case(RiskyClicks > 0 and NewIPSignins > 0 and MailboxChanges > 0, "1-Critical (full AiTM chain)",
+                         RiskyClicks > 0 and NewIPSignins > 0, "2-High (click + new-IP sign-in)",
+                         NewIPSignins > 0, "3-Medium (exposure + new-IP sign-in)",
+                         RiskyClicks > 0, "4-Medium (risky click)", "5-Low (phish delivered)")
+| project Severity, User, PhishDelivered, RiskyClicks, NewIPSignins, MailboxChanges, Exposure, FirstClick, FirstNewSignin,
+          ClickIPs, SigninIPs, Countries, Apps, MailboxActions, PhishSubjects, PhishSenders, Urls
+| order by Severity asc, Exposure desc
+| take 50
+
+// ===== [3 - AiTM & Credential Phishing] Credential-harvest / AiTM-style URLs in email
+set query_results_cache_max_age = time(5m);
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+| project NetworkMessageId, RecipientEmailAddress, DeliveryAction, ThreatTypes, EmailDirection;
+let Pattern = @"(?i)(login|log-in|signin|sign-in|verify|validate|sso|oauth|auth|password|passwd|mfa|2fa|secure|account|o365|office|microsoft|m365|outlook|sharepoint|onedrive|docusign|adobe|wetransfer)";
+let Hosting = dynamic(["workers.dev","pages.dev","ipfs","ngrok","glitch.me","firebaseapp.com","web.app","r2.dev","azurewebsites.net","blob.core.windows.net","github.io","netlify.app","vercel.app","weebly","wixsite","square.site","replit","onrender.com","herokuapp.com","trycloudflare.com"]);
+let Legit = dynamic(["microsoft.com","microsoftonline.com","office.com","office365.com","live.com","outlook.com","sharepoint.com","microsoft365.com","aka.ms","windows.net","azure.com","safelinks.protection.outlook.com"]);
+let ClickedUrls = ClickEv
+| summarize Clicks = count(), Allowed = countif(ActionType == "ClickAllowed"), Clickers = strcat_array(make_set(AccountUpn, 10), ", ") by Url;
+external_table('EmailUrlInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| project NetworkMessageId, Url, UrlDomain = tolower(UrlDomain)
+| join kind=inner (Mail | where EmailDirection == "Inbound") on NetworkMessageId
+| where not(UrlDomain has_any (Legit))
+| extend KeywordHit = Url matches regex Pattern, HostingHit = UrlDomain has_any (Hosting)
+| where KeywordHit or HostingHit or isnotempty(ThreatTypes)
+| join kind=leftouter ClickedUrls on Url
+| summarize Emails = dcount(NetworkMessageId), Recipients = dcount(RecipientEmailAddress), Delivered = dcountif(NetworkMessageId, DeliveryAction == "Delivered"),
+            Flagged = dcountif(NetworkMessageId, isnotempty(ThreatTypes)), AllowedClicks = sum(Allowed),
+            KeywordHit = max(toint(KeywordHit)), HostingHit = max(toint(HostingHit)), SampleUrls = make_set(Url, 3), Clickers = make_set_if(Clickers, isnotempty(Clickers), 10)
+    by UrlDomain
+| extend Severity = case(AllowedClicks > 0 and Delivered > 0, "1-High (delivered + clicked)", Delivered > 0 and Flagged == 0 and (HostingHit == 1 or KeywordHit == 1), "2-Medium (delivered, not flagged)", Delivered > 0, "3-Medium", "4-Low (blocked)")
+| project Severity, UrlDomain, Emails, Recipients, Delivered, Flagged, AllowedClicks, KeywordHit, HostingHit, SampleUrls, Clickers
+| order by Severity asc, AllowedClicks desc, Delivered desc
+| take 50
+
+// ===== [3 - AiTM & Credential Phishing] QR-code phishing (quishing)
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+| project NetworkMessageId, TimeGenerated, RecipientEmailAddress, SenderFromAddress, Subject, DeliveryAction, ThreatTypes, DetectionMethods;
+let QrIds = external_table('EmailUrlInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| where tostring(P.UrlLocation) has "QR"
+| summarize QrUrls = make_set(Url, 5) by NetworkMessageId;
+Mail
+| join kind=leftouter QrIds on NetworkMessageId
+| where isnotempty(QrUrls) or tostring(DetectionMethods) has "QR"
+| extend Severity = case(DeliveryAction == "Delivered" and isnotempty(ThreatTypes), "1-High (malicious QR delivered)", DeliveryAction == "Delivered", "2-Medium (QR delivered)", "3-Low (blocked)")
+| project TimeGenerated, Severity, RecipientEmailAddress, SenderFromAddress, Subject, DeliveryAction, ThreatTypes, QrUrls, NetworkMessageId
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [3 - AiTM & Credential Phishing] Users with malicious URL click alerts
+set query_results_cache_max_age = time(5m);
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+let Clicks = ClickEv
+| where isempty(_recipient) or AccountUpn =~ _recipient
+| extend ClickedThrough = tostring(IsClickedThrough) in~ ("true", "1")
+;
+Clicks
+| where ClickedThrough
+| summarize ClickThroughs = count(), Urls = make_set(Url, 5), IPs = make_set(IPAddress, 5), Workloads = make_set(Workload), Threats = make_set_if(ThreatTypes, isnotempty(ThreatTypes), 5),
+            FirstClick = min(TimeGenerated), LastClick = max(TimeGenerated) by AccountUpn
+| extend Severity = iff(array_length(Threats) > 0, "1-High (threat URL)", "2-Medium")
+| order by Severity asc, ClickThroughs desc
+| take 50
+
+// ===== [3 - AiTM & Credential Phishing] AiTM / credential-theft / BEC alerts with impacted entities
+set query_results_cache_max_age = time(5m);
+let Alerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("AiTM", "adversary-in-the-middle", "session cookie", "stolen session", "token", "credential", "phish", "BEC", "business email compromise", "inbox rule", "forwarding", "password spray", "impossible travel")
+| project AlertTime = TimeGenerated, AlertId, Title, Severity, Category, ServiceSource;
+let Ev = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in ((Alerts | project AlertId))
+| extend P = pack_all()
+| summarize Users = make_set_if(tostring(P.AccountUpn), isnotempty(tostring(P.AccountUpn)), 10),
+            IPs = make_set_if(tostring(P.RemoteIP), isnotempty(tostring(P.RemoteIP)), 10),
+            Urls = make_set_if(tostring(P.Url), isnotempty(tostring(P.Url)), 5),
+            Entities = make_set(tostring(P.EntityType), 10) by AlertId;
+Alerts
+| join kind=leftouter Ev on AlertId
+| where isempty(_recipient) or tostring(Users) has _recipient
+| extend SevRank = case(Severity =~ "High", 1, Severity =~ "Medium", 2, Severity =~ "Low", 3, 4)
+| project AlertTime, Severity, Title, Category, ServiceSource, Users, IPs, Urls, Entities, AlertId, SevRank
+| order by SevRank asc, AlertTime desc
+| project-away SevRank
+| take 50
+
+// ===== [4 - URLs & Clicks] Top malicious URL domains in email
+set query_results_cache_max_age = time(5m);
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+| where isnotempty(ThreatTypes)
+| project NetworkMessageId, RecipientEmailAddress, DeliveryAction, ThreatTypes;
+let ClickedUrls = ClickEv
+| summarize Allowed = countif(ActionType == "ClickAllowed"), Blocked = countif(ActionType has "Blocked") by Url;
+external_table('EmailUrlInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| project NetworkMessageId, Url, UrlDomain
+| join kind=inner Mail on NetworkMessageId
+| join kind=leftouter ClickedUrls on Url
+| summarize Emails = dcount(NetworkMessageId), Recipients = dcount(RecipientEmailAddress), Delivered = dcountif(NetworkMessageId, DeliveryAction == "Delivered"),
+            ClicksAllowed = sum(Allowed), ClicksBlocked = sum(Blocked), ThreatTypes = make_set(ThreatTypes, 3), SampleUrls = make_set(Url, 3)
+    by UrlDomain
+| order by ClicksAllowed desc, Delivered desc, Emails desc
+| take 50
+
+// ===== [4 - URLs & Clicks] Users who clicked malicious or suspicious links
+set query_results_cache_max_age = time(5m);
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+let Clicks = ClickEv
+| where isempty(_recipient) or AccountUpn =~ _recipient
+| extend ClickedThrough = tostring(IsClickedThrough) in~ ("true", "1")
+;
+Clicks
+| where isnotempty(ThreatTypes) or ClickedThrough or ActionType has "Blocked"
+| summarize Clicks = count(), Allowed = countif(ActionType == "ClickAllowed"), Blocked = countif(ActionType has "Blocked"), ClickedThrough = countif(ClickedThrough),
+            Urls = make_set(Url, 5), IPs = make_set(IPAddress, 5), Workloads = make_set(Workload), LastClick = max(TimeGenerated) by AccountUpn
+| extend Severity = case(Allowed > 0 or ClickedThrough > 0, "1-High (reached the site)", "2-Medium (blocked)")
+| order by Severity asc, Clicks desc
+| take 50
+
+// ===== [4 - URLs & Clicks] Malicious URL click alerts over time
+set query_results_cache_max_age = time(5m);
+let Step = iff(_endTime - _startTime > 3d, 6h, 1h);
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+ClickEv
+| where isempty(_recipient) or AccountUpn =~ _recipient
+| summarize ClickAlerts = count() by bin(TimeGenerated, Step)
+| order by TimeGenerated asc
+
+// ===== [4 - URLs & Clicks] URL shorteners and redirect services in delivered mail
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+| where EmailDirection == "Inbound" and DeliveryAction == "Delivered"
+| project NetworkMessageId, RecipientEmailAddress, SenderFromDomain, ThreatTypes;
+let Shorteners = dynamic(["bit.ly","t.co","tinyurl.com","goo.gl","ow.ly","is.gd","buff.ly","rebrand.ly","cutt.ly","shorturl.at","rb.gy","t.ly","s.id","lnkd.in","tiny.cc","qrco.de","linktr.ee","l.ead.me","bl.ink","urlz.fr"]);
+external_table('EmailUrlInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| project NetworkMessageId, Url, UrlDomain = tolower(UrlDomain)
+| where UrlDomain in (Shorteners) or Url has_any ("redirect=", "url=http", "/redir", "?goto=", "&dest=")
+| join kind=inner Mail on NetworkMessageId
+| summarize Emails = dcount(NetworkMessageId), Recipients = dcount(RecipientEmailAddress), Flagged = dcountif(NetworkMessageId, isnotempty(ThreatTypes)),
+            SenderDomains = make_set(SenderFromDomain, 5), SampleUrls = make_set(Url, 3) by UrlDomain
+| extend Severity = case(Flagged > 0, "1-High (flagged)", Recipients >= 5, "2-Medium (broad)", "3-Low")
+| order by Severity asc, Recipients desc
+| take 50
+
+// ===== [5 - Malware & Files] Malicious attachments by file type
+set query_results_cache_max_age = time(5m);
+let Att = external_table('EmailAttachmentInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+;
+Att
+| where isnotempty(ThreatTypes)
+| summarize Attachments = count() by FileType = tolower(FileType), ThreatTypes
+| order by Attachments desc
+
+// ===== [5 - Malware & Files] Top malware / threat names
+set query_results_cache_max_age = time(5m);
+let Att = external_table('EmailAttachmentInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+;
+Att
+| where isnotempty(ThreatNames)
+| mv-expand Name = split(ThreatNames, ",") to typeof(string)
+| extend Name = trim(" ", Name)
+| summarize Attachments = count(), Recipients = dcount(RecipientEmailAddress) by Name
+| top 15 by Attachments
+
+// ===== [5 - Malware & Files] Malicious attachments (hash view)
+set query_results_cache_max_age = time(5m);
+let Att = external_table('EmailAttachmentInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+;
+let Deliv = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| project NetworkMessageId, DeliveryAction;
+Att
+| where isnotempty(ThreatTypes)
+| join kind=leftouter Deliv on NetworkMessageId
+| summarize Emails = dcount(NetworkMessageId), Recipients = dcount(RecipientEmailAddress), Delivered = dcountif(NetworkMessageId, DeliveryAction == "Delivered"),
+            FileNames = make_set(FileName, 5), Senders = make_set(SenderFromAddress, 5), ThreatNames = make_set(ThreatNames, 5),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by SHA256, FileType
+| extend Severity = iff(Delivered > 0, "1-High (delivered)", "2-Medium (blocked)")
+| project Severity, SHA256, FileType, FileNames, ThreatNames, Emails, Recipients, Delivered, Senders, FirstSeen, LastSeen
+| order by Severity asc, Recipients desc
+| take 50
+
+// ===== [5 - Malware & Files] Risky attachment types delivered (HTML smuggling, SVG, ISO, LNK...)
+set query_results_cache_max_age = time(5m);
+let Att = external_table('EmailAttachmentInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+;
+let RiskyTypes = dynamic(["html","htm","shtml","svg","iso","img","vhd","lnk","one","js","jse","vbs","hta","wsf","xll","msi","cab","zip","7z","rar","pdf"]);
+let Deliv = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where EmailDirection == "Inbound"
+| project NetworkMessageId, DeliveryAction, Subject, SenderFromDomain;
+Att
+| extend Ext = tolower(tostring(split(FileName, ".")[-1]))
+| where Ext in (RiskyTypes) or tolower(FileType) in (RiskyTypes)
+| join kind=inner Deliv on NetworkMessageId
+| where DeliveryAction == "Delivered"
+| summarize Emails = dcount(NetworkMessageId), Recipients = dcount(RecipientEmailAddress), Flagged = countif(isnotempty(ThreatTypes)),
+            FileNames = make_set(FileName, 5), SenderDomains = make_set(SenderFromDomain, 5), Subjects = make_set(Subject, 3) by Ext
+| extend Severity = case(Flagged > 0, "1-High (malicious delivered)", Ext in ("html","htm","shtml","svg","iso","img","vhd","lnk","one","hta","js","vbs","xll"), "2-Medium (high-risk type delivered)", "3-Low")
+| project Severity, Ext, Emails, Recipients, Flagged, FileNames, SenderDomains, Subjects
+| order by Severity asc, Recipients desc
+
+// ===== [5 - Malware & Files] Malware detected in SharePoint / OneDrive / Teams files
+set query_results_cache_max_age = time(5m);
+external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ActionType in~ ("FileMalwareDetected", "FileMalwareDetectedByAV")
+| extend R = todynamic(tostring(RawEventData))
+| extend User = tolower(tostring(R.UserId)), File = tostring(R.SourceFileName), Site = tostring(R.SiteUrl), Path = tostring(R.ObjectId), Workload = tostring(R.Workload), Virus = tostring(R.VirusInfo)
+| where isempty(_recipient) or User =~ _recipient
+| project TimeGenerated, Workload, File, Virus, User, Site, Path
+| order by TimeGenerated desc
+| take 50
+
+// ===== [5 - Malware & Files] Anonymous / external sharing links created
+set query_results_cache_max_age = time(5m);
+external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ActionType in~ ("AnonymousLinkCreated", "SharingInvitationCreated", "AddedToSecureLink", "SecureLinkCreated", "SharingSet")
+| extend R = todynamic(tostring(RawEventData))
+| extend User = tolower(tostring(R.UserId)), Target = tostring(R.TargetUserOrGroupName), File = tostring(R.SourceFileName), Site = tostring(R.SiteUrl)
+| where isempty(_recipient) or User =~ _recipient
+| summarize Links = count(), Anonymous = countif(ActionType =~ "AnonymousLinkCreated"), Targets = make_set(Target, 10), Files = make_set(File, 10), LastSeen = max(TimeGenerated) by User
+| extend Severity = case(Anonymous >= 10, "1-High (mass anonymous links)", Anonymous > 0, "2-Medium", "3-Low")
+| order by Severity asc, Links desc
+| take 50
+
+// ===== [6 - Campaigns & Geo] Lure clusters (sender domain + subject)
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+Mail
+| where EmailDirection == "Inbound" and isnotempty(ThreatTypes)
+| extend Lure = trim(" ", replace_regex(tolower(Subject), @"[0-9#]+", "#"))
+| summarize Emails = count(), Recipients = dcount(RecipientEmailAddress), Delivered = countif(DeliveryAction == "Delivered"),
+            Senders = make_set(SenderFromAddress, 5), SenderIPs = make_set(SenderIPv4, 5), ThreatTypes = make_set(ThreatTypes, 3),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by SenderFromDomain, Lure
+| where Recipients >= 1
+| order by Recipients desc, Delivered desc
+| take 50
+
+// ===== [6 - Campaigns & Geo] Threat email sources map (sender IP)
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+Mail
+| where isnotempty(ThreatTypes) and isnotempty(SenderIPv4)
+| summarize Emails = count() by SenderIPv4
+| extend G = geo_info_from_ip_address(SenderIPv4)
+| extend Latitude = todouble(G.latitude), Longitude = todouble(G.longitude), Country = tostring(G.country)
+| where isnotnull(Latitude) and isnotnull(Longitude)
+| summarize Emails = sum(Emails) by Longitude, Latitude, Country
+
+// ===== [6 - Campaigns & Geo] Threats by sender country
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+Mail
+| where isnotempty(ThreatTypes) and isnotempty(SenderIPv4)
+| summarize Emails = count() by SenderIPv4
+| extend Country = tostring(geo_info_from_ip_address(SenderIPv4).country)
+| summarize Emails = sum(Emails) by SenderCountry = iff(isempty(Country), "Unknown", Country)
+| top 15 by Emails
+
+// ===== [6 - Campaigns & Geo] Threats by sender top-level domain
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+Mail
+| where isnotempty(ThreatTypes)
+| extend TLD = tolower(tostring(split(SenderFromDomain, ".")[-1]))
+| summarize Emails = count() by TLD
+| top 15 by Emails
+
+// ===== [6 - Campaigns & Geo] Sender infrastructure hitting many recipients
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+| extend A = todynamic(tostring(AuthenticationDetails))
+| extend SPF = tostring(A.SPF), DKIM = tostring(A.DKIM), DMARC = tostring(A.DMARC), CompAuth = tostring(A.CompAuth)
+| extend AuthFail = DMARC =~ "fail" or SPF in~ ("fail", "softfail") or CompAuth =~ "fail"
+;
+Mail
+| where EmailDirection == "Inbound" and isnotempty(SenderIPv4)
+| summarize Emails = count(), Recipients = dcount(RecipientEmailAddress), Domains = dcount(SenderFromDomain), DomainList = make_set(SenderFromDomain, 10),
+            Threats = countif(isnotempty(ThreatTypes)), AuthFails = countif(AuthFail), Delivered = countif(DeliveryAction == "Delivered") by SenderIPv4
+| extend Country = tostring(geo_info_from_ip_address(SenderIPv4).country)
+| extend Severity = case(Threats > 0 and Domains >= 3, "1-High (multi-domain threat sender)", AuthFails > 0 and Recipients >= 10, "2-Medium (auth-failing bulk sender)", "3-Low")
+| order by Severity asc, Recipients desc
+| take 50
+
+// ===== [7 - ZAP & Remediation] Post-delivery moves by destination and trigger
+set query_results_cache_max_age = time(5m);
+let PostDel = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where DeliveryAction == "Delivered"
+| extend P0 = pack_all()
+| extend LatestLocation = tostring(P0.LatestDeliveryLocation), LatestAction = tostring(P0.LatestDeliveryAction)
+| where isnotempty(LatestLocation) and LatestLocation != DeliveryLocation
+| project TimeGenerated, NetworkMessageId, RecipientEmailAddress, ThreatTypes, DeliveryLocation = LatestLocation,
+          Action = LatestAction, ActionType = strcat("Moved to ", LatestLocation), ActionResult = "Success", ActionTrigger = iff(isnotempty(ThreatTypes), "ZAP / threat remediation", "Admin or user move");
+let PD = PostDel
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| extend P = pack_all()
+| extend ActionTrigger = tostring(P.ActionTrigger)
+;
+PD
+| summarize Actions = count() by ActionType, ActionTrigger
+| order by Actions desc
+
+// ===== [7 - ZAP & Remediation] Post-delivery actions over time
+set query_results_cache_max_age = time(5m);
+let PostDel = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where DeliveryAction == "Delivered"
+| extend P0 = pack_all()
+| extend LatestLocation = tostring(P0.LatestDeliveryLocation), LatestAction = tostring(P0.LatestDeliveryAction)
+| where isnotempty(LatestLocation) and LatestLocation != DeliveryLocation
+| project TimeGenerated, NetworkMessageId, RecipientEmailAddress, ThreatTypes, DeliveryLocation = LatestLocation,
+          Action = LatestAction, ActionType = strcat("Moved to ", LatestLocation), ActionResult = "Success", ActionTrigger = iff(isnotempty(ThreatTypes), "ZAP / threat remediation", "Admin or user move");
+let Step = iff(_endTime - _startTime > 3d, 6h, 1h);
+let PD = PostDel
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| extend P = pack_all()
+| extend ActionTrigger = tostring(P.ActionTrigger)
+;
+PD
+| summarize Actions = count() by bin(TimeGenerated, Step), ActionType
+| order by TimeGenerated asc
+
+// ===== [7 - ZAP & Remediation] Delivered threats NOT remediated (still in mailbox)
+set query_results_cache_max_age = time(5m);
+let PostDel = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where DeliveryAction == "Delivered"
+| extend P0 = pack_all()
+| extend LatestLocation = tostring(P0.LatestDeliveryLocation), LatestAction = tostring(P0.LatestDeliveryAction)
+| where isnotempty(LatestLocation) and LatestLocation != DeliveryLocation
+| project TimeGenerated, NetworkMessageId, RecipientEmailAddress, ThreatTypes, DeliveryLocation = LatestLocation,
+          Action = LatestAction, ActionType = strcat("Moved to ", LatestLocation), ActionResult = "Success", ActionTrigger = iff(isnotempty(ThreatTypes), "ZAP / threat remediation", "Admin or user move");
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+let Remediated = PostDel
+| where ActionResult =~ "Success"
+| distinct NetworkMessageId;
+let Clicked = ClickEv
+| where ActionType == "ClickAllowed"
+| summarize make_set(NetworkMessageId);
+let ClickedSet = toscalar(Clicked);
+Mail
+| where isnotempty(ThreatTypes) and DeliveryAction == "Delivered"
+| where NetworkMessageId !in (Remediated)
+| extend Clicked = set_has_element(ClickedSet, NetworkMessageId)
+| extend Severity = case(ThreatTypes has "Malware" or Clicked, "1-High", ThreatTypes has "Phish", "2-Medium", "3-Low (spam)")
+| project TimeGenerated, Severity, RecipientEmailAddress, SenderFromAddress, Subject, ThreatTypes, DeliveryLocation, Clicked, NetworkMessageId
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [7 - ZAP & Remediation] Post-delivery and ZAP alerts
+set query_results_cache_max_age = time(5m);
+external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("removed after delivery", "ZAP", "zero-hour", "remediat", "purge")
+| project TimeGenerated, Severity, Title, Category, ServiceSource, AlertId
+| order by TimeGenerated desc
+| take 50
+
+// ===== [8 - Post-Compromise & XDR] Suspicious inbox and transport rules
+set query_results_cache_max_age = time(5m);
+let Cae = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ActionType in~ ("New-InboxRule", "Set-InboxRule", "UpdateInboxRules", "New-TransportRule", "Set-TransportRule");
+let FinKw = dynamic(["invoice","payment","wire","bank","remittance","urgent","payroll","ach","iban","factura","pago","phish","hack","security","password"]);
+Cae
+| extend R = todynamic(tostring(RawEventData))
+| extend User = tolower(tostring(R.UserId)), Params = tolower(tostring(R.Parameters))
+| mv-apply Prm = todynamic(tostring(R.Parameters)) on (summarize RuleName = take_anyif(tostring(Prm.Value), tostring(Prm.Name) =~ "Name"))
+| where isempty(_recipient) or User =~ _recipient
+| extend Deletes = Params has_any ("deletemessage", "softdelete", "permanentdelete"),
+         Hides = Params has_any ("rss", "archive", "conversation history", "junk", "markasread"),
+         Forwards = Params has_any ("forwardto", "redirectto", "forwardasattachmentto"),
+         Keywords = Params has_any (FinKw),
+         ShortName = isnotempty(RuleName) and strlen(trim(" ", RuleName)) <= 3
+| extend Score = toint(Deletes) * 3 + toint(Hides) * 3 + toint(Forwards) * 4 + toint(Keywords) * 3 + toint(ShortName) * 2
+| extend Severity = case(Score >= 7, "1-High", Score >= 3, "2-Medium", "3-Low")
+| project TimeGenerated, Severity, Score, User, ActionType, RuleName, Deletes, Hides, Forwards, Keywords, ShortName, IPAddress, Params
+| order by Severity asc, Score desc, TimeGenerated desc
+| take 50
+
+// ===== [8 - Post-Compromise & XDR] Mailbox forwarding and delegation changes
+set query_results_cache_max_age = time(5m);
+let Cae = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ActionType in~ ("Set-Mailbox", "Add-MailboxPermission", "Add-RecipientPermission", "Set-OwaMailboxPolicy");
+Cae
+| extend R = todynamic(tostring(RawEventData))
+| extend User = tolower(tostring(R.UserId)), Params = tostring(R.Parameters), Target = tostring(R.ObjectId)
+| where isempty(_recipient) or User =~ _recipient or Target has _recipient
+| extend Forwarding = Params has_any ("ForwardingSmtpAddress", "ForwardingAddress", "DeliverToMailboxAndForward"),
+         FullAccess = Params has "FullAccess" or ActionType =~ "Add-MailboxPermission"
+| extend Severity = case(Forwarding, "1-High (forwarding set)", FullAccess, "2-Medium (delegation)", "3-Low")
+| project TimeGenerated, Severity, User, ActionType, Target, Forwarding, FullAccess, IPAddress, Params
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [8 - Post-Compromise & XDR] OAuth consent and app permission grants
+set query_results_cache_max_age = time(5m);
+let Cae = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ActionType has_any ("Consent to application", "Add delegated permission grant", "Add app role assignment", "Add OAuth2PermissionGrant", "Add service principal");
+Cae
+| extend R = todynamic(tostring(RawEventData))
+| extend User = tolower(tostring(R.UserId)), Target = tostring(R.Target), Props = tostring(R.ModifiedProperties)
+| where isempty(_recipient) or User =~ _recipient
+| extend HighRiskScope = Props has_any ("Mail.Read", "Mail.ReadWrite", "Mail.Send", "MailboxSettings", "Files.ReadWrite.All", "offline_access", "full_access_as_user", "EWS.AccessAsUser.All")
+| extend Severity = iff(HighRiskScope, "1-High (mail / file scopes)", "2-Medium")
+| project TimeGenerated, Severity, User, ActionType, Target, HighRiskScope, IPAddress, Props
+| order by Severity asc, TimeGenerated desc
+| take 50
+
+// ===== [8 - Post-Compromise & XDR] Mailbox access bursts (MailItemsAccessed)
+set query_results_cache_max_age = time(5m);
+let Threshold = 500;
+external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ActionType == "MailItemsAccessed"
+| extend R = todynamic(tostring(RawEventData))
+| extend User = tolower(tostring(R.UserId)), ClientApp = tostring(R.ClientInfoString), Ops = toint(R.OperationCount)
+| where isempty(_recipient) or User =~ _recipient
+| summarize Events = count(), Items = sum(coalesce(Ops, 1)), IPs = make_set(IPAddress, 10), IPCount = dcount(IPAddress), Clients = make_set(ClientApp, 5)
+    by User, Hour = bin(TimeGenerated, 1h)
+| extend Severity = case(Items >= Threshold and IPCount > 1, "1-High (burst from several IPs)", Items >= Threshold, "2-Medium (burst)", IPCount > 2, "3-Medium (many IPs)", "4-Low")
+| order by Severity asc, Items desc
+| take 50
+
+// ===== [8 - Post-Compromise & XDR] Email & identity alerts by category and severity
+set query_results_cache_max_age = time(5m);
+external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ServiceSource has_any ("Office 365", "Defender for Office", "Entra", "Identity", "Cloud Apps") or Category in~ ("InitialAccess", "CredentialAccess", "Exfiltration", "Collection", "Persistence")
+| summarize Alerts = count() by Category, Severity
+| order by Alerts desc
+
+// ===== [8 - Post-Compromise & XDR] Composite email-compromise risk score per user
+set query_results_cache_max_age = time(5m);
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient or SenderFromAddress =~ _recipient
+| project NetworkMessageId, RecipientEmailAddress, SenderFromAddress, ThreatTypes, DeliveryAction, EmailDirection;
+let PhishRx = Mail | where EmailDirection == "Inbound" and ThreatTypes has "Phish" and DeliveryAction == "Delivered" | summarize V = count() by User = tolower(RecipientEmailAddress) | extend Signal = "PhishDelivered", Weight = 2;
+let OutThreat = Mail | where EmailDirection == "Outbound" and isnotempty(ThreatTypes) | summarize V = count() by User = tolower(SenderFromAddress) | extend Signal = "OutboundThreat", Weight = 10;
+let Clk = ClickEv
+| where (ActionType == "ClickAllowed" and isnotempty(ThreatTypes)) or tostring(IsClickedThrough) in~ ("true", "1")
+| summarize V = count() by User = tolower(AccountUpn) | extend Signal = "RiskyClick", Weight = 6;
+let Cae = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where ActionType in~ ("New-InboxRule", "Set-InboxRule", "UpdateInboxRules", "Set-Mailbox", "Add-MailboxPermission") or ActionType has "Consent to application"
+| extend User = tolower(tostring(todynamic(tostring(RawEventData)).UserId));
+let Rules = Cae | where ActionType !has "Consent" | summarize V = count() by User | extend Signal = "MailboxChange", Weight = 8;
+let Consent = Cae | where ActionType has "Consent" | summarize V = count() by User | extend Signal = "OAuthConsent", Weight = 8;
+let Alerts = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| extend P = pack_all()
+| extend User = tolower(tostring(P.AccountUpn))
+| where isnotempty(User)
+| summarize V = dcount(AlertId) by User | extend Signal = "AlertEvidence", Weight = 10;
+union PhishRx, OutThreat, Clk, Rules, Consent, Alerts
+| where isnotempty(User)
+| where isempty(_recipient) or User =~ _recipient
+| extend Points = min_of(V, long(5)) * Weight
+| summarize RiskScore = sum(Points), Signals = make_bag(bag_pack(Signal, V)) by User
+| extend Severity = case(RiskScore >= 40, "1-High", RiskScore >= 15, "2-Medium", "3-Low")
+| project Severity, User, RiskScore, Signals
+| order by RiskScore desc
+| take 50
+
+// ===== [9 - Investigation] Recipient / sender-domain summary
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+;
+Mail
+| extend A = todynamic(tostring(AuthenticationDetails))
+| extend SPF = tostring(A.SPF), DKIM = tostring(A.DKIM), DMARC = tostring(A.DMARC), CompAuth = tostring(A.CompAuth)
+| extend AuthFail = DMARC =~ "fail" or SPF in~ ("fail", "softfail") or CompAuth =~ "fail"
+| summarize Emails = count(), Inbound = countif(EmailDirection == "Inbound"), Threats = countif(isnotempty(ThreatTypes)), ThreatsDelivered = countif(isnotempty(ThreatTypes) and DeliveryAction == "Delivered"),
+            AuthFails = countif(AuthFail), SenderDomains = dcount(SenderFromDomain), TopSenders = make_set(SenderFromAddress, 10), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+    by Recipient = tolower(RecipientEmailAddress)
+| order by ThreatsDelivered desc, Threats desc
+| take 50
+
+// ===== [9 - Investigation] Unified email-to-identity timeline (set User / Sender domain)
+set query_results_cache_max_age = time(5m);
+let PostDel = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where DeliveryAction == "Delivered"
+| extend P0 = pack_all()
+| extend LatestLocation = tostring(P0.LatestDeliveryLocation), LatestAction = tostring(P0.LatestDeliveryAction)
+| where isnotempty(LatestLocation) and LatestLocation != DeliveryLocation
+| project TimeGenerated, NetworkMessageId, RecipientEmailAddress, ThreatTypes, DeliveryLocation = LatestLocation,
+          Action = LatestAction, ActionType = strcat("Moved to ", LatestLocation), ActionResult = "Success", ActionTrigger = iff(isnotempty(ThreatTypes), "ZAP / threat remediation", "Admin or user move");
+let ClickAlerts = external_table('AlertInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| where Title has_any ("malicious URL click", "URL click", "clicked a", "user clicked")
+| project AlertId;
+let ClickEv = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where AlertId in (ClickAlerts)
+| extend P = pack_all()
+| extend EvUpn = tostring(P.AccountUpn), EvUrl = tostring(P.Url), EvIp = tostring(P.RemoteIP), EvMsg = tostring(P.NetworkMessageId)
+| summarize TimeGenerated = min(TimeGenerated), AccountUpn = take_anyif(EvUpn, isnotempty(EvUpn)), Url = take_anyif(EvUrl, isnotempty(EvUrl)),
+            IPAddress = take_anyif(EvIp, isnotempty(EvIp)), NetworkMessageId = take_anyif(EvMsg, isnotempty(EvMsg)) by AlertId
+| extend ActionType = "ClickAllowed", ThreatTypes = "Phish", IsClickedThrough = false, Workload = "Email";
+let U = tolower(_recipient);
+let Email = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where (isnotempty(U) and RecipientEmailAddress =~ U) or (isnotempty(_senderDomain) and SenderFromDomain =~ _senderDomain)
+| project TimeGenerated, Source = "Email", User = tolower(RecipientEmailAddress), Activity = strcat(DeliveryAction, " / ", DeliveryLocation),
+          Detail = strcat(SenderFromAddress, " | ", Subject), Threat = ThreatTypes, IP = SenderIPv4;
+let Click = ClickEv
+| where isnotempty(U) and AccountUpn =~ U
+| project TimeGenerated, Source = "UrlClick", User = tolower(AccountUpn), Activity = ActionType, Detail = Url, Threat = ThreatTypes, IP = IPAddress;
+let Post = PostDel
+| where isnotempty(U) and RecipientEmailAddress =~ U
+| project TimeGenerated, Source = "PostDelivery", User = tolower(RecipientEmailAddress), Activity = strcat(ActionType, " / ", ActionResult), Detail = Action, Threat = ThreatTypes, IP = "";
+let Sign = union
+ (external_table('SigninLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isnotempty(U) and UserPrincipalName =~ U
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName),
+ (external_table('AADNonInteractiveUserSignInLogs') | where TimeGenerated between (_startTime .. _endTime)
+   | where isnotempty(U) and UserPrincipalName =~ U
+   | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, Location, AppDisplayName)
+| project TimeGenerated, Source = "SignIn", User = tolower(UserPrincipalName), Activity = iff(ResultType == "0", "Success", strcat("Failure ", ResultType)), Detail = AppDisplayName, Threat = "", IP = IPAddress;
+let Cloud = external_table('CloudAppEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isnotempty(U)
+| where ActionType in~ ("New-InboxRule", "Set-InboxRule", "UpdateInboxRules", "Set-Mailbox", "Add-MailboxPermission", "MailItemsAccessed", "Send", "SoftDelete", "HardDelete") or ActionType has "Consent"
+| extend R = todynamic(tostring(RawEventData))
+| where tostring(R.UserId) =~ U
+| project TimeGenerated, Source = "CloudApp", User = U, Activity = ActionType, Detail = tostring(R.Parameters), Threat = "", IP = IPAddress;
+let Alert = external_table('AlertEvidence')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isnotempty(U)
+| extend P = pack_all()
+| where tostring(P.AccountUpn) =~ U
+| summarize TimeGenerated = min(TimeGenerated) by AlertId
+| join kind=inner (external_table('AlertInfo') | where TimeGenerated between (_startTime .. _endTime) | project AlertId, Title, Severity) on AlertId
+| project TimeGenerated, Source = "Alert", User = U, Activity = Severity, Detail = Title, Threat = "", IP = "";
+union Email, Click, Post, Sign, Cloud, Alert
+| order by TimeGenerated desc
+| take 500
+
+// ===== [9 - Investigation] Message detail: URLs and attachments
+set query_results_cache_max_age = time(5m);
+let Mail = external_table('EmailEvents')
+| where TimeGenerated between (_startTime .. _endTime)
+| where isempty(_recipient) or RecipientEmailAddress =~ _recipient
+| where isempty(_senderDomain) or SenderFromDomain =~ _senderDomain
+| where isnotempty(_recipient) or isnotempty(_senderDomain)
+| project TimeGenerated, NetworkMessageId, RecipientEmailAddress, SenderFromAddress, Subject, DeliveryAction, ThreatTypes;
+let Urls = external_table('EmailUrlInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize Urls = make_set(Url, 10) by NetworkMessageId;
+let Files = external_table('EmailAttachmentInfo')
+| where TimeGenerated between (_startTime .. _endTime)
+| summarize Attachments = make_set(strcat(FileName, " (", ThreatTypes, ")"), 10) by NetworkMessageId;
+Mail
+| join kind=leftouter Urls on NetworkMessageId
+| join kind=leftouter Files on NetworkMessageId
+| project TimeGenerated, RecipientEmailAddress, SenderFromAddress, Subject, DeliveryAction, ThreatTypes, Urls, Attachments, NetworkMessageId
+| order by TimeGenerated desc
+| take 200
