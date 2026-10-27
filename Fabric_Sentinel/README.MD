@@ -222,18 +222,6 @@ Alerts, Incidents & Behaviors	SecurityAlert, SecurityIncident, AlertInfo, AlertE
 Apps & Identity Correlation	SigninLogs, AuditLogs, CloudAppEvents, IdentityLogonEvents, SecurityAlert
 Check the exact list in the header of each .kql file before deploying.
 
-Demo walkthrough
-Recommended order (≈ 20 minutes):
-
-Intro & architecture — one mirrored copy, no data duplication.
-KQL Job — show the brute force findings table and incident risk history.
-Live Dashboard — alerts trend, MITRE ATT&CK, identity (impossible travel, spray, botnet), user drill-down.
-Graph — identity attack graph in the Query builder.
-Notebook — identity anomalies and visuals.
-Power BI — executive KPIs published in Teams.
-Data Agent — natural-language security summary, password spray, geolocation.
-Recap — Sentinel = what happened; Fabric = why, how it's connected, what next.
-📺 Video: [add YouTube link] · 📝 Article: [add Substack link]
 
 Troubleshooting
 Symptom	Fix
