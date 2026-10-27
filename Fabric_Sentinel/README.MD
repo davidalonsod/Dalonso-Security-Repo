@@ -6,7 +6,7 @@ This repository contains everything needed to build an **AI-powered SOC analytic
 
 ![Sentinel + Fabric](images/sentinel-fabric-youtube-infographic.png)
 
----
+https://youtu.be/JYGbq_VxQFE
 
 ## Table of contents
 
