@@ -1,0 +1,90 @@
+let NormalizePlatform = (value:string) { replace_regex(tolower(value), @'[^a-z0-9]', '') };
+let InventoryKeys=CustomAgentInventory()
+| extend Keys=pack_array(InventoryId, EntraId, SourceId,
+    tostring(Observability), tostring(Observability.value), tostring(Observability.id))
+| mv-expand AgentLookup=Keys to typeof(string)
+| extend AgentLookup=tolower(AgentLookup)
+| where isnotempty(AgentLookup) and AgentLookup !in ('null', '{}', '[]')
+| summarize ManagedMatches=countif(Managed), CustomMatches=countif(Custom),
+    InventoryName=take_anyif(InventoryAgent, Custom) by AgentLookup;
+let Scope=_GetWatchlist('CustomAgentScope')
+// New/empty watchlists have no expanded CSV columns; bind a stable schema first.
+| extend W=todynamic(column_ifexists('WatchlistItem', dynamic(null)))
+| project ScopeType=coalesce(tostring(column_ifexists('ScopeType', '')), tostring(W.ScopeType)),
+    ScopeValue=coalesce(tostring(column_ifexists('ScopeValue', '')), tostring(W.ScopeValue)),
+    ScopeResource=tolower(coalesce(tostring(column_ifexists('ResourceId', '')), tostring(W.ResourceId))),
+    Enabled=coalesce(tostring(column_ifexists('Enabled', '')), tostring(W.Enabled))
+| where Enabled =~ 'true' and isnotempty(ScopeResource) and isnotempty(ScopeValue);
+let RoleScope=toscalar(Scope | where ScopeType == 'AppRoleName'
+    | summarize make_set(strcat(ScopeResource, '|', tostring(ScopeValue))));
+let IdScope=toscalar(Scope | where ScopeType == 'AgentId'
+    | summarize make_set(strcat(ScopeResource, '|', tolower(tostring(ScopeValue)))));
+let ExcludedIdScope=toscalar(Scope | where ScopeType == 'ExcludeAgentId'
+    | summarize make_set(strcat(ScopeResource, '|', tolower(tostring(ScopeValue)))));
+let Approved=_GetWatchlist('CustomAgentApprovedMcpTargets')
+| extend W=todynamic(column_ifexists('WatchlistItem', dynamic(null)))
+| project ServerIdentifier=coalesce(tostring(column_ifexists('ServerIdentifier', '')), tostring(W.ServerIdentifier)),
+    Enabled=coalesce(tostring(column_ifexists('Enabled', '')), tostring(W.Enabled))
+| where Enabled =~ 'true' and isnotempty(ServerIdentifier);
+let ApprovedCount=toscalar(Approved | count);
+let ApprovedTargets=toscalar(Approved | summarize make_set(tostring(ServerIdentifier)));
+union isfuzzy=true AppRequests, AppDependencies
+| where TimeGenerated > ago(lookback)
+| extend P=Properties, EventTime=TimeGenerated, SpanId=tolower(tostring(Id)),
+    OperationId=tolower(tostring(OperationId)), _ResourceId=tolower(tostring(_ResourceId))
+| extend AgentId=tostring(P['gen_ai.agent.id']), AgentName=tostring(P['gen_ai.agent.name']),
+    Operation=tostring(P['gen_ai.operation.name']), Tool=tostring(P['gen_ai.tool.name']),
+    Model=tostring(P['gen_ai.request.model']), Conversation=tostring(P['gen_ai.conversation.id']),
+    ToolType=tostring(P['gen_ai.tool.type']),
+    Platform=NormalizePlatform(coalesce(tostring(P['contoso.agent.platform']), tostring(P['gen_ai.agent.platform']))),
+    ExplicitCustom=tolower(tostring(P['contoso.agent.kind'])) in ('custom', 'sdk', 'third-party', 'thirdparty'),
+    AgentLookup=tolower(tostring(P['gen_ai.agent.id']))
+| where isnotempty(AgentId) or isnotempty(AgentName) or Operation in ('invoke_agent', 'chat', 'execute_tool')
+| join kind=leftouter InventoryKeys on AgentLookup
+| extend Managed=Platform contains 'foundry' or Platform contains 'copilot' or Platform contains 'powerplatform'
+    or coalesce(ManagedMatches, 0) > 0
+    or set_has_element(ExcludedIdScope, strcat(_ResourceId, '|', AgentLookup))
+    or isnotempty(tostring(P['microsoft.foundry.agent.id']))
+    or isnotempty(tostring(P['microsoft.copilotstudio.agent.id'])),
+    CentrallyScoped=set_has_element(RoleScope, strcat(_ResourceId, '|', AppRoleName))
+        or set_has_element(IdScope, strcat(_ResourceId, '|', AgentLookup))
+| extend Classification=case(Managed, 'Excluded managed platform',
+    coalesce(CustomMatches, 0) > 0, 'Custom inventory',
+    ExplicitCustom, 'Explicit SDK marker', CentrallyScoped, 'Central exact scope', 'Unattributed GenAI'),
+    Agent=coalesce(InventoryName, AgentName, AgentId, AppRoleName),
+    AgentKey=coalesce(AgentLookup, iff(isnotempty(AppRoleName), strcat(AppRoleName, '/', AgentName), ''))
+| extend ServerUrl=coalesce(tostring(P['gen_ai.tool.server_url']), tostring(P['mcp.server.url']), tostring(P['server_url'])),
+    ServerLabel=coalesce(tostring(P['gen_ai.tool.server_label']), tostring(P['mcp.server.label']),
+        tostring(P['server_label']), tostring(P['gen_ai.tool.server.name']), tostring(P['mcp.server.name'])),
+    TargetValue=coalesce(tostring(column_ifexists('Target', '')), tostring(P['server.address'])),
+    IsTool=Operation in ('execute_tool', 'call_tool', 'tools/call', 'mcp.call_tool', 'mcp.tools.call')
+        or tostring(P['mcp.method']) == 'tools/call',
+    ExplicitMcp=ToolType has 'mcp' or Operation has 'mcp'
+        or isnotempty(tostring(P['mcp.server.url'])) or isnotempty(tostring(P['mcp.server.name']))
+        or isnotempty(tostring(P['mcp.server.label'])),
+    CommandCapable=strcat(Tool, ' ', tostring(P['gen_ai.tool.description'])) matches regex
+        @'(?i)(run[_ -]?(shell|command|code)|execute[_ -]?(shell|command|code)|powershell|cmd\.exe|terminal|ssh[_ -]?exec|remote[_ -]?code[_ -]?execution|vulnerabilities/exec)',
+    InputTokens=coalesce(tolong(P['gen_ai.usage.input_tokens']), 0),
+    OutputTokens=coalesce(tolong(P['gen_ai.usage.output_tokens']), 0),
+    Blocked=coalesce(tobool(P['contoso.guardrail.blocked']), tobool(P['gen_ai.guardrail.blocked']), false),
+    Unevaluated=tostring(P['contoso.guardrail.unevaluated_controls'])
+| extend RawTarget=coalesce(ServerUrl, ServerLabel, TargetValue),
+    UrlTarget=case(ServerUrl startswith 'http://' or ServerUrl startswith 'https://', ServerUrl,
+        ServerLabel startswith 'http://' or ServerLabel startswith 'https://', ServerLabel,
+        TargetValue startswith 'http://' or TargetValue startswith 'https://', TargetValue, ''),
+    EvaluationUnavailable=isnotempty(Unevaluated) and Unevaluated !in ('[]', 'null', '{}')
+| extend ParsedTarget=parse_url(UrlTarget), McpNameHint=strcat(Tool, ' ', RawTarget) has 'mcp',
+    Approval=case(isempty(RawTarget), 'NO SERVER METADATA', ApprovedCount == 0, 'CONFIGURE ALLOWLIST',
+        set_has_element(ApprovedTargets, RawTarget), 'Approved', 'UNAPPROVED')
+// parse_url can truncate bracketed IPv6 hosts; preserve the literal address explicitly.
+| extend IPv6Host=extract(@'(?i)^https?://(?:[^/@]*@)?\[([0-9a-f:.]+)(?:%[a-z0-9%._-]+)?\](?::[0-9]+)?(?:[/#?]|$)', 1, UrlTarget)
+| extend TargetHost=tolower(coalesce(IPv6Host, trim(@'[\[\]]', tostring(ParsedTarget.Host))))
+| extend ServerDisplay=iff(isnotempty(TargetHost),
+        strcat(tostring(ParsedTarget.Scheme), '://', iff(TargetHost contains ':',
+            strcat('[', TargetHost, ']'), TargetHost), tostring(ParsedTarget.Path)), ServerLabel),
+    HasLineage=isnotempty(_ResourceId) and isnotempty(OperationId) and isnotempty(SpanId) and isnotempty(AgentKey)
+| summarize arg_max(EventTime, *) by _ResourceId, OperationId, SpanId
+| project EventTime, _ResourceId, OperationId, SpanId, AppRoleName, Agent, AgentId, AgentKey,
+    Conversation, Operation, Tool, Model, ToolType, Classification, HasLineage, IsTool,
+    ExplicitMcp, McpNameHint, CommandCapable, TargetHost, ServerDisplay, Approval,
+    Success, DurationMs, InputTokens, OutputTokens, Blocked, EvaluationUnavailable

@@ -1,0 +1,94 @@
+let HasBody=(value:string) { isnotempty(trim(@'\s+', value)) and trim(@'\s+', value) !in ('null', '[]', '{}') };
+let Spans=CustomAgentSpans(lookback)
+| where Classification !in ('Excluded managed platform', 'Unattributed GenAI') and HasLineage;
+let Recorded=union isfuzzy=true AppRequests, AppDependencies
+| where TimeGenerated > ago(lookback)
+| extend _ResourceId=tolower(tostring(_ResourceId)), OperationId=tolower(tostring(OperationId)),
+    SpanId=tolower(tostring(Id)), ContentTime=TimeGenerated, P=Properties
+| extend AgentKey=coalesce(tolower(tostring(P['gen_ai.agent.id'])),
+    iff(isnotempty(AppRoleName), strcat(AppRoleName, '/', tostring(P['gen_ai.agent.name'])), ''))
+| where isnotempty(_ResourceId) and isnotempty(OperationId) and isnotempty(SpanId) and isnotempty(AgentKey)
+| summarize arg_max(ContentTime, *) by _ResourceId, OperationId, SpanId, AgentKey
+| project _ResourceId, OperationId, SpanId, AgentKey,
+    InputMessages=tostring(P['gen_ai.input.messages']), OutputMessages=tostring(P['gen_ai.output.messages']),
+    Instructions=tostring(P['gen_ai.system_instructions']),
+    ToolArguments=tostring(P['gen_ai.tool.call.arguments']), ToolResult=tostring(P['gen_ai.tool.call.result']);
+let Contents=materialize(Spans
+| join kind=leftouter Recorded on _ResourceId, OperationId, SpanId, AgentKey);
+let InputParts=Contents
+| extend Envelope=parse_json(InputMessages)
+| extend Envelope=case(gettype(Envelope) == 'array', Envelope,
+    gettype(Envelope) == 'dictionary' and isnotempty(tostring(Envelope.role)), pack_array(Envelope), dynamic([]))
+| mv-expand Message=Envelope
+| extend Role=tolower(tostring(Message.role)), Parts=coalesce(Message.parts, Message.content)
+| extend Parts=case(gettype(Parts) == 'array', Parts, isnotnull(Parts), pack_array(Parts), dynamic([]))
+| mv-expand Part=Parts
+| extend Text=coalesce(tostring(Part.content), tostring(Part.text), iff(gettype(Part) == 'string', tostring(Part), ''))
+| where isnotempty(Text)
+| summarize UserText=strcat_array(make_list_if(Text, Role == 'user', 1048576), '\n'),
+    SystemText=strcat_array(make_list_if(Text, Role in ('system', 'developer'), 1048576), '\n')
+    by _ResourceId, OperationId, SpanId, AgentKey;
+let OutputParts=Contents
+| extend Envelope=parse_json(OutputMessages)
+| extend Envelope=case(gettype(Envelope) == 'array', Envelope,
+    gettype(Envelope) == 'dictionary' and isnotempty(tostring(Envelope.role)), pack_array(Envelope), dynamic([]))
+| mv-expand Message=Envelope
+| where tostring(Message.role) =~ 'assistant'
+| extend Parts=coalesce(Message.parts, Message.content)
+| extend Parts=case(gettype(Parts) == 'array', Parts, isnotnull(Parts), pack_array(Parts), dynamic([]))
+| mv-expand Part=Parts
+| extend Text=coalesce(tostring(Part.content), tostring(Part.text), iff(gettype(Part) == 'string', tostring(Part), ''))
+| where isnotempty(Text)
+| summarize AssistantText=strcat_array(make_list(Text, 1048576), '\n') by _ResourceId, OperationId, SpanId, AgentKey;
+let InstructionParts=Contents
+| extend Parts=parse_json(Instructions)
+| extend Parts=case(gettype(Parts) == 'array', Parts, isnotnull(Parts), pack_array(Parts), dynamic([]))
+| mv-expand Part=Parts
+| extend Text=coalesce(tostring(Part.content), tostring(Part.text), iff(gettype(Part) == 'string', tostring(Part), ''))
+| where isnotempty(Text)
+| summarize InstructionText=strcat_array(make_list(Text, 1048576), '\n') by _ResourceId, OperationId, SpanId, AgentKey;
+let Core=materialize(Contents
+| join kind=leftouter InputParts on _ResourceId, OperationId, SpanId, AgentKey
+| join kind=leftouter OutputParts on _ResourceId, OperationId, SpanId, AgentKey
+| join kind=leftouter InstructionParts on _ResourceId, OperationId, SpanId, AgentKey
+| extend PlainInput=iff(gettype(parse_json(InputMessages)) == 'string' and HasBody(InputMessages),
+        tostring(parse_json(InputMessages)), ''),
+    OutputText=coalesce(AssistantText, iff(gettype(parse_json(OutputMessages)) == 'string' and HasBody(OutputMessages),
+        tostring(parse_json(OutputMessages)), '')),
+    SystemText=coalesce(SystemText, InstructionText),
+    ContextEligible=isnotempty(AgentId) or (isnotempty(AppRoleName) and AgentKey != strcat(AppRoleName, '/')));
+let Prompts=Core
+| where ContextEligible and isnotempty(UserText) and Operation in ('invoke_agent', 'chat')
+| summarize arg_min(EventTime, UserText, SpanId) by _ResourceId, OperationId, AgentKey
+| project _ResourceId, OperationId, AgentKey, ContextPrompt=UserText, ContextPromptSpanId=SpanId;
+let Outputs=Core
+| where ContextEligible and isnotempty(OutputText) and Operation in ('invoke_agent', 'chat')
+| summarize arg_max(EventTime, OutputText, SpanId) by _ResourceId, OperationId, AgentKey
+| project _ResourceId, OperationId, AgentKey, ContextOutput=OutputText, ContextOutputSpanId=SpanId;
+Core
+| join kind=leftouter Prompts on _ResourceId, OperationId, AgentKey
+| join kind=leftouter Outputs on _ResourceId, OperationId, AgentKey
+| extend Prompt=coalesce(UserText, PlainInput, ContextPrompt),
+    Output=coalesce(OutputText, iff(HasBody(OutputMessages), OutputMessages, ''), ContextOutput),
+    PromptEvidenceOrigin=case(isnotempty(UserText), 'Finding span: user role',
+        isnotempty(PlainInput), 'Finding span: unstructured input; role unverified',
+        isnotempty(ContextPrompt), 'Same resource/agent/trace context', 'No user prompt captured or parsed'),
+    OutputEvidenceOrigin=case(isnotempty(OutputText), 'Finding span: assistant/text output',
+        HasBody(OutputMessages), 'Finding span: unparsed output envelope',
+        isnotempty(ContextOutput), 'Same resource/agent/trace context', 'No output captured'),
+    PromptEvidenceSpanId=iff(isnotempty(UserText) or isnotempty(PlainInput), SpanId, ContextPromptSpanId),
+    OutputEvidenceSpanId=iff(isnotempty(OutputText) or HasBody(OutputMessages), SpanId, ContextOutputSpanId),
+    EvidenceSource='Inline AppRequests/AppDependencies',
+    InputParseState=case(isempty(InputMessages), 'Not recorded', not(HasBody(InputMessages)), 'Recorded empty',
+        isnotempty(UserText), 'Parsed user role', isnotempty(PlainInput), 'Unstructured; user role unverified',
+        isnotempty(SystemText), 'No user role parsed; system/developer text present',
+        'Recorded; unsupported or no text user role'),
+    OutputParseState=case(isempty(OutputMessages), 'Not recorded', not(HasBody(OutputMessages)), 'Recorded empty',
+        isnotempty(OutputText), 'Parsed assistant/text', 'Recorded; unsupported or no text assistant role'),
+    ToolArgumentsState=case(isempty(ToolArguments), 'Not recorded', not(HasBody(ToolArguments)), 'Recorded empty', 'Recorded nonempty'),
+    ToolResultState=case(isempty(ToolResult), 'Not recorded', not(HasBody(ToolResult)), 'Recorded empty', 'Recorded nonempty')
+| project EventTime, _ResourceId, OperationId, SpanId, AgentKey, Agent, AgentId, AppRoleName,
+    Conversation, Operation, Model, Tool, TargetHost, ServerDisplay, IsTool, Success, DurationMs,
+    UserText, SystemText, OutputText, ToolArguments, ToolResult, InputMessages, OutputMessages,
+    Prompt, Output, EvidenceSource, PromptEvidenceOrigin, OutputEvidenceOrigin,
+    PromptEvidenceSpanId, OutputEvidenceSpanId, InputParseState, OutputParseState, ToolArgumentsState, ToolResultState

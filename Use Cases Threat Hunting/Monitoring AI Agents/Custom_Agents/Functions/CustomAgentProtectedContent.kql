@@ -1,0 +1,28 @@
+// Legacy protected-only source, retained for reference; the current pack deploys CustomAgentInlineContent instead.
+let Spans=CustomAgentSpans(lookback)
+| where Classification !in ('Excluded managed platform', 'Unattributed GenAI') and HasLineage;
+let Protected=AppGenAIContent
+| where TimeGenerated > ago(lookback)
+| extend _ResourceId=tolower(tostring(_ResourceId)), OperationId=tolower(tostring(TraceId)),
+    SpanId=tolower(tostring(SpanId)), ContentTime=TimeGenerated
+| where isnotempty(_ResourceId) and isnotempty(OperationId) and isnotempty(SpanId)
+| summarize arg_max(ContentTime, *) by _ResourceId, OperationId, SpanId
+| project _ResourceId, OperationId, SpanId, ContentTime,
+    Messages=todynamic(InputMessages), OutputText=tostring(OutputMessages),
+    ToolResult=tostring(column_ifexists('ToolCallResult', ''));
+Spans
+| join kind=inner Protected on _ResourceId, OperationId, SpanId
+| extend Messages=iff(gettype(Messages) == 'array' and array_length(Messages) > 0, Messages, dynamic([{}]))
+| mv-apply Message=Messages on (
+    extend Role=tolower(tostring(Message.role)), Parts=coalesce(Message.parts, Message.content)
+    | extend Parts=case(gettype(Parts) == 'string', pack_array(bag_pack('content', tostring(Parts))),
+        gettype(Parts) == 'array' and array_length(Parts) > 0, Parts, dynamic([{}]))
+    | mv-apply Part=Parts on (
+        extend PartText=coalesce(tostring(Part.content), tostring(Part.text),
+            iff(gettype(Part) == 'string', tostring(Part), ''))
+        | summarize MessageText=strcat_array(make_list(PartText, 100), '\n') by Role
+      )
+    | summarize UserText=strcat_array(make_list_if(MessageText, Role == 'user', 100), '\n'),
+        SystemText=strcat_array(make_list_if(MessageText, Role in ('system', 'developer'), 100), '\n')
+  )
+| project-away Messages

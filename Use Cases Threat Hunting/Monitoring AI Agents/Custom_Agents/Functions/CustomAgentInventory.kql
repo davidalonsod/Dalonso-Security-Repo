@@ -1,0 +1,20 @@
+let NormalizePlatform = (value:string) { replace_regex(tolower(value), @'[^a-z0-9]', '') };
+AgentsInfo
+| where TimeGenerated > ago(14d)
+| extend Snapshot=coalesce(todatetime(column_ifexists('Timestamp', datetime(null))), TimeGenerated),
+    InventoryId=tostring(AgentId),
+    InventoryAgent=coalesce(tostring(column_ifexists('AgentName', '')), tostring(column_ifexists('Name', ''))),
+    EntraId=coalesce(tostring(column_ifexists('EntraAgentID', '')), tostring(column_ifexists('EntraAgentId', ''))),
+    SourceId=tostring(column_ifexists('SourceAgentId', '')),
+    Observability=todynamic(tostring(column_ifexists('ObservabilityID', dynamic(null)))),
+    McpServers=todynamic(tostring(column_ifexists('McpServers', dynamic(null))))
+| where isnotempty(InventoryId)
+| summarize arg_max(Snapshot, *) by InventoryId
+| extend Platform=tostring(Platform), NormalizedPlatform=NormalizePlatform(tostring(Platform))
+| extend Managed=NormalizedPlatform contains 'foundry' or NormalizedPlatform contains 'copilot'
+    or NormalizedPlatform contains 'powerplatform'
+| extend Custom=not(Managed) and NormalizedPlatform in ('other', 'custom', 'sdk', 'external',
+    'thirdparty', 'aws', 'amazonbedrock', 'bedrock', 'amazonbedrockagentcore',
+    'awsbedrock', 'agentcore', 'openai', 'anthropic', 'langchain', 'langgraph')
+| project Snapshot, InventoryId, InventoryAgent, EntraId, SourceId, Observability,
+    Platform, Managed, Custom, McpServers
