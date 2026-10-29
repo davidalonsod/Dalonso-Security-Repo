@@ -1,0 +1,68 @@
+id: "cdd92dc8-ce5a-5cd9-ac6c-1bc0fdbceda9"
+name: "Custom Agents - Explicitly recorded guardrail block"
+description: "Reports an explicit normalized blocked attribute once per resource/agent/trace. This is control evidence, not compromise; ordinary errors, refusals and unavailable evaluations are not counted as blocks."
+severity: "Low"
+requiredDataConnectors: [{"connectorId":"ApplicationInsights","dataTypes":["AppRequests","AppDependencies"]}]
+queryFrequency: "PT1H"
+queryPeriod: "P14D"
+triggerOperator: "gt"
+triggerThreshold: 0
+enabled: false
+tactics: []
+relevantTechniques: []
+query: |
+  let Evidence=materialize(CustomAgentInlineContent(1h));
+  CustomAgentSpans(1h)
+  | where Classification !in ('Excluded managed platform', 'Unattributed GenAI') and HasLineage
+  | where Blocked
+  | summarize arg_min(EventTime, *) by _ResourceId, OperationId, AgentKey
+  | extend Signal='Explicit guardrail block recorded; review as a control event'
+  | extend TimeGenerated=EventTime, ResourceId=_ResourceId, TraceId=OperationId,
+      EventCount=tolong(column_ifexists('EventCount', 1)),
+      SuccessfulCalls=tolong(column_ifexists('SuccessfulCalls', 0)),
+      FailedCalls=tolong(column_ifexists('FailedCalls', 0))
+  | project TimeGenerated, ResourceId, Agent, AgentId, AgentKey, AppRoleName,
+      TraceId, SpanId, Conversation, Model, Tool, TargetHost, ServerDisplay,
+      Signal, EventCount, SuccessfulCalls, FailedCalls,
+      TriggerSpanId=tostring(column_ifexists('TriggerSpanId', '')),
+      TriggerTime=todatetime(column_ifexists('TriggerTime', datetime(null))),
+      TriggerTool=tostring(column_ifexists('TriggerTool', '')),
+      TriggerToolResult=tostring(column_ifexists('TriggerToolResult', '')),
+      TriggerServerDisplay=tostring(column_ifexists('TriggerServerDisplay', '')),
+      TriggerTargetHost=tostring(column_ifexists('TriggerTargetHost', '')),
+      RiskyOutputKind=tostring(column_ifexists('RiskyOutputKind', '')),
+      RelatedToolResults=tolong(column_ifexists('RelatedToolResults', 0)),
+      MatchedIntentPrompt=tostring(column_ifexists('IntentPrompt', '')),
+      MatchedIntentSpanId=tostring(column_ifexists('IntentSpanId', ''))
+  | join kind=leftouter (Evidence
+      | project ResourceId=_ResourceId, TraceId=OperationId, SpanId, AgentKey, Prompt, Output, ToolArguments, ToolResult, InputMessages, OutputMessages,
+      EvidenceSource, PromptEvidenceOrigin, OutputEvidenceOrigin, PromptEvidenceSpanId, OutputEvidenceSpanId,
+      InputParseState, OutputParseState, ToolArgumentsState, ToolResultState)
+      on ResourceId, TraceId, SpanId, AgentKey
+  | extend Prompt=coalesce(MatchedIntentPrompt, Prompt),
+      PromptEvidenceOrigin=iff(isnotempty(MatchedIntentPrompt), 'Matched intent span: user role', PromptEvidenceOrigin),
+      PromptEvidenceSpanId=coalesce(MatchedIntentSpanId, PromptEvidenceSpanId)
+  | extend PreviewCharacters=toint(min_of(160, max_of(0, (1500 - string_size(tostring(bag_pack(
+      'AgentId', AgentId, 'AgentKey', AgentKey, 'TraceId', TraceId, 'SpanId', SpanId,
+      'Conversation', Conversation, 'ResourceId', ResourceId, 'Signal', Signal)))) / 12)))
+  | extend PromptPreview=substring(Prompt, 0, PreviewCharacters),
+      OutputPreview=substring(Output, 0, PreviewCharacters)
+  | extend EvidencePreviewStatus=case(PreviewCharacters == 0, 'Metadata exhausted preview budget; inspect full query results',
+      strlen(Prompt) > PreviewCharacters or strlen(Output) > PreviewCharacters, 'Inline evidence; previews shortened; full text in query results',
+      isempty(Prompt) and isempty(Output), 'No prompt/output captured or parsed; not a protection verdict',
+      'Inline evidence; full recorded text in query results')
+  | project TimeGenerated, ResourceId, Agent, AgentId, AgentKey, AppRoleName,
+      TraceId, SpanId, Conversation, Model, Tool, TargetHost, ServerDisplay,
+      Signal, EventCount, SuccessfulCalls, FailedCalls, Prompt, Output, ToolArguments, ToolResult, InputMessages, OutputMessages,
+      EvidenceSource, PromptEvidenceOrigin, OutputEvidenceOrigin, PromptEvidenceSpanId, OutputEvidenceSpanId,
+      InputParseState, OutputParseState, ToolArgumentsState, ToolResultState,
+      PromptPreview, OutputPreview, EvidencePreviewStatus, TriggerSpanId, TriggerTime, TriggerTool, TriggerToolResult,
+      TriggerServerDisplay, TriggerTargetHost, RiskyOutputKind, RelatedToolResults
+  | order by TimeGenerated desc
+entityMappings: [{"entityType":"AzureResource","fieldMappings":[{"identifier":"ResourceId","columnName":"ResourceId"}]},{"entityType":"CloudApplication","fieldMappings":[{"identifier":"Name","columnName":"Agent"}]}]
+customDetails: {"AgentId":"AgentId","AgentKey":"AgentKey","TraceId":"TraceId","SpanId":"SpanId","Conversation":"Conversation","ResourceId":"ResourceId","Signal":"Signal","Prompt":"PromptPreview","Output":"OutputPreview","EvidenceStatus":"EvidencePreviewStatus"}
+eventGroupingSettings: {"aggregationKind":"AlertPerResult"}
+incidentConfiguration: {"createIncident":true,"groupingConfiguration":{"enabled":true,"reopenClosedIncident":false,"lookbackDuration":"PT1H","matchingMethod":"Selected","groupByEntities":[],"groupByAlertDetails":[],"groupByCustomDetails":["AgentKey","ResourceId"]}}
+version: "1.2.0"
+kind: "Scheduled"
+tags: ["Sentinel-As-Code","Custom","AI","Custom-Agents","Inline-Unmasked-Evidence"]
