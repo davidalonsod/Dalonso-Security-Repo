@@ -6,9 +6,7 @@ tool, MCP, APIM, Defender, and incident monitoring already present in V2.
 V2 remains unchanged. V3 is generated as a separate workbook:
 
 - Source artifact: `AI-Agents-MonitoringV2.workbook`
-- Generator: `build-v3.mjs`
 - Generated workbook: `AI-Agents-Monitoring-Workbook-V3.workbook`
-- Deployment script: `deploy-workbook-v3.ps1`
 
 ## Summary
 
