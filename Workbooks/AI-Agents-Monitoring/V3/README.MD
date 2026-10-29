@@ -641,21 +641,6 @@ The generator:
 The generator also adds and validates the 41 Custom Agents queries. To run structural
 checks after generation:
 
-```powershell
-node .\test-custom-agents-v3.mjs
-```
-
-Optionally pass a pre-edit workbook snapshot as the first argument to verify every
-pre-existing item, parameter and tab was preserved. The read-only live check is:
-
-```powershell
-.\test-custom-agents-v3-live.ps1 `
-  -WorkspaceId '<workspace-customer-id>' -TenantId '<tenant-id>'
-```
-
-Add `-SyntheticOnly` to execute just the production-KQL attribution fixtures without
-reading customer event tables. No synthetic data or rules are ingested/deployed.
-
 ## Deploy
 
 Manual portal import:
@@ -666,12 +651,6 @@ Manual portal import:
 4. Open the advanced editor.
 5. Paste the contents of `AI-Agents-Monitoring-Workbook-V3.workbook`.
 
-Scripted deployment:
-
-```powershell
-.\deploy-workbook-v3.ps1 `
-  -SourceWorkspaceResourceId '/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace>'
-```
 
 V3 uses a distinct default display name and deterministic resource ID, so it deploys
 beside V2 unless `WorkbookId` or `DisplayName` is explicitly reused.
