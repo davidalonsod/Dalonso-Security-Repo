@@ -8,6 +8,8 @@ This repository contains everything needed to build an **AI-powered SOC analytic
 
 https://youtu.be/JYGbq_VxQFE
 
+Dashboard for CISOs on Teams https://youtu.be/zUyGbZSQxFA 
+
 ## Table of contents
 
 1. [What is this?](#what-is-this)
