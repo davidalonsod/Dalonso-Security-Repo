@@ -1,5 +1,7 @@
 # David Alonso-Security-Repo
 
+Video Summary about this Repo https://youtu.be/Ab-lj_7s3kA 
+
 More information about me https://www.linkedin.com/in/david-alonso-dominguez/
 
 <img width="936" height="1201" alt="image" src="https://github.com/user-attachments/assets/be53e34f-f9e8-4e19-acf9-aaa85ca12258" />
