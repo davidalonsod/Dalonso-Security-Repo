@@ -4,7 +4,6 @@
 
 This repository contains everything needed to build an **AI-powered SOC analytics layer in Microsoft Fabric** on top of the **Microsoft Sentinel data lake**, without copying or re-ingesting your security data. It includes ready-to-import Real-Time Dashboards, KQL scripts, Fabric notebooks, a Fabric Graph model, a Power BI executive report, a Data Agent configuration and demo material.
 
-![Sentinel + Fabric](images/sentinel-fabric-youtube-infographic.png)
 
 https://youtu.be/JYGbq_VxQFE
 
