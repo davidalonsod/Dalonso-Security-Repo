@@ -9,6 +9,8 @@ chart, map, and table regions** with Microsoft sign-in and verified source data.
 > Complete the [publication checklist](#publishing-to-your-repository-without-confidential-information)
 > before uploading any project files, including to a private repository.
 
+CISO Command Center: A Business-Aware CISO Dashboard with Sentinel and Fabric App https://youtu.be/XqVlsNTAcaQ
+
 ## CISO capabilities and business benefits
 
 | Page | Capabilities | Benefit |
